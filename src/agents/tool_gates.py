@@ -361,25 +361,23 @@ def _tools_budget(_ctx: GateContext) -> set[str]:
 
 # Canonical names for the CI/release tools -- single source of truth so gate
 # literals can't drift from the real tool names (codereview finding, PR #207).
-# Each is granted only in states where the event's trust/domain has already
-# been assessed, or where it carries no injectable/scoping risk:
-#   - greenwave: read-only, enum-restricted decision_context -- safe pre-classification,
-#     but its unscoped subject_identifier is an IDOR risk in low-trust DOMAIN_CASUAL.
-#   - ask_release_ai / google_web_search: forward attacker-influenceable free text
-#     (ask_release_ai to a broad-access internal service; google_web_search injects
-#     unverified external content into context) -- unsafe before classification has
-#     assessed the event's trust, safe once a human/LLM has classified it as casual
-#     conversation.
-_TOOL_GREENWAVE = "greenwave"
+# ask_release_ai / google_web_search forward attacker-influenceable free text
+# (ask_release_ai to a broad-access internal service; google_web_search injects
+# unverified external content into context) -- unsafe before an event's source
+# has been assessed as trusted, so they're granted only in DOMAIN_CASUAL, which
+# already requires event_source in (chat, slack). greenwave's subject_identifier
+# is unscoped to the triggering event (IDOR risk, handle_greenwave) and is not
+# yet safe to grant from ANY allow-mode gate here -- PRE_CLASSIFICATION and
+# DOMAIN_CHAOTIC both admit events regardless of source, and DOMAIN_CHAOTIC's
+# tools_affected must stay unconditional (its predicate has no source check,
+# unlike DOMAIN_CASUAL) so it can't safely carry a source-gated tool either.
 _TOOL_ASK_RELEASE_AI = "ask_release_ai"
 _TOOL_GOOGLE_WEB_SEARCH = "google_web_search"
-_RELEASE_CI_TOOLS = frozenset({_TOOL_GREENWAVE, _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH})
 
 
 def _tools_pre_classification(ctx: GateContext) -> set[str]:
     allowed = {"lookup_service", "lookup_journal", "consult_deep_memory",
-               "classify_event", "set_phase",
-               _TOOL_GREENWAVE}
+               "classify_event", "set_phase"}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
     return allowed
@@ -399,7 +397,6 @@ def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
         "respond_to_jarvis", "wait_for_jarvis",
-        *_RELEASE_CI_TOOLS,
     }
 
 

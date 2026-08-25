@@ -242,7 +242,7 @@ class TestPreClassification:
         ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="aligner")
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert names == {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "greenwave"}
+        assert names == {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase"}
 
     def test_chat_source_allows_wait_for_user(self):
         ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="chat")
@@ -303,7 +303,6 @@ class TestDomainChaotic:
             "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
             "wait_for_agent", "reply_to_agent", "message_agent",
             "respond_to_jarvis", "wait_for_jarvis",
-            "greenwave", "ask_release_ai", "google_web_search",
         }
         assert names == expected
 
