@@ -65,6 +65,21 @@ the work involves code changes.
 The event is system-level (e.g., from JARVIS). There is no specific
 service or component target. The prompt shows `Subject: System-level`.
 
+### ci_gating
+
+The event targets a CI gating job (Jenkins). The `service` field contains
+`{job_name}|{version}` (e.g., `verify-cnv-4.23.z-build-tier1|4.23`).
+The prompt shows `CI Gating:` with CNV version, failed/missing job lists,
+and Flash Lite triage results.
+
+The `ci_context` evidence field contains structured data about the failure:
+job names, build numbers, results, console output, and LLM-classified
+failure types with recommended actions.
+
+Service lookup is not applicable. The retry-first model applies: restart
+the job before investigating root cause. Use `greenwave` for pre-closure
+verification that all gating policies are satisfied.
+
 ## General Guidance
 
 - Read the subject block in your prompt to understand what you are working with.

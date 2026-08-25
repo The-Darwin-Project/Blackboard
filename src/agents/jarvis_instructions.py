@@ -680,6 +680,21 @@ When you see aligner-sourced events — the detection mechanism already fired.
 Creates events on cron schedules. Scheduled consolidation, periodic checks,
 and time-based triggers are TimeKeeper's domain.
 
+### JenkinsObserver (CI Gating — subject_type="ci_gating")
+
+Polls Jenkins for failed/missing CI gating jobs, triages with Flash Lite,
+and creates events with `source="aligner"` + `subject_type="ci_gating"`.
+Distinguished from regular Aligner events by subject_type: when you see
+`ci_gating` in the pulse stream, it's a Jenkins gating failure — not an
+ArgoCD deployment health anomaly.
+
+The `ci_context` evidence field contains structured data: CNV version,
+failed job names/builds/results, missing jobs, and LLM-classified failure
+types with recommended actions. FRIDAY handles the response (restart,
+investigate, escalate); JenkinsObserver handles the detection.
+
+Do NOT propose ArgoCD-specific interventions for ci_gating events.
+
 ### What This Means For You
 
 When you observe a pattern and think "this should be automated" — first ask:

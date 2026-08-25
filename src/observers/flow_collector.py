@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..agents.aligner import Aligner
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
+    from ..agents.jenkins_observer import JenkinsObserver
     from ..agents.llm.token_meter import TokenMeter
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
@@ -39,6 +40,7 @@ class FlowCollector:
         registry: "AgentRegistry | None" = None,
         headhunter: "Headhunter | None" = None,
         aligner: "Aligner | None" = None,
+        jenkins_observer: "JenkinsObserver | None" = None,
         provisioner: "EphemeralProvisioner | None" = None,
         token_meter: "TokenMeter | None" = None,
         interval: float = 60.0,
@@ -48,6 +50,7 @@ class FlowCollector:
         self._registry = registry
         self._headhunter = headhunter
         self._aligner = aligner
+        self._jenkins_observer = jenkins_observer
         self._provisioner = provisioner
         self._token_meter = token_meter
         self._interval = interval
@@ -155,6 +158,15 @@ class FlowCollector:
         except Exception:
             pass
 
+        jenkins_pending = 0
+        jenkins_breaker_open = False
+        try:
+            if self._jenkins_observer:
+                jenkins_pending = self._jenkins_observer.pending_count
+                jenkins_breaker_open = self._jenkins_observer.breaker_open
+        except Exception:
+            pass
+
         dispatch_total = 0
         dispatch_success_rate_pct = 100.0
         dispatch_infra_fails = 0
@@ -183,6 +195,8 @@ class FlowCollector:
             waiting_approval_events=flow.get("waiting_approval_events", 0),
             headhunter_pending=hh_pending,
             aligner_pending=aligner_pending,
+            jenkins_pending=jenkins_pending,
+            jenkins_breaker_open=jenkins_breaker_open,
             wip_used=wip_used_raw,
             wip_cap=wip_cap,
             wip_utilization_pct=round(wip_used_raw / wip_cap * 100, 1) if wip_cap > 0 else 0.0,

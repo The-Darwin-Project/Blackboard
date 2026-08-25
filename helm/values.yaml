@@ -181,6 +181,10 @@ gcp:
       temperature: "0.5"
       thinkingLevel: "high"
       maxOutputTokens: "16000"
+    jenkinsObserver:
+      model: "gemini-3.5-flash-lite" # CI gating triage (lightweight, fast)
+      temperature: "0.3"
+      maxOutputTokens: "4096"
   tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
@@ -548,6 +552,29 @@ timekeeper:
   maxPerUser: "10" # max schedules per authenticated user
   maxTotal: "50" # max schedules system-wide
   chatStaleTtl: "5400" # seconds before auto-closing stale chat/slack approval requests (90 min)
+# =============================================================================
+# Jenkins CI Gating Observer (polls Jenkins for failed/missing gating jobs)
+# =============================================================================
+jenkinsObserver:
+  enabled: false
+  dryRun: true # Logs evidence but skips event creation. Flip after soak.
+  pollInterval: "300" # seconds between poll cycles
+  startupDelay: "180" # seconds to wait before first poll
+  dwellSeconds: "60" # minimum dwell time before event creation
+  floodThreshold: "3" # signals per version before flood consolidation
+  versions: "" # CSV of CNV versions to poll (e.g., "4.22,4.23")
+  jenkins:
+    existingSecret: "" # K8s Secret with keys: username, api-token
+    url: ""
+    insecureTls: true
+    timeout: "15"
+    circuitBreakerThreshold: "3"
+  skillsCatalog:
+    url: ""
+    skills: "cnv-gating-workflow,cnv-gating-failure-analysis"
+  releaseAi:
+    url: ""
+    existingSecret: "" # Shared secret for auth
 # =============================================================================
 # Idle Timeout (auto-close stale chat/slack events after user inactivity)
 # =============================================================================

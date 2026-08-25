@@ -454,6 +454,37 @@ async def lifespan(app: FastAPI):
             logger.info("NightwatcherObserver started")
         else:
             logger.info("NightwatcherObserver disabled (NIGHTWATCHER_ENABLED=false)")
+
+        # === JENKINS OBSERVER (CI gating reconcile) ===
+        jenkins_observer = None
+        if os.getenv("JENKINS_OBSERVER_ENABLED", "false").lower() == "true":
+            from .agents.jenkins_observer import JenkinsObserver
+            from .adapters.jenkins import JenkinsAdapter
+
+            jenkins_url = os.getenv("JENKINS_URL", "")
+            jenkins_user = os.getenv("JENKINS_USER", "")
+            jenkins_token = os.getenv("JENKINS_TOKEN", "")
+            jenkins_adapter = None
+            if jenkins_url and jenkins_user and jenkins_token:
+                jenkins_adapter = JenkinsAdapter(
+                    base_url=jenkins_url,
+                    user=jenkins_user,
+                    token=jenkins_token,
+                    timeout=float(os.getenv("JENKINS_TIMEOUT", "15")),
+                    verify_tls=os.getenv("JENKINS_INSECURE_TLS", "true").lower() != "true",
+                    breaker_threshold=int(os.getenv("JENKINS_CIRCUIT_BREAKER_THRESHOLD", "3")),
+                )
+            jenkins_observer = JenkinsObserver(
+                blackboard=blackboard,
+                jenkins_adapter=jenkins_adapter,
+            )
+            if not jenkins_adapter:
+                logger.warning("JenkinsObserver started WITHOUT adapter (missing JENKINS_URL/USER/TOKEN) — will no-op until config is complete")
+            await jenkins_observer.start()
+            brain.agents["_jenkins_observer"] = jenkins_observer
+            logger.info("JenkinsObserver started")
+        else:
+            logger.info("JenkinsObserver disabled (JENKINS_OBSERVER_ENABLED=false)")
     
         # === BACKFILL MISSED ARCHIVES (non-blocking, fire-and-forget) ===
         async def _backfill_on_startup():
@@ -527,6 +558,11 @@ async def lifespan(app: FastAPI):
     if redis and nightwatcher_observer:
         await nightwatcher_observer.stop()
         logger.info("NightwatcherObserver stopped")
+
+    # Stop JenkinsObserver
+    if redis and jenkins_observer:
+        await jenkins_observer.stop()
+        logger.info("JenkinsObserver stopped")
     
     await close_redis()
     logger.info("Redis connection closed")
@@ -640,6 +676,16 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     wip_utilization_pct = (wip_used / wip_cap * 100) if wip_cap > 0 else 0.0
     wip_available = max(0, wip_cap - wip_used)
 
+    jenkins_pending = 0
+    jenkins_breaker_open = False
+    try:
+        jenkins_ref = brain.agents.get("_jenkins_observer") if brain else None
+        if jenkins_ref:
+            jenkins_pending = jenkins_ref.pending_count
+            jenkins_breaker_open = jenkins_ref.breaker_open
+    except Exception:
+        pass
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
@@ -651,6 +697,8 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         waiting_approval_events=flow.get("waiting_approval_events", 0),
         headhunter_pending=hh_pending,
         aligner_pending=aligner_pending_count,
+        jenkins_pending=jenkins_pending,
+        jenkins_breaker_open=jenkins_breaker_open,
         wip_used=wip_used,
         wip_cap=wip_cap,
         wip_utilization_pct=round(wip_utilization_pct, 1),

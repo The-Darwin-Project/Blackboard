@@ -482,6 +482,7 @@ SUBJECT_EMOJI: dict[str, str] = {
     "system": ":female-technologist:",
     "jira": ":jira:",
     "github_issue": ":github:",
+    "ci_gating": ":gear:",
 }
 
 SUBJECT_LABEL: dict[str, str] = {
@@ -490,6 +491,7 @@ SUBJECT_LABEL: dict[str, str] = {
     "system": "System",
     "jira": "Jira Issue",
     "github_issue": "GitHub Issue",
+    "ci_gating": "CI Gating",
 }
 
 

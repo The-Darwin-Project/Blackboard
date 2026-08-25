@@ -36,6 +36,7 @@ async def handle_lookup_service(
             "kargo_stage": "kargo_context",
             "jira": "jira_context",
             "system": "system-level context",
+            "ci_gating": "ci_context",
         }.get(subject_type, subject_type)
         result_text = (
             f"## lookup_service: Not applicable\n\n"

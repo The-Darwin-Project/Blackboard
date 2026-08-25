@@ -156,6 +156,28 @@ def _build_subject_block(
         if body:
             lines.append(f"  Body (snippet): {body[:1000]}")
 
+    elif subject_type == "ci_gating" and ev and ev.ci_context:
+        cc = ev.ci_context
+        lines.append(f"CI Gating: {event.service}")
+        lines.append(f"  CNV Version: {cc.get('cnv_version', '')}")
+        if cc.get("jenkins_url"):
+            lines.append(f"  Jenkins: {cc['jenkins_url']}")
+        failed = cc.get("failed_jobs", [])
+        missing = cc.get("missing_jobs", [])
+        if failed:
+            lines.append(f"  Failed Jobs ({len(failed)}):")
+            for j in failed[:10]:
+                lines.append(f"    - {j.get('job_name', '')} #{j.get('build_number', '')} [{j.get('result', '')}]")
+        if missing:
+            lines.append(f"  Missing Jobs ({len(missing)}):")
+            for j in missing[:10]:
+                lines.append(f"    - {j.get('job_name', '')}")
+        triage = cc.get("llm_triage", [])
+        if triage:
+            lines.append("  LLM Triage:")
+            for t in triage[:5]:
+                lines.append(f"    - {t.get('classification', '')} (confidence={t.get('confidence', '')}) → {t.get('recommended_action', '')}")
+
     elif ev and ev.github_context:
         gc = ev.github_context
         lines.append(f"Component: {event.service}")

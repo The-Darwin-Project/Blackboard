@@ -491,6 +491,75 @@ spec:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_NIGHTWATCHER
             {{- end }}
+            {{- if .Values.jenkinsObserver }}
+            # JenkinsObserver (CI gating reconciliation)
+            - name: JENKINS_OBSERVER_ENABLED
+              value: "{{ .Values.jenkinsObserver.enabled }}"
+            - name: JENKINS_OBSERVER_DRY_RUN
+              value: "{{ .Values.jenkinsObserver.dryRun }}"
+            - name: JENKINS_OBSERVER_POLL_INTERVAL
+              value: "{{ .Values.jenkinsObserver.pollInterval }}"
+            - name: JENKINS_OBSERVER_STARTUP_DELAY
+              value: "{{ .Values.jenkinsObserver.startupDelay }}"
+            - name: JENKINS_OBSERVER_DWELL_SECONDS
+              value: "{{ .Values.jenkinsObserver.dwellSeconds }}"
+            - name: JENKINS_OBSERVER_FLOOD_THRESHOLD
+              value: "{{ .Values.jenkinsObserver.floodThreshold }}"
+            - name: JENKINS_OBSERVER_VERSIONS
+              value: "{{ .Values.jenkinsObserver.versions }}"
+            {{- if .Values.jenkinsObserver.jenkins }}
+            - name: JENKINS_URL
+              value: "{{ .Values.jenkinsObserver.jenkins.url }}"
+            - name: JENKINS_INSECURE_TLS
+              value: "{{ .Values.jenkinsObserver.jenkins.insecureTls }}"
+            - name: JENKINS_CIRCUIT_BREAKER_THRESHOLD
+              value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerThreshold }}"
+            {{- if .Values.jenkinsObserver.jenkins.existingSecret }}
+            - name: JENKINS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jenkinsObserver.jenkins.existingSecret }}
+                  key: username
+            - name: JENKINS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jenkinsObserver.jenkins.existingSecret }}
+                  key: api-token
+            {{- end }}
+            {{- end }}
+            {{- if .Values.jenkinsObserver.skillsCatalog }}
+            - name: SKILLS_CATALOG_URL
+              value: "{{ .Values.jenkinsObserver.skillsCatalog.url }}"
+            - name: SKILLS_CATALOG_SKILLS
+              value: "{{ .Values.jenkinsObserver.skillsCatalog.skills }}"
+            {{- end }}
+            {{- if .Values.jenkinsObserver.releaseAi }}
+            - name: RELEASE_AI_URL
+              value: "{{ .Values.jenkinsObserver.releaseAi.url }}"
+            {{- if .Values.jenkinsObserver.releaseAi.existingSecret }}
+            - name: RELEASE_AI_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jenkinsObserver.releaseAi.existingSecret }}
+                  key: shared-secret
+            {{- end }}
+            {{- end }}
+            - name: LLM_MODEL_JENKINS_OBSERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_JENKINS_OBSERVER
+            - name: LLM_TEMPERATURE_JENKINS_OBSERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_JENKINS_OBSERVER
+            - name: LLM_MAX_TOKENS_JENKINS_OBSERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_JENKINS_OBSERVER
+            {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)
             - name: SLACK_BOT_TOKEN

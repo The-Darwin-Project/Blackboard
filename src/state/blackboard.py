@@ -1621,6 +1621,8 @@ return 1
                 waiting_approval_events=round(sum(s.waiting_approval_events for s in group) / n),
                 headhunter_pending=round(sum(s.headhunter_pending for s in group) / n),
                 aligner_pending=round(sum(s.aligner_pending for s in group) / n),
+                jenkins_pending=round(sum(s.jenkins_pending for s in group) / n),
+                jenkins_breaker_open=any(s.jenkins_breaker_open for s in group),
                 wip_used=round(sum(s.wip_used for s in group) / n),
                 wip_cap=round(sum(s.wip_cap for s in group) / n),
                 wip_utilization_pct=sum(s.wip_utilization_pct for s in group) / n,
@@ -2834,6 +2836,52 @@ return 1
         pipe.zadd(self.ALIGNER_PENDING, {key: time.time()})
         pipe.hset(self.ALIGNER_PENDING_META, key, json.dumps(metadata))
         await pipe.execute()
+
+    # =========================================================================
+    # Jenkins CI Pending Queue (ZSET + metadata HASH)
+    # =========================================================================
+
+    JENKINS_PENDING = "darwin:jenkins:pending"
+    JENKINS_PENDING_META = "darwin:jenkins:pending:meta"
+
+    async def stage_jenkins_signal(self, key: str, metadata: dict) -> None:
+        """Stage a CI gating signal into the Jenkins pending dwell queue.
+
+        ZADD NX preserves first_seen timestamp (dwell correctness).
+        HSET overwrites metadata with latest values.
+        Key format: {job_name}|{version}
+        """
+        pipe = self.redis.pipeline()
+        pipe.zadd(self.JENKINS_PENDING, {key: time.time()}, nx=True)
+        pipe.hset(self.JENKINS_PENDING_META, key, json.dumps(metadata))
+        await pipe.execute()
+
+    async def drain_jenkins_pending(self, dwell_seconds: float) -> list[str]:
+        """Return pending keys that have dwelled longer than threshold."""
+        cutoff = time.time() - dwell_seconds
+        return await self.redis.zrangebyscore(self.JENKINS_PENDING, 0, cutoff)
+
+    async def commit_jenkins_signal(self, key: str) -> None:
+        """Remove a pending signal after event creation or self-resolution."""
+        pipe = self.redis.pipeline()
+        pipe.zrem(self.JENKINS_PENDING, key)
+        pipe.hdel(self.JENKINS_PENDING_META, key)
+        await pipe.execute()
+
+    async def restage_jenkins_signal(self, key: str, metadata: dict) -> None:
+        """Re-stage a suppressed signal with fresh dwell timestamp.
+
+        ZREM + ZADD (no NX) resets the dwell clock.
+        """
+        pipe = self.redis.pipeline()
+        pipe.zrem(self.JENKINS_PENDING, key)
+        pipe.zadd(self.JENKINS_PENDING, {key: time.time()})
+        pipe.hset(self.JENKINS_PENDING_META, key, json.dumps(metadata))
+        await pipe.execute()
+
+    async def count_jenkins_pending(self) -> int:
+        """Count of pending CI gating signals in the dwell queue."""
+        return await self.redis.zcard(self.JENKINS_PENDING)
 
     # =========================================================================
     # Observations (FRIDAY numeric series -- event-scoped + global timeline)

@@ -44,6 +44,10 @@ data:
   LLM_TEMPERATURE_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.temperature }}"
   LLM_THINKING_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.thinkingLevel }}"
   LLM_MAX_TOKENS_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.maxOutputTokens }}"
+  # JenkinsObserver (CI gating triage)
+  LLM_MODEL_JENKINS_OBSERVER: "{{ .Values.gcp.llm.jenkinsObserver.model }}"
+  LLM_TEMPERATURE_JENKINS_OBSERVER: "{{ .Values.gcp.llm.jenkinsObserver.temperature }}"
+  LLM_MAX_TOKENS_JENKINS_OBSERVER: "{{ .Values.gcp.llm.jenkinsObserver.maxOutputTokens }}"
   # Quota rate limiter
   LLM_TPM_LIMIT: "{{ .Values.gcp.tpmLimit }}"
   
