@@ -359,6 +359,22 @@ def _tools_budget(_ctx: GateContext) -> set[str]:
     return {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"}
 
 
+# Canonical names for the CI/release tools -- single source of truth so gate
+# literals can't drift from the real tool names (codereview finding, PR #207).
+# ask_release_ai / google_web_search forward attacker-influenceable free text
+# (ask_release_ai to a broad-access internal service; google_web_search injects
+# unverified external content into context) -- unsafe before an event's source
+# has been assessed as trusted, so they're granted only in DOMAIN_CASUAL, which
+# already requires event_source in (chat, slack). greenwave's subject_identifier
+# is unscoped to the triggering event (IDOR risk, handle_greenwave) and is not
+# yet safe to grant from ANY allow-mode gate here -- PRE_CLASSIFICATION and
+# DOMAIN_CHAOTIC both admit events regardless of source, and DOMAIN_CHAOTIC's
+# tools_affected must stay unconditional (its predicate has no source check,
+# unlike DOMAIN_CASUAL) so it can't safely carry a source-gated tool either.
+_TOOL_ASK_RELEASE_AI = "ask_release_ai"
+_TOOL_GOOGLE_WEB_SEARCH = "google_web_search"
+
+
 def _tools_pre_classification(ctx: GateContext) -> set[str]:
     allowed = {"lookup_service", "lookup_journal", "consult_deep_memory",
                "classify_event", "set_phase"}
@@ -390,6 +406,7 @@ def _tools_domain_casual(_ctx: GateContext) -> set[str]:
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
         "take_note", "review_notes",
+        _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH,
     }
 
 

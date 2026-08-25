@@ -328,11 +328,13 @@ class TestDomainCasual:
             "consult_deep_memory", "lookup_service", "lookup_journal",
             "respond_to_jarvis", "read_sticky_notes",
             "take_note", "review_notes",
+            "ask_release_ai", "google_web_search",
         }
         assert names <= expected
         assert {"classify_event", "set_phase", "wait_for_user",
                 "consult_deep_memory", "lookup_service", "lookup_journal",
-                "take_note", "review_notes"} <= names
+                "take_note", "review_notes",
+                "ask_release_ai", "google_web_search"} <= names
 
     def test_does_not_fire_for_aligner(self):
         ctx = _ctx(
