@@ -471,7 +471,7 @@ async def lifespan(app: FastAPI):
                     user=jenkins_user,
                     token=jenkins_token,
                     timeout=float(os.getenv("JENKINS_TIMEOUT", "15")),
-                    verify_tls=os.getenv("JENKINS_INSECURE_TLS", "true").lower() != "true",
+                    verify_tls=os.getenv("JENKINS_INSECURE_TLS", "false").lower() != "true",
                     breaker_threshold=int(os.getenv("JENKINS_CIRCUIT_BREAKER_THRESHOLD", "3")),
                 )
             jenkins_observer = JenkinsObserver(

@@ -512,6 +512,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.jenkins.url }}"
             - name: JENKINS_INSECURE_TLS
               value: "{{ .Values.jenkinsObserver.jenkins.insecureTls }}"
+            - name: JENKINS_TIMEOUT
+              value: "{{ .Values.jenkinsObserver.jenkins.timeout }}"
             - name: JENKINS_CIRCUIT_BREAKER_THRESHOLD
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerThreshold }}"
             {{- if .Values.jenkinsObserver.jenkins.existingSecret }}

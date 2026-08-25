@@ -4,6 +4,8 @@
 # 2. [Constraint]: Auth via Basic (user:token). verify=False for self-signed certs.
 # 3. [Pattern]: 3-strike permanent-latch circuit breaker (mirrors headhunter.py:271-309).
 #    401/403 excluded from strike count. No auto-recovery — latch until pod restart.
+#    Best-effort fetches (console-log tail) pass count_failures=False -- they must not
+#    trip the breaker on their own since they're unrelated to core reachability.
 # 4. [Contract]: breaker_open property for FlowCollector observability.
 # 5. [Constraint]: All org-specific values from constructor args (env vars resolved by caller).
 """
@@ -110,8 +112,15 @@ class JenkinsAdapter:
                 self._consecutive_failures,
             )
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response | None:
-        """Execute HTTP request with circuit breaker guard."""
+    async def _request(
+        self, method: str, path: str, *, count_failures: bool = True, **kwargs
+    ) -> httpx.Response | None:
+        """Execute HTTP request with circuit breaker guard.
+
+        count_failures=False is used for best-effort fetches (e.g. console-log tail)
+        whose failures are unrelated to core Jenkins reachability and must not trip
+        the breaker on their own.
+        """
         if self._breaker_latched:
             return None
         try:
@@ -119,10 +128,12 @@ class JenkinsAdapter:
             url = f"{self._base_url}{path}"
             resp = await client.request(method, url, **kwargs)
             if resp.status_code in (401, 403):
-                self._record_failure(resp.status_code)
+                if count_failures:
+                    self._record_failure(resp.status_code)
                 return None
             if resp.status_code >= 500:
-                self._record_failure(resp.status_code)
+                if count_failures:
+                    self._record_failure(resp.status_code)
                 return None
             if resp.status_code >= 400:
                 logger.warning("Jenkins %s %s returned %d — client error, not recording as breaker strike",
@@ -132,7 +143,8 @@ class JenkinsAdapter:
             return resp
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
             logger.warning("Jenkins request failed: %s %s — %s", method, path, exc)
-            self._record_failure(None)
+            if count_failures:
+                self._record_failure(None)
             return None
 
     async def poll_smoke_jobs(self, version: str) -> list[JobResult]:
@@ -181,7 +193,10 @@ class JenkinsAdapter:
                     params[p["name"]] = str(p.get("value", ""))
 
         console_tail = ""
-        tail_resp = await self._request("GET", f"/job/{job}/{build}/logText/progressiveText?start=0")
+        # Best-effort: an oversized/slow console log must not trip the breaker on its own.
+        tail_resp = await self._request(
+            "GET", f"/job/{job}/{build}/logText/progressiveText?start=0", count_failures=False
+        )
         if tail_resp and tail_resp.status_code == 200:
             text = tail_resp.text
             console_tail = text[-5000:] if len(text) > 5000 else text

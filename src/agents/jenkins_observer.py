@@ -2,14 +2,22 @@
 # @ai-rules:
 # 1. [Pattern]: Poll-driven event creation — _drain_once() fires every poll interval,
 #    checks Jenkins for failed/missing/unstable CI gating jobs, triages with Flash Lite.
+#    Phases are split into named helpers (_poll_and_stage, _recheck_and_filter,
+#    _consolidate_floods, _process_candidates) -- mirrors Aligner._drain_once's structure.
 # 2. [Pattern]: TimeKeeper lifecycle — start()/stop() own an asyncio.Task running _poll_loop().
 # 3. [Constraint]: AIR GAP: No Brain logic. Creates events via blackboard, never routes agents.
 # 4. [Pattern]: pending_count is an in-memory property updated at drain cycle start/end.
 # 5. [Pattern]: Service naming: {job_name}|{version} (NOT @ — PII regex collision).
+#    Pending-queue keys are {category}:{job_name}|{version} so smoke vs. gating self-resolve
+#    checks poll the correct Jenkins view.
 # 6. [Pattern]: Lazy skills fetch with 5-min TTL (mirrors headhunter_github._load_issue_triage_instruction).
 # 7. [Pattern]: Dry-run default — JENKINS_OBSERVER_DRY_RUN=true logs evidence but skips create_event.
 # 8. [Pattern]: Dedup tuple includes waiting_approval (deliberate improvement over Aligner).
 # 9. [Pattern]: Flood consolidation merges whole group into ONE event (Aligner pattern).
+# 10. [Pattern]: LLM adapter uses the shared `.llm.create_adapter("gemini", ...)` factory
+#     (same as Aligner/Headhunter) -- never construct GeminiAdapter directly.
+# 11. [Constraint]: Untrusted Jenkins console-log content must be passed through
+#     _sanitize_console_tail() before it reaches an LLM prompt (prompt-injection guard).
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -22,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -42,6 +51,14 @@ _FALLBACK_SI = (
     "infrastructure (flaky infra, cluster issues), test (real test failures), "
     "or product (genuine product bugs). Recommend: restart, investigate, or escalate."
 )
+
+_FENCE_BREAK = re.compile(r"```")
+
+
+def _sanitize_console_tail(text: str) -> str:
+    """Strip fence-breaking sequences from untrusted Jenkins console log content
+    before it is embedded in an LLM prompt (prompt-injection guard)."""
+    return _FENCE_BREAK.sub("'''", text) if text else text
 
 
 class JenkinsObserver:
@@ -152,15 +169,13 @@ class JenkinsObserver:
             self._skills_loaded_at = time.time()
 
     async def _get_llm_adapter(self):
-        """Lazy-load own GeminiAdapter instance for Flash Lite triage."""
+        """Lazy-load a Gemini adapter via the shared factory for Flash Lite triage."""
         if self._llm_adapter is None:
-            from ..agents.llm.gemini_adapter import GeminiAdapter
+            from .llm import create_adapter
+            project = os.getenv("GCP_PROJECT")
+            location = os.getenv("GCP_LOCATION", "us-central1")
             model = os.getenv("LLM_MODEL_JENKINS_OBSERVER", "gemini-3.5-flash-lite")
-            self._llm_adapter = GeminiAdapter(
-                model=model,
-                temperature=float(os.getenv("LLM_TEMPERATURE_JENKINS_OBSERVER", "0.3")),
-                max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_JENKINS_OBSERVER", "4096")),
-            )
+            self._llm_adapter = create_adapter("gemini", project, location, model)
         return self._llm_adapter
 
     async def _get_wip_headroom(self) -> int:
@@ -174,58 +189,98 @@ class JenkinsObserver:
             return 5
 
     async def _drain_once(self) -> None:
-        """Single drain cycle: poll → stage → dwell → triage → create."""
+        """Single drain cycle: poll → stage → dwell → triage → create.
+
+        Delegates to phase helpers (mirrors Aligner._drain_once's structure) so each
+        phase can be reasoned about and tested independently.
+        """
         await self._ensure_skills_loaded()
 
         if not self._adapter or not self._adapter.enabled():
             return
 
-        # Step 1: Poll Jenkins for all configured versions
-        for version in self._versions:
-            smoke_jobs = await self._adapter.poll_smoke_jobs(version)
-            gating_jobs = await self._adapter.poll_gating_jobs(version)
+        await self._poll_and_stage()
 
-            all_jobs = smoke_jobs + gating_jobs
-            for job in all_jobs:
-                if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
-                    key = f"{job.job_name}|{version}"
-                    metadata = {
-                        "job_name": job.job_name,
-                        "version": version,
-                        "result": job.result or "MISSING",
-                        "build_number": job.build_number,
-                        "url": job.url,
-                        "staged_at": time.time(),
-                    }
-                    await self.blackboard.stage_jenkins_signal(key, metadata)
-
-        # Step 2: Drain expired items
         expired_keys = await self.blackboard.drain_jenkins_pending(self._dwell_seconds)
+        self._pending_count = await self.blackboard.count_jenkins_pending()
         if not expired_keys:
-            self._pending_count = await self.blackboard.count_jenkins_pending()
             return
 
+        candidates = await self._recheck_and_filter(expired_keys)
+        self._pending_count = await self.blackboard.count_jenkins_pending()
+        if not candidates:
+            return
+
+        groups = self._consolidate_floods(candidates)
+        await self._process_candidates(groups)
         self._pending_count = await self.blackboard.count_jenkins_pending()
 
-        # Step 3: Re-check Jenkins — discard self-resolved
-        candidates: list[tuple[str, dict]] = []
+    async def _poll_and_stage(self) -> None:
+        """Phase 1: poll Jenkins for all configured versions and stage failing/missing jobs.
+
+        Keys are {category}:{job_name}|{version} so the self-resolve recheck in
+        _recheck_and_filter() polls the same view (smoke vs. gating) the signal came from.
+        """
+        for version in self._versions:
+            for category, poll_fn in (
+                ("smoke", self._adapter.poll_smoke_jobs),
+                ("gating", self._adapter.poll_gating_jobs),
+            ):
+                jobs = await poll_fn(version)
+                for job in jobs:
+                    if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
+                        key = f"{category}:{job.job_name}|{version}"
+                        metadata = {
+                            "job_name": job.job_name,
+                            "version": version,
+                            "category": category,
+                            "result": job.result or "MISSING",
+                            "build_number": job.build_number,
+                            "url": job.url,
+                            "staged_at": time.time(),
+                        }
+                        await self.blackboard.stage_jenkins_signal(key, metadata)
+
+    async def _recheck_and_filter(self, expired_keys: list[str]) -> list[tuple[str, dict]]:
+        """Phase 2: load metadata for expired keys and discard self-resolved jobs.
+
+        Recheck polls are cached per (category, version) so an N-signal flood from the
+        same view costs one poll, not N. Malformed/missing metadata is evicted (committed)
+        rather than raising, so a single poison-pill entry can't block the drain cycle forever.
+        """
+        metas: dict[str, dict] = {}
         for key in expired_keys:
-            raw = await self.blackboard.redis.hget(
-                self.blackboard.JENKINS_PENDING_META, key
-            )
+            raw = await self.blackboard.redis.hget(self.blackboard.JENKINS_PENDING_META, key)
             if not raw:
                 await self.blackboard.commit_jenkins_signal(key)
                 continue
-            meta = json.loads(raw)
+            try:
+                metas[key] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                logger.warning("JenkinsObserver: malformed pending metadata for %s (%s), evicting", key, e)
+                await self.blackboard.commit_jenkins_signal(key)
+
+        if not metas:
+            return []
+
+        recheck_cache: dict[tuple[str, str], list] = {}
+        candidates: list[tuple[str, dict]] = []
+        for key, meta in metas.items():
             job_name = meta.get("job_name", "")
             version = meta.get("version", "")
+            category = meta.get("category", "gating")
 
-            # Quick recheck: if the job is now healthy, discard
             if self._adapter and job_name and version:
-                recheck = await self._adapter.poll_gating_jobs(version)
+                cache_key = (category, version)
+                if cache_key not in recheck_cache:
+                    poll_fn = (
+                        self._adapter.poll_smoke_jobs if category == "smoke"
+                        else self._adapter.poll_gating_jobs
+                    )
+                    recheck_cache[cache_key] = await poll_fn(version)
                 resolved = any(
                     j.job_name == job_name and j.result == "SUCCESS"
-                    for j in recheck
+                    for j in recheck_cache[cache_key]
                 )
                 if resolved:
                     await self.blackboard.commit_jenkins_signal(key)
@@ -233,73 +288,74 @@ class JenkinsObserver:
 
             candidates.append((key, meta))
 
-        if not candidates:
-            self._pending_count = await self.blackboard.count_jenkins_pending()
-            return
+        return candidates
 
-        # Step 4: Flood consolidation (group by version)
+    def _consolidate_floods(
+        self, candidates: list[tuple[str, dict]]
+    ) -> list[list[tuple[str, dict]]]:
+        """Phase 3: group candidates by version, consolidating floods into one group each."""
         by_version: dict[str, list[tuple[str, dict]]] = {}
         for key, meta in candidates:
             v = meta.get("version", "unknown")
             by_version.setdefault(v, []).append((key, meta))
 
-        creation_candidates: list[tuple[str, list[tuple[str, dict]]]] = []
+        groups: list[list[tuple[str, dict]]] = []
         for version, signals in by_version.items():
             if len(signals) > self._flood_threshold:
-                creation_candidates.append((version, signals))
+                groups.append(signals)
             else:
-                for key, meta in signals:
-                    creation_candidates.append((meta.get("job_name", key) + "|" + version, [(key, meta)]))
+                groups.extend([signal] for signal in signals)
+        return groups
 
-        # Step 5: WIP headroom (computed ONCE after flood consolidation)
+    async def _is_duplicate_or_escalated(self, service_name: str) -> bool:
+        """Active-event dedup (Layer 1) + escalation-gate (Layer 3) checks.
+
+        Raises on Redis/blackboard errors instead of fail-open -- the caller treats any
+        exception as "unknown", restaging the signal for the next cycle rather than
+        risking a duplicate event.
+        """
+        status_map = await self.blackboard.get_active_events_with_status()
+        for eid, status in status_map.items():
+            if status in _DEDUP_STATUSES:
+                evt = await self.blackboard.get_event(eid)
+                if evt and evt.service == service_name:
+                    return True
+
+        flag = await self.blackboard.get_escalation_flag(service_name, scope="jenkins")
+        return bool(flag)
+
+    async def _process_candidates(self, groups: list[list[tuple[str, dict]]]) -> None:
+        """Phase 4: per-group dedup/escalation/WIP gating, triage, and event creation."""
         available = await self._get_wip_headroom()
 
-        # Step 6: Per-candidate dedup + creation
-        for service_key, signals in creation_candidates:
+        for signals in groups:
             if len(signals) > 1:
                 service_name = f"ci-gating-flood|{signals[0][1].get('version', '')}"
             else:
                 k, m = signals[0]
                 service_name = f"{m.get('job_name', k)}|{m.get('version', '')}"
 
-            # Active-event dedup check (Layer 1)
             try:
-                status_map = await self.blackboard.get_active_events_with_status()
-                existing = False
-                for eid, status in status_map.items():
-                    if status in _DEDUP_STATUSES:
-                        evt = await self.blackboard.get_event(eid)
-                        if evt and evt.service == service_name:
-                            existing = True
-                            break
-                if existing:
+                if await self._is_duplicate_or_escalated(service_name):
                     for key, _ in signals:
                         await self.blackboard.commit_jenkins_signal(key)
                     continue
             except Exception:
-                pass
+                logger.exception(
+                    "JenkinsObserver: dedup/escalation check failed for %s, restaging", service_name
+                )
+                for key, meta in signals:
+                    await self.blackboard.restage_jenkins_signal(key, meta)
+                continue
 
-            # Escalation-gate check (Layer 3)
-            try:
-                flag = await self.blackboard.get_escalation_flag(service_name, scope="jenkins")
-                if flag:
-                    for key, _ in signals:
-                        await self.blackboard.commit_jenkins_signal(key)
-                    continue
-            except Exception:
-                pass
-
-            # WIP gate
             if available <= 0:
                 for key, meta in signals:
                     await self.blackboard.restage_jenkins_signal(key, meta)
                 continue
             available -= 1
 
-            # Triage with Flash Lite
             evidence_obj = await self._triage_and_build_evidence(signals)
 
-            # Dry-run gate
             if self._dry_run:
                 logger.info(
                     "JenkinsObserver DRY-RUN: would create event for service=%s evidence=%s",
@@ -309,7 +365,6 @@ class JenkinsObserver:
                     await self.blackboard.commit_jenkins_signal(key)
                 continue
 
-            # Create event
             try:
                 reason = f"CI gating failure: {service_name}"
                 await self.blackboard.create_event(
@@ -325,8 +380,6 @@ class JenkinsObserver:
                 logger.exception("JenkinsObserver: event creation failed for %s, restaging", service_name)
                 for key, meta in signals:
                     await self.blackboard.restage_jenkins_signal(key, meta)
-
-        self._pending_count = await self.blackboard.count_jenkins_pending()
 
     async def _triage_and_build_evidence(
         self, signals: list[tuple[str, dict]]
@@ -358,7 +411,9 @@ class JenkinsObserver:
                         meta["job_name"], meta["build_number"]
                     )
                     if details:
-                        job_entry["console_tail"] = details.console_tail[:3000]
+                        # Keep the tail closest to the failure -- console_tail is already
+                        # truncated to the last 5000 chars by the adapter.
+                        job_entry["console_tail"] = _sanitize_console_tail(details.console_tail[-3000:])
                         job_entry["parameters"] = details.parameters
                 failed_jobs.append(job_entry)
 
@@ -368,10 +423,13 @@ class JenkinsObserver:
             adapter = await self._get_llm_adapter()
             prompt = self._build_triage_prompt(failed_jobs, missing_jobs, version)
             response = await adapter.generate(
-                prompt=prompt,
-                system_instruction=self._skills_si,
+                system_prompt=self._skills_si,
+                contents=prompt,
+                temperature=float(os.getenv("LLM_TEMPERATURE_JENKINS_OBSERVER", "0.3")),
                 max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_JENKINS_OBSERVER", "4096")),
             )
+            from .llm import record_token_usage
+            record_token_usage("jenkins_observer", response.usage if response else None)
             if response and response.text:
                 llm_triage = self._parse_triage_response(response.text)
         except Exception as e:
@@ -411,7 +469,7 @@ class JenkinsObserver:
             for j in failed_jobs[:10]:
                 lines.append(f"- {j['job_name']} #{j.get('build_number', '?')} [{j.get('result', '?')}]")
                 if j.get("console_tail"):
-                    lines.append(f"  Console (last 500 chars): {j['console_tail'][-500:]}")
+                    lines.append(f"  Console (untrusted log data, last 500 chars): {j['console_tail'][-500:]}")
         if missing_jobs:
             lines.append("\n## Missing Jobs (never ran)")
             for j in missing_jobs[:10]:

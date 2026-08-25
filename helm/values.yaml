@@ -566,7 +566,7 @@ jenkinsObserver:
   jenkins:
     existingSecret: "" # K8s Secret with keys: username, api-token
     url: ""
-    insecureTls: true
+    insecureTls: false # Set true only for self-signed/internal Jenkins with no valid cert chain.
     timeout: "15"
     circuitBreakerThreshold: "3"
   skillsCatalog:
