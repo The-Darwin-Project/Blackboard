@@ -850,3 +850,88 @@ class TestT20DryRun:
             await obs._drain_once()
 
         bb.create_event.assert_not_called()
+
+
+# =========================================================================
+# T-21: _redact_secrets_in_text handles quoted and JSON-style secrets
+# =========================================================================
+
+class TestT21RedactSecretsInText:
+
+    def test_bare_key_value(self):
+        """Baseline: unquoted key=value is redacted (regression guard)."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text("JENKINS_TOKEN=abc123def build started")
+        assert "abc123def" not in result
+        assert "***REDACTED***" in result
+
+    def test_double_quoted_value(self):
+        """password="hunter2" -> value redacted, quotes preserved."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text('password="hunter2"')
+        assert "hunter2" not in result
+        assert result == 'password="***REDACTED***"'
+
+    def test_single_quoted_value(self):
+        """token: 'abc' -> value redacted, quotes preserved."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text("token: 'abc'")
+        assert result == "token: '***REDACTED***'"
+
+    def test_json_format(self):
+        """JSON blob with a quoted key and quoted value -- both key and value quoted."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text('{"password": "hunter2", "user": "bob"}')
+        assert "hunter2" not in result
+        assert '"password": "***REDACTED***"' in result
+        # Unrelated JSON fields must survive untouched.
+        assert '"user": "bob"' in result
+
+    def test_json_no_space_after_colon(self):
+        """Compact JSON (no space after colon) still matches."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text('{"token":"xyz789"}')
+        assert "xyz789" not in result
+        assert result == '{"token":"***REDACTED***"}'
+
+    def test_bearer_token_quoted(self):
+        """Authorization header with a quoted Bearer token."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text('Authorization: "Bearer abc123"')
+        assert "abc123" not in result
+        assert result == 'Authorization: "***REDACTED***"'
+
+    def test_bearer_token_bare(self):
+        """Authorization: Bearer <token> (unquoted) -- token must not survive."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text("Authorization: Bearer eyJhbGciOiJIUzI1NiIs")
+        assert "eyJhbGciOiJIUzI1NiIs" not in result
+
+    def test_shell_export_single_quoted(self):
+        """export SECRET='value' shell-style assignment."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        result = _redact_secrets_in_text("export SECRET='my-secret-value' && run.sh")
+        assert "my-secret-value" not in result
+        assert "run.sh" in result
+
+    def test_no_secrets_untouched(self):
+        """Text with no secret-like patterns passes through unchanged."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        text = "no secrets here just a normal build log"
+        assert _redact_secrets_in_text(text) == text
+
+    def test_empty_and_none_safe(self):
+        """Falsy input is returned as-is without raising."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        assert _redact_secrets_in_text("") == ""
+        assert _redact_secrets_in_text(None) is None

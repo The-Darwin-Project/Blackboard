@@ -175,20 +175,22 @@ def _build_subject_block(
 
     elif subject_type == "ci_gating" and ev and ev.ci_context:
         cc = ev.ci_context
-        lines.append(f"CI Gating: {event.service}")
-        lines.append(f"  CNV Version: {cc.get('cnv_version', '')}")
+        lines.append(f"CI Gating: {_safe_prompt_field(event.service, max_len=200)}")
+        lines.append(f"  CNV Version: {_safe_prompt_field(cc.get('cnv_version', ''), max_len=40)}")
         if cc.get("jenkins_url"):
-            lines.append(f"  Jenkins: {cc['jenkins_url']}")
+            lines.append(f"  Jenkins: {_safe_prompt_field(cc['jenkins_url'], max_len=200)}")
         failed = cc.get("failed_jobs", [])
         missing = cc.get("missing_jobs", [])
         if failed:
             lines.append(f"  Failed Jobs ({len(failed)}):")
             for j in failed[:10]:
-                lines.append(f"    - {j.get('job_name', '')} #{j.get('build_number', '')} [{j.get('result', '')}]")
+                job_name = _safe_prompt_field(j.get("job_name", ""), max_len=200)
+                result = _safe_prompt_field(j.get("result", ""), max_len=40)
+                lines.append(f"    - {job_name} #{j.get('build_number', '')} [{result}]")
         if missing:
             lines.append(f"  Missing Jobs ({len(missing)}):")
             for j in missing[:10]:
-                lines.append(f"    - {j.get('job_name', '')}")
+                lines.append(f"    - {_safe_prompt_field(j.get('job_name', ''), max_len=200)}")
         triage = cc.get("llm_triage", [])
         if triage:
             lines.append("  LLM Triage:")

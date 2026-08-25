@@ -93,19 +93,34 @@ def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
 
 
 # key=value / key: value pairs where the key looks secret-bearing (e.g. "TOKEN=abc123",
-# "password: hunter2", "Authorization: xyz") -- covers the common ways CI logs leak
-# credentials inline. Value is any run of non-whitespace, non-quote characters.
+# "password: hunter2", 'token: 'abc'', '"password": "hunter2"') -- covers the common ways
+# CI logs and JSON blobs leak credentials inline. The key may be quoted (JSON) or bare, and
+# the value may be double-quoted, single-quoted, or a bare run of non-whitespace/delimiter
+# characters. `[:=]` covers both "key: value" and "key=value" separators.
+_SECRET_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s,}\]\"']+)"
 _SECRET_TEXT_PATTERN = re.compile(
-    r"(?im)((?:token|secret|password|passwd|pwd|api[_-]?key|credential|authorization)"
-    r"\s*[:=]\s*)([^\s'\"]+)"
+    r"(?im)(\"?(?:token|secret|password|passwd|pwd|api[_-]?key|credential|authorization)\"?"
+    r"\s*[:=]\s*)" + _SECRET_VALUE
 )
-_BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)(\S+)")
+_BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)" + _SECRET_VALUE)
+
+
+def _redact_match(m: "re.Match") -> str:
+    """Replace a secret-pattern match, preserving surrounding quotes on the value if any
+    (so `password: "hunter2"` becomes `password: "***REDACTED***"`, not `password: "` +
+    `***REDACTED***` with the closing quote left dangling)."""
+    prefix, value = m.group(1), m.group(2)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        quote = value[0]
+        return f"{prefix}{quote}{_REDACTED}{quote}"
+    return prefix + _REDACTED
 
 
 def _redact_secrets_in_text(text: str) -> str:
-    """Redact common inline credential patterns from untrusted free-text Jenkins
-    console log content before it enters ci_context (same exposure vector as
-    _redact_build_parameters, but for unstructured log text rather than a params dict).
+    """Redact common inline credential patterns -- bare, single-quoted, double-quoted, or
+    JSON-style -- from untrusted free-text Jenkins console log content before it enters
+    ci_context (same exposure vector as _redact_build_parameters, but for unstructured log
+    text rather than a params dict).
 
     Bearer-token redaction MUST run before the generic key[:=]value pass -- otherwise
     "Authorization: Bearer <token>" matches the generic pattern first (key="Authorization",
@@ -114,8 +129,8 @@ def _redact_secrets_in_text(text: str) -> str:
     """
     if not text:
         return text
-    text = _BEARER_TEXT_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
-    text = _SECRET_TEXT_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
+    text = _BEARER_TEXT_PATTERN.sub(_redact_match, text)
+    text = _SECRET_TEXT_PATTERN.sub(_redact_match, text)
     return text
 
 
