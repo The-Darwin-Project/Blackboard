@@ -24,6 +24,12 @@
 # 13. [Constraint]: LLM triage output (from _parse_triage_response) must be passed through
 #     _validate_triage_entry() -- it is untrusted (LLM-generated from an attacker-influenceable
 #     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py.
+# 14. [Constraint]: console_tail must be passed through _redact_secrets_in_text() (inline
+#     TOKEN=/password:/Bearer patterns) in addition to _sanitize_console_tail() -- same
+#     ci_context exposure vector as build parameters, but for unstructured log text.
+# 15. [Pattern]: _poll_and_stage() only stages FAILURE/UNSTABLE/ABORTED and truly-missing
+#     jobs (no build at all). A job with result=None but a build_number is in-progress and
+#     must not be staged as a failure signal.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -84,6 +90,33 @@ def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
         name: _REDACTED if _SECRET_PARAM_PATTERN.search(name) else value
         for name, value in params.items()
     }
+
+
+# key=value / key: value pairs where the key looks secret-bearing (e.g. "TOKEN=abc123",
+# "password: hunter2", "Authorization: xyz") -- covers the common ways CI logs leak
+# credentials inline. Value is any run of non-whitespace, non-quote characters.
+_SECRET_TEXT_PATTERN = re.compile(
+    r"(?im)((?:token|secret|password|passwd|pwd|api[_-]?key|credential|authorization)"
+    r"\s*[:=]\s*)([^\s'\"]+)"
+)
+_BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)(\S+)")
+
+
+def _redact_secrets_in_text(text: str) -> str:
+    """Redact common inline credential patterns from untrusted free-text Jenkins
+    console log content before it enters ci_context (same exposure vector as
+    _redact_build_parameters, but for unstructured log text rather than a params dict).
+
+    Bearer-token redaction MUST run before the generic key[:=]value pass -- otherwise
+    "Authorization: Bearer <token>" matches the generic pattern first (key="Authorization",
+    value="Bearer") and redacts only the literal word "Bearer", leaving the actual token
+    in the text.
+    """
+    if not text:
+        return text
+    text = _BEARER_TEXT_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
+    text = _SECRET_TEXT_PATTERN.sub(lambda m: m.group(1) + _REDACTED, text)
+    return text
 
 
 _VALID_TRIAGE_CLASSIFICATIONS = frozenset({"infrastructure", "test", "product"})
@@ -292,6 +325,11 @@ class JenkinsObserver:
             ):
                 jobs = await poll_fn(version)
                 for job in jobs:
+                    if job.result is None and job.build_number is not None:
+                        # In-progress build (lastBuild exists but hasn't finished) -- not a
+                        # failure signal. Only a job with NO build at all (build_number is
+                        # also None) counts as "missing".
+                        continue
                     if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
                         key = f"{category}:{job.job_name}|{version}"
                         metadata = {
@@ -477,7 +515,8 @@ class JenkinsObserver:
                     if details:
                         # Keep the tail closest to the failure -- console_tail is already
                         # truncated to the last 5000 chars by the adapter.
-                        job_entry["console_tail"] = _sanitize_console_tail(details.console_tail[-3000:])
+                        tail = _redact_secrets_in_text(details.console_tail[-3000:])
+                        job_entry["console_tail"] = _sanitize_console_tail(tail)
                         job_entry["parameters"] = _redact_build_parameters(details.parameters)
                 failed_jobs.append(job_entry)
 
