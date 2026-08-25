@@ -30,6 +30,7 @@ ESCALATION_SCOPE_MAP: dict[str, str] = {
     "system": "sync",
     "jira": "health",
     "github_issue": "health",
+    "ci_gating": "jenkins",
 }
 """Maps subject_type -> escalation scope field suffix.
 
@@ -260,6 +261,9 @@ class EventEvidence(BaseModel):
         None, description="GitHub Issue context: owner, repo, issue_number, title, body, labels, assignees, html_url, state, author, created_at, skill_label"
     )
     argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key (namespace/name) for evidence-based icon resolution")
+    ci_context: Optional[dict] = Field(
+        None, description="CI gating context: cnv_version, jenkins_url, failed_jobs, missing_jobs, llm_triage"
+    )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
@@ -630,6 +634,8 @@ class FlowMetricsResponse(BaseModel):
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
     aligner_pending: int = 0
+    jenkins_pending: int = 0
+    jenkins_breaker_open: bool = False
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0
@@ -651,6 +657,8 @@ class FlowSnapshot(BaseModel):
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
     aligner_pending: int = 0
+    jenkins_pending: int = 0
+    jenkins_breaker_open: bool = False
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0

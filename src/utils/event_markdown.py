@@ -16,6 +16,7 @@ _MD_SUBJECT_LABEL = {
     "system": "Subject",
     "jira": "Jira Issue",
     "github_issue": "GitHub Issue",
+    "ci_gating": "CI Gating",
 }
 
 

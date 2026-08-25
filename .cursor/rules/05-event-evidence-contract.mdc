@@ -23,6 +23,7 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 | `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. Headhunter uses `_classify_severity(action, pipeline)`. |
 | `brain_severity` | No | Set by Brain's `classify_event` (optional severity param). Overrides `severity` once set. Starts `None`. |
 | `metrics` | Conditional | Required for aligner events (`EventMetrics` with cpu/memory/error_rate/replicas). `None` for user-initiated events. |
+| `ci_context` | Conditional | Required for JenkinsObserver events (`subject_type="ci_gating"`). Contains `cnv_version`, `jenkins_url`, `failed_jobs`, `missing_jobs`, `llm_triage`. `None` for non-CI events. |
 
 ## Cynefin Domain Classification Pipeline
 
@@ -47,6 +48,7 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 
 * **Chat/Slack**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`, `display_text` = user message.
 * **TimeKeeper**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`.
+* **JenkinsObserver** (CI gating): `source="aligner"`, `source_type="aligner"`, `subject_type="ci_gating"`, `domain="disorder"`, `domain_confidence="default"`, `severity="warning"`. `ci_context` includes `cnv_version`, `jenkins_url`, `failed_jobs`, `missing_jobs`, `llm_triage`. Uses `domain_confidence="default"` despite real Flash Lite triage having occurred — Flash Lite classifies the failure type (infra/test/product), a separate axis from Cynefin domain classification; `"assessed"` is reserved for sources that pair it with a real (non-disorder) `domain` value.
 * **JARVIS** (meta-events): `source_type="jarvis"`, `domain="complicated"`, `domain_confidence="assessed"`, `severity="info"`. Created by LiveAPIAdapter when all events are parked (system review).
 
 ## Nightwatcher Dispatcher Distinction

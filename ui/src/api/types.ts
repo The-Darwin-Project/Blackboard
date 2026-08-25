@@ -326,6 +326,8 @@ export interface FlowMetrics {
   waiting_approval_events: number;
   headhunter_pending: number;
   aligner_pending: number;
+  jenkins_pending: number;
+  jenkins_breaker_open: boolean;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;
@@ -346,6 +348,8 @@ export interface FlowSnapshot {
   waiting_approval_events: number;
   headhunter_pending: number;
   aligner_pending: number;
+  jenkins_pending: number;
+  jenkins_breaker_open: boolean;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;

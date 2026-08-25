@@ -5257,6 +5257,7 @@ class Brain:
             registry=registry,
             headhunter=hh,
             aligner=aligner_ref,
+            jenkins_observer=self.agents.get("_jenkins_observer"),
             provisioner=self._ephemeral_provisioner,
             token_meter=get_token_meter(),
             interval=60.0,
