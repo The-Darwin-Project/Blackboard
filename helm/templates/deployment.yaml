@@ -540,12 +540,16 @@ spec:
             {{- if .Values.jenkinsObserver.releaseAi }}
             - name: RELEASE_AI_URL
               value: "{{ .Values.jenkinsObserver.releaseAi.url }}"
+            {{- if .Values.jenkinsObserver.releaseAi.email }}
+            - name: RELEASE_AI_EMAIL
+              value: "{{ .Values.jenkinsObserver.releaseAi.email }}"
+            {{- end }}
             {{- if .Values.jenkinsObserver.releaseAi.existingSecret }}
-            - name: RELEASE_AI_SECRET
+            - name: RELEASE_AI_BFF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.jenkinsObserver.releaseAi.existingSecret }}
-                  key: shared-secret
+                  key: bff-token
             {{- end }}
             {{- end }}
             - name: LLM_MODEL_JENKINS_OBSERVER

@@ -575,7 +575,8 @@ jenkinsObserver:
     skills: "cnv-gating-workflow,cnv-gating-failure-analysis"
   releaseAi:
     url: ""
-    existingSecret: "" # Shared secret for auth
+    email: "" # Forwarded-Email header value for Release AI RCA queries (RELEASE_AI_EMAIL)
+    existingSecret: "" # K8s Secret with key: bff-token (RELEASE_AI_BFF_TOKEN)
 # =============================================================================
 # Idle Timeout (auto-close stale chat/slack events after user inactivity)
 # =============================================================================

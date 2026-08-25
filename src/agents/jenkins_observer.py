@@ -99,7 +99,8 @@ def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
 # characters. `[:=]` covers both "key: value" and "key=value" separators.
 _SECRET_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s,}\]\"']+)"
 _SECRET_TEXT_PATTERN = re.compile(
-    r"(?im)(\"?(?:token|secret|password|passwd|pwd|api[_-]?key|credential|authorization)\"?"
+    r"(?im)(\"?(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|secret[_-]?key|key|credential|authorization)\"?"
     r"\s*[:=]\s*)" + _SECRET_VALUE
 )
 _BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)" + _SECRET_VALUE)
