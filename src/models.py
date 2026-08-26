@@ -699,6 +699,19 @@ class PendingAnomaly(BaseModel):
     first_seen: float
 
 
+class JenkinsPendingItem(BaseModel):
+    """Jenkins CI pending queue item — a failed/missing gating job dwelling before event creation."""
+    key: str
+    target: str
+    version: str = ""
+    category: str = ""
+    job_name: str = ""
+    result: str = ""
+    build_number: Optional[int] = None
+    url: str = ""
+    first_seen: float
+
+
 class ReportMeta(BaseModel):
     """Report summary for list views. Created by persist_report, stored as JSON."""
     event_id: str

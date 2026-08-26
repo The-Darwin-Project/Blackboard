@@ -112,7 +112,7 @@ function ArgoCDIcon({ size }: { size: number }) {
   );
 }
 
-function JenkinsIcon({ size }: { size: number }) {
+export function JenkinsIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="1" y="5" width="3" height="6" rx="0.8" fill="#D33833" />

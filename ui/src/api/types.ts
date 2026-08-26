@@ -415,6 +415,18 @@ export interface AlignerPendingItem {
   first_seen: number;
 }
 
+export interface JenkinsPendingItem {
+  key: string;
+  target: string;
+  version: string;
+  category: string;
+  job_name: string;
+  result: string;
+  build_number: number | null;
+  url: string;
+  first_seen: number;
+}
+
 // =============================================================================
 // Public Configuration (AI Transparency & Compliance)
 // =============================================================================

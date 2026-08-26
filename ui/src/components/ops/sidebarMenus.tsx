@@ -5,13 +5,14 @@
 // 3. [Pattern]: Each menu item has an icon (lucide), label, color, and optional danger flag.
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 // 5. [Pattern]: alignerPendingMenuItems — Copy only (Create Event deferred to v2, needs full WS+Brain chain).
+// 6. [Pattern]: jenkinsQueueMenuItems — Open in Jenkins (safeOpen, XSS prevention) + Copy Job Name.
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
 import { safeOpen } from '../../utils/safeOpen';
-import type { AgentRegistryEntry, KargoStageStatus, JiraMission } from '../../api/types';
+import type { AgentRegistryEntry, KargoStageStatus, JiraMission, JenkinsPendingItem } from '../../api/types';
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
 
@@ -77,6 +78,16 @@ export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
 export function alignerPendingMenuItems(item: { target: string; key: string }): ContextMenuItem[] {
   return [
     { id: 'copy-target', label: 'Copy Service Name', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(item.target) },
+  ];
+}
+
+export function jenkinsQueueMenuItems(item: JenkinsPendingItem): ContextMenuItem[] {
+  return [
+    ...(item.url ? [
+      { id: 'open-jenkins', label: 'Open in Jenkins', icon: <ExternalLink size={18} />, color: '#D33833', onClick: () => safeOpen(item.url) },
+      { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
+    ] : []),
+    { id: 'copy-job', label: 'Copy Job Name', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(item.job_name || item.target) },
   ];
 }
 

@@ -1,6 +1,6 @@
 // BlackBoard/ui/src/components/ops/EventSidebar.tsx
 // @ai-rules:
-// 1. [Pattern]: Persistent sidebar. Unified system state tree: Agents, Events, ArgoCD Queue, Jira, Kargo, HH Queue, Schedules.
+// 1. [Pattern]: Persistent sidebar. Unified system state tree: Agents, Events, ArgoCD Queue, Jenkins Queue, Jira, Kargo, HH Queue, Schedules.
 // 2. [Pattern]: Event detail area extracted to EventChatPanel. Sidebar is tree-only + new-event ChatInput.
 // 3. [Pattern]: Right-click context menus per node type. Icons + color from ACTOR_COLORS and lucide-react.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
@@ -12,14 +12,14 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsControl, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending } from '../../hooks/useQueue';
+import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending, useJenkinsPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
-import SourceIcon from '../SourceIcon';
+import SourceIcon, { JenkinsIcon } from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
-import { agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
+import { agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems, jenkinsQueueMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
 import { safeOpen } from '../../utils/safeOpen';
 import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
@@ -68,6 +68,7 @@ export default function EventSidebar() {
   });
   const { data: hhTodos = [], isError: hhError } = useHeadhunterPending();
   const { data: alignerPending = [] } = useAlignerPending();
+  const { data: jenkinsPending = [] } = useJenkinsPending();
   const { data: jiraMissions = [] } = useJiraMissions();
   const jiraActions = useJiraActions();
   const { data: schedules = [] } = useSchedules();
@@ -320,6 +321,26 @@ export default function EventSidebar() {
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setCtxMenu({ x: e.clientX, y: e.clientY, items: alignerPendingMenuItems(item) });
+                  }}
+                />
+              ))}
+            </TreeGroup>
+
+            {/* Jenkins CI Queue Group */}
+            <TreeGroup icon={<JenkinsIcon size={16} />}
+              label="Jenkins Queue" count={jenkinsPending.length}
+              countColor={jenkinsPending.length > 0 ? '#D33833' : '#64748b'}
+              forceCollapsed={!!selectedEventId}>
+              {jenkinsPending.length === 0 && <EmptyLabel>No pending CI signals</EmptyLabel>}
+              {jenkinsPending.map(item => (
+                <TreeNode key={item.key}
+                  icon={<JenkinsIcon size={18} />}
+                  label={item.target}
+                  sublabel={`${item.result || 'missing'} (${Math.floor((Date.now() / 1000 - item.first_seen) / 60)}m)`}
+                  sublabelColor={item.result === 'FAILURE' ? '#ef4444' : '#f59e0b'}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setCtxMenu({ x: e.clientX, y: e.clientY, items: jenkinsQueueMenuItems(item) });
                   }}
                 />
               ))}

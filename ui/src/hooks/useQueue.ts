@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: Hybrid hydration -- REST on mount, WS for incremental, polling as safety net.
 // 2. [Gotcha]: refetchInterval on activeEvents catches missed WS event_closed messages (ghost events).
-// 3. [Pattern]: useHeadhunterPending and useAlignerPending use react-query (30s poll + WS invalidation).
+// 3. [Pattern]: useHeadhunterPending, useAlignerPending, and useJenkinsPending use react-query (30s poll + WS invalidation).
 /**
  * Queue hooks with hybrid hydration:
  * - Initial state from REST GET (on mount / reconnect)
@@ -10,7 +10,7 @@
  * - Polling safety net (10s) to catch missed WS messages
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getWaitingApprovalEvents, getEventDocument, getHeadhunterPending, getAlignerPending } from '../api/client';
+import { getActiveEvents, getWaitingApprovalEvents, getEventDocument, getHeadhunterPending, getAlignerPending, getJenkinsPending } from '../api/client';
 import type { ActiveEvent, EventDocument, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
@@ -65,6 +65,15 @@ export function useAlignerPending() {
   });
 }
 
+export function useJenkinsPending() {
+  return useQuery({
+    queryKey: ['jenkinsPending'],
+    queryFn: getJenkinsPending,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
 /**
  * Hook to invalidate queue queries (called by WebSocket message handler).
  */
@@ -80,6 +89,7 @@ export function useQueueInvalidation() {
     invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
     invalidateHeadhunter: () => queryClient.invalidateQueries({ queryKey: ['headhunterPending'] }),
     invalidateAligner: () => queryClient.invalidateQueries({ queryKey: ['alignerPending'] }),
+    invalidateJenkins: () => queryClient.invalidateQueries({ queryKey: ['jenkinsPending'] }),
     optimisticRemoveEvent: (eventId: string) => {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
         old ? old.filter((e) => e.id !== eventId) : [],

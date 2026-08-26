@@ -123,7 +123,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, invalidateAligner, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgents = useMemo(() => {
@@ -139,7 +139,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
 
   selectedEventIdRef.current = selectedEventId;
 
-  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); invalidateAligner(); });
+  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); invalidateAligner(); invalidateJenkins(); });
 
   useWSMessage((msg) => {
     if (msg.type === 'event_created' && msg.event_id) {
@@ -148,6 +148,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       }
       invalidateActive();
       invalidateAligner();
+      invalidateJenkins();
     } else if (msg.type === 'event_closed') {
       const closedId = msg.event_id as string;
       if (closedId) {
@@ -157,6 +158,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateClosed();
         invalidateHeadhunter();
         invalidateAligner();
+        invalidateJenkins();
         if (closedId === selectedEventIdRef.current) {
           selectedEventIdRef.current = null;
           setSelectedEventId(null);

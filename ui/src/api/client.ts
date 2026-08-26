@@ -359,10 +359,14 @@ export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {
   return fetchApi<HeadhunterTodo[]>('/queue/headhunter/pending');
 }
 
-import type { AlignerPendingItem } from './types';
+import type { AlignerPendingItem, JenkinsPendingItem } from './types';
 
 export async function getAlignerPending(): Promise<AlignerPendingItem[]> {
   return fetchApi<AlignerPendingItem[]>('/queue/aligner/pending');
+}
+
+export async function getJenkinsPending(): Promise<JenkinsPendingItem[]> {
+  return fetchApi<JenkinsPendingItem[]>('/queue/jenkins/pending');
 }
 
 // =============================================================================
