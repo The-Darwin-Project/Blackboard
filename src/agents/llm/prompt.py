@@ -203,7 +203,8 @@ def _build_subject_block(
         if maintainer:
             emails = maintainer.get("emails", [])
             if emails:
-                lines.append(f"  Maintainer Emails: {', '.join(emails)}")
+                safe_emails = ", ".join(_safe_prompt_field(e, max_len=200) for e in emails)
+                lines.append(f"  Maintainer Emails: {safe_emails}")
 
     elif ev and ev.github_context:
         gc = ev.github_context

@@ -198,3 +198,39 @@ class TestFailClosed:
             await Brain._build_system_prompt(
                 brain, _make_event_stub(), ["triage"], context_flags=None
             )
+
+
+class TestMaintainerEnvSelection:
+    """Regression coverage for the subject_type -> maintainer env var selection.
+
+    PR #210 codereview HIGH finding: subject_type was read off event.evidence
+    (wrong object -- EventDocument has no .evidence attr, EventEvidence has no
+    subject_type field), so it was always None and JENKINS_OBSERVER_MAINTAINERS
+    was never selected for ci_gating events.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ci_gating_selects_jenkins_observer_maintainers(self, monkeypatch):
+        monkeypatch.setenv("JENKINS_OBSERVER_MAINTAINERS", "jenkins-maint@example.com")
+        monkeypatch.setenv("HEADHUNTER_MAINTAINERS", "headhunter-maint@example.com")
+        brain = _make_brain_stub([])
+        event = _make_event_stub(subject_type="ci_gating")
+
+        from src.agents.brain import Brain
+        await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
+
+        _, kwargs = brain._skill_loader.resolve_dependencies_with_paths.call_args
+        assert kwargs["template_vars"]["maintainer_emails"] == "jenkins-maint@example.com"
+
+    @pytest.mark.asyncio
+    async def test_non_ci_gating_selects_headhunter_maintainers(self, monkeypatch):
+        monkeypatch.setenv("JENKINS_OBSERVER_MAINTAINERS", "jenkins-maint@example.com")
+        monkeypatch.setenv("HEADHUNTER_MAINTAINERS", "headhunter-maint@example.com")
+        brain = _make_brain_stub([])
+        event = _make_event_stub(subject_type="service")
+
+        from src.agents.brain import Brain
+        await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
+
+        _, kwargs = brain._skill_loader.resolve_dependencies_with_paths.call_args
+        assert kwargs["template_vars"]["maintainer_emails"] == "headhunter-maint@example.com"

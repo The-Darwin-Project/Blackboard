@@ -19,6 +19,7 @@ import httpx
 
 from ..models import ConversationTurn
 from ..utils import redact_pii
+from ..utils.maintainers import resolve_maintainer_emails
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -30,26 +31,13 @@ logger = logging.getLogger("darwin.brain")
 # Helpers (extracted from Brain static/private methods)
 # ---------------------------------------------------------------------------
 def _resolve_maintainer_enum(event) -> list[str]:
-    """Extract valid maintainer emails from event evidence + static config."""
-    emails: list[str] = []
-    evidence = getattr(getattr(event, "event", None), "evidence", None)
-    if evidence:
-        gl = getattr(evidence, "gitlab_context", None) or {}
-        if isinstance(gl, dict):
-            maintainer = gl.get("maintainer", {})
-            emails.extend(maintainer.get("emails", []))
-        if not emails:
-            gh = getattr(evidence, "github_context", None) or {}
-            if isinstance(gh, dict):
-                maintainer = gh.get("maintainer", {})
-                emails.extend(maintainer.get("emails", []))
-    if not emails:
-        static = os.getenv("HEADHUNTER_MAINTAINERS", "")
-        emails = [e.strip() for e in static.split(",") if e.strip()]
-    if event and getattr(event, "slack_user_id", None):
-        emails.append(event.slack_user_id)
-    seen: set[str] = set()
-    return [e for e in emails if e and e not in seen and not seen.add(e)]
+    """Extract valid maintainer emails from event evidence + static config.
+
+    Thin wrapper around the shared resolver in src/utils/maintainers.py -- kept as a
+    standalone function (not imported from Brain) per this module's no-Brain-import
+    constraint. See that module for source precedence and env-fallback selection.
+    """
+    return resolve_maintainer_emails(event)
 
 
 async def _resolve_slack_user(slack_channel, user_email: str, event_doc) -> str | None:

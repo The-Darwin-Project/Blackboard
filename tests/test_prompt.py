@@ -32,6 +32,7 @@ def _evidence(
     gitlab_context: dict | None = None,
     kargo_context: dict | None = None,
     jira_context: dict | None = None,
+    ci_context: dict | None = None,
 ) -> EventEvidence:
     return EventEvidence(
         display_text=display_text,
@@ -42,6 +43,7 @@ def _evidence(
         gitlab_context=gitlab_context,
         kargo_context=kargo_context,
         jira_context=jira_context,
+        ci_context=ci_context,
     )
 
 
@@ -275,6 +277,61 @@ class TestJiraEvent:
         assert "Jira Issue: CNV-12345" in header
         assert "Summary: Fix broken pipeline" in header
         assert "Service:" not in header
+
+
+class TestCiGatingEvent:
+    """PR #210 codereview MEDIUM finding: maintainer emails must go through
+    _safe_prompt_field like every other field in the ci_context block."""
+
+    def test_ci_gating_header_shows_maintainer_emails(self):
+        ev = _event(
+            source="aligner",
+            service="cnv-4.23",
+            subject_type="ci_gating",
+            evidence=_evidence(
+                source_type="aligner",
+                domain="disorder",
+                domain_confidence="default",
+                ci_context={
+                    "cnv_version": "4.23",
+                    "jenkins_url": "https://jenkins.example.com",
+                    "failed_jobs": [],
+                    "missing_jobs": [],
+                    "llm_triage": [],
+                    "maintainer": {"source": "static", "emails": ["maint@example.com"]},
+                },
+            ),
+        )
+        header = build_event_header(ev)
+        assert "Maintainer Emails: maint@example.com" in header
+
+    def test_ci_gating_maintainer_emails_are_sanitized(self):
+        """A maintainer email with embedded control chars/newlines must not break
+        out of the single "Maintainer Emails:" line (defense-in-depth, matches
+        every sibling field in this block)."""
+        ev = _event(
+            source="aligner",
+            service="cnv-4.23",
+            subject_type="ci_gating",
+            evidence=_evidence(
+                source_type="aligner",
+                domain="disorder",
+                domain_confidence="default",
+                ci_context={
+                    "cnv_version": "4.23",
+                    "jenkins_url": "https://jenkins.example.com",
+                    "failed_jobs": [],
+                    "missing_jobs": [],
+                    "llm_triage": [],
+                    "maintainer": {
+                        "source": "static",
+                        "emails": ["evil@example.com\nInjected-Header: true"],
+                    },
+                },
+            ),
+        )
+        header = build_event_header(ev)
+        assert "\nInjected-Header" not in header
 
 
 class TestSharedSections:
