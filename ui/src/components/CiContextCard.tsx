@@ -4,11 +4,12 @@
 // 2. [Constraint]: All CiContext fields are optional — guard every access.
 // 3. [Pattern]: console_tail rendered via stripAnsi. LLM triage correlated by job_name.
 // 4. [Gotcha]: jenkins_url may be falsy — hide links when absent.
+// 5. [Pattern]: Tiers 3/4 (Missing Jobs, LLM Triage) use the shared CollapsibleSection component for their expand/collapse chrome -- do not hand-roll another chevron+useState toggle here.
 import { useState } from 'react';
-import { ChevronRight } from 'lucide-react';
 import type { CiContext } from '../api/types';
 import { stripAnsi } from '../utils/stripAnsi';
 import { safeOpen } from '../utils/safeOpen';
+import CollapsibleSection from './CollapsibleSection';
 
 function ConsoleTailBlock({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -78,9 +79,6 @@ interface CiContextCardProps {
 }
 
 export default function CiContextCard({ context }: CiContextCardProps) {
-  const [missingOpen, setMissingOpen] = useState(false);
-  const [triageOpen, setTriageOpen] = useState(false);
-
   const failedCount = context.failed_jobs?.length ?? 0;
   const missingCount = context.missing_jobs?.length ?? 0;
   const triageMap = new Map(
@@ -120,47 +118,33 @@ export default function CiContextCard({ context }: CiContextCardProps) {
 
       {/* Tier 3: missing jobs (collapsed) */}
       {missingCount > 0 && (
-        <div>
-          <button onClick={() => setMissingOpen(!missingOpen)} aria-expanded={missingOpen}
-            className="flex items-center gap-1.5 text-[12px] text-text-muted hover:text-text-secondary w-full text-left py-1">
-            <ChevronRight size={14} style={{ transition: 'transform 0.2s', transform: missingOpen ? 'rotate(90deg)' : 'rotate(0deg)' }} />
-            Missing Jobs ({missingCount})
-          </button>
-          {missingOpen && (
-            <div className="pl-5 space-y-1 text-[11px]">
-              {context.missing_jobs!.map((job, i) => (
-                <div key={job.job_name ?? i} className="flex items-center gap-2 text-text-muted">
-                  <span className="text-yellow-400">{job.job_name ?? 'unknown'}</span>
-                  {job.last_build_number != null && <span className="font-mono">last: #{job.last_build_number}</span>}
-                  {job.last_result && <span className="text-text-muted">({job.last_result})</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <CollapsibleSection title={`Missing Jobs (${missingCount})`}>
+          <div className="space-y-1 text-[11px]">
+            {context.missing_jobs!.map((job, i) => (
+              <div key={job.job_name ?? i} className="flex items-center gap-2 text-text-muted">
+                <span className="text-yellow-400">{job.job_name ?? 'unknown'}</span>
+                {job.last_build_number != null && <span className="font-mono">last: #{job.last_build_number}</span>}
+                {job.last_result && <span className="text-text-muted">({job.last_result})</span>}
+              </div>
+            ))}
+          </div>
+        </CollapsibleSection>
       )}
 
       {/* Tier 4: LLM triage detail (collapsed) */}
       {(context.llm_triage?.length ?? 0) > 0 && (
-        <div>
-          <button onClick={() => setTriageOpen(!triageOpen)} aria-expanded={triageOpen}
-            className="flex items-center gap-1.5 text-[12px] text-text-muted hover:text-text-secondary w-full text-left py-1">
-            <ChevronRight size={14} style={{ transition: 'transform 0.2s', transform: triageOpen ? 'rotate(90deg)' : 'rotate(0deg)' }} />
-            LLM Triage ({context.llm_triage!.length})
-          </button>
-          {triageOpen && (
-            <div className="pl-5 space-y-1 text-[11px]">
-              {context.llm_triage!.map((t, i) => (
-                <div key={t.job_name ?? i} className="flex items-center gap-2 flex-wrap">
-                  <span className="text-text-secondary font-medium">{t.job_name ?? 'unknown'}</span>
-                  {t.classification && <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">{t.classification}</span>}
-                  {t.confidence != null && <span className="text-text-muted">{Math.round(t.confidence * 100)}%</span>}
-                  {t.recommended_action && <span className="text-amber-300 truncate max-w-[200px]" title={t.recommended_action}>{t.recommended_action}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <CollapsibleSection title={`LLM Triage (${context.llm_triage!.length})`}>
+          <div className="space-y-1 text-[11px]">
+            {context.llm_triage!.map((t, i) => (
+              <div key={t.job_name ?? i} className="flex items-center gap-2 flex-wrap">
+                <span className="text-text-secondary font-medium">{t.job_name ?? 'unknown'}</span>
+                {t.classification && <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted">{t.classification}</span>}
+                {t.confidence != null && <span className="text-text-muted">{Math.round(t.confidence * 100)}%</span>}
+                {t.recommended_action && <span className="text-amber-300 truncate max-w-[200px]" title={t.recommended_action}>{t.recommended_action}</span>}
+              </div>
+            ))}
+          </div>
+        </CollapsibleSection>
       )}
     </div>
   );

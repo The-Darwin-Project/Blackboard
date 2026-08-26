@@ -6,6 +6,7 @@
 // 4. [Pattern]: Escape handler placed BEFORE altKey guard; includes isContentEditable check. Alt+] closes chat panel. ContextMenu has its own keydown Escape handler (both fire = "escape everything" UX).
 // 5. [Pattern]: min-width: 400px guard on main content prevents crush when sidebar + chat panel open.
 // 6. [Gotcha]: darwin:selectEvent custom event listener bridges WaitingBell -> OpsStateContext.selectEvent.
+// 7. [Pattern]: EventChatPanel wrapped in ErrorBoundary -- it renders evidence-driven cards (e.g. CiContextCard) whose shape isn't runtime-validated, so a render throw must not take down the whole shell.
 /**
  * Darwin Operations Center layout.
  * Header: logo + tabs only (clean, minimal).
@@ -20,6 +21,7 @@ import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
 import EventChatPanel from './ops/EventChatPanel';
 import ActivityPanel from './ops/ActivityPanel';
+import ErrorBoundary from './ErrorBoundary';
 
 const BASE_TABS = [
   { id: '/', label: 'Streams' },
@@ -131,7 +133,13 @@ function LayoutInner() {
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
         {selectedEventId && (
-          <EventChatPanel eventId={selectedEventId} onClose={deselectEvent} />
+          <ErrorBoundary fallback={
+            <div className="p-4 text-text-muted text-sm" style={{ width: 500 }}>
+              Event panel encountered an error. Try refreshing.
+            </div>
+          }>
+            <EventChatPanel eventId={selectedEventId} onClose={deselectEvent} />
+          </ErrorBoundary>
         )}
         <main className="flex-1 overflow-hidden min-w-0 relative" style={{ minWidth: 400 }}>
           <div className="absolute inset-0 overflow-hidden">
