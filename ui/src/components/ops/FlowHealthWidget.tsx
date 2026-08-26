@@ -86,6 +86,15 @@ export default function FlowHealthWidget() {
         {(data.aligner_pending ?? 0) > 0 && (
           <span>{data.aligner_pending} ArgoCD pending</span>
         )}
+        {(data.jenkins_pending ?? 0) > 0 && (
+          <span>{data.jenkins_pending} Jenkins pending</span>
+        )}
+        {data.jenkins_breaker_open === true && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />
+            <span className="text-red-400 font-semibold">CB</span>
+          </span>
+        )}
       </div>
 
       {/* Per-role breakdown */}

@@ -19,7 +19,8 @@ import ChatInput from '../ChatInput';
 import CollapsibleSection from '../CollapsibleSection';
 import DeferCountdownBar from '../DeferCountdownBar';
 import MockConversationFeed from './MockConversationFeed';
-import type { ConversationTurn, TokenUsageDict } from '../../api/types';
+import CiContextCard from '../CiContextCard';
+import type { ConversationTurn, TokenUsageDict, CiContext, EventEvidence } from '../../api/types';
 
 const DEV_MODE = import.meta.env.DEV;
 const MIN_WIDTH = 350;
@@ -185,10 +186,15 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
               <PlanProgress conversation={doc.conversation as ConversationTurn[]} />
             </CollapsibleSection>
           )}
+          {(doc.event?.evidence as EventEvidence | undefined)?.ci_context && (
+            <CollapsibleSection title="CI Context" defaultOpen>
+              <CiContextCard context={(doc.event.evidence as EventEvidence).ci_context as CiContext} />
+            </CollapsibleSection>
+          )}
           <CollapsibleSection title="Details">
             <div className="space-y-1.5 text-[13px] text-text-muted">
               <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} subjectType={doc.subject_type} evidence={doc.event?.evidence as unknown as Record<string, unknown> | undefined} size={18} />{doc.source}</span></div>
-              <div className="flex justify-between"><span>{doc.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
+              <div className="flex justify-between"><span>{doc.subject_type === 'kargo_stage' ? 'Stage' : doc.subject_type === 'ci_gating' ? 'CI Job' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
               {doc.event?.evidence?.triggered_by && (
                 <div className="flex justify-between"><span>User</span><span className="text-text-secondary">{doc.event.evidence.triggered_by}</span></div>
               )}

@@ -183,6 +183,31 @@ export interface EventMetrics {
   replicas: string;
 }
 
+export interface CiContext {
+  cnv_version?: string;
+  jenkins_url?: string;
+  failed_jobs?: Array<{
+    job_name?: string;
+    build_number?: number;
+    result?: string;
+    parameters?: Record<string, string>;
+    console_tail?: string;
+    jenkins_link?: string;
+  }>;
+  missing_jobs?: Array<{
+    job_name?: string;
+    last_build_number?: number;
+    last_result?: string;
+  }>;
+  llm_triage?: Array<{
+    job_name?: string;
+    classification?: string;
+    confidence?: number;
+    recommended_action?: string;
+  }>;
+  [key: string]: unknown;
+}
+
 export interface EventEvidence {
   display_text: string;
   source_type: string;
@@ -195,10 +220,11 @@ export interface EventEvidence {
   metrics?: EventMetrics;
   kargo_context?: Record<string, string>;
   argocd_app?: string | null;
+  ci_context?: CiContext;
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
-export type SubjectType = 'service' | 'kargo_stage' | 'system' | 'jira';
+export type SubjectType = 'service' | 'kargo_stage' | 'system' | 'jira' | 'ci_gating' | 'github_issue';
 
 export interface ActiveEvent {
   id: string;

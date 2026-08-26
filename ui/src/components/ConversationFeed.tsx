@@ -20,7 +20,7 @@ function eventToMarkdown(event: { id: string; source: string; status: string; se
   const evidenceText = typeof evidence === 'string' ? evidence : (evidence as Record<string, string>)?.display_text || '';
   const lines: string[] = [
     `# Event: ${event.id}`, '',
-    `- **Source:** ${event.source}`, `- **${event.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}:** ${event.service}`,
+    `- **Source:** ${event.source}`, `- **${event.subject_type === 'kargo_stage' ? 'Stage' : event.subject_type === 'ci_gating' ? 'CI Job' : 'Service'}:** ${event.service}`,
     `- **Status:** ${event.status}`, `- **Reason:** ${event.event.reason}`,
     `- **Evidence:** ${evidenceText}`, `- **Time:** ${event.event.timeDate}`,
     '', '## Conversation', '',
