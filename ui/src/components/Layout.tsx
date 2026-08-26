@@ -7,6 +7,7 @@
 // 5. [Pattern]: min-width: 400px guard on main content prevents crush when sidebar + chat panel open.
 // 6. [Gotcha]: darwin:selectEvent custom event listener bridges WaitingBell -> OpsStateContext.selectEvent.
 // 7. [Pattern]: EventChatPanel wrapped in ErrorBoundary -- it renders evidence-driven cards (e.g. CiContextCard) whose shape isn't runtime-validated, so a render throw must not take down the whole shell.
+// 8. [Gotcha]: ErrorBoundary is keyed on selectedEventId. React error boundaries never clear `hasError` on their own -- without the key, one bad event's crash would permanently brick the panel for every event selected afterward.
 /**
  * Darwin Operations Center layout.
  * Header: logo + tabs only (clean, minimal).
@@ -133,7 +134,7 @@ function LayoutInner() {
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
         {selectedEventId && (
-          <ErrorBoundary fallback={
+          <ErrorBoundary key={selectedEventId} fallback={
             <div className="p-4 text-text-muted text-sm" style={{ width: 500 }}>
               Event panel encountered an error. Try refreshing.
             </div>
