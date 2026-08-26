@@ -563,6 +563,7 @@ jenkinsObserver:
   dwellSeconds: "60" # minimum dwell time before event creation
   floodThreshold: "3" # signals per version before flood consolidation
   versions: "" # CSV of CNV versions to poll (e.g., "4.22,4.23")
+  maintainers: "" # CSV of maintainer emails for escalation -- set in GitOps overlay
   jenkins:
     existingSecret: "" # K8s Secret with keys: username, api-token
     url: ""

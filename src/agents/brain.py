@@ -2402,7 +2402,9 @@ class Brain:
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
-        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv("HEADHUNTER_MAINTAINERS", "")}
+        subject_type = getattr(getattr(event, "evidence", None), "subject_type", None)
+        maintainer_env = "JENKINS_OBSERVER_MAINTAINERS" if subject_type == "ci_gating" else "HEADHUNTER_MAINTAINERS"
+        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv(maintainer_env, "")}
         resolved_pairs = self._skill_loader.resolve_dependencies_with_paths(
             initial_paths, template_vars=template_vars
         )
@@ -3493,7 +3495,7 @@ class Brain:
 
         Returns a deduplicated list the LLM must pick from (enum constraint).
         Sources: evidence.gitlab_context.maintainer.emails, github_context.maintainer.emails,
-        then HEADHUNTER_MAINTAINERS env.
+        ci_context.maintainer.emails, then HEADHUNTER_MAINTAINERS/JENKINS_OBSERVER_MAINTAINERS env.
         """
         emails: list[str] = []
         evidence = getattr(getattr(event, "event", None), "evidence", None)
@@ -3507,8 +3509,15 @@ class Brain:
                 if isinstance(gh, dict):
                     maintainer = gh.get("maintainer", {})
                     emails.extend(maintainer.get("emails", []))
+            if not emails:
+                cc = getattr(evidence, "ci_context", None) or {}
+                if isinstance(cc, dict):
+                    maintainer = cc.get("maintainer", {})
+                    emails.extend(maintainer.get("emails", []))
         if not emails:
-            static = os.getenv("HEADHUNTER_MAINTAINERS", "")
+            subject_type = getattr(evidence, "subject_type", None) if evidence else None
+            env_key = "JENKINS_OBSERVER_MAINTAINERS" if subject_type == "ci_gating" else "HEADHUNTER_MAINTAINERS"
+            static = os.getenv(env_key, "")
             emails = [e.strip() for e in static.split(",") if e.strip()]
         if event and getattr(event, "slack_user_id", None):
             emails.append(event.slack_user_id)

@@ -262,7 +262,7 @@ class EventEvidence(BaseModel):
     )
     argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key (namespace/name) for evidence-based icon resolution")
     ci_context: Optional[dict] = Field(
-        None, description="CI gating context: cnv_version, jenkins_url, failed_jobs, missing_jobs, llm_triage"
+        None, description="CI gating context: cnv_version, jenkins_url, failed_jobs, missing_jobs, llm_triage, maintainer"
     )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")

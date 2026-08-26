@@ -507,6 +507,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.floodThreshold }}"
             - name: JENKINS_OBSERVER_VERSIONS
               value: "{{ .Values.jenkinsObserver.versions }}"
+            - name: JENKINS_OBSERVER_MAINTAINERS
+              value: "{{ .Values.jenkinsObserver.maintainers }}"
             {{- if .Values.jenkinsObserver.jenkins }}
             - name: JENKINS_URL
               value: "{{ .Values.jenkinsObserver.jenkins.url }}"
