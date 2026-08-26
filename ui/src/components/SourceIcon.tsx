@@ -112,6 +112,20 @@ function ArgoCDIcon({ size }: { size: number }) {
   );
 }
 
+function JenkinsIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1" y="5" width="3" height="6" rx="0.8" fill="#D33833" />
+      <rect x="6.5" y="5" width="3" height="6" rx="0.8" fill="#D33833" />
+      <rect x="12" y="5" width="3" height="6" rx="0.8" fill="#D33833" />
+      <line x1="4" y1="8" x2="6.5" y2="8" stroke="#D33833" strokeWidth="1.2" />
+      <line x1="9.5" y1="8" x2="12" y2="8" stroke="#D33833" strokeWidth="1.2" />
+      <line x1="10" y1="2" x2="14" y2="5" stroke="#D33833" strokeWidth="1.4" strokeLinecap="round" />
+      <line x1="14" y1="2" x2="10" y2="5" stroke="#D33833" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function FallbackIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -135,6 +149,7 @@ const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
 const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   kargo_stage: KargoIcon,
   jira: JiraIcon,
+  ci_gating: JenkinsIcon,
 };
 
 export default function SourceIcon({ source, subjectType, evidence, size = 16 }: SourceIconProps) {
