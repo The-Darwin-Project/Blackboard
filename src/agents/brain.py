@@ -238,6 +238,7 @@ from src.agents.context_parts import (
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
+from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
@@ -2402,7 +2403,8 @@ class Brain:
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
-        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv("HEADHUNTER_MAINTAINERS", "")}
+        maintainer_env = maintainer_env_key(getattr(event, "subject_type", None))
+        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv(maintainer_env, "")}
         resolved_pairs = self._skill_loader.resolve_dependencies_with_paths(
             initial_paths, template_vars=template_vars
         )
@@ -3493,27 +3495,11 @@ class Brain:
 
         Returns a deduplicated list the LLM must pick from (enum constraint).
         Sources: evidence.gitlab_context.maintainer.emails, github_context.maintainer.emails,
-        then HEADHUNTER_MAINTAINERS env.
+        ci_context.maintainer.emails, then HEADHUNTER_MAINTAINERS/JENKINS_OBSERVER_MAINTAINERS env.
+        See src/utils/maintainers.py for the shared implementation (also used by
+        handlers_integration.py's Slack-notify fallback).
         """
-        emails: list[str] = []
-        evidence = getattr(getattr(event, "event", None), "evidence", None)
-        if evidence:
-            gl = getattr(evidence, "gitlab_context", None) or {}
-            if isinstance(gl, dict):
-                maintainer = gl.get("maintainer", {})
-                emails.extend(maintainer.get("emails", []))
-            if not emails:
-                gh = getattr(evidence, "github_context", None) or {}
-                if isinstance(gh, dict):
-                    maintainer = gh.get("maintainer", {})
-                    emails.extend(maintainer.get("emails", []))
-        if not emails:
-            static = os.getenv("HEADHUNTER_MAINTAINERS", "")
-            emails = [e.strip() for e in static.split(",") if e.strip()]
-        if event and getattr(event, "slack_user_id", None):
-            emails.append(event.slack_user_id)
-        seen: set[str] = set()
-        return [e for e in emails if e and e not in seen and not seen.add(e)]
+        return resolve_maintainer_emails(event)
 
     @staticmethod
     def _inject_maintainer_enum(tools: list[dict], emails: list[str]) -> list[dict]:

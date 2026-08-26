@@ -298,6 +298,35 @@ class TestT5TriageStructure:
         assert result.source_type == "aligner"
         assert result.domain == "disorder"
         assert "llm_triage" in result.ci_context
+        assert "maintainer" in result.ci_context
+        assert result.ci_context["maintainer"]["source"] == "static"
+
+    async def test_triage_includes_populated_maintainers(self):
+        """T-5b: Populated JENKINS_OBSERVER_MAINTAINERS flows into ci_context."""
+        env = _env_vars()
+        env["JENKINS_OBSERVER_MAINTAINERS"] = "alice@example.com, bob@example.com"
+        with patch.dict("os.environ", env):
+            from src.agents.jenkins_observer import JenkinsObserver
+            bb = _mock_blackboard()
+            obs = JenkinsObserver(blackboard=bb)
+            mock_response = MagicMock()
+            mock_response.text = json.dumps([_make_triage_response()])
+            mock_llm = AsyncMock()
+            mock_llm.generate = AsyncMock(return_value=mock_response)
+            obs._get_llm_adapter = AsyncMock(return_value=mock_llm)
+            obs._adapter = AsyncMock()
+            obs._adapter.get_build_details = AsyncMock(return_value=None)
+            obs._skills_si = "test system instruction"
+            signals = [("verify-cnv-4.23.z-build-tier1|4.23", {
+                "job_name": "verify-cnv-4.23.z-build-tier1",
+                "version": "4.23", "result": "FAILURE",
+                "build_number": 100,
+                "url": "https://jenkins.example.com/job/verify-cnv-4.23.z-build-tier1/100",
+                "staged_at": time.time(),
+            })]
+            result = await obs._triage_and_build_evidence(signals)
+
+        assert result.ci_context["maintainer"]["emails"] == ["alice@example.com", "bob@example.com"]
 
 
 # =========================================================================

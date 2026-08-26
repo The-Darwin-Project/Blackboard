@@ -30,6 +30,8 @@
 # 15. [Pattern]: _poll_and_stage() only stages FAILURE/UNSTABLE/ABORTED and truly-missing
 #     jobs (no build at all). A job with result=None but a build_number is in-progress and
 #     must not be staged as a failure signal.
+# 16. [Pattern]: Maintainer escalation list from JENKINS_OBSERVER_MAINTAINERS env CSV,
+#     injected into ci_context.maintainer matching Headhunter's static-source shape.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -554,12 +556,16 @@ class JenkinsObserver:
         except Exception as e:
             logger.warning("JenkinsObserver: LLM triage failed (%s), continuing without", e)
 
+        maintainer_csv = os.getenv("JENKINS_OBSERVER_MAINTAINERS", "")
+        maintainer_emails = [e.strip() for e in maintainer_csv.split(",") if e.strip()]
+
         ci_context = {
             "cnv_version": version,
             "jenkins_url": jenkins_url,
             "failed_jobs": failed_jobs,
             "missing_jobs": missing_jobs,
             "llm_triage": llm_triage,
+            "maintainer": {"source": "static", "emails": maintainer_emails},
         }
 
         display_parts = []

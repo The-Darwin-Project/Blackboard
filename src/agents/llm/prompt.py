@@ -199,6 +199,12 @@ def _build_subject_block(
                 confidence = _safe_prompt_field(t.get("confidence", ""), max_len=10)
                 action = _safe_prompt_field(t.get("recommended_action", ""), max_len=40)
                 lines.append(f"    - {classification} (confidence={confidence}) → {action}")
+        maintainer = cc.get("maintainer", {})
+        if maintainer:
+            emails = maintainer.get("emails", [])
+            if emails:
+                safe_emails = ", ".join(_safe_prompt_field(e, max_len=200) for e in emails)
+                lines.append(f"  Maintainer Emails: {safe_emails}")
 
     elif ev and ev.github_context:
         gc = ev.github_context
