@@ -20,6 +20,25 @@ import MarkdownViewer from '../MarkdownViewer';
 import { getExecutiveNeurons } from './cortex-constants';
 import type { Neuron } from './types';
 
+type OffRingCollection = 'knowledge' | 'lesson' | 'memory';
+
+function isOffRingCollection(value: string): value is OffRingCollection {
+  return value === 'knowledge' || value === 'lesson' || value === 'memory';
+}
+
+async function fetchOffRingNeuron(collection: OffRingCollection, id: string): Promise<Neuron> {
+  if (collection === 'knowledge') {
+    const point = await getKnowledgeById(id);
+    return { id: `knowledge:${point.id}`, type: 'knowledge', heat: 0, payload: point.payload as unknown as Record<string, unknown> };
+  }
+  if (collection === 'lesson') {
+    const lesson = await getLessonById(id);
+    return { id: `lesson:${lesson.id}`, type: 'lesson', heat: 0, payload: lesson.payload as unknown as Record<string, unknown> };
+  }
+  const memory = await getMemory(id);
+  return { id: `memory:${memory.id}`, type: 'memory', heat: 0, payload: memory.payload as Record<string, unknown> };
+}
+
 const CortexPage: FC = () => {
   const { data: graphData, isLoading, error } = useCortexGraph();
   const liveBatches = usePulseStream();
@@ -84,8 +103,28 @@ const CortexPage: FC = () => {
       setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
       return;
     }
-    if (!mergedNeurons.some(n => n.id === id)) return;
-    setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
+    if (mergedNeurons.some(n => n.id === id)) {
+      setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
+      return;
+    }
+    // Live pulse-materialized knowledge-ring nodes (see cortex-pulse-handler.ts's
+    // materializeNeuron) exist on the Sigma graph but not yet in the REST-fetched
+    // mergedNeurons -- resolve them the same way the manual off-ring lookup box does.
+    const [neuronType, ...rest] = id.split(':');
+    const rawId = rest.join(':');
+    if (!rawId || !isOffRingCollection(neuronType)) return;
+    let closed = false;
+    setSelectedNeuron(prev => {
+      if (prev?.id === id) { closed = true; return null; }
+      return prev;
+    });
+    if (closed) return;
+    fetchOffRingNeuron(neuronType, rawId)
+      .then(neuron => {
+        setLookupNeuron(neuron);
+        setSelectedNeuron(pos ? { id, pos } : null);
+      })
+      .catch(() => setLookupError(`No ${neuronType} found for "${rawId}"`));
   }, [mergedNeurons, activeEvents]);
 
   const handleCloseNeuron = useCallback(() => setSelectedNeuron(null), []);
@@ -95,17 +134,7 @@ const CortexPage: FC = () => {
     if (!id) return;
     setLookupError(null);
     try {
-      let neuron: Neuron;
-      if (lookupCollection === 'knowledge') {
-        const point = await getKnowledgeById(id);
-        neuron = { id: `knowledge:${point.id}`, type: 'knowledge', heat: 0, payload: point.payload as unknown as Record<string, unknown> };
-      } else if (lookupCollection === 'lesson') {
-        const lesson = await getLessonById(id);
-        neuron = { id: `lesson:${lesson.id}`, type: 'lesson', heat: 0, payload: lesson.payload as unknown as Record<string, unknown> };
-      } else {
-        const memory = await getMemory(id);
-        neuron = { id: `memory:${memory.id}`, type: 'memory', heat: 0, payload: memory.payload as Record<string, unknown> };
-      }
+      const neuron = await fetchOffRingNeuron(lookupCollection, id);
       setLookupNeuron(neuron);
       const centerPos = { x: window.innerWidth / 2 - 160, y: window.innerHeight / 2 - 100 };
       setSelectedNeuron({ id: neuron.id, pos: centerPos });
