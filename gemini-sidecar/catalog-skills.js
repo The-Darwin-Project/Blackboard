@@ -8,6 +8,9 @@
 // 6. [Pattern]: Promise.allSettled with concurrency cap for downloads. Per-slug fail-open.
 // 7. [Constraint]: No SKILLS_CATALOG_SKILLS env needed — fetches entire active catalog via index.json.
 // 8. [Security]: slug MUST be validated against SAFE_SLUG_RE before ANY filesystem use — path traversal via untrusted index.json skill.name.
+// 9. [Gotcha]: The 30-min _refreshTimer is armed in startCatalogSync()'s .finally(), not
+//    the success branch — a failed first sync must still get retried periodically, or a
+//    catalog service that isn't ready yet at WS-open permanently disables sync for the pod.
 
 const fs = require('fs');
 const path = require('path');
@@ -135,21 +138,28 @@ function startCatalogSync(catalogUrl, ephemeral) {
 
   const ts = () => new Date().toISOString();
 
+  // Arm the periodic refresh regardless of whether the very first sync
+  // succeeds or fails -- a transient failure (e.g. catalog service not yet
+  // ready when the WS first opens) must not permanently disable sync for the
+  // pod's lifetime. This is the only retry path for a failed first attempt.
+  const armRefreshTimer = () => {
+    if (ephemeral || _refreshTimer) return;
+    _refreshTimer = setInterval(() => {
+      syncCatalogSkills(catalogUrl)
+        .then((c) => console.log(`[${ts()}] Catalog skills refreshed: ${c} skills`))
+        .catch((e) => console.warn(`[${ts()}] Catalog skills refresh failed: ${e.message}`));
+    }, REFRESH_INTERVAL_MS);
+    if (_refreshTimer.unref) _refreshTimer.unref();
+  };
+
   syncCatalogSkills(catalogUrl)
     .then((count) => {
       console.log(`[${ts()}] Catalog skills synced: ${count} skills extracted`);
-      if (!ephemeral && !_refreshTimer) {
-        _refreshTimer = setInterval(() => {
-          syncCatalogSkills(catalogUrl)
-            .then((c) => console.log(`[${ts()}] Catalog skills refreshed: ${c} skills`))
-            .catch((e) => console.warn(`[${ts()}] Catalog skills refresh failed: ${e.message}`));
-        }, REFRESH_INTERVAL_MS);
-        if (_refreshTimer.unref) _refreshTimer.unref();
-      }
     })
     .catch((e) => {
       console.warn(`[${ts()}] Catalog skills sync failed: ${e.message}`);
-    });
+    })
+    .finally(armRefreshTimer);
 }
 
 module.exports = { syncCatalogSkills, startCatalogSync };

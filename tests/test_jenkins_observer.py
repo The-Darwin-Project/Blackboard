@@ -1220,6 +1220,84 @@ class TestTV7cBoardRedServiceName:
 
 
 # =========================================================================
+# T-V7d: Board-wide red >= 3 active-job floor (boundary)
+# =========================================================================
+
+class TestTV7dBoardRedActiveFloor:
+    """T-V7d: board-wide-red requires len(active) >= 3, even at 100% failing.
+    PR description flags this floor as an undocumented plan deviation --
+    a regression that changes or drops it must fail a test, not ship silently."""
+
+    async def test_two_active_100pct_failing_is_not_board_red(self):
+        """2 active jobs, both failing (ratio=1.0 > 0.7) but below the >=3
+        floor -- must NOT trigger BOARD_RED; each job stages individually."""
+        bb = _mock_blackboard()
+
+        jobs = [
+            _make_job_result(
+                job_name=f"job-{i}", result="FAILURE", color="red",
+                timestamp=int(time.time() * 1000),
+            )
+            for i in range(2)
+        ]
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=jobs)
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._skills_si = "test skills"
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert not any("view-outage:" in key for key in staged_keys), \
+            f"2 active jobs (below >=3 floor) must NOT trigger BOARD_RED, got: {staged_keys}"
+        assert len(staged_keys) == 2, \
+            f"Below the floor, each failing job should stage individually, got: {staged_keys}"
+
+    async def test_three_active_100pct_failing_is_board_red(self):
+        """3 active jobs, all failing (ratio=1.0 > 0.7) -- exactly at the >=3
+        floor -- MUST trigger a single consolidated BOARD_RED signal."""
+        bb = _mock_blackboard()
+
+        jobs = [
+            _make_job_result(
+                job_name=f"job-{i}", result="FAILURE", color="red",
+                timestamp=int(time.time() * 1000),
+            )
+            for i in range(3)
+        ]
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=jobs)
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._skills_si = "test skills"
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert len(staged_keys) == 1 and "view-outage:" in staged_keys[0], \
+            f"3 active jobs (at the >=3 floor) MUST trigger a single BOARD_RED signal, got: {staged_keys}"
+
+
+# =========================================================================
 # T-V13: JOB_METADATA parse - wrapper type
 # =========================================================================
 
@@ -1475,6 +1553,37 @@ class TestTV20ViewUnhealthyParity:
         ]
         assert any(s.jenkins_view_unhealthy for s in snapshots), \
             "any() over a group with one True must yield True"
+
+
+# =========================================================================
+# T-V22: Empty JENKINS_OBSERVER_VIEWS must report unhealthy, not silently healthy
+# =========================================================================
+
+class TestTV22EmptyViewsReportsUnhealthy:
+    """T-V22: A misconfigured/renamed values key (e.g. the retired
+    jenkinsObserver.versions -> views rename) resolving to an empty views list
+    must surface as view_unhealthy=True, not silently mask discovery as
+    healthy (view_unhealthy defaulted to False via an empty dict)."""
+
+    async def test_empty_views_marks_view_unhealthy_true(self):
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS="")):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.enabled = MagicMock(return_value=True)
+
+            assert obs.view_unhealthy is False, \
+                "Sanity: view_unhealthy should be False before any poll cycle"
+
+            await obs._poll_and_stage()
+
+        assert obs.view_unhealthy is True, \
+            "Empty JENKINS_OBSERVER_VIEWS must mark view_unhealthy=True, " \
+            "not silently report healthy while discovery is dark"
+        bb.stage_jenkins_signal.assert_not_called()
 
 
 # =========================================================================

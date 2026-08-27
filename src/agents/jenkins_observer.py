@@ -61,6 +61,18 @@ logger = logging.getLogger(__name__)
 
 _DEDUP_STATUSES = ("new", "active", "deferred", "waiting_approval")
 
+# Sentinel key for _view_unhealthy when JENKINS_OBSERVER_VIEWS resolves empty
+# (misconfiguration or a GitOps overlay still setting the old `versions` key).
+# Not a real view name -- ensures view_unhealthy reports True instead of
+# silently defaulting to healthy when no views are configured.
+_VIEWS_UNCONFIGURED_KEY = "__no_views_configured__"
+
+# Bounds on the one-time legacy pipe-key migration in start() -- this runs on
+# the app's critical startup path (awaited before the readiness probe), so it
+# must never be allowed to scale with an unbounded backlog.
+_LEGACY_MIGRATION_LIMIT = 500
+_LEGACY_MIGRATION_TIMEOUT = 10.0  # seconds
+
 _FALLBACK_SI = (
     "You are a CI gating triage assistant. Classify Jenkins job failures as "
     "infrastructure (flaky infra, cluster issues), test (real test failures), "
@@ -254,26 +266,22 @@ class JenkinsObserver:
         return any(self._view_unhealthy.values())
 
     async def start(self) -> None:
-        """Start the poll loop task. Migrates legacy pipe-key entries on first start."""
+        """Start the poll loop task. Migrates a bounded batch of legacy pipe-key
+        entries on first start (capped by count and wall-clock time so a large
+        backlog cannot delay pod readiness past the probe timeout)."""
         if self._running:
             return
         self._running = True
-        # Pipe-key cutover: commit any legacy {job}|{version} keys left from prior format
         try:
-            members = await self.blackboard.redis.zrange(
-                self.blackboard.JENKINS_PENDING, 0, -1
+            await asyncio.wait_for(
+                self._migrate_legacy_pipe_keys(), timeout=_LEGACY_MIGRATION_TIMEOUT
             )
-            for item in members:
-                # zrange may return tuples (member, score) or bytes/str depending on withscores
-                if isinstance(item, tuple):
-                    member = item[0]
-                else:
-                    member = item
-                if isinstance(member, bytes):
-                    member = member.decode("utf-8")
-                if "|" in member:
-                    await self.blackboard.commit_jenkins_signal(member)
-                    logger.info("JenkinsObserver: migrated legacy pipe-key %s", member)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "JenkinsObserver: pipe-key cutover exceeded %.0fs timeout, "
+                "remaining legacy entries will be retried on next start",
+                _LEGACY_MIGRATION_TIMEOUT,
+            )
         except Exception as e:
             logger.warning("JenkinsObserver: pipe-key cutover failed (%s), continuing", e)
 
@@ -282,6 +290,25 @@ class JenkinsObserver:
             "JenkinsObserver started (interval=%ds, dwell=%ds, views=%s, dry_run=%s)",
             self._poll_interval, self._dwell_seconds, self._views, self._dry_run,
         )
+
+    async def _migrate_legacy_pipe_keys(self) -> None:
+        """Pipe-key cutover: commit up to _LEGACY_MIGRATION_LIMIT legacy
+        {job}|{version} keys left from a prior format. Bounded by count so this
+        one-time migration cannot grow unboundedly with the pending queue size."""
+        members = await self.blackboard.redis.zrange(
+            self.blackboard.JENKINS_PENDING, 0, _LEGACY_MIGRATION_LIMIT - 1
+        )
+        for item in members:
+            # zrange may return tuples (member, score) or bytes/str depending on withscores
+            if isinstance(item, tuple):
+                member = item[0]
+            else:
+                member = item
+            if isinstance(member, bytes):
+                member = member.decode("utf-8")
+            if "|" in member:
+                await self.blackboard.commit_jenkins_signal(member)
+                logger.info("JenkinsObserver: migrated legacy pipe-key %s", member)
 
     async def stop(self) -> None:
         """Stop the poll loop task."""
@@ -397,7 +424,11 @@ class JenkinsObserver:
         and lets the Brain classify from content.
         """
         if not self._views:
-            logger.warning("JENKINS_OBSERVER_VIEWS is empty — CI discovery disabled")
+            logger.error(
+                "JenkinsObserver: JENKINS_OBSERVER_VIEWS is empty while the observer is "
+                "enabled -- CI gating discovery is completely dark. Marking unhealthy."
+            )
+            self._view_unhealthy[_VIEWS_UNCONFIGURED_KEY] = True
             return
         for view in self._views:
             scan = await self._adapter.scan_view(view)

@@ -18,12 +18,15 @@ The JS implementation runs via subprocess where needed.
 """
 from __future__ import annotations
 
+import http.server
 import io
 import json
 import os
 import shutil
+import socketserver
 import subprocess
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +57,69 @@ def _make_catalog_zip(slug: str, files: dict[str, str]) -> bytes:
         for path, content in files.items():
             zf.writestr(f"{slug}/{path}", content)
     return buf.getvalue()
+
+
+def _make_raw_zip(entries: dict[str, str]) -> bytes:
+    """Build a ZIP with entry names exactly as given (no slug prefixing) --
+    used to craft path-traversal ("zip-slip") entries that a well-behaved
+    writer (e.g. adm-zip's own addFile) would normally sanitize away."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in entries.items():
+            zf.writestr(path, content)
+    return buf.getvalue()
+
+
+def _run_catalog_server(index_payload: bytes, zips: dict[str, bytes]):
+    """Start a real local HTTP server serving index.json + per-slug ZIP
+    downloads, mirroring the DevOps Skills Catalog API contract. Returns
+    (server, thread); caller must server.shutdown() + thread.join()."""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/api/v1/skills/index.json":
+                self._send(200, index_payload, "application/json")
+                return
+            if self.path.startswith("/api/v1/skills/") and self.path.endswith("/download"):
+                slug = self.path[len("/api/v1/skills/"):-len("/download")]
+                if slug in zips:
+                    self._send(200, zips[slug], "application/zip")
+                    return
+            self._send(404, b"not found")
+
+        def _send(self, code, body, content_type="text/plain"):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            pass  # silence request logging in test output
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _run_real_sync(home_dir: Path, catalog_url: str) -> subprocess.CompletedProcess:
+    """Invoke the real syncCatalogSkills(catalogUrl) in a Node subprocess
+    against catalog_url, with HOME pointed at an isolated temp directory so
+    extraction/symlink creation never touches the real filesystem."""
+    script = (
+        f"const {{ syncCatalogSkills }} = require({json.dumps(str(CATALOG_SKILLS_JS))});\n"
+        f"syncCatalogSkills({json.dumps(catalog_url)})\n"
+        "  .then((count) => { console.log('COUNT=' + count); process.exit(0); })\n"
+        "  .catch((e) => { console.error(e.stack || e.message); process.exit(1); });\n"
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(home_dir)
+    return subprocess.run(
+        ["node", "-e", script],
+        capture_output=True, text=True, timeout=15,
+        cwd=str(SIDECAR_DIR), env=env,
+    )
 
 
 # =========================================================================
@@ -224,3 +290,92 @@ class TestTC4PartialFailure:
         if result.returncode == 0:
             assert "AsyncFunction" in result.stdout or "Function" in result.stdout, \
                 "syncCatalogSkills must be an (async) function"
+
+
+# =========================================================================
+# Real invocation: syncCatalogSkills against a real local HTTP server.
+#
+# The tests above only assert the planned/contract shape. These exercise the
+# actual extraction, symlink creation, partial-failure, and zip-slip-defense
+# code paths for real -- with filesystem-state assertions -- instead of
+# reimplementing the logic in Python or checking that the module merely loads.
+# =========================================================================
+
+@pytest.mark.skipif(not CATALOG_SKILLS_JS.exists(), reason="catalog-skills.js not found")
+@pytest.mark.skipif(not _node_available(), reason="Node.js or adm-zip not available")
+class TestRealSyncCatalogSkills:
+
+    def test_real_sync_extracts_and_symlinks_skipping_failed_slug(self, tmp_path):
+        """Full pipeline, for real: index.json -> ZIP download -> extraction
+        -> Claude symlink, with one slug 404ing (T-C4 partial-failure, for
+        real instead of simulated in Python)."""
+        good_zip = _make_catalog_zip("test-skill", {
+            "SKILL.md": "# Test Skill\nBody",
+            "references/architecture.md": "# Architecture\nDetails.",
+            "scripts/run.sh": "#!/bin/bash\necho hi",
+        })
+        index = json.dumps({
+            "skills": [
+                {"name": "test-skill", "lifecycle": "active"},
+                {"name": "broken-skill", "lifecycle": "active"},
+            ]
+        }).encode("utf-8")
+
+        server, thread = _run_catalog_server(index, {"test-skill": good_zip})
+        try:
+            port = server.server_address[1]
+            result = _run_real_sync(tmp_path, f"http://127.0.0.1:{port}")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+        assert result.returncode == 0, f"sync failed: {result.stderr}"
+        assert "COUNT=1" in result.stdout, \
+            f"expected exactly 1 extracted skill, got: {result.stdout}"
+
+        dest = tmp_path / ".gemini" / "skills" / "catalog-test-skill"
+        assert dest.joinpath("SKILL.md").read_text() == "# Test Skill\nBody"
+        assert dest.joinpath("references", "architecture.md").exists()
+        assert dest.joinpath("scripts", "run.sh").exists()
+
+        claude_link = tmp_path / ".claude" / "skills" / "catalog-test-skill"
+        assert claude_link.is_symlink(), "Claude symlink must be created"
+        assert os.path.realpath(claude_link) == os.path.realpath(dest)
+
+        broken_dest = tmp_path / ".gemini" / "skills" / "catalog-broken-skill"
+        assert not broken_dest.exists(), \
+            "A 404 on one slug must not extract anything for that slug"
+
+    def test_real_sync_zip_slip_entry_does_not_escape_skills_dir(self, tmp_path):
+        """A ZIP crafted with a raw path-traversal entry name
+        ('../../evil-marker.txt') -- something adm-zip's own addFile()
+        sanitizes away, but a hostile upstream catalog response would not --
+        must never land outside the confined skills directory tree."""
+        evil_zip = _make_raw_zip({
+            "../../evil-marker.txt": "escaped-content",
+            "evil-skill/SKILL.md": "# evil",
+        })
+        index = json.dumps({
+            "skills": [{"name": "evil-skill", "lifecycle": "active"}]
+        }).encode("utf-8")
+
+        server, thread = _run_catalog_server(index, {"evil-skill": evil_zip})
+        try:
+            port = server.server_address[1]
+            result = _run_real_sync(tmp_path, f"http://127.0.0.1:{port}")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+        assert result.returncode == 0, f"sync failed: {result.stderr}"
+
+        # The traversal entry must never land outside the confined skills tree.
+        for escaped in (tmp_path / "evil-marker.txt", tmp_path.parent / "evil-marker.txt"):
+            assert not escaped.exists(), f"zip-slip escaped confinement to {escaped}"
+
+        # Sanity: the marker was actually processed (neutralized) inside the
+        # confined tree, proving extraction ran rather than the test
+        # vacuously passing because nothing happened.
+        gemini_skills_dir = tmp_path / ".gemini" / "skills"
+        assert list(gemini_skills_dir.rglob("evil-marker.txt")), \
+            "expected the traversal entry to be neutralized inside the skills dir"
