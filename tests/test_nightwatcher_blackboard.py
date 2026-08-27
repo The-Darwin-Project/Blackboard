@@ -242,3 +242,18 @@ class TestListShiftReports:
         assert result[0]["escalation_count"] == 1
         assert result[0]["incident_count"] == 1
         assert result[0]["noise_reduction_pct"] == 80.0
+        assert result[0]["failed_cluster_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_failed_cluster_count(self, mock_redis):
+        bb = _make_blackboard(mock_redis)
+        report_data = {
+            "shift_date": "2026-04-29", "window": "morning",
+            "status": "completed", "manifest": [], "incidents": [],
+            "metrics": {"noise_reduction_pct": 0.0, "failed_cluster_count": 3},
+        }
+        mock_redis.zrangebyscore = AsyncMock(return_value=["2026-04-29:morning"])
+        mock_redis.mget = AsyncMock(return_value=[json.dumps(report_data)])
+
+        result = await bb.list_shift_reports(0, time.time())
+        assert result[0]["failed_cluster_count"] == 3

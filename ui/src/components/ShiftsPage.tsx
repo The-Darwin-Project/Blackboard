@@ -7,7 +7,7 @@
  * Shifts page -- Nightwatcher shift calendar and detail views.
  */
 import { useState, useMemo } from 'react';
-import { Clock, ChevronLeft, ChevronRight, Moon } from 'lucide-react';
+import { Clock, ChevronLeft, ChevronRight, Moon, AlertTriangle } from 'lucide-react';
 import { useCurrentShift, useShiftsList, useShiftDetail } from '../hooks/useShifts';
 import { SHIFT_STATUS_COLORS } from '../constants/colors';
 import type { ShiftReportSummary, ShiftReportFull } from '../api/types';
@@ -37,6 +37,16 @@ function shiftWeek(week: string, delta: number): string {
   const d = new Date(dates[0].getTime());
   d.setUTCDate(d.getUTCDate() + delta * 7);
   return getISOWeek(d);
+}
+
+function FailedClusterBadge({ count, label, className = '' }: { count: number; label: string; className?: string }) {
+  if (count <= 0) return null;
+  return (
+    <span className={`flex items-center gap-1 text-red-400 ${className}`}>
+      <AlertTriangle className="w-3 h-3" />
+      {count} {label}
+    </span>
+  );
 }
 
 export default function ShiftsPage() {
@@ -141,7 +151,7 @@ export default function ShiftsPage() {
   );
 }
 
-function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
+export function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
   dateStr: string; window: string; shift?: ShiftReportSummary;
   onClick: () => void; isSelected: boolean;
 }) {
@@ -164,6 +174,7 @@ function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
           <div className="text-xs text-text-primary font-medium">
             {shift.escalation_count} → {shift.incident_count}
           </div>
+          <FailedClusterBadge count={shift.failed_cluster_count} label="failed" className="text-[10px]" />
           {shift.noise_reduction_pct > 0 && (
             <div className="w-full bg-bg-tertiary rounded-full h-1.5">
               <div className="h-1.5 rounded-full bg-green-500"
@@ -181,7 +192,7 @@ function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
   );
 }
 
-function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClose: () => void }) {
+export function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClose: () => void }) {
   const duration = report.metrics?.sweep_duration_s;
   return (
     <div className="bg-bg-secondary border border-border rounded-lg p-4 space-y-4">
@@ -193,11 +204,12 @@ function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClos
       </div>
 
       {/* Metrics bar */}
-      <div className="flex gap-4 text-xs text-text-secondary">
+      <div className="flex gap-4 text-xs text-text-secondary flex-wrap">
         <span>{report.metrics?.escalation_count ?? 0} escalations</span>
         <span>{report.metrics?.incident_count ?? 0} incidents</span>
         <span>{(report.metrics?.noise_reduction_pct ?? 0).toFixed(0)}% reduced</span>
         {duration != null && <span>{duration.toFixed(1)}s sweep</span>}
+        <FailedClusterBadge count={report.metrics?.failed_cluster_count ?? 0} label="clusters failed (Jira error)" />
       </div>
 
       {/* Incidents */}

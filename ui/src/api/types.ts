@@ -464,6 +464,7 @@ export interface ShiftReportSummary {
   escalation_count: number;
   incident_count: number;
   noise_reduction_pct: number;
+  failed_cluster_count: number;
 }
 
 export interface StagedEscalationDTO {

@@ -2778,13 +2778,15 @@ return 1
             if not raw:
                 continue
             data = _json.loads(raw)
+            metrics = data.get("metrics", {})
             results.append({
                 "shift_date": data.get("shift_date", ""),
                 "window": data.get("window", ""),
                 "status": data.get("status", ""),
                 "escalation_count": len(data.get("manifest", [])),
                 "incident_count": len(data.get("incidents", [])),
-                "noise_reduction_pct": data.get("metrics", {}).get("noise_reduction_pct", 0),
+                "noise_reduction_pct": metrics.get("noise_reduction_pct", 0),
+                "failed_cluster_count": metrics.get("failed_cluster_count", 0),
             })
         results.sort(key=lambda r: r["shift_date"], reverse=True)
         return results
