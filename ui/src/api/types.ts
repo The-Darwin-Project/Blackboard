@@ -419,6 +419,7 @@ export interface JenkinsPendingItem {
   key: string;
   target: string;
   version: string;
+  category: string;
   job_name: string;
   result: string;
   build_number: number | null;

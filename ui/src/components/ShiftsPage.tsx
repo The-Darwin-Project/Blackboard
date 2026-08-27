@@ -39,6 +39,16 @@ function shiftWeek(week: string, delta: number): string {
   return getISOWeek(d);
 }
 
+function FailedClusterBadge({ count, label, className = '' }: { count: number; label: string; className?: string }) {
+  if (count <= 0) return null;
+  return (
+    <span className={`flex items-center gap-1 text-red-400 ${className}`}>
+      <AlertTriangle className="w-3 h-3" />
+      {count} {label}
+    </span>
+  );
+}
+
 export default function ShiftsPage() {
   const [week, setWeek] = useState(() => getISOWeek(new Date()));
   const [selectedShift, setSelectedShift] = useState<{ date: string; window: string } | null>(null);
@@ -141,7 +151,7 @@ export default function ShiftsPage() {
   );
 }
 
-function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
+export function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
   dateStr: string; window: string; shift?: ShiftReportSummary;
   onClick: () => void; isSelected: boolean;
 }) {
@@ -164,12 +174,7 @@ function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
           <div className="text-xs text-text-primary font-medium">
             {shift.escalation_count} → {shift.incident_count}
           </div>
-          {shift.failed_cluster_count > 0 && (
-            <div className="flex items-center gap-1 text-[10px] text-red-400">
-              <AlertTriangle className="w-3 h-3" />
-              {shift.failed_cluster_count} failed
-            </div>
-          )}
+          <FailedClusterBadge count={shift.failed_cluster_count} label="failed" className="text-[10px]" />
           {shift.noise_reduction_pct > 0 && (
             <div className="w-full bg-bg-tertiary rounded-full h-1.5">
               <div className="h-1.5 rounded-full bg-green-500"
@@ -187,7 +192,7 @@ function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
   );
 }
 
-function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClose: () => void }) {
+export function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClose: () => void }) {
   const duration = report.metrics?.sweep_duration_s;
   return (
     <div className="bg-bg-secondary border border-border rounded-lg p-4 space-y-4">
@@ -204,12 +209,7 @@ function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClos
         <span>{report.metrics?.incident_count ?? 0} incidents</span>
         <span>{(report.metrics?.noise_reduction_pct ?? 0).toFixed(0)}% reduced</span>
         {duration != null && <span>{duration.toFixed(1)}s sweep</span>}
-        {(report.metrics?.failed_cluster_count ?? 0) > 0 && (
-          <span className="text-red-400 flex items-center gap-1">
-            <AlertTriangle className="w-3 h-3" />
-            {report.metrics.failed_cluster_count} clusters failed (Jira error)
-          </span>
-        )}
+        <FailedClusterBadge count={report.metrics?.failed_cluster_count ?? 0} label="clusters failed (Jira error)" />
       </div>
 
       {/* Incidents */}
