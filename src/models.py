@@ -636,6 +636,7 @@ class FlowMetricsResponse(BaseModel):
     aligner_pending: int = 0
     jenkins_pending: int = 0
     jenkins_breaker_open: bool = False
+    jenkins_view_unhealthy: bool = False
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0
@@ -659,6 +660,7 @@ class FlowSnapshot(BaseModel):
     aligner_pending: int = 0
     jenkins_pending: int = 0
     jenkins_breaker_open: bool = False
+    jenkins_view_unhealthy: bool = False
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0
@@ -700,11 +702,11 @@ class PendingAnomaly(BaseModel):
 
 
 class JenkinsPendingItem(BaseModel):
-    """Jenkins CI pending queue item — a failed/missing gating job dwelling before event creation."""
+    """Jenkins CI pending queue item — a failed/missing job dwelling before event creation."""
     key: str
     target: str
     version: str = ""
-    category: str = ""
+    view: str = ""
     job_name: str = ""
     result: str = ""
     build_number: Optional[int] = None

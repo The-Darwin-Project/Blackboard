@@ -346,6 +346,7 @@ class BrainSkillLoader:
         tool_name: str,
         brain_phase: str | None = None,
         event_source: str | None = None,
+        subject_type: str | None = None,
     ) -> str:
         """Build skill pointer XML block for a tool_result turn.
 
@@ -354,6 +355,10 @@ class BrainSkillLoader:
         - Phase-specific skill (what to do next in current phase)
         - Source-specific skill (event source behavioral context)
         Deduplicates when multiple layers map to the same skill.
+
+        When subject_type is available, prefers the composite source skill
+        (source/{source}_{subject_type}.md) over the generic, mirroring
+        _build_system_prompt's source-phase resolution.
         """
         from ..models import _resolve_phase  # noqa: deferred to avoid circular import
 
@@ -375,6 +380,10 @@ class BrainSkillLoader:
 
         if event_source:
             source_skill = f"source/{event_source}.md"
+            if subject_type:
+                composite = f"source/{event_source}_{subject_type}.md"
+                if self._corpus.path_index.get(composite):
+                    source_skill = composite
             if source_skill not in seen:
                 refs.append(f'<skill id="{source_skill}" />')
                 seen.add(source_skill)

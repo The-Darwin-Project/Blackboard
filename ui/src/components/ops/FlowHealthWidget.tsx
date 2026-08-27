@@ -95,6 +95,12 @@ export default function FlowHealthWidget() {
             <span className="text-red-400 font-semibold">CB</span>
           </span>
         )}
+        {data.jenkins_view_unhealthy === true && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-orange-400 inline-block" />
+            <span className="text-orange-400 font-semibold">view</span>
+          </span>
+        )}
       </div>
 
       {/* Per-role breakdown */}

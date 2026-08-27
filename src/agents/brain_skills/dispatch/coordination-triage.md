@@ -93,6 +93,24 @@ Act on its findings yourself using your own tools.
 When your native capabilities CAN answer the question directly, use them. Explorer
 is for the gap between what you can observe and what you need to know.
 
+## CI Gating Dispatch Principles
+
+A wrapper failure with multiple independently failing lanes is not one dispatch — each
+lane may have a different root cause requiring separate investigation before deciding
+whether to re-trigger, fix, or waive.
+
+CI gating failures default to investigation-first: what failed and why. The agent's job
+is to answer "is this transient, deterministic, or a new regression?" — the answer
+determines the next action (re-trigger, escalate to owner, or waive).
+
+Explorer is the natural first dispatch for unknown CI gating failures (read-only
+investigation across Jenkins, logs, and historical patterns). Developer only when the
+cause is a code or config defect in a repository FRIDAY has write access to. The failing
+job's own codebase is usually external to Darwin's scope.
+
+`job_metadata.owner` and `team` identify the human owners of the failing test — these are
+escalation targets for deterministic failures, not dispatch targets for agents.
+
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
 An investigator identifies the bug class; an architect identifies the exact code. These are different capabilities. Skipping the architect verification step means the Developer receives a problem description that may reference wrong file paths, miss related logic, or underestimate blast radius — producing a fix that addresses the symptom but not the full scope of the issue.

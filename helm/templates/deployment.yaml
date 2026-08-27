@@ -492,6 +492,12 @@ spec:
                   key: LLM_MAX_TOKENS_NIGHTWATCHER
             {{- end }}
             {{- if .Values.jenkinsObserver }}
+            {{- if .Values.jenkinsObserver.versions }}
+            {{- fail "jenkinsObserver.versions was renamed to jenkinsObserver.views (CSV of Jenkins view names, e.g. \"Gating Wrappers\" -- not CNV versions). Update your values/GitOps overlay; the old key is otherwise silently ignored and JENKINS_OBSERVER_VIEWS resolves empty." }}
+            {{- end }}
+            {{- if and .Values.jenkinsObserver.enabled (not .Values.jenkinsObserver.views) }}
+            {{- fail "jenkinsObserver.enabled=true requires jenkinsObserver.views to be set (CSV of Jenkins view names) -- otherwise CI gating discovery runs completely dark with no alert." }}
+            {{- end }}
             # JenkinsObserver (CI gating reconciliation)
             - name: JENKINS_OBSERVER_ENABLED
               value: "{{ .Values.jenkinsObserver.enabled }}"
@@ -505,8 +511,10 @@ spec:
               value: "{{ .Values.jenkinsObserver.dwellSeconds }}"
             - name: JENKINS_OBSERVER_FLOOD_THRESHOLD
               value: "{{ .Values.jenkinsObserver.floodThreshold }}"
-            - name: JENKINS_OBSERVER_VERSIONS
-              value: "{{ .Values.jenkinsObserver.versions }}"
+            - name: JENKINS_OBSERVER_VIEWS
+              value: "{{ .Values.jenkinsObserver.views }}"
+            - name: JENKINS_OBSERVER_RECENCY_HOURS
+              value: "{{ .Values.jenkinsObserver.recencyHours }}"
             - name: JENKINS_OBSERVER_MAINTAINERS
               value: "{{ .Values.jenkinsObserver.maintainers }}"
             {{- if .Values.jenkinsObserver.jenkins }}
@@ -937,6 +945,7 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -1111,6 +1120,7 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -1274,6 +1284,7 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -1428,6 +1439,7 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:

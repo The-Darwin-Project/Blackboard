@@ -160,10 +160,12 @@ class FlowCollector:
 
         jenkins_pending = 0
         jenkins_breaker_open = False
+        jenkins_view_unhealthy = False
         try:
             if self._jenkins_observer:
                 jenkins_pending = self._jenkins_observer.pending_count
                 jenkins_breaker_open = self._jenkins_observer.breaker_open
+                jenkins_view_unhealthy = self._jenkins_observer.view_unhealthy
         except Exception:
             pass
 
@@ -197,6 +199,7 @@ class FlowCollector:
             aligner_pending=aligner_pending,
             jenkins_pending=jenkins_pending,
             jenkins_breaker_open=jenkins_breaker_open,
+            jenkins_view_unhealthy=jenkins_view_unhealthy,
             wip_used=wip_used_raw,
             wip_cap=wip_cap,
             wip_utilization_pct=round(wip_used_raw / wip_cap * 100, 1) if wip_cap > 0 else 0.0,

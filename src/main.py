@@ -679,11 +679,13 @@ async def get_flow_metrics() -> FlowMetricsResponse:
 
     jenkins_pending = 0
     jenkins_breaker_open = False
+    jenkins_view_unhealthy = False
     try:
         jenkins_ref = brain.agents.get("_jenkins_observer") if brain else None
         if jenkins_ref:
             jenkins_pending = jenkins_ref.pending_count
             jenkins_breaker_open = jenkins_ref.breaker_open
+            jenkins_view_unhealthy = jenkins_ref.view_unhealthy
     except Exception:
         pass
 
@@ -700,6 +702,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         aligner_pending=aligner_pending_count,
         jenkins_pending=jenkins_pending,
         jenkins_breaker_open=jenkins_breaker_open,
+        jenkins_view_unhealthy=jenkins_view_unhealthy,
         wip_used=wip_used,
         wip_cap=wip_cap,
         wip_utilization_pct=round(wip_utilization_pct, 1),

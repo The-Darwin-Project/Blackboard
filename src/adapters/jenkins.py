@@ -12,6 +12,14 @@
 #    failures. Prevents a transient outage from requiring a manual pod restart forever.
 # 4. [Contract]: breaker_open property for FlowCollector observability.
 # 5. [Constraint]: All org-specific values from constructor args (env vars resolved by caller).
+# 6. [Pattern]: View-based discovery -- scan_view(view) queries /view/{name}/api/json
+#    for all jobs in the view with their lastBuild status in a single HTTP call.
+#    404 = view not found (valid health signal). Adapter does NOT own recency/color
+#    filtering -- that is observer domain logic.
+# 7. [Contract]: No wave-scoped breaker accounting needed -- scan_view is a single
+#    HTTP call per view, not a fan-out. _record_success/_record_failure called directly.
+# 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
+#    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
 """
 Jenkins CI platform adapter -- poll jobs, get build details, restart.
 
@@ -21,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -36,6 +45,8 @@ class JobResult:
     build_number: int | None = None
     result: str | None = None  # SUCCESS, FAILURE, UNSTABLE, ABORTED, None (running/missing)
     url: str = ""
+    timestamp: int | None = None
+    color: str = ""
 
 
 @dataclass
@@ -49,12 +60,18 @@ class BuildDetails:
     url: str = ""
 
 
+@dataclass
+class ViewScanResult:
+    """Result of scanning a Jenkins view."""
+    jobs: list[JobResult]
+    status_code: int | None  # HTTP status; None = transport / non-404 error
+
+
 @runtime_checkable
 class JenkinsPlatformPort(Protocol):
     """Port for Jenkins CI platform operations."""
 
-    async def poll_smoke_jobs(self, version: str) -> list[JobResult]: ...
-    async def poll_gating_jobs(self, version: str) -> list[JobResult]: ...
+    async def scan_view(self, view: str) -> ViewScanResult: ...
     async def get_build_details(self, job: str, build: int) -> BuildDetails | None: ...
     async def restart_job(self, job: str, params: dict[str, str] | None = None) -> bool: ...
     def enabled(self) -> bool: ...
@@ -145,13 +162,25 @@ class JenkinsAdapter:
             )
 
     async def _request(
-        self, method: str, path: str, *, count_failures: bool = True, **kwargs
+        self, method: str, path: str, *, count_failures: bool = True,
+        pass_through_404: bool = False, **kwargs,
     ) -> httpx.Response | None:
         """Execute HTTP request with circuit breaker guard.
 
         count_failures=False is used for best-effort fetches (e.g. console-log tail)
         whose failures are unrelated to core Jenkins reachability and must not trip
         the breaker on their own.
+
+        pass_through_404=True returns the raw 404 response to the caller instead of
+        swallowing it. Used by pattern-based polling where 404 means "job does not exist"
+        (a valid, expected signal) rather than an error -- also counts as a reachability
+        success (Jenkins answered), so it resets the failure counter like any 2xx.
+
+        count_failures=False ALSO returns the raw response for 401/403/5xx/other 4xx
+        (instead of None) so a caller that wants to do its own outcome accounting --
+        e.g. a wave-scoped aggregate across multiple concurrent requests -- can classify
+        each attempt itself. Transport-level failures (timeout/connect/invalid-URL) still
+        have no response object and always return None regardless of this flag.
         """
         self._maybe_reset_breaker()
         if self._breaker_latched:
@@ -163,51 +192,80 @@ class JenkinsAdapter:
             if resp.status_code in (401, 403):
                 if count_failures:
                     self._record_failure(resp.status_code)
-                return None
+                    return None
+                return resp
             if resp.status_code >= 500:
                 if count_failures:
                     self._record_failure(resp.status_code)
-                return None
+                    return None
+                return resp
+            if pass_through_404 and resp.status_code == 404:
+                self._record_success()
+                return resp
             if resp.status_code >= 400:
                 logger.warning("Jenkins %s %s returned %d — client error, not recording as breaker strike",
                                method, path, resp.status_code)
-                return None
+                return None if count_failures else resp
             self._record_success()
             return resp
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError, httpx.InvalidURL) as exc:
             logger.warning("Jenkins request failed: %s %s — %s", method, path, exc)
             if count_failures:
                 self._record_failure(None)
             return None
 
-    async def poll_smoke_jobs(self, version: str) -> list[JobResult]:
-        """Poll smoke-test jobs for a CNV version."""
-        return await self._poll_view_jobs(version, "smoke")
+    async def scan_view(self, view: str) -> ViewScanResult:
+        """Scan a Jenkins view for all jobs with their last build status.
 
-    async def poll_gating_jobs(self, version: str) -> list[JobResult]:
-        """Poll gating jobs for a CNV version."""
-        return await self._poll_view_jobs(version, "gating")
+        Returns ViewScanResult with HTTP status_code for caller health tracking:
+        - 200: jobs parsed from view
+        - 404: view does not exist (valid signal for observer health)
+        - None: transport error or breaker open (no HTTP was made)
+        """
+        if self.breaker_open:
+            return ViewScanResult([], None)
 
-    async def _poll_view_jobs(self, version: str, category: str) -> list[JobResult]:
-        """Poll jobs by constructing the Jenkins API path for the version view."""
-        path = f"/job/cnv-{version.replace('.', '-')}-{category}/api/json?tree=jobs[name,lastBuild[number,result,url]]"
-        resp = await self._request("GET", path)
-        if not resp or resp.status_code != 200:
-            return []
+        encoded_view = urllib.parse.quote(view, safe="")
+        path = (
+            f"/view/{encoded_view}/api/json"
+            f"?tree=jobs[name,color,lastBuild[number,result,url,timestamp]]"
+        )
+        resp = await self._request("GET", path, pass_through_404=True)
+        if resp is None:
+            return ViewScanResult([], None)
+        if resp.status_code == 404:
+            return ViewScanResult([], 404)
+
         try:
             data = resp.json()
         except Exception:
-            return []
-        results: list[JobResult] = []
-        for job in data.get("jobs", []):
-            lb = job.get("lastBuild") or {}
-            results.append(JobResult(
-                job_name=job.get("name", ""),
-                build_number=lb.get("number"),
-                result=lb.get("result"),
-                url=lb.get("url", ""),
-            ))
-        return results
+            logger.warning("Jenkins view %s returned malformed JSON", view)
+            return ViewScanResult([], None)
+
+        jobs: list[JobResult] = []
+        for entry in data.get("jobs", []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name", "")
+            if not name:
+                continue
+            color = entry.get("color", "")
+            lb = entry.get("lastBuild")
+            if lb and isinstance(lb, dict):
+                jobs.append(JobResult(
+                    job_name=name,
+                    build_number=lb.get("number"),
+                    result=lb.get("result"),
+                    url=lb.get("url", ""),
+                    timestamp=lb.get("timestamp"),
+                    color=color,
+                ))
+            else:
+                jobs.append(JobResult(
+                    job_name=name,
+                    color=color,
+                ))
+        return ViewScanResult(jobs, 200)
 
     async def get_build_details(self, job: str, build: int) -> BuildDetails | None:
         """Fetch build details including parameters and console tail."""

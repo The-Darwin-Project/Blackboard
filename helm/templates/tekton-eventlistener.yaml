@@ -125,6 +125,7 @@ spec:
                 - name: KARGO_INSECURE
                   value: "true"
                 {{- end }}
+                {{- include "darwin.skillsCatalogEnv" . | nindent 16 }}
               computeResources:
                 requests:
                   memory: {{ .Values.sidecars.resources.requests.memory | default "256Mi" | quote }}

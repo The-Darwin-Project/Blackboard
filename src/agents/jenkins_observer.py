@@ -7,8 +7,8 @@
 # 2. [Pattern]: TimeKeeper lifecycle — start()/stop() own an asyncio.Task running _poll_loop().
 # 3. [Constraint]: AIR GAP: No Brain logic. Creates events via blackboard, never routes agents.
 # 4. [Pattern]: pending_count is an in-memory property updated at drain cycle start/end.
-# 5. [Pattern]: Service naming: {job_name}|{version} (NOT @ — PII regex collision).
-#    Pending-queue keys are {category}:{job_name}|{version} so smoke vs. gating self-resolve
+# 5. [Pattern]: Service naming: {job_name} (pending-queue key). Board-wide outage uses
+#    view-outage:{view} as key with result=BOARD_RED. Classification is the Brain's job.
 #    checks poll the correct Jenkins view.
 # 6. [Pattern]: Lazy skills fetch with 5-min TTL (mirrors headhunter_github._load_issue_triage_instruction).
 # 7. [Pattern]: Dry-run default — JENKINS_OBSERVER_DRY_RUN=true logs evidence but skips create_event.
@@ -55,10 +55,29 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 from ..models import EventEvidence
+from ..skills_catalog import download_skill_md
 
 logger = logging.getLogger(__name__)
 
 _DEDUP_STATUSES = ("new", "active", "deferred", "waiting_approval")
+
+# Sentinel keys for _view_unhealthy -- neither is a real Jenkins view name.
+# Both exist because view_unhealthy defaults to healthy (any() over an empty/
+# unset dict is False), so every path that skips per-view scanning must
+# explicitly opt in to "unhealthy" or the CI-gating-dark condition is masked.
+# NOTE: if you ever iterate _view_unhealthy.items() for per-view logging/metrics,
+# filter these out -- they are not views.
+_VIEWS_UNCONFIGURED_KEY = "__no_views_configured__"
+# Set in _drain_once() while self._adapter is None/disabled (missing Jenkins
+# config, or circuit breaker open) -- cleared once the adapter is usable again
+# so _poll_and_stage() can recompute real per-view health.
+_ADAPTER_UNAVAILABLE_KEY = "__adapter_unavailable__"
+
+# Bounds on the one-time legacy pipe-key migration in start() -- this runs on
+# the app's critical startup path (awaited before the readiness probe), so it
+# must never be allowed to scale with an unbounded backlog.
+_LEGACY_MIGRATION_LIMIT = 500
+_LEGACY_MIGRATION_TIMEOUT = 10.0  # seconds
 
 _FALLBACK_SI = (
     "You are a CI gating triage assistant. Classify Jenkins job failures as "
@@ -140,6 +159,32 @@ def _redact_secrets_in_text(text: str) -> str:
 _VALID_TRIAGE_CLASSIFICATIONS = frozenset({"infrastructure", "test", "product"})
 _VALID_TRIAGE_ACTIONS = frozenset({"restart", "investigate", "escalate"})
 
+_JOB_METADATA_KEEP_KEYS = frozenset({
+    "version", "type", "name", "factory", "owner", "team", "tier",
+})
+
+
+def _parse_job_metadata(params: dict) -> dict:
+    """Parse the JOB_METADATA JSON parameter into a clean subset.
+
+    Returns empty dict on missing/invalid/non-dict content. Keeps only the
+    useful fields (version, type, name, factory, owner, team, tier, labels[:20]).
+    """
+    raw = params.get("JOB_METADATA")
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result = {k: v for k, v in data.items() if k in _JOB_METADATA_KEEP_KEYS}
+    labels = data.get("labels")
+    if isinstance(labels, list):
+        result["labels"] = labels[:20]
+    return result
+
 
 def _validate_triage_entry(entry: object) -> Optional[dict]:
     """Validate + normalize one LLM triage entry before it can reach ci_context and,
@@ -196,9 +241,12 @@ class JenkinsObserver:
         self._flood_threshold = int(os.getenv("JENKINS_OBSERVER_FLOOD_THRESHOLD", "3"))
         self._dry_run = os.getenv("JENKINS_OBSERVER_DRY_RUN", "true").lower() == "true"
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
-        self._versions = [
-            v.strip() for v in os.getenv("JENKINS_OBSERVER_VERSIONS", "").split(",") if v.strip()
+        self._views = [
+            v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
+        self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
+
+        self._view_unhealthy: dict[str, bool] = {}
 
         self._skills_si: str = _FALLBACK_SI
         self._skills_loaded_at: float = 0.0
@@ -218,16 +266,55 @@ class JenkinsObserver:
             return self._adapter.breaker_open
         return False
 
+    @property
+    def view_unhealthy(self) -> bool:
+        """True if any configured view returned 404 on last scan."""
+        return any(self._view_unhealthy.values())
+
     async def start(self) -> None:
-        """Start the poll loop task."""
+        """Start the poll loop task. Migrates a bounded batch of legacy pipe-key
+        entries on first start (capped by count and wall-clock time so a large
+        backlog cannot delay pod readiness past the probe timeout)."""
         if self._running:
             return
         self._running = True
+        try:
+            await asyncio.wait_for(
+                self._migrate_legacy_pipe_keys(), timeout=_LEGACY_MIGRATION_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "JenkinsObserver: pipe-key cutover exceeded %.0fs timeout, "
+                "remaining legacy entries will be retried on next start",
+                _LEGACY_MIGRATION_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning("JenkinsObserver: pipe-key cutover failed (%s), continuing", e)
+
         self._task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "JenkinsObserver started (interval=%ds, dwell=%ds, versions=%s, dry_run=%s)",
-            self._poll_interval, self._dwell_seconds, self._versions, self._dry_run,
+            "JenkinsObserver started (interval=%ds, dwell=%ds, views=%s, dry_run=%s)",
+            self._poll_interval, self._dwell_seconds, self._views, self._dry_run,
         )
+
+    async def _migrate_legacy_pipe_keys(self) -> None:
+        """Pipe-key cutover: commit up to _LEGACY_MIGRATION_LIMIT legacy
+        {job}|{version} keys left from a prior format. Bounded by count so this
+        one-time migration cannot grow unboundedly with the pending queue size."""
+        members = await self.blackboard.redis.zrange(
+            self.blackboard.JENKINS_PENDING, 0, _LEGACY_MIGRATION_LIMIT - 1
+        )
+        for item in members:
+            # zrange may return tuples (member, score) or bytes/str depending on withscores
+            if isinstance(item, tuple):
+                member = item[0]
+            else:
+                member = item
+            if isinstance(member, bytes):
+                member = member.decode("utf-8")
+            if "|" in member:
+                await self.blackboard.commit_jenkins_signal(member)
+                logger.info("JenkinsObserver: migrated legacy pipe-key %s", member)
 
     async def stop(self) -> None:
         """Stop the poll loop task."""
@@ -257,31 +344,36 @@ class JenkinsObserver:
             await asyncio.sleep(self._poll_interval)
 
     async def _ensure_skills_loaded(self) -> None:
-        """Lazy-fetch Skills Catalog instructions. Never raises."""
+        """Lazy-fetch Skills Catalog SKILL.md texts from ZIP downloads. Never raises."""
         if time.time() - self._skills_loaded_at < self._skills_ttl:
             return
-        try:
-            catalog_url = os.getenv("SKILLS_CATALOG_URL", "")
-            skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "cnv-gating-workflow")
-            if not catalog_url:
-                self._skills_loaded_at = time.time()
-                return
+        catalog_url = os.getenv("SKILLS_CATALOG_URL", "")
+        skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "")
+        if not catalog_url:
+            self._skills_loaded_at = time.time()
+            return
 
-            parts = []
-            async with httpx.AsyncClient(timeout=10) as client:
-                for slug in skills_csv.split(","):
-                    slug = slug.strip()
-                    if not slug:
-                        continue
+        parts: list[str] = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            for slug in skills_csv.split(","):
+                slug = slug.strip()
+                if not slug:
+                    continue
+                try:
                     resp = await client.get(f"{catalog_url}/api/v1/skills/{slug}/download")
-                    if resp.status_code == 200:
-                        parts.append(resp.text[:10000])
-            if parts:
-                self._skills_si = "\n\n---\n\n".join(parts)
-            self._skills_loaded_at = time.time()
-        except Exception as e:
-            logger.warning("JenkinsObserver: Skills Catalog fetch failed (%s), using fallback SI", e)
-            self._skills_loaded_at = time.time()
+                    if resp.status_code != 200:
+                        logger.warning("JenkinsObserver: Catalog slug '%s' returned %s", slug, resp.status_code)
+                        continue
+                    md = download_skill_md(resp.content, slug)
+                    if md:
+                        parts.append(_sanitize_console_tail(md[:10000]))
+                    else:
+                        logger.warning("JenkinsObserver: No SKILL.md in ZIP for slug '%s'", slug)
+                except Exception as e:
+                    logger.warning("JenkinsObserver: Catalog fetch failed for slug '%s' (%s)", slug, e)
+        if parts:
+            self._skills_si = "\n\n---\n\n".join(parts)
+        self._skills_loaded_at = time.time()
 
     async def _get_llm_adapter(self):
         """Lazy-load a Gemini adapter via the shared factory for Flash Lite triage."""
@@ -312,7 +404,16 @@ class JenkinsObserver:
         await self._ensure_skills_loaded()
 
         if not self._adapter or not self._adapter.enabled():
+            logger.error(
+                "JenkinsObserver: adapter %s -- CI gating discovery is completely "
+                "dark. Marking unhealthy.",
+                "not configured" if not self._adapter else "disabled (breaker open?)",
+            )
+            self._view_unhealthy[_ADAPTER_UNAVAILABLE_KEY] = True
             return
+        # Adapter is back up -- let _poll_and_stage() recompute real per-view health
+        # instead of leaving this sentinel stuck true from a since-recovered outage.
+        self._view_unhealthy.pop(_ADAPTER_UNAVAILABLE_KEY, None)
 
         await self._poll_and_stage()
 
@@ -331,42 +432,102 @@ class JenkinsObserver:
         self._pending_count = await self.blackboard.count_jenkins_pending()
 
     async def _poll_and_stage(self) -> None:
-        """Phase 1: poll Jenkins for all configured versions and stage failing/missing jobs.
+        """Phase 1: poll Jenkins views and stage failing/missing jobs.
 
-        Keys are {category}:{job_name}|{version} so the self-resolve recheck in
-        _recheck_and_filter() polls the same view (smoke vs. gating) the signal came from.
+        Keys are {job_name}. Board-wide-red uses view-outage:{view}.
+        The observer does not classify jobs into categories -- it discovers broadly
+        and lets the Brain classify from content.
         """
-        for version in self._versions:
-            for category, poll_fn in (
-                ("smoke", self._adapter.poll_smoke_jobs),
-                ("gating", self._adapter.poll_gating_jobs),
-            ):
-                jobs = await poll_fn(version)
-                for job in jobs:
-                    if job.result is None and job.build_number is not None:
-                        # In-progress build (lastBuild exists but hasn't finished) -- not a
-                        # failure signal. Only a job with NO build at all (build_number is
-                        # also None) counts as "missing".
+        if not self._views:
+            logger.error(
+                "JenkinsObserver: JENKINS_OBSERVER_VIEWS is empty while the observer is "
+                "enabled -- CI gating discovery is completely dark. Marking unhealthy."
+            )
+            self._view_unhealthy[_VIEWS_UNCONFIGURED_KEY] = True
+            return
+        for view in self._views:
+            scan = await self._adapter.scan_view(view)
+
+            if scan.status_code == 404:
+                logger.error("JenkinsObserver: view %r returned 404 — marking unhealthy", view)
+                self._view_unhealthy[view] = True
+                continue
+            if scan.status_code is None and not scan.jobs:
+                self._view_unhealthy[view] = False
+                continue
+            self._view_unhealthy[view] = False
+
+            # Filter out disabled/notbuilt and in-progress jobs
+            eligible: list = []
+            for job in scan.jobs:
+                if job.color in ("disabled", "notbuilt", "disabled_anime", "notbuilt_anime"):
+                    continue
+                if job.result is None and job.build_number is not None:
+                    continue
+                eligible.append(job)
+
+            # Recency filter: drop SUCCESS-only when stale
+            recency_cutoff_ms = time.time() * 1000 - (self._recency_hours * 3600 * 1000)
+            post_recency: list = []
+            for job in eligible:
+                if job.result == "SUCCESS":
+                    if job.timestamp is not None and job.timestamp < recency_cutoff_ms:
                         continue
-                    if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
-                        key = f"{category}:{job.job_name}|{version}"
-                        metadata = {
-                            "job_name": job.job_name,
-                            "version": version,
-                            "category": category,
-                            "result": job.result or "MISSING",
-                            "build_number": job.build_number,
-                            "url": job.url,
-                            "staged_at": time.time(),
-                        }
-                        await self.blackboard.stage_jenkins_signal(key, metadata)
+                post_recency.append(job)
+
+            # Board-wide-red detection (post-color AND post-recency)
+            # Only triggers when a significant portion of the view (>70%) is failing
+            # and there are enough jobs for "board-wide" to be meaningful (>= 3)
+            active = [j for j in post_recency if not (j.result is None and j.build_number is not None)]
+            failing = [
+                j for j in active
+                if j.result in ("FAILURE", "UNSTABLE", "ABORTED") or j.result is None
+            ]
+            if len(active) >= 3 and len(failing) / len(active) > 0.7:
+                key = f"view-outage:{view}"
+                metadata = {
+                    "job_name": key,
+                    "version": "multi",
+                    "view": view,
+                    "result": "BOARD_RED",
+                    "build_number": None,
+                    "url": "",
+                    "staged_at": time.time(),
+                    "failing_count": len(failing),
+                    "active_count": len(active),
+                }
+                await self.blackboard.stage_jenkins_signal(key, metadata)
+                continue
+
+            # Stage each failing/missing job individually
+            for job in post_recency:
+                if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
+                    version = self._extract_version_from_name(job.job_name)
+                    key = job.job_name
+                    metadata = {
+                        "job_name": job.job_name,
+                        "version": version,
+                        "view": view,
+                        "result": job.result or "MISSING",
+                        "build_number": job.build_number,
+                        "url": job.url,
+                        "staged_at": time.time(),
+                    }
+                    await self.blackboard.stage_jenkins_signal(key, metadata)
+
+    @staticmethod
+    def _extract_version_from_name(name: str) -> str:
+        """Extract a version like '4.22' from a job name, or 'unknown'."""
+        match = re.search(r"(\d+\.\d+)", name)
+        return match.group(1) if match else "unknown"
 
     async def _recheck_and_filter(self, expired_keys: list[str]) -> list[tuple[str, dict]]:
         """Phase 2: load metadata for expired keys and discard self-resolved jobs.
 
-        Recheck polls are cached per (category, version) so an N-signal flood from the
-        same view costs one poll, not N. Malformed/missing metadata is evicted (committed)
-        rather than raising, so a single poison-pill entry can't block the drain cycle forever.
+        Recheck polls are cached per view so an N-signal flood costs one scan, not N.
+        Malformed/missing metadata is evicted (committed) rather than raising, so a single
+        poison-pill entry can't block the drain cycle forever. Missing 'view' key in meta
+        is treated as a poison-pill (legacy pipe-key format).
         """
         metas: dict[str, dict] = {}
         for key in expired_keys:
@@ -383,24 +544,30 @@ class JenkinsObserver:
         if not metas:
             return []
 
-        recheck_cache: dict[tuple[str, str], list] = {}
+        recheck_cache: dict[str, list] = {}
         candidates: list[tuple[str, dict]] = []
         for key, meta in metas.items():
             job_name = meta.get("job_name", "")
-            version = meta.get("version", "")
-            category = meta.get("category", "gating")
+            view = meta.get("view", "")
 
-            if self._adapter and job_name and version:
-                cache_key = (category, version)
-                if cache_key not in recheck_cache:
-                    poll_fn = (
-                        self._adapter.poll_smoke_jobs if category == "smoke"
-                        else self._adapter.poll_gating_jobs
-                    )
-                    recheck_cache[cache_key] = await poll_fn(version)
+            # Poison-pill: no view key means legacy pipe-key format
+            if not view:
+                logger.warning("JenkinsObserver: no 'view' in metadata for %s, evicting (poison-pill)", key)
+                await self.blackboard.commit_jenkins_signal(key)
+                continue
+
+            # BOARD_RED entries skip recheck (aggregate, not per-job)
+            if meta.get("result") == "BOARD_RED":
+                candidates.append((key, meta))
+                continue
+
+            if self._adapter and job_name:
+                if view not in recheck_cache:
+                    scan = await self._adapter.scan_view(view)
+                    recheck_cache[view] = scan.jobs if scan.jobs else []
                 resolved = any(
                     j.job_name == job_name and j.result == "SUCCESS"
-                    for j in recheck_cache[cache_key]
+                    for j in recheck_cache[view]
                 )
                 if resolved:
                     await self.blackboard.commit_jenkins_signal(key)
@@ -453,7 +620,11 @@ class JenkinsObserver:
                 service_name = f"ci-gating-flood|{signals[0][1].get('version', '')}"
             else:
                 k, m = signals[0]
-                service_name = f"{m.get('job_name', k)}|{m.get('version', '')}"
+                if m.get("result") == "BOARD_RED":
+                    service_name = f"ci-gating-outage|{m.get('view', '')}"
+                else:
+                    version = m.get("version", "")
+                    service_name = f"{m.get('job_name', k)}|{version}" if version else m.get("job_name", k)
 
             try:
                 if await self._is_duplicate_or_escalated(service_name):
@@ -510,6 +681,7 @@ class JenkinsObserver:
         version = signals[0][1].get("version", "") if signals else ""
         jenkins_url = os.getenv("JENKINS_URL", "")
 
+        details_fetched = 0
         for _, meta in signals:
             result = meta.get("result", "UNKNOWN")
             job_entry = {
@@ -525,17 +697,26 @@ class JenkinsObserver:
                     "last_result": result,
                 })
             else:
-                # Fetch console tail for failed jobs
-                if self._adapter and meta.get("build_number"):
+                if self._adapter and meta.get("build_number") and details_fetched < 10:
                     details = await self._adapter.get_build_details(
                         meta["job_name"], meta["build_number"]
                     )
+                    details_fetched += 1
                     if details:
-                        # Keep the tail closest to the failure -- console_tail is already
-                        # truncated to the last 5000 chars by the adapter.
                         tail = _redact_secrets_in_text(details.console_tail[-3000:])
                         job_entry["console_tail"] = _sanitize_console_tail(tail)
-                        job_entry["parameters"] = _redact_build_parameters(details.parameters)
+                        redacted_params = _redact_build_parameters(details.parameters)
+                        job_metadata = _parse_job_metadata(redacted_params)
+                        if job_metadata:
+                            job_entry["job_metadata"] = job_metadata
+                            if job_metadata.get("version"):
+                                version = job_metadata["version"]
+                        # Strip raw JOB_METADATA and CI_MESSAGE from parameters
+                        cleaned_params = {
+                            k: v for k, v in redacted_params.items()
+                            if k not in ("JOB_METADATA", "CI_MESSAGE")
+                        }
+                        job_entry["parameters"] = cleaned_params
                 failed_jobs.append(job_entry)
 
         # LLM triage
@@ -589,6 +770,8 @@ class JenkinsObserver:
     ) -> str:
         """Build a triage prompt for Flash Lite."""
         lines = [f"CNV version: {version}", ""]
+        lines.append("Prior: UNSTABLE results are likely test/product failures. FAILURE results are likely infra/pipeline failures.")
+        lines.append("")
         if failed_jobs:
             lines.append("## Failed Jobs")
             for j in failed_jobs[:10]:

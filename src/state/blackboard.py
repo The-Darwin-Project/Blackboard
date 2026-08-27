@@ -1623,6 +1623,7 @@ return 1
                 aligner_pending=round(sum(s.aligner_pending for s in group) / n),
                 jenkins_pending=round(sum(s.jenkins_pending for s in group) / n),
                 jenkins_breaker_open=any(s.jenkins_breaker_open for s in group),
+                jenkins_view_unhealthy=any(s.jenkins_view_unhealthy for s in group),
                 wip_used=round(sum(s.wip_used for s in group) / n),
                 wip_cap=round(sum(s.wip_cap for s in group) / n),
                 wip_utilization_pct=sum(s.wip_utilization_pct for s in group) / n,
