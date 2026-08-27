@@ -7,6 +7,7 @@
 // 5. [Constraint]: setImmediate yield between extractions to avoid parking the event loop (WS heartbeat).
 // 6. [Pattern]: Promise.allSettled with concurrency cap for downloads. Per-slug fail-open.
 // 7. [Constraint]: No SKILLS_CATALOG_SKILLS env needed — fetches entire active catalog via index.json.
+// 8. [Security]: slug MUST be validated against SAFE_SLUG_RE before ANY filesystem use — path traversal via untrusted index.json skill.name.
 
 const fs = require('fs');
 const path = require('path');
@@ -18,6 +19,7 @@ const AdmZip = require('adm-zip');
 const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
 const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 const CONCURRENCY_CAP = 8;
+const SAFE_SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
 const DOWNLOAD_TIMEOUT_MS = 10000;
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -82,12 +84,20 @@ async function syncCatalogSkills(catalogUrl) {
 }
 
 async function downloadAndExtract(catalogUrl, slug) {
+  if (!SAFE_SLUG_RE.test(slug)) {
+    console.warn(`[catalog-skills] Rejected unsafe slug: ${JSON.stringify(slug).slice(0, 80)}`);
+    return;
+  }
   const url = `${catalogUrl}/api/v1/skills/${encodeURIComponent(slug)}/download`;
   const buf = await httpGet(url, DOWNLOAD_TIMEOUT_MS);
 
   const zip = new AdmZip(buf);
-  const destDir = path.join(GEMINI_SKILLS_DIR, `catalog-${slug}`);
-  const tmpDir = path.join(GEMINI_SKILLS_DIR, `.tmp-${slug}-${Date.now()}`);
+  const destDir = path.resolve(GEMINI_SKILLS_DIR, `catalog-${slug}`);
+  const tmpDir = path.resolve(GEMINI_SKILLS_DIR, `.tmp-${slug}-${Date.now()}`);
+  if (!destDir.startsWith(GEMINI_SKILLS_DIR + path.sep) || !tmpDir.startsWith(GEMINI_SKILLS_DIR + path.sep)) {
+    console.warn(`[catalog-skills] Path confinement failed for slug: ${JSON.stringify(slug).slice(0, 80)}`);
+    return;
+  }
 
   zip.extractAllTo(tmpDir, true);
 
@@ -104,8 +114,9 @@ async function downloadAndExtract(catalogUrl, slug) {
   // Yield to event loop between extractions (WS heartbeat protection)
   await new Promise((r) => setImmediate(r));
 
-  // Claude symlink with exists-check (EEXIST idempotency)
-  const claudeTarget = path.join(CLAUDE_SKILLS_DIR, `catalog-${slug}`);
+  // Claude symlink with exists-check (EEXIST idempotency) + path confinement
+  const claudeTarget = path.resolve(CLAUDE_SKILLS_DIR, `catalog-${slug}`);
+  if (!claudeTarget.startsWith(CLAUDE_SKILLS_DIR + path.sep)) return;
   if (!fs.existsSync(claudeTarget)) {
     try { fs.symlinkSync(destDir, claudeTarget); } catch {}
   }

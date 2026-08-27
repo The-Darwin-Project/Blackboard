@@ -333,7 +333,7 @@ class JenkinsObserver:
                         continue
                     md = download_skill_md(resp.content, slug)
                     if md:
-                        parts.append(md[:10000])
+                        parts.append(self._sanitize_console_tail(md[:10000]))
                     else:
                         logger.warning("JenkinsObserver: No SKILL.md in ZIP for slug '%s'", slug)
                 except Exception as e:
