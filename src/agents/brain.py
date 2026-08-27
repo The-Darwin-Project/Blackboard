@@ -2440,6 +2440,20 @@ class Brain:
                 else:
                     logger.debug(f"GitHub tag '{gpath}' resolved to None in path_index")
 
+        # Evidence-driven context: inject CI gating skills when ci_context is present
+        if (event.event and event.event.evidence
+                and hasattr(event.event.evidence, "ci_context")
+                and event.event.evidence.ci_context):
+            for cpath in self._skill_loader.find_paths_by_tag("ci_gating"):
+                result = self._skill_loader.get_with_meta(cpath)
+                if result:
+                    cbody, _ = result
+                    resolved_contents.append(
+                        _wrap_section(cpath, cbody, self._skill_loader.get_tag_type(cpath))
+                    )
+                else:
+                    logger.debug(f"CI gating tag '{cpath}' resolved to None in path_index")
+
         # Gated posture skills for chat/slack events (mutually exclusive)
         if context_flags and context_flags.get("is_first_human_turn"):
             for path in self._skill_loader.find_paths_by_tag("user-energy"):
@@ -3112,6 +3126,7 @@ class Brain:
                             skill_injected_by_v2 = True
                             refs = self._skill_loader.build_skill_refs(
                                 turn.waitingFor, event.brain_phase, event.source,
+                                subject_type=getattr(event, "subject_type", None),
                             )
                             if refs:
                                 skill_prefix = refs
@@ -3157,6 +3172,7 @@ class Brain:
                 if not skill_injected_by_v2:
                     refs = self._skill_loader.build_skill_refs(
                         turn.waitingFor, event.brain_phase, event.source,
+                        subject_type=getattr(event, "subject_type", None),
                     )
                     if refs and parts[0].get("text"):
                         parts[0]["text"] = f"{refs}\n{parts[0]['text']}"

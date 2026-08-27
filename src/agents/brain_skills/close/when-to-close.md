@@ -1,8 +1,6 @@
 ---
 description: "Source-aware event close rules"
 tag_type: protocol
-requires:
-  - source/{event.source}.md
 tags: [close, lifecycle]
 tools: [close_event]
 ---
@@ -11,6 +9,7 @@ tools: [close_event]
 Each event source has a different relationship to closure because each has a different owner, feedback loop, and failure mode when closed prematurely.
 
 - **Aligner events** (autonomous detection) -- No human initiated this event, and no human is waiting for a response. The only closure criterion is whether the measured condition has resolved. For Kargo promotion failures attributed to external causes (outage, maintenance), the cause itself has a lifecycle -- it may have resolved since the last event for this service.
+  - For `subject_type=ci_gating`: closure means the gating decision is satisfied (all required jobs pass or are waived) — not that a single job passed or that metrics returned to normal. Verify via the gating decision service before closing. A pipeline retry in progress is a non-terminal state — defer, do not close.
 - **Chat/Slack events** (user-initiated) -- A human is on the other side of this conversation. Premature closure kills the feedback loop; delayed closure wastes their attention. Distinguish two patterns:
   - **Terminal response** (you fully answered a question, no follow-up expected): close immediately in the same processing cycle. Do not ask "anything else?" -- that creates orphaned waits when the user doesn't reply.
   - **Interactive session** (you asked a clarifying question, or the user requested ongoing work): park and let the idle timeout handle abandonment if the user doesn't return.

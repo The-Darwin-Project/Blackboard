@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 from ..models import EventEvidence
+from ..skills_catalog import download_skill_md
 
 logger = logging.getLogger(__name__)
 
@@ -310,31 +311,36 @@ class JenkinsObserver:
             await asyncio.sleep(self._poll_interval)
 
     async def _ensure_skills_loaded(self) -> None:
-        """Lazy-fetch Skills Catalog instructions. Never raises."""
+        """Lazy-fetch Skills Catalog SKILL.md texts from ZIP downloads. Never raises."""
         if time.time() - self._skills_loaded_at < self._skills_ttl:
             return
-        try:
-            catalog_url = os.getenv("SKILLS_CATALOG_URL", "")
-            skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "cnv-gating-workflow")
-            if not catalog_url:
-                self._skills_loaded_at = time.time()
-                return
+        catalog_url = os.getenv("SKILLS_CATALOG_URL", "")
+        skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "cnv-gating-workflow")
+        if not catalog_url:
+            self._skills_loaded_at = time.time()
+            return
 
-            parts = []
-            async with httpx.AsyncClient(timeout=10) as client:
-                for slug in skills_csv.split(","):
-                    slug = slug.strip()
-                    if not slug:
-                        continue
+        parts: list[str] = []
+        async with httpx.AsyncClient(timeout=10) as client:
+            for slug in skills_csv.split(","):
+                slug = slug.strip()
+                if not slug:
+                    continue
+                try:
                     resp = await client.get(f"{catalog_url}/api/v1/skills/{slug}/download")
-                    if resp.status_code == 200:
-                        parts.append(resp.text[:10000])
-            if parts:
-                self._skills_si = "\n\n---\n\n".join(parts)
-            self._skills_loaded_at = time.time()
-        except Exception as e:
-            logger.warning("JenkinsObserver: Skills Catalog fetch failed (%s), using fallback SI", e)
-            self._skills_loaded_at = time.time()
+                    if resp.status_code != 200:
+                        logger.warning("JenkinsObserver: Catalog slug '%s' returned %s", slug, resp.status_code)
+                        continue
+                    md = download_skill_md(resp.content, slug)
+                    if md:
+                        parts.append(md[:10000])
+                    else:
+                        logger.warning("JenkinsObserver: No SKILL.md in ZIP for slug '%s'", slug)
+                except Exception as e:
+                    logger.warning("JenkinsObserver: Catalog fetch failed for slug '%s' (%s)", slug, e)
+        if parts:
+            self._skills_si = "\n\n---\n\n".join(parts)
+        self._skills_loaded_at = time.time()
 
     async def _get_llm_adapter(self):
         """Lazy-load a Gemini adapter via the shared factory for Flash Lite triage."""

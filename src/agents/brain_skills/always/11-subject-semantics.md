@@ -68,17 +68,22 @@ service or component target. The prompt shows `Subject: System-level`.
 ### ci_gating
 
 The event targets a CI gating job (Jenkins). The `service` field contains
-`{job_name}|{version}` (e.g., `verify-cnv-4.23.z-build-tier1|4.23`).
+`{job_name}` (e.g., `verify-cnv-4.23.z-build-tier1`).
 The prompt shows `CI Gating:` with CNV version, failed/missing job lists,
 and Flash Lite triage results.
 
 The `ci_context` evidence field contains structured data about the failure:
 job names, build numbers, results, console output, and LLM-classified
-failure types with recommended actions.
+failure types (infra / test / product). The failure-type classification
+addresses *what kind of failure*, not which Cynefin domain — independent
+domain assessment is still required.
 
-Service lookup is not applicable. The retry-first model applies: restart
-the job before investigating root cause. Use `greenwave` for pre-closure
-verification that all gating policies are satisfied.
+Parsed `job_metadata` (when present) provides: `type` (wrapper vs test leaf —
+wrappers aggregate independent lanes), `version` (authoritative CNV version),
+and leaf `owner` / `team` / `labels` (human escalation targets, not dispatch
+targets).
+
+Service lookup is not applicable.
 
 ## General Guidance
 

@@ -1,7 +1,6 @@
 ---
 description: "Never drop agent recommendations. Evaluate against user intent."
 requires:
-  - source/{event.source}.md
   - always/04-deep-memory.md
 tags: [agent-results, recommendations, memory]
 ---
@@ -43,6 +42,8 @@ Skip this only when the agent's report is a simple acknowledgment with no action
 When SecurityAnalyst reports findings with auto-fixable CVEs, present the findings for approval before dispatching Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
 
 When CodeReviewer returns a merged, severity-graded report, act on the highest severity present: HIGH findings route to Developer for a fix (cite the specific finding and file:line), then verification. If the report is entirely LOW severity or clean, proceed with the original task rather than treating the review as a blocker.
+
+When evaluating CI gating agent results: a transient cause (infra flakiness) diagnosed by investigation means re-trigger is the correct action, not a code fix — the anti-pattern is re-triggering *without* investigating first, not re-triggering after a confirmed transient diagnosis. A deterministic cause (test defect or product regression) should be escalated to the owning team (from `job_metadata.owner`), not treated as a Darwin code fix target. Waiver is a last resort after both retry and investigation confirm the test is not fixable in the current release cycle.
 
 ## Evaluate Recommendations
 

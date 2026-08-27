@@ -30,10 +30,13 @@ const {
 const { wsSend } = require('./ws-utils');
 const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
 
+const { startCatalogSync } = require('./catalog-skills');
+
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 30000;
 let _activeWs = null;
 let _isWaking = false;
+let _catalogSynced = false;
 
 function killChild(child) {
   child.kill('SIGTERM');
@@ -76,6 +79,10 @@ function startWSClient(brainUrl) {
         event_id: EVENT_ID || null, ephemeral: EPHEMERAL,
         capabilities: [], cli: AGENT_CLI, model: AGENT_MODEL,
       });
+      if (!_catalogSynced) {
+        _catalogSynced = true;
+        startCatalogSync(process.env.SKILLS_CATALOG_URL || '', EPHEMERAL);
+      }
       resetIdleTimer();
     });
 
