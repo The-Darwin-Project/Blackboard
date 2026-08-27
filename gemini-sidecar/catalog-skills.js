@@ -77,8 +77,14 @@ async function syncCatalogSkills(catalogUrl) {
   const results = await runWithConcurrency(downloadTasks, CONCURRENCY_CAP);
 
   let extracted = 0;
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value) extracted++;
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled' && r.value) {
+      extracted++;
+    } else if (r.status === 'rejected') {
+      const slug = skills[i] ? skills[i].name : `index-${i}`;
+      console.warn(`[catalog-skills] Failed to sync skill '${slug}': ${r.reason?.message || r.reason}`);
+    }
   }
   return extracted;
 }

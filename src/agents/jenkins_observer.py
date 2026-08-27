@@ -157,7 +157,7 @@ def _parse_job_metadata(params: dict) -> dict:
         return {}
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -315,7 +315,7 @@ class JenkinsObserver:
         if time.time() - self._skills_loaded_at < self._skills_ttl:
             return
         catalog_url = os.getenv("SKILLS_CATALOG_URL", "")
-        skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "cnv-gating-workflow")
+        skills_csv = os.getenv("SKILLS_CATALOG_SKILLS", "")
         if not catalog_url:
             self._skills_loaded_at = time.time()
             return
@@ -396,6 +396,9 @@ class JenkinsObserver:
         The observer does not classify jobs into categories -- it discovers broadly
         and lets the Brain classify from content.
         """
+        if not self._views:
+            logger.warning("JENKINS_OBSERVER_VIEWS is empty — CI discovery disabled")
+            return
         for view in self._views:
             scan = await self._adapter.scan_view(view)
 

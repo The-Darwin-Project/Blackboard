@@ -1,6 +1,6 @@
 ---
 description: "CI gating event envelope — Jenkins origin, wrapper topology, gating-decision lifecycle"
-tags: [aligner, ci_gating]
+tags: [aligner]
 tag_type: rule
 ---
 # CI Gating Source Environment

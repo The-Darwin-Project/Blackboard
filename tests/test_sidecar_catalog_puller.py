@@ -142,7 +142,7 @@ class TestTC3EmptyUrl:
         """syncCatalogSkills with empty url should return without error."""
         script = (
             "const m = require('./catalog-skills.js'); "
-            f"m.syncCatalogSkills({{ url: '', destDir: '{tmp_path}' }})"
+            "m.syncCatalogSkills('')"
             ".then(() => console.log('OK'))"
             ".catch(e => {{ console.error(e.message); process.exit(1); }})"
         )
@@ -162,7 +162,7 @@ class TestTC3EmptyUrl:
         """syncCatalogSkills with undefined url should return without error."""
         script = (
             "const m = require('./catalog-skills.js'); "
-            f"m.syncCatalogSkills({{ url: undefined, destDir: '{tmp_path}' }})"
+            "m.syncCatalogSkills(undefined)"
             ".then(() => console.log('OK'))"
             ".catch(e => {{ console.error(e.message); process.exit(1); }})"
         )
