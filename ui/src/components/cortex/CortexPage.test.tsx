@@ -88,4 +88,22 @@ describe('CortexPage handleClickNeuron (materialize->click regression)', () => {
     expect(getKnowledgeById).not.toHaveBeenCalled();
     expect(screen.queryByText(/select_agent/)).toBeNull();
   });
+
+  it('toggle-closes a resolved off-ring node on a second click without re-fetching', async () => {
+    getKnowledgeById.mockResolvedValue({
+      id: 'fact-pulsed-2',
+      payload: { topic: 'Toggle Fact', fact: 'Closes without refetch', scope: 'global', source: 's', confidence: 0.9, valid_until: null, created_at: 0, updated_at: 0 },
+    });
+
+    render(<CortexPage />);
+    await waitFor(() => expect(mockOnClickNeuron.current).not.toBeNull());
+
+    mockOnClickNeuron.current!('knowledge:fact-pulsed-2', { x: 10, y: 10 });
+    await waitFor(() => expect(screen.getAllByText('Toggle Fact').length).toBeGreaterThan(0));
+    expect(getKnowledgeById).toHaveBeenCalledTimes(1);
+
+    mockOnClickNeuron.current!('knowledge:fact-pulsed-2', { x: 10, y: 10 });
+    await waitFor(() => expect(screen.queryByText('Toggle Fact')).toBeNull());
+    expect(getKnowledgeById).toHaveBeenCalledTimes(1);
+  });
 });
