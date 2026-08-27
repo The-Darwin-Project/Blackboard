@@ -177,7 +177,8 @@ RUN npm install --omit=dev
 # Copy server code (modular -- entrypoint + 12 modules + 3 MCP servers)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
-     team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js ./
+     team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
+     catalog-skills.js ./
 
 # Install agent-to-FRIDAY callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
