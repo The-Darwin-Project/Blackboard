@@ -4,9 +4,13 @@
 // 2. [Pattern]: 3 states: loading, empty, populated. Same pattern as LessonsView + NotebookPanel inline edit.
 // 3. [Constraint]: Scope values match backend regex: convention | ownership | historical | relationship.
 // 4. [Gotcha]: Identity fields (topic, scope) are immutable after creation -- PATCH only allows fact, source, confidence, valid_until.
-import { useState, useCallback } from 'react';
-import { Plus, Trash2, Library, Pencil, Check, X, AlertTriangle } from 'lucide-react';
-import { useKnowledge, useCreateKnowledge, useUpdateKnowledge, useDeleteKnowledge } from '../../hooks/useMemory';
+// 5. [Pattern]: useKnowledgeScroll (useInfiniteQuery) replaces the old full-collection useKnowledge --
+//    "loaded N" + "Load more" never implies N is the corpus size. Scope filter is server-side
+//    (Qdrant indexed); q is a free-text substring applied on each fetched page only.
+import { useState, useCallback, useMemo } from 'react';
+import { Plus, Trash2, Library, Pencil, Check, X, AlertTriangle, Search, Loader2 } from 'lucide-react';
+import { useKnowledgeScroll, useCreateKnowledge, useUpdateKnowledge, useDeleteKnowledge } from '../../hooks/useMemory';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import type { KnowledgeScope } from '../../api/types';
 
 const SCOPES: KnowledgeScope[] = ['convention', 'ownership', 'historical', 'relationship'];
@@ -63,10 +67,18 @@ function StaleBadge({ validUntil }: { validUntil: number | null }) {
 }
 
 export default function KnowledgeView() {
-  const { data: knowledge, isLoading, isError } = useKnowledge();
+  const [scopeFilter, setScopeFilter] = useState<KnowledgeScope | ''>('');
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
+
+  const {
+    data, isLoading, isError, fetchNextPage, hasNextPage, isFetchingNextPage,
+  } = useKnowledgeScroll({ scope: scopeFilter || undefined, q: debouncedSearch || undefined });
   const createMutation = useCreateKnowledge();
   const updateMutation = useUpdateKnowledge();
   const deleteMutation = useDeleteKnowledge();
+
+  const items = useMemo(() => data?.pages.flatMap(p => p.items) ?? [], [data]);
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM);
@@ -113,18 +125,30 @@ export default function KnowledgeView() {
     return <div className="flex items-center justify-center h-full text-red-400 text-sm">Failed to load reference facts.</div>;
   }
 
-  const items = knowledge || [];
-
   return (
     <div className="h-full overflow-auto p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-text-primary">
-          Reference Facts <span className="text-text-muted font-normal">({items.length})</span>
+          Reference Facts <span className="text-text-muted font-normal">(loaded {items.length}{hasNextPage ? '+' : ''})</span>
         </h2>
         <button onClick={() => setShowForm(!showForm)}
           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-accent/20 text-accent hover:bg-accent/30 transition-colors">
           <Plus size={12} /> New Fact
         </button>
+      </div>
+
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
+            value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search topic or fact..." />
+        </div>
+        <select className="bg-bg-primary border border-border rounded px-2 py-1.5 text-xs text-text-primary"
+          value={scopeFilter} onChange={e => setScopeFilter(e.target.value as KnowledgeScope | '')}>
+          <option value="">All scopes</option>
+          {SCOPES.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
 
       {showForm && (
@@ -274,6 +298,12 @@ export default function KnowledgeView() {
               </div>
             );
           })}
+          {hasNextPage && (
+            <button onClick={() => fetchNextPage()} disabled={isFetchingNextPage}
+              className="w-full py-2 rounded text-xs font-medium text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+              {isFetchingNextPage ? <><Loader2 size={12} className="animate-spin" /> Loading...</> : 'Load more'}
+            </button>
+          )}
         </div>
       )}
     </div>

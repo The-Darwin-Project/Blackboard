@@ -5,15 +5,21 @@
 # 3. [Gotcha]: ensure_collection is idempotent -- safe to call on every startup.
 # 4. [Pattern]: vector_size=768 for text-embedding-005 model.
 # 5. [Pattern]: scroll() returns (points, next_offset) tuple for cursor-based pagination.
+#    next_offset is an OPAQUE string -- str offsets pass through unchanged, non-str offsets
+#    (int, dict) are json.dumps'd. Callers must treat it as opaque and pass it back verbatim
+#    as the next call's `offset` -- never parse or construct it manually.
 # 6. [Pattern]: get_points() retrieves by ID list. delete() removes by ID list. Both follow Qdrant REST conventions.
 # 7. [Pattern]: search() accepts optional keyword-only `filter` dict (Qdrant filter DSL). Passed as sibling key in request body.
 # 8. [Pattern]: create_payload_index() is idempotent -- 409 means index already exists (same as ensure_collection).
+# 9. [Pattern]: scroll() also accepts optional keyword-only `filter` dict (same DSL as search()) to constrain pages
+#    by indexed payload fields.
 """
 Thin async wrapper around Qdrant REST API.
 No additional pip dependencies -- uses httpx (already installed).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
@@ -23,6 +29,35 @@ import httpx
 logger = logging.getLogger(__name__)
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+
+def _encode_cursor(next_page_offset: Any) -> str | None:
+    """Encode Qdrant's raw next_page_offset as an opaque string cursor.
+
+    str offsets (the common case -- uuid5 point IDs) pass through unchanged.
+    Non-str offsets (int point IDs, or an unexpected compound offset object)
+    are json.dumps'd so the cursor stays a plain string over REST.
+    """
+    if next_page_offset is None:
+        return None
+    if isinstance(next_page_offset, str):
+        return next_page_offset
+    return json.dumps(next_page_offset)
+
+
+def _decode_cursor(cursor: str | None) -> Any:
+    """Decode an opaque cursor back to the value Qdrant expects as `offset`.
+
+    Mirrors _encode_cursor: attempts json.loads first (recovers non-str
+    offsets); falls back to the raw string when it isn't valid JSON (the
+    common case -- a uuid5 point ID is never valid JSON).
+    """
+    if cursor is None:
+        return None
+    try:
+        return json.loads(cursor)
+    except Exception:
+        return cursor
 
 
 class VectorStore:
@@ -140,15 +175,23 @@ class VectorStore:
         collection: str,
         limit: int = 100,
         offset: str | None = None,
+        *,
+        filter: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """List all points in a collection (cursor-based pagination).
+        """List points in a collection (cursor-based pagination).
+
+        `offset` is the opaque cursor returned as `next_offset` by a prior call --
+        pass it back verbatim. `filter` uses the same Qdrant filter DSL as search().
 
         Returns (points, next_offset). next_offset is None when no more pages.
         """
         client = await self._get_client()
         body: dict[str, Any] = {"limit": limit, "with_payload": True}
-        if offset is not None:
-            body["offset"] = offset
+        decoded_offset = _decode_cursor(offset)
+        if decoded_offset is not None:
+            body["offset"] = decoded_offset
+        if filter is not None:
+            body["filter"] = filter
         resp = await client.post(
             f"/collections/{collection}/points/scroll",
             json=body,
@@ -159,7 +202,7 @@ class VectorStore:
             {"id": p.get("id"), "payload": p.get("payload", {})}
             for p in data.get("points", [])
         ]
-        return points, data.get("next_page_offset")
+        return points, _encode_cursor(data.get("next_page_offset"))
 
     async def get_points(
         self,

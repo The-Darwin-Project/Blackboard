@@ -4,9 +4,13 @@
 // 2. [Pattern]: Step 1 accepts paste, file upload, event selection, context notes.
 // 3. [Pattern]: Step 2 shows editable cards with include/exclude toggles.
 // 4. [Pattern]: Step 3 applies selected items and shows summary.
-import { useState, useCallback, useMemo } from 'react';
+// 5. [Pattern]: Event picker is a searching/paginated useMemoriesScroll query (q=eventSearch),
+//    not a full-archive load + client slice(0,50) -- the server does the search, the client just
+//    renders one page (50 rows) at a time.
+import { useState, useCallback } from 'react';
 import { Upload, Loader2, Check, X, Download, ArrowLeft, Search } from 'lucide-react';
-import { useExtractLessons, useApplyLessons, useMemories } from '../../hooks/useMemory';
+import { useExtractLessons, useApplyLessons, useMemoriesScroll } from '../../hooks/useMemory';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import type { ExtractedLesson, ExtractedCorrection } from '../../api/client';
 
 type Step = 1 | 2 | 3;
@@ -20,28 +24,19 @@ export default function ExtractWizard() {
   const [step, setStep] = useState<Step>(1);
   const [document, setDocument] = useState('');
   const [selectedEvents, setSelectedEvents] = useState<string[]>([]);
+  const [selectedEventMeta, setSelectedEventMeta] = useState<Record<string, string>>({});
   const [contextNotes, setContextNotes] = useState('');
   const [lessons, setLessons] = useState<ReviewItem<ExtractedLesson>[]>([]);
   const [corrections, setCorrections] = useState<ReviewItem<ExtractedCorrection>[]>([]);
   const [result, setResult] = useState<{ stored_lessons: number; applied_corrections: number } | null>(null);
 
   const [eventSearch, setEventSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(eventSearch);
   const extractMutation = useExtractLessons();
   const applyMutation = useApplyLessons();
-  const { data: memories } = useMemories();
 
-  const filteredMemories = useMemo(() => {
-    if (!memories) return [];
-    const q = eventSearch.toLowerCase().trim();
-    if (!q) return memories.slice(0, 50);
-    return memories.filter(mem => {
-      const p = mem.payload as Record<string, unknown>;
-      const eid = ((p.event_id as string) || mem.id).toLowerCase();
-      const svc = ((p.service as string) || '').toLowerCase();
-      const sym = ((p.symptom as string) || '').toLowerCase();
-      return eid.includes(q) || svc.includes(q) || sym.includes(q);
-    }).slice(0, 50);
-  }, [memories, eventSearch]);
+  const { data } = useMemoriesScroll({ q: debouncedSearch || undefined });
+  const filteredMemories = data?.pages[0]?.items ?? [];
 
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -74,8 +69,9 @@ export default function ExtractWizard() {
     );
   };
 
-  const toggleEvent = (eid: string) => {
+  const toggleEvent = (eid: string, service?: string) => {
     setSelectedEvents(prev => prev.includes(eid) ? prev.filter(e => e !== eid) : [...prev, eid]);
+    if (service) setSelectedEventMeta(prev => ({ ...prev, [eid]: service }));
   };
 
   // --- STEP 1: Input ---
@@ -106,56 +102,56 @@ export default function ExtractWizard() {
           </label>
         </div>
 
-        {memories && memories.length > 0 && (
-          <div>
-            <label className="block text-[10px] text-text-muted mb-1">
-              Cross-reference Events (optional, from Deep Memory)
-            </label>
-            {selectedEvents.length > 0 && (
-              <div className="flex flex-wrap gap-1 mb-1.5">
-                {selectedEvents.map(eid => {
-                  const mem = memories.find(m => ((m.payload as Record<string, unknown>).event_id as string || m.id) === eid);
-                  const svc = mem ? (mem.payload as Record<string, unknown>).service as string || '?' : '?';
-                  return (
-                    <span key={eid} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-accent/15 text-accent">
-                      {eid.slice(4, 16)} ({svc})
-                      <button onClick={() => toggleEvent(eid)} className="hover:text-red-400 transition-colors">
-                        <X size={10} />
-                      </button>
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-            <div className="relative mb-1">
-              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
-              <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
-                value={eventSearch} onChange={e => setEventSearch(e.target.value)}
-                placeholder="Search by event ID, service, or symptom..." />
+        <div>
+          <label className="block text-[10px] text-text-muted mb-1">
+            Cross-reference Events (optional, from Deep Memory)
+          </label>
+          {selectedEvents.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-1.5">
+              {selectedEvents.map(eid => {
+                const svc = selectedEventMeta[eid] ?? '?';
+                return (
+                  <span key={eid} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-accent/15 text-accent">
+                    {eid.slice(4, 16)} ({svc})
+                    <button onClick={() => toggleEvent(eid)} className="hover:text-red-400 transition-colors">
+                      <X size={10} />
+                    </button>
+                  </span>
+                );
+              })}
             </div>
-            <div className="max-h-36 overflow-auto border border-border rounded p-2 space-y-1">
-              {filteredMemories.length === 0 ? (
-                <div className="text-[10px] text-text-muted py-1 px-1">No events match "{eventSearch}"</div>
-              ) : (
-                filteredMemories.map(mem => {
-                  const p = mem.payload as Record<string, unknown>;
-                  const eid = (p.event_id as string) || mem.id;
-                  const isSelected = selectedEvents.includes(eid);
-                  return (
-                    <label key={eid} className={`flex items-center gap-2 text-xs cursor-pointer rounded px-1 py-0.5 transition-colors ${
-                      isSelected ? 'bg-accent/10' : 'hover:bg-bg-tertiary'
-                    }`}>
-                      <input type="checkbox" checked={isSelected}
-                        onChange={() => toggleEvent(eid)} className="rounded" />
-                      <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
-                      <span className="text-text-secondary truncate">{(p.service as string) || '?'} -- {((p.symptom as string) || '').slice(0, 60)}</span>
-                    </label>
-                  );
-                })
-              )}
-            </div>
+          )}
+          <div className="relative mb-1">
+            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+            <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
+              value={eventSearch} onChange={e => setEventSearch(e.target.value)}
+              placeholder="Search by event ID, service, or symptom..." />
           </div>
-        )}
+          <div className="max-h-36 overflow-auto border border-border rounded p-2 space-y-1">
+            {filteredMemories.length === 0 ? (
+              <div className="text-[10px] text-text-muted py-1 px-1">
+                {eventSearch ? `No events match "${eventSearch}"` : 'No archived memories yet.'}
+              </div>
+            ) : (
+              filteredMemories.map(mem => {
+                const p = mem.payload as Record<string, unknown>;
+                const eid = (p.event_id as string) || mem.id;
+                const svc = (p.service as string) || '?';
+                const isSelected = selectedEvents.includes(eid);
+                return (
+                  <label key={eid} className={`flex items-center gap-2 text-xs cursor-pointer rounded px-1 py-0.5 transition-colors ${
+                    isSelected ? 'bg-accent/10' : 'hover:bg-bg-tertiary'
+                  }`}>
+                    <input type="checkbox" checked={isSelected}
+                      onChange={() => toggleEvent(eid, svc)} className="rounded" />
+                    <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
+                    <span className="text-text-secondary truncate">{svc} -- {((p.symptom as string) || '').slice(0, 60)}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </div>
 
         <div>
           <label className="block text-[10px] text-text-muted mb-1">Additional Context (optional)</label>
@@ -273,7 +269,7 @@ export default function ExtractWizard() {
           <div>{result.applied_corrections} correction{result.applied_corrections !== 1 ? 's' : ''} applied</div>
         </div>
       )}
-      <button onClick={() => { setStep(1); setDocument(''); setSelectedEvents([]); setContextNotes(''); setLessons([]); setCorrections([]); setResult(null); }}
+      <button onClick={() => { setStep(1); setDocument(''); setSelectedEvents([]); setSelectedEventMeta({}); setContextNotes(''); setLessons([]); setCorrections([]); setResult(null); }}
         className="px-4 py-2 rounded text-xs font-medium bg-accent/20 text-accent hover:bg-accent/30 transition-colors">
         Extract Another
       </button>

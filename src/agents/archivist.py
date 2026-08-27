@@ -34,6 +34,14 @@
 #     (must stay in sync with BRAIN_TOOL_SCHEMAS — Test T-10 enforces). Applied in store_lesson()
 #     before embed AND in the dedup-merge path. Does NOT import from src/agents/llm/ (hexagonal
 #     boundary); mapping maintained manually.
+# 22. [Pattern]: scroll_knowledge/scroll_lessons/scroll_memories are the REST-facing, one-page
+#     siblings of list_knowledge/list_lessons/list_memories (which loop scroll() to completion
+#     for in-process callers -- cognitive_graph, seed scripts, JARVIS). Do NOT change list_*
+#     semantics when touching pagination -- both call the shared _scroll_collection() helper,
+#     but list_* still loops internally while scroll_* returns exactly one page as
+#     {"items": [...], "next_offset": str|None}. The REST route layer (queue.py) derives the
+#     public envelope's next_cursor/has_more from next_offset -- Archivist stays in
+#     VectorStore's offset/next_offset vocabulary, not the REST cursor vocabulary.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -1021,6 +1029,33 @@ class Archivist:
         except Exception as e:
             logger.debug(f"Pulse emission failed (non-fatal): {e}")
 
+    async def _scroll_collection(
+        self,
+        collection: str,
+        *,
+        limit: int,
+        offset: str | None,
+        filter: dict | None = None,
+    ) -> dict:
+        """One page of a Qdrant collection via cursor pagination.
+
+        Unlike list_*(limit) (which loops scroll() to completion), this fetches
+        exactly one page. Returns {"items": [...], "next_offset": str|None}.
+        `offset` is the opaque value from a prior page's `next_offset` -- pass it
+        back verbatim; a missing/None offset means "first page". The route layer
+        (queue.py) is responsible for deriving the REST envelope's `next_cursor`/
+        `has_more` from `next_offset` -- this method speaks VectorStore's own
+        offset/next_offset vocabulary, not the REST cursor vocabulary.
+        """
+        points, next_offset = await self._vector_store.scroll(
+            collection, limit=limit, offset=offset, filter=filter,
+        )
+        logger.debug(
+            f"archivist.scroll collection={collection} limit={limit} "
+            f"has_more={next_offset is not None}"
+        )
+        return {"items": points, "next_offset": next_offset}
+
     async def list_memories(self, limit: int = 0) -> list[dict]:
         """List all event memories from Qdrant (paginated scroll, fetches all).
 
@@ -1047,6 +1082,24 @@ class Archivist:
         except Exception as e:
             logger.warning(f"list_memories failed: {e}")
             return []
+
+    async def scroll_memories(
+        self, *, limit: int = 50, offset: str | None = None, filter: dict | None = None,
+    ) -> dict:
+        """One page of event memories via cursor pagination. Returns {items, next_offset}.
+
+        Keeps list_memories(limit) unchanged for in-process callers
+        (cognitive_graph, seed scripts) -- this is the REST-facing sibling.
+        """
+        try:
+            if not await self._ensure_initialized():
+                return {"items": [], "next_offset": None}
+            return await self._scroll_collection(
+                COLLECTION_NAME, limit=limit, offset=offset, filter=filter,
+            )
+        except Exception as e:
+            logger.warning(f"scroll_memories failed: {e}")
+            return {"items": [], "next_offset": None}
 
     async def get_lesson(self, lesson_id: str) -> dict | None:
         """Get a single lesson by lesson_id."""
@@ -1097,6 +1150,24 @@ class Archivist:
         except Exception as e:
             logger.warning(f"list_lessons failed: {e}")
             return []
+
+    async def scroll_lessons(
+        self, *, limit: int = 50, offset: str | None = None, filter: dict | None = None,
+    ) -> dict:
+        """One page of lessons via cursor pagination. Returns {items, next_offset}.
+
+        Keeps list_lessons(limit) unchanged for in-process callers
+        (cognitive_graph, seed scripts) -- this is the REST-facing sibling.
+        """
+        try:
+            if not await self._ensure_initialized():
+                return {"items": [], "next_offset": None}
+            return await self._scroll_collection(
+                LESSONS_COLLECTION, limit=limit, offset=offset, filter=filter,
+            )
+        except Exception as e:
+            logger.warning(f"scroll_lessons failed: {e}")
+            return {"items": [], "next_offset": None}
 
     async def delete_lesson(self, lesson_id: str) -> bool:
         """Remove a lesson by ID. Returns True on success."""
@@ -1318,6 +1389,24 @@ class Archivist:
         except Exception as e:
             logger.warning(f"list_knowledge failed: {e}")
             return []
+
+    async def scroll_knowledge(
+        self, *, limit: int = 50, offset: str | None = None, filter: dict | None = None,
+    ) -> dict:
+        """One page of knowledge facts via cursor pagination. Returns {items, next_offset}.
+
+        Keeps list_knowledge(limit) unchanged for in-process callers
+        (cognitive_graph, seed scripts) -- this is the REST-facing sibling.
+        """
+        try:
+            if not self._knowledge_ready:
+                return {"items": [], "next_offset": None}
+            return await self._scroll_collection(
+                KNOWLEDGE_COLLECTION, limit=limit, offset=offset, filter=filter,
+            )
+        except Exception as e:
+            logger.warning(f"scroll_knowledge failed: {e}")
+            return {"items": [], "next_offset": None}
 
     async def get_knowledge(self, knowledge_id: str) -> dict | None:
         """Get a single knowledge fact by ID."""

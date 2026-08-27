@@ -8,6 +8,10 @@
 // 5. [Design]: 401 interceptor fires _onUnauthorized before throwing ApiError. The callback (wired from
 //    AuthContext) gates on user.expired to avoid false logout during silent-renew race. REST routes currently
 //    don't enforce per-route JWT -- 401 only comes from upstream proxies (OpenShift Route, Nginx).
+// 6. [Pattern]: scrollKnowledge/scrollLessons/scrollMemories replace the old bare-array
+//    getKnowledge/getLessons/getMemories -- the REST endpoints now return a cursor envelope
+//    {items, next_cursor, has_more} (mirrors ReportSearchResponse/searchReports). Consume via
+//    useInfiniteQuery hooks in useMemory.ts, never re-add a bare-array wrapper around these.
 /**
  * Typed API client for Darwin Brain backend.
  */
@@ -510,12 +514,40 @@ export interface Lesson {
     anti_pattern: string;
     keywords: string[];
     event_references: string[];
+    channel?: 'external' | 'experience';
+    verification_count?: number;
     created_at: number;
   };
 }
 
-export async function getMemories(): Promise<MemoryPoint[]> {
-  return fetchApi<MemoryPoint[]>('/queue/admin/memories');
+/** Cursor-scroll envelope for GET /queue/admin/memories. Mirrors ReportSearchResponse. */
+export interface MemoryScrollResponse {
+  items: MemoryPoint[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+/** Cursor-scroll envelope for GET /queue/admin/lessons. Mirrors ReportSearchResponse. */
+export interface LessonScrollResponse {
+  items: Lesson[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+export interface MemoryScrollParams {
+  limit?: number;
+  cursor?: string;
+  service?: string;
+  q?: string;
+}
+
+export async function scrollMemories(params: MemoryScrollParams = {}): Promise<MemoryScrollResponse> {
+  const qs = new URLSearchParams();
+  qs.append('limit', String(params.limit ?? 50));
+  if (params.cursor) qs.append('cursor', params.cursor);
+  if (params.service) qs.append('service', params.service);
+  if (params.q) qs.append('q', params.q);
+  return fetchApi<MemoryScrollResponse>(`/queue/admin/memories?${qs.toString()}`);
 }
 
 export async function getMemory(eventId: string): Promise<MemoryPoint> {
@@ -534,8 +566,24 @@ export async function correctMemory(payload: {
   });
 }
 
-export async function getLessons(): Promise<Lesson[]> {
-  return fetchApi<Lesson[]>('/queue/admin/lessons');
+export interface LessonScrollParams {
+  limit?: number;
+  cursor?: string;
+  channel?: 'external' | 'experience';
+  q?: string;
+}
+
+export async function scrollLessons(params: LessonScrollParams = {}): Promise<LessonScrollResponse> {
+  const qs = new URLSearchParams();
+  qs.append('limit', String(params.limit ?? 50));
+  if (params.cursor) qs.append('cursor', params.cursor);
+  if (params.channel) qs.append('channel', params.channel);
+  if (params.q) qs.append('q', params.q);
+  return fetchApi<LessonScrollResponse>(`/queue/admin/lessons?${qs.toString()}`);
+}
+
+export async function getLessonById(lessonId: string): Promise<Lesson> {
+  return fetchApi<Lesson>(`/queue/admin/lessons/${encodeURIComponent(lessonId)}`);
 }
 
 export async function createLesson(payload: {
@@ -773,10 +821,28 @@ export async function dismissProposals(timestamps: number[]): Promise<void> {
 // Knowledge Facts API (darwin_knowledge)
 // =============================================================================
 
-import type { KnowledgePoint } from './types';
+import type { KnowledgePoint, KnowledgeScrollResponse } from './types';
 
-export async function getKnowledge(limit = 100): Promise<KnowledgePoint[]> {
-  return fetchApi<KnowledgePoint[]>(`/queue/admin/knowledge?limit=${limit}`);
+export interface KnowledgeScrollParams {
+  limit?: number;
+  cursor?: string;
+  scope?: import('./types').KnowledgeScope;
+  service?: string;
+  q?: string;
+}
+
+export async function scrollKnowledge(params: KnowledgeScrollParams = {}): Promise<KnowledgeScrollResponse> {
+  const qs = new URLSearchParams();
+  qs.append('limit', String(params.limit ?? 50));
+  if (params.cursor) qs.append('cursor', params.cursor);
+  if (params.scope) qs.append('scope', params.scope);
+  if (params.service) qs.append('service', params.service);
+  if (params.q) qs.append('q', params.q);
+  return fetchApi<KnowledgeScrollResponse>(`/queue/admin/knowledge?${qs.toString()}`);
+}
+
+export async function getKnowledgeById(knowledgeId: string): Promise<KnowledgePoint> {
+  return fetchApi<KnowledgePoint>(`/queue/admin/knowledge/${encodeURIComponent(knowledgeId)}`);
 }
 
 export async function createKnowledge(payload: {

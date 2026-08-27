@@ -4,6 +4,10 @@
 # 2. [Pattern]: Uses admin API (POST/GET/DELETE /queue/admin/knowledge) -- does NOT import Archivist directly.
 # 3. [Gotcha]: Requires running BlackBoard service with Qdrant accessible. Set DARWIN_URL env var.
 # 4. [Pattern]: 3 runs for variance check. Pass criteria: top-1 accuracy >= 80%, score gap >= 0.05.
+# 5. [Gotcha]: GET /admin/knowledge (and lessons/memories) now returns a cursor-scroll envelope
+#    {items, next_cursor, has_more} -- NOT a bare array. This probe only uses GET .../{id}
+#    (single-item, unchanged shape) and DELETE, so it's unaffected -- but do not add a bare
+#    `resp.json()` list-array assumption against the collection-list endpoint here.
 """
 Embedding quality probe for the darwin_knowledge collection.
 
@@ -90,9 +94,6 @@ async def run_probe():
             score_gaps = []
 
             for query, expected_idx in POSITIVE_QUERIES:
-                resp = await client.get("/admin/knowledge")
-                all_facts = resp.json()
-
                 # Use the brain's deep memory search via a direct Qdrant query isn't
                 # exposed via admin API, so we verify by checking GET returns the right data.
                 # For the actual embedding quality test, we check the knowledge_id ordering.

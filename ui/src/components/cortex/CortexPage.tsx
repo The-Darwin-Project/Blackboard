@@ -3,11 +3,15 @@
 // 1. [Pattern]: Split layout -- left panel (global topology), right panel (drill-down on event select).
 // 2. [Pattern]: Active events bar at bottom of left panel. Click event -> opens drill-down.
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
+// 4. [Pattern]: Lookup search box (top-left overlay) queries GET /queue/admin/{collection}/{id}
+//    directly -- finds facts/lessons/memories NOT on the 600/type ring sample without growing the
+//    ring itself. If the resolved neuron is already on-graph, selects it in place; otherwise opens
+//    NeuronInfoPanel with the fetched payload via the `lookupNeuron` fallback (off-graph render path).
 import { useState, useMemo, useCallback, useEffect, type FC } from 'react';
-import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Loader2, Brain, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { useCortexGraph, useKGServiceDetail, useKGServices, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
-import { getEventReport } from '../../api/client';
+import { getEventReport, getKnowledgeById, getLessonById, getMemory } from '../../api/client';
 import CortexGraph from './CortexGraph';
 import CortexLiveFeed from './CortexLiveFeed';
 import EventDrillDown from './EventDrillDown';
@@ -32,6 +36,10 @@ const CortexPage: FC = () => {
   const [selectedNeuron, setSelectedNeuron] = useState<{ id: string; pos: { x: number; y: number } } | null>(null);
   const [feedOpen, setFeedOpen] = useState(true);
   const [reportViewer, setReportViewer] = useState<{ title: string; content: string } | null>(null);
+  const [lookupNeuron, setLookupNeuron] = useState<Neuron | null>(null);
+  const [lookupCollection, setLookupCollection] = useState<'knowledge' | 'lesson' | 'memory'>('knowledge');
+  const [lookupId, setLookupId] = useState('');
+  const [lookupError, setLookupError] = useState<string | null>(null);
 
   const selectedServiceId = selectedNeuron?.id.startsWith('service:')
     ? selectedNeuron.id
@@ -82,11 +90,40 @@ const CortexPage: FC = () => {
 
   const handleCloseNeuron = useCallback(() => setSelectedNeuron(null), []);
 
+  const handleLookup = useCallback(async () => {
+    const id = lookupId.trim();
+    if (!id) return;
+    setLookupError(null);
+    try {
+      let neuron: Neuron;
+      if (lookupCollection === 'knowledge') {
+        const point = await getKnowledgeById(id);
+        neuron = { id: `knowledge:${point.id}`, type: 'knowledge', heat: 0, payload: point.payload as unknown as Record<string, unknown> };
+      } else if (lookupCollection === 'lesson') {
+        const lesson = await getLessonById(id);
+        neuron = { id: `lesson:${lesson.id}`, type: 'lesson', heat: 0, payload: lesson.payload as unknown as Record<string, unknown> };
+      } else {
+        const memory = await getMemory(id);
+        neuron = { id: `memory:${memory.id}`, type: 'memory', heat: 0, payload: memory.payload as Record<string, unknown> };
+      }
+      setLookupNeuron(neuron);
+      const centerPos = { x: window.innerWidth / 2 - 160, y: window.innerHeight / 2 - 100 };
+      setSelectedNeuron({ id: neuron.id, pos: centerPos });
+    } catch {
+      setLookupError(`No ${lookupCollection} found for "${id}"`);
+    }
+  }, [lookupId, lookupCollection]);
+
   useEffect(() => {
-    if (selectedNeuron && !selectedNeuron.id.startsWith('service:') && !mergedNeurons.some(n => n.id === selectedNeuron.id)) {
+    if (
+      selectedNeuron
+      && !selectedNeuron.id.startsWith('service:')
+      && lookupNeuron?.id !== selectedNeuron.id
+      && !mergedNeurons.some(n => n.id === selectedNeuron.id)
+    ) {
       setSelectedNeuron(null);
     }
-  }, [selectedNeuron, mergedNeurons]);
+  }, [selectedNeuron, mergedNeurons, lookupNeuron]);
 
   if (isLoading) {
     return (
@@ -108,7 +145,33 @@ const CortexPage: FC = () => {
   return (
     <div className="h-full flex overflow-hidden">
       {/* Center: Graph + events bar */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
+        <div className="absolute top-2 left-2 z-10 flex items-center gap-1 bg-bg-primary/90 border border-border rounded-lg p-1.5 shadow-lg">
+          <select
+            value={lookupCollection}
+            onChange={e => setLookupCollection(e.target.value as 'knowledge' | 'lesson' | 'memory')}
+            className="bg-bg-primary border border-border rounded px-1.5 py-1 text-[10px] text-text-secondary"
+          >
+            <option value="knowledge">Fact ID</option>
+            <option value="lesson">Lesson ID</option>
+            <option value="memory">Event ID</option>
+          </select>
+          <input
+            value={lookupId}
+            onChange={e => { setLookupId(e.target.value); setLookupError(null); }}
+            onKeyDown={e => { if (e.key === 'Enter') handleLookup(); }}
+            placeholder="Lookup off-ring by ID..."
+            className="w-40 bg-bg-primary border border-border rounded px-2 py-1 text-[10px] text-text-primary"
+          />
+          <button onClick={handleLookup} className="p-1.5 rounded text-text-muted hover:text-accent hover:bg-bg-tertiary transition-colors" title="Look up">
+            <Search size={12} />
+          </button>
+        </div>
+        {lookupError && (
+          <div className="absolute top-11 left-2 z-10 text-[10px] text-red-400 bg-bg-primary/90 px-2 py-1 rounded border border-red-400/30">
+            {lookupError}
+          </div>
+        )}
         <CortexGraph
           neurons={neurons}
           glowingIds={glowingIds}
@@ -130,7 +193,15 @@ const CortexPage: FC = () => {
               payload: { label, ...(svc?.properties ?? {}), relationship_count: svc?.relationship_count ?? 0, last_seen: svc?.last_seen ?? '' },
             };
           }
-          return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} serviceDetail={serviceDetail} /> : null;
+          if (!neuron && lookupNeuron?.id === selectedNeuron.id) neuron = lookupNeuron;
+          return neuron ? (
+            <NeuronInfoPanel
+              neuron={neuron}
+              position={selectedNeuron.pos}
+              onClose={() => { handleCloseNeuron(); setLookupNeuron(null); }}
+              serviceDetail={serviceDetail}
+            />
+          ) : null;
         })()}
         {reportViewer && (
           <MarkdownViewer

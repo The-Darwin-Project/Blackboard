@@ -6,8 +6,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
-import { getCognitiveGraph, getCortexActivity, getKGServiceDetail, getKGServices, getRecentPulses } from '../api/client';
-import type { KGServiceDetail, KGServiceEntity } from '../api/types';
+import { getCognitiveGraph, getCortexActivity, getKGServiceDetail, getKGServices, getKGStats, getRecentPulses } from '../api/client';
+import type { KGServiceDetail, KGServiceEntity, KGStats } from '../api/types';
 import type {
   CognitiveGraphResponse, PulseBatch, CortexThinkingMessage,
   CortexShadowMessage, CortexStatusMessage, CortexHeartbeatMessage,
@@ -46,6 +46,15 @@ export function useKGServiceDetail(entityId: string | null) {
     queryFn: () => getKGServiceDetail(entityId!),
     enabled: !!entityId,
     staleTime: 30_000,
+  });
+}
+
+export function useKGStats() {
+  return useQuery<KGStats>({
+    queryKey: ['kg-stats'],
+    queryFn: getKGStats,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   });
 }
 

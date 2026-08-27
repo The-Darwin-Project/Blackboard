@@ -2,7 +2,10 @@
 # @ai-rules:
 # 1. [Constraint]: Read-only endpoints EXCEPT proposal dismiss (operator lifecycle action).
 # 2. [Pattern]: Returns 503 when PulseTracker or Archivist unavailable (feature flag off).
-# 3. [Pattern]: /api/cognitive-graph merges Qdrant neurons with Redis heat counters.
+# 3. [Pattern]: /api/cognitive-graph merges Qdrant neurons with Redis heat counters. Cold-start
+#    sample is limit=600 per collection (budget-raised, not "heat-ranked" -- Qdrant scroll has
+#    no order_by). The Cortex ring's per-type LRU budget (CortexGraph.tsx) matches this 600.
+#    JARVIS's own _load_neuron_labels sample stays at 500 (out of scope for this endpoint).
 # 4. [Pattern]: /api/pulses filters by event_id or since timestamp.
 # 5. [Pattern]: /api/cortex/shadow endpoints read shadow intervention logs from Redis LIST keys.
 # 6. [Pattern]: /api/cortex/status reads live_adapter from app.state for UI hydration on mount.
@@ -42,9 +45,9 @@ async def get_cognitive_graph():
     pulse_tracker = await get_pulse_tracker()
     heat = await pulse_tracker.get_heat() if pulse_tracker else {}
 
-    lessons = await archivist.list_lessons(limit=500)
-    memories = await archivist.list_memories(limit=500)
-    knowledge = await archivist.list_knowledge(limit=500) if hasattr(archivist, "list_knowledge") else []
+    lessons = await archivist.list_lessons(limit=600)
+    memories = await archivist.list_memories(limit=600)
+    knowledge = await archivist.list_knowledge(limit=600) if hasattr(archivist, "list_knowledge") else []
 
     neurons = []
     for p in lessons:

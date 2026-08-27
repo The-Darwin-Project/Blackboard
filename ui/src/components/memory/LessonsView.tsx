@@ -2,9 +2,13 @@
 // @ai-rules:
 // 1. [Pattern]: Table view of lessons learned with creation form and delete.
 // 2. [Pattern]: 3 states: loading, empty, populated. Same pattern as IncidentsPage.
-import { useState } from 'react';
-import { Plus, Trash2, BookOpen } from 'lucide-react';
-import { useLessons, useCreateLesson, useDeleteLesson } from '../../hooks/useMemory';
+// 3. [Pattern]: useLessonsScroll (useInfiniteQuery) replaces the old full-collection useLessons.
+//    Channel filter is post-fetch (no Qdrant index on `channel`) -- pages may look sparse when
+//    filtered, an accepted limitation (see plan T-5b).
+import { useState, useMemo } from 'react';
+import { Plus, Trash2, BookOpen, Search, Loader2 } from 'lucide-react';
+import { useLessonsScroll, useCreateLesson, useDeleteLesson } from '../../hooks/useMemory';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 
 interface LessonForm {
   title: string;
@@ -17,12 +21,20 @@ interface LessonForm {
 const EMPTY_FORM: LessonForm = { title: '', pattern: '', anti_pattern: '', keywords: '', event_references: '' };
 
 export default function LessonsView() {
-  const { data: lessons, isLoading, isError } = useLessons();
+  const [channelFilter, setChannelFilter] = useState<'external' | 'experience' | ''>('');
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
+
+  const {
+    data, isLoading, isError, fetchNextPage, hasNextPage, isFetchingNextPage,
+  } = useLessonsScroll({ channel: channelFilter || undefined, q: debouncedSearch || undefined });
   const createMutation = useCreateLesson();
   const deleteMutation = useDeleteLesson();
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<LessonForm>(EMPTY_FORM);
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  const items = useMemo(() => data?.pages.flatMap(p => p.items) ?? [], [data]);
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-text-muted text-sm">Loading lessons...</div>;
@@ -43,18 +55,31 @@ export default function LessonsView() {
     });
   };
 
-  const items = lessons || [];
-
   return (
     <div className="h-full overflow-auto p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-text-primary">
-          Lessons Learned <span className="text-text-muted font-normal">({items.length})</span>
+          Lessons Learned <span className="text-text-muted font-normal">(loaded {items.length}{hasNextPage ? '+' : ''})</span>
         </h2>
         <button onClick={() => setShowForm(!showForm)}
           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-accent/20 text-accent hover:bg-accent/30 transition-colors">
           <Plus size={12} /> New Lesson
         </button>
+      </div>
+
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
+            value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search title or pattern..." />
+        </div>
+        <select className="bg-bg-primary border border-border rounded px-2 py-1.5 text-xs text-text-primary"
+          value={channelFilter} onChange={e => setChannelFilter(e.target.value as 'external' | 'experience' | '')}>
+          <option value="">All channels</option>
+          <option value="external">external</option>
+          <option value="experience">experience</option>
+        </select>
       </div>
 
       {showForm && (
@@ -156,6 +181,12 @@ export default function LessonsView() {
               </div>
             );
           })}
+          {hasNextPage && (
+            <button onClick={() => fetchNextPage()} disabled={isFetchingNextPage}
+              className="w-full py-2 rounded text-xs font-medium text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+              {isFetchingNextPage ? <><Loader2 size={12} className="animate-spin" /> Loading...</> : 'Load more'}
+            </button>
+          )}
         </div>
       )}
     </div>
