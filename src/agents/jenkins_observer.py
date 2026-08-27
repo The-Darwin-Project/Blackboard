@@ -354,7 +354,7 @@ class JenkinsObserver:
             return
 
         parts: list[str] = []
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, verify=False) as client:
             for slug in skills_csv.split(","):
                 slug = slug.strip()
                 if not slug:

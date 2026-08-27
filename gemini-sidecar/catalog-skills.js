@@ -31,7 +31,9 @@ let _refreshTimer = null;
 function httpGet(url, timeoutMs) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { timeout: timeoutMs }, (res) => {
+    const opts = { timeout: timeoutMs };
+    if (mod === https) opts.rejectUnauthorized = false;
+    const req = mod.get(url, opts, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => {
