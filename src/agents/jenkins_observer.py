@@ -61,11 +61,17 @@ logger = logging.getLogger(__name__)
 
 _DEDUP_STATUSES = ("new", "active", "deferred", "waiting_approval")
 
-# Sentinel key for _view_unhealthy when JENKINS_OBSERVER_VIEWS resolves empty
-# (misconfiguration or a GitOps overlay still setting the old `versions` key).
-# Not a real view name -- ensures view_unhealthy reports True instead of
-# silently defaulting to healthy when no views are configured.
+# Sentinel keys for _view_unhealthy -- neither is a real Jenkins view name.
+# Both exist because view_unhealthy defaults to healthy (any() over an empty/
+# unset dict is False), so every path that skips per-view scanning must
+# explicitly opt in to "unhealthy" or the CI-gating-dark condition is masked.
+# NOTE: if you ever iterate _view_unhealthy.items() for per-view logging/metrics,
+# filter these out -- they are not views.
 _VIEWS_UNCONFIGURED_KEY = "__no_views_configured__"
+# Set in _drain_once() while self._adapter is None/disabled (missing Jenkins
+# config, or circuit breaker open) -- cleared once the adapter is usable again
+# so _poll_and_stage() can recompute real per-view health.
+_ADAPTER_UNAVAILABLE_KEY = "__adapter_unavailable__"
 
 # Bounds on the one-time legacy pipe-key migration in start() -- this runs on
 # the app's critical startup path (awaited before the readiness probe), so it
@@ -360,7 +366,7 @@ class JenkinsObserver:
                         continue
                     md = download_skill_md(resp.content, slug)
                     if md:
-                        parts.append(self._sanitize_console_tail(md[:10000]))
+                        parts.append(_sanitize_console_tail(md[:10000]))
                     else:
                         logger.warning("JenkinsObserver: No SKILL.md in ZIP for slug '%s'", slug)
                 except Exception as e:
@@ -398,7 +404,16 @@ class JenkinsObserver:
         await self._ensure_skills_loaded()
 
         if not self._adapter or not self._adapter.enabled():
+            logger.error(
+                "JenkinsObserver: adapter %s -- CI gating discovery is completely "
+                "dark. Marking unhealthy.",
+                "not configured" if not self._adapter else "disabled (breaker open?)",
+            )
+            self._view_unhealthy[_ADAPTER_UNAVAILABLE_KEY] = True
             return
+        # Adapter is back up -- let _poll_and_stage() recompute real per-view health
+        # instead of leaving this sentinel stuck true from a since-recovered outage.
+        self._view_unhealthy.pop(_ADAPTER_UNAVAILABLE_KEY, None)
 
         await self._poll_and_stage()
 

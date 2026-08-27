@@ -704,6 +704,57 @@ class TestT16SkillsDegradation:
 
 
 # =========================================================================
+# T-16c: Skills Catalog success path actually loads real skill content
+# =========================================================================
+
+class TestT16cSkillsSuccessPath:
+    """T-16c: A successful catalog fetch must replace _skills_si with the
+    downloaded SKILL.md content, not silently leave it at the fallback.
+
+    This is the success-path complement to T-16/T-16b (which only assert the
+    failure branches). Its absence is exactly why a self._sanitize_console_tail
+    AttributeError (self._sanitize_console_tail is a module-level function,
+    not a method) went undetected across two review rounds: the broad
+    `except Exception` swallowed it, _skills_si silently stayed at fallback,
+    and every prior test only checked "fallback is non-empty" -- which is
+    true whether the real fetch succeeded or crashed."""
+
+    async def test_catalog_success_loads_real_skill_content(self):
+        import io
+        import zipfile
+
+        skill_body = "# CNV Gating Workflow\n\nDetailed skill instructions for triage."
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("cnv-gating-workflow/SKILL.md", skill_body)
+        zip_bytes = buf.getvalue()
+
+        env = _env_vars(SKILLS_CATALOG_SKILLS="cnv-gating-workflow")
+        with patch.dict("os.environ", env):
+            from src.agents.jenkins_observer import _FALLBACK_SI, JenkinsObserver
+
+            bb = _mock_blackboard()
+            obs = JenkinsObserver(blackboard=bb)
+            obs._skills_loaded_at = 0  # force reload
+
+            with patch("httpx.AsyncClient") as MockClient:
+                mock_client = AsyncMock()
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.content = zip_bytes
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                await obs._ensure_skills_loaded()
+
+        assert skill_body in obs._skills_si, \
+            f"Real downloaded SKILL.md content must be in _skills_si, got: {obs._skills_si!r}"
+        assert obs._skills_si != _FALLBACK_SI, \
+            "_skills_si must not silently remain at the fallback after a successful fetch"
+
+
+# =========================================================================
 # T-17: Kill-switch prevents construction
 # =========================================================================
 
@@ -1584,6 +1635,79 @@ class TestTV22EmptyViewsReportsUnhealthy:
             "Empty JENKINS_OBSERVER_VIEWS must mark view_unhealthy=True, " \
             "not silently report healthy while discovery is dark"
         bb.stage_jenkins_signal.assert_not_called()
+
+
+# =========================================================================
+# T-V23: Missing/disabled adapter must also report unhealthy (second trigger
+# for the same CI-gating-dark bug class as T-V22)
+# =========================================================================
+
+class TestTV23AdapterUnavailableReportsUnhealthy:
+    """T-V23: _drain_once() returning early because self._adapter is None or
+    disabled (missing Jenkins config, or a latched circuit breaker) is a
+    second, independent trigger for the exact same silent-healthy-while-dark
+    bug T-V22 covers for empty views -- it must also mark view_unhealthy=True,
+    and must clear that sentinel once the adapter recovers."""
+
+    async def test_missing_adapter_marks_view_unhealthy_true(self):
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = None  # e.g. JENKINS_URL/USER/TOKEN not configured
+
+            assert obs.view_unhealthy is False, \
+                "Sanity: view_unhealthy should be False before any drain cycle"
+
+            await obs._drain_once()
+
+        assert obs.view_unhealthy is True, \
+            "A missing/disabled adapter must mark view_unhealthy=True, " \
+            "not silently report healthy while discovery is dark"
+        bb.stage_jenkins_signal.assert_not_called()
+
+    async def test_disabled_adapter_marks_view_unhealthy_true(self):
+        """Same as above but via adapter.enabled() == False (e.g. breaker open)
+        rather than adapter being None outright."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.enabled = MagicMock(return_value=False)
+
+            await obs._drain_once()
+
+        assert obs.view_unhealthy is True, \
+            "adapter.enabled()==False must mark view_unhealthy=True, not report healthy"
+
+    async def test_adapter_recovery_clears_sentinel(self):
+        """Once the adapter becomes available again, the sentinel must clear
+        so real per-view health (not a stale outage flag) drives view_unhealthy."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = None
+            await obs._drain_once()
+            assert obs.view_unhealthy is True, "Sanity: unhealthy while adapter is down"
+
+            obs._adapter = AsyncMock()
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=[])
+            )
+            obs._skills_si = "test skills"
+            await obs._drain_once()
+
+        assert obs.view_unhealthy is False, \
+            "view_unhealthy must clear once the adapter recovers and a clean scan runs"
 
 
 # =========================================================================
