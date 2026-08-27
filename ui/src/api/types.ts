@@ -419,7 +419,6 @@ export interface JenkinsPendingItem {
   key: string;
   target: string;
   version: string;
-  category: string;
   job_name: string;
   result: string;
   build_number: number | null;
@@ -464,6 +463,7 @@ export interface ShiftReportSummary {
   escalation_count: number;
   incident_count: number;
   noise_reduction_pct: number;
+  failed_cluster_count: number;
 }
 
 export interface StagedEscalationDTO {

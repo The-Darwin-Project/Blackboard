@@ -7,7 +7,7 @@
  * Shifts page -- Nightwatcher shift calendar and detail views.
  */
 import { useState, useMemo } from 'react';
-import { Clock, ChevronLeft, ChevronRight, Moon } from 'lucide-react';
+import { Clock, ChevronLeft, ChevronRight, Moon, AlertTriangle } from 'lucide-react';
 import { useCurrentShift, useShiftsList, useShiftDetail } from '../hooks/useShifts';
 import { SHIFT_STATUS_COLORS } from '../constants/colors';
 import type { ShiftReportSummary, ShiftReportFull } from '../api/types';
@@ -164,6 +164,12 @@ function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
           <div className="text-xs text-text-primary font-medium">
             {shift.escalation_count} → {shift.incident_count}
           </div>
+          {shift.failed_cluster_count > 0 && (
+            <div className="flex items-center gap-1 text-[10px] text-red-400">
+              <AlertTriangle className="w-3 h-3" />
+              {shift.failed_cluster_count} failed
+            </div>
+          )}
           {shift.noise_reduction_pct > 0 && (
             <div className="w-full bg-bg-tertiary rounded-full h-1.5">
               <div className="h-1.5 rounded-full bg-green-500"
@@ -193,11 +199,17 @@ function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClos
       </div>
 
       {/* Metrics bar */}
-      <div className="flex gap-4 text-xs text-text-secondary">
+      <div className="flex gap-4 text-xs text-text-secondary flex-wrap">
         <span>{report.metrics?.escalation_count ?? 0} escalations</span>
         <span>{report.metrics?.incident_count ?? 0} incidents</span>
         <span>{(report.metrics?.noise_reduction_pct ?? 0).toFixed(0)}% reduced</span>
         {duration != null && <span>{duration.toFixed(1)}s sweep</span>}
+        {(report.metrics?.failed_cluster_count ?? 0) > 0 && (
+          <span className="text-red-400 flex items-center gap-1">
+            <AlertTriangle className="w-3 h-3" />
+            {report.metrics.failed_cluster_count} clusters failed (Jira error)
+          </span>
+        )}
       </div>
 
       {/* Incidents */}
