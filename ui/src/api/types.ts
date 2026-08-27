@@ -354,6 +354,7 @@ export interface FlowMetrics {
   aligner_pending: number;
   jenkins_pending: number;
   jenkins_breaker_open: boolean;
+  jenkins_view_unhealthy: boolean;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;
@@ -376,6 +377,7 @@ export interface FlowSnapshot {
   aligner_pending: number;
   jenkins_pending: number;
   jenkins_breaker_open: boolean;
+  jenkins_view_unhealthy: boolean;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;

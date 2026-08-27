@@ -81,3 +81,14 @@ app: darwin-brain
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: slack-access-gate
 {{- end }}
+
+{{/*
+Skills Catalog URL env block — included in sidecar containers and Tekton TriggerTemplate.
+Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of .Values.jenkinsObserver.enabled).
+*/}}
+{{- define "darwin.skillsCatalogEnv" -}}
+{{- if and .Values.jenkinsObserver .Values.jenkinsObserver.skillsCatalog .Values.jenkinsObserver.skillsCatalog.url }}
+- name: SKILLS_CATALOG_URL
+  value: "{{ .Values.jenkinsObserver.skillsCatalog.url }}"
+{{- end }}
+{{- end }}

@@ -562,7 +562,8 @@ jenkinsObserver:
   startupDelay: "180" # seconds to wait before first poll
   dwellSeconds: "60" # minimum dwell time before event creation
   floodThreshold: "3" # signals per version before flood consolidation
-  versions: "" # CSV of CNV versions to poll (e.g., "4.22,4.23")
+  views: "" # CSV of Jenkins view names to scan (e.g., "Gating Wrappers")
+  recencyHours: "72" # hours -- stale SUCCESS jobs dropped (FAILURE always kept)
   maintainers: "" # CSV of maintainer emails for escalation -- set in GitOps overlay
   jenkins:
     existingSecret: "" # K8s Secret with keys: username, api-token
@@ -573,7 +574,7 @@ jenkinsObserver:
     circuitBreakerCooldown: "300" # seconds before the breaker auto-unlatches for a retry
   skillsCatalog:
     url: ""
-    skills: "cnv-gating-workflow,cnv-gating-failure-analysis"
+    skills: "" # Comma-separated skill slugs for observer Flash Lite triage. Production values in GitOps overlay.
   releaseAi:
     url: ""
     email: "" # Forwarded-Email header value for Release AI RCA queries (RELEASE_AI_EMAIL)

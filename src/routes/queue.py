@@ -11,7 +11,7 @@
 # 9. [Pattern]: Knowledge CRUD routes mirror lesson pattern. KnowledgeUpdateRequest uses extra="forbid" to enforce immutability of identity fields (topic, scope) -- Pydantic returns 422 on unknown fields.
 # 10. [Pattern]: PATCH /admin/knowledge/{id} does read-modify-reembed-upsert. Only mutable fields (fact, source, confidence, valid_until) can be updated.
 # 11. [Pattern]: GET /aligner/pending reads from darwin:aligner:pending ZSET + meta HASH. Pure Redis read (unlike HH which re-fetches from GitLab). response_model=list[PendingAnomaly].
-# 12. [Pattern]: GET /jenkins/pending mirrors aligner pattern — darwin:jenkins:pending ZSET + meta HASH. Key format: {category}:{job_name}|{version}. response_model=list[JenkinsPendingItem].
+# 12. [Pattern]: GET /jenkins/pending mirrors aligner pattern — darwin:jenkins:pending ZSET + meta HASH. Key format: {job_name} or view-outage:{view}. response_model=list[JenkinsPendingItem]. Meta-last: target from meta.get("job_name"), not key-derived.
 # 11. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
 #     deliberately omits it -- service is immutable once a fact is created.
 """
@@ -937,7 +937,10 @@ async def aligner_pending_items(
 async def jenkins_pending_items(
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
-    """Pending CI signals in the Jenkins dwell queue."""
+    """Pending CI signals in the Jenkins dwell queue.
+
+    Key format: {job_name} or view-outage:{view}.
+    """
     members = await blackboard.redis.zrange(
         "darwin:jenkins:pending", 0, -1, withscores=True
     )
@@ -947,9 +950,12 @@ async def jenkins_pending_items(
             "darwin:jenkins:pending:meta", member
         )
         meta = {} if meta_json is None else json.loads(meta_json)
-        raw_target, version = member.split("|", 1) if "|" in member else (member, "")
-        category, target = raw_target.split(":", 1) if ":" in raw_target else ("", raw_target)
-        result.append({**meta, "key": member, "target": target, "category": category, "version": version, "first_seen": score})
+        result.append({
+            "key": member,
+            "target": meta.get("job_name") or member,
+            "first_seen": score,
+            **meta,
+        })
     return result
 
 
