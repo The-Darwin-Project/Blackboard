@@ -57,12 +57,17 @@ GET  /queue/headhunter/pending        # Pending Headhunter events
 
 ### Admin Endpoints
 
+Memory/lesson/knowledge list endpoints use cursor-based scroll pagination (see [Knowledge Admin](#knowledge-admin) for the shared envelope shape).
+
 ```text
 POST /queue/admin/rebuild-deep-memory # Re-index deep memory from closed events
-GET  /queue/admin/memories            # Browse vector store entries
+GET  /queue/admin/memories            # Scroll archived event memories
+     ?limit=50&cursor=&service=&q=    # cursor from prior page's next_cursor; q is post-fetch substring match on symptom/service (current page only)
 POST /queue/admin/correct-memory      # Correct a memory entry
-GET  /queue/admin/lessons             # List extracted lessons
+GET  /queue/admin/lessons             # Scroll lessons learned
+     ?limit=50&cursor=&channel=&q=    # channel/q are post-fetch filters (current page only, no Qdrant index)
 POST /queue/admin/lessons             # Create a lesson
+GET  /queue/admin/lessons/{id}        # Get a single lesson by ID
 PATCH /queue/admin/lessons/{id}/demote  # Demote a lesson (reduce priority)
 PATCH /queue/admin/lessons/{id}/verify  # Mark a lesson as verified
 DELETE /queue/admin/lessons/{id}      # Delete a lesson
@@ -231,10 +236,29 @@ Static infrastructure facts (conventions, ownership, relationships). Admin CRUD 
 
 ```text
 POST   /queue/admin/knowledge         # Create a knowledge fact
-GET    /queue/admin/knowledge         # List all knowledge facts
+GET    /queue/admin/knowledge         # Scroll knowledge facts
+       ?limit=50&cursor=&scope=&service=&q=  # scope/service are indexed Qdrant filters; q is a post-fetch substring match (current page only)
 GET    /queue/admin/knowledge/{id}    # Get a single knowledge fact
 PATCH  /queue/admin/knowledge/{id}    # Update a knowledge fact (topic/scope immutable)
 DELETE /queue/admin/knowledge/{id}    # Delete a knowledge fact
+```
+
+**Scroll envelope** (shared shape for `/admin/{memories,lessons,knowledge}`):
+
+```json
+{"items": [...], "next_cursor": "opaque-string-or-null", "has_more": true}
+```
+
+`limit` defaults to 50, `le=200`. `cursor` is opaque -- pass the prior page's `next_cursor` verbatim; omit for the first page. `has_more: false` means the underlying Qdrant scroll is exhausted; post-fetch filters (`q`, `channel`) can return a sparse or empty page while `has_more` is still `true` if matches exist on a later page -- there is no `total` count.
+
+## Knowledge Graph
+
+Read-only endpoints backing the Memory page's Graph tab. Dex-gated; return empty results (`[]` / `null`) when the graph store or Dex is unavailable, rather than erroring.
+
+```text
+GET /api/knowledge-graph/services         # All entities with relationship counts
+GET /api/knowledge-graph/services/{id}    # Single entity + its relationships
+GET /api/knowledge-graph/stats            # Entity/relationship counts by type, last_updated
 ```
 
 ## Diagnostics
