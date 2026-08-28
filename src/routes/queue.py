@@ -14,6 +14,11 @@
 # 12. [Pattern]: GET /jenkins/pending mirrors aligner pattern — darwin:jenkins:pending ZSET + meta HASH. Key format: {job_name} or view-outage:{view}. response_model=list[JenkinsPendingItem]. Meta-last: target from meta.get("job_name"), not key-derived.
 # 11. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
 #     deliberately omits it -- service is immutable once a fact is created.
+# 12. [Pattern]: GET /admin/{knowledge,lessons,memories} are cursor-paginated scroll endpoints:
+#     {items, next_cursor, has_more} (no `total`, matching /reports/search). limit default 50,
+#     le=200 on all three -- never raise this to unbounded. q/scope/channel/service filters are
+#     partly Qdrant-indexed (scope/service) and partly post-fetch on the current page only
+#     (channel has no payload index; q is a page-local substring match everywhere).
 """
 Conversation Queue API - Event document management.
 
@@ -550,13 +555,29 @@ class LessonRequest(BaseModel):
 
 
 @router.get("/admin/memories")
-async def list_memories():
-    """List all archived event memories from Qdrant."""
+async def scroll_memories(
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = Query(default=None, max_length=500, description="Opaque cursor from a prior page's next_cursor"),
+    service: Optional[str] = Query(default=None, max_length=200, description="Filter by service (indexed)"),
+    q: Optional[str] = Query(default=None, max_length=200, description="Substring match on symptom/service, applied to this page only"),
+):
+    """One page of archived event memories from Qdrant. Envelope: {items, next_cursor, has_more}."""
     try:
         archivist = await get_archivist()
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
-    return await archivist.list_memories()
+    qdrant_filter = {"must": [{"key": "service", "match": {"value": service}}]} if service else None
+    result = await archivist.scroll_memories(limit=limit, offset=cursor, filter=qdrant_filter)
+    items = result.get("items", [])
+    if q:
+        ql = q.lower()
+        items = [
+            p for p in items
+            if ql in str(p.get("payload", {}).get("symptom", "")).lower()
+            or ql in str(p.get("payload", {}).get("service", "")).lower()
+        ]
+    next_offset = result.get("next_offset")
+    return {"items": items, "next_cursor": next_offset, "has_more": next_offset is not None}
 
 
 @router.get("/admin/memories/{event_id}")
@@ -591,13 +612,46 @@ async def correct_memory(req: CorrectMemoryRequest):
 
 
 @router.get("/admin/lessons")
-async def list_lessons():
-    """List all lessons learned from Qdrant."""
+async def scroll_lessons(
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = Query(default=None, max_length=500, description="Opaque cursor from a prior page's next_cursor"),
+    channel: Optional[str] = Query(default=None, max_length=200, description="Filter by channel (external/experience) -- no Qdrant index, applied to this page only"),
+    q: Optional[str] = Query(default=None, max_length=200, description="Substring match on title/pattern, applied to this page only"),
+):
+    """One page of lessons learned from Qdrant. Envelope: {items, next_cursor, has_more}."""
     try:
         archivist = await get_archivist()
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
-    return await archivist.list_lessons()
+    result = await archivist.scroll_lessons(limit=limit, offset=cursor)
+    items = result.get("items", [])
+    if channel:
+        items = [
+            p for p in items
+            if p.get("payload", {}).get("channel", "external") == channel
+        ]
+    if q:
+        ql = q.lower()
+        items = [
+            p for p in items
+            if ql in str(p.get("payload", {}).get("title", "")).lower()
+            or ql in str(p.get("payload", {}).get("pattern", "")).lower()
+        ]
+    next_offset = result.get("next_offset")
+    return {"items": items, "next_cursor": next_offset, "has_more": next_offset is not None}
+
+
+@router.get("/admin/lessons/{lesson_id}")
+async def get_lesson(lesson_id: str):
+    """Get a single lesson by lesson_id."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    result = await archivist.get_lesson(lesson_id)
+    if not result:
+        raise HTTPException(404, f"Lesson {lesson_id} not found")
+    return result
 
 
 @router.post("/admin/lessons")
@@ -723,13 +777,17 @@ async def verify_lesson(lesson_id: str):
 
 @router.delete("/admin/lessons/{lesson_id}")
 async def delete_lesson(lesson_id: str):
-    """Delete a lesson by ID."""
+    """Delete a lesson by ID.
+
+    Uses get_lesson() (direct point lookup) rather than scanning list_lessons(limit=500) --
+    the old scan silently 404'd on any lesson beyond the 500th stored.
+    """
     try:
         archivist = await get_archivist()
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
-    existing = await archivist.list_lessons(limit=500)
-    if not any(p.get("payload", {}).get("lesson_id") == lesson_id for p in existing):
+    existing = await archivist.get_lesson(lesson_id)
+    if not existing:
         raise HTTPException(404, f"Lesson {lesson_id} not found")
     success = await archivist.delete_lesson(lesson_id)
     if not success:
@@ -857,13 +915,40 @@ async def create_knowledge(req: KnowledgeRequest):
 
 
 @router.get("/admin/knowledge")
-async def list_knowledge(limit: int = Query(default=100, le=1000, ge=1)):
-    """List knowledge facts from Qdrant (paginated, default 100, max 1000)."""
+async def scroll_knowledge(
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = Query(default=None, max_length=500, description="Opaque cursor from a prior page's next_cursor"),
+    scope: Optional[str] = Query(default=None, max_length=200, description="Filter by scope (indexed)"),
+    service: Optional[str] = Query(default=None, max_length=200, description="Filter by service (indexed)"),
+    q: Optional[str] = Query(default=None, max_length=200, description="Substring match on topic/fact, applied to this page only"),
+):
+    """One page of knowledge facts from Qdrant. Envelope: {items, next_cursor, has_more}.
+
+    Never `limit=0` -- cursor absence just means "first page". ge=1/le=200 stays
+    tight (the old le=1000 + a client-side default=100 was a double clamp that
+    masked the unread tail; this pagination contract replaces it, not raises it).
+    """
     try:
         archivist = await get_archivist()
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
-    return await archivist.list_knowledge(limit=limit)
+    conditions = []
+    if scope:
+        conditions.append({"key": "scope", "match": {"value": scope}})
+    if service:
+        conditions.append({"key": "service", "match": {"value": service}})
+    qdrant_filter = {"must": conditions} if conditions else None
+    result = await archivist.scroll_knowledge(limit=limit, offset=cursor, filter=qdrant_filter)
+    items = result.get("items", [])
+    if q:
+        ql = q.lower()
+        items = [
+            p for p in items
+            if ql in str(p.get("payload", {}).get("topic", "")).lower()
+            or ql in str(p.get("payload", {}).get("fact", "")).lower()
+        ]
+    next_offset = result.get("next_offset")
+    return {"items": items, "next_cursor": next_offset, "has_more": next_offset is not None}
 
 
 @router.get("/admin/knowledge/{knowledge_id}")

@@ -3,9 +3,12 @@
 // 1. [Pattern]: Table view of archived event memories with inline correction form.
 // 2. [Pattern]: 3 states: loading, empty, populated. Same pattern as IncidentsPage.
 // 3. [Pattern]: Click row to expand detail + correction form. Submit invalidates query cache.
-import { useState, Fragment } from 'react';
-import { CheckCircle, ChevronDown, ChevronRight, Send } from 'lucide-react';
-import { useMemories, useCorrectMemory } from '../../hooks/useMemory';
+// 4. [Pattern]: useMemoriesScroll (useInfiniteQuery) replaces the old full-collection useMemories.
+//    Service filter is server-side (Qdrant indexed); q is a substring match on each fetched page.
+import { useState, useMemo, Fragment } from 'react';
+import { CheckCircle, ChevronDown, ChevronRight, Send, Search, Loader2 } from 'lucide-react';
+import { useMemoriesScroll, useCorrectMemory } from '../../hooks/useMemory';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 
 interface CorrectionForm {
   eventId: string;
@@ -15,10 +18,19 @@ interface CorrectionForm {
 }
 
 export default function MemoriesView() {
-  const { data: memories, isLoading, isError } = useMemories();
+  const [service, setService] = useState('');
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search);
+  const debouncedService = useDebouncedValue(service);
+
+  const {
+    data, isLoading, isError, fetchNextPage, hasNextPage, isFetchingNextPage,
+  } = useMemoriesScroll({ service: debouncedService || undefined, q: debouncedSearch || undefined });
   const correctMutation = useCorrectMemory();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [form, setForm] = useState<CorrectionForm | null>(null);
+
+  const memories = useMemo(() => data?.pages.flatMap(p => p.items) ?? [], [data]);
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-text-muted text-sm">Loading memories...</div>;
@@ -26,7 +38,7 @@ export default function MemoriesView() {
   if (isError) {
     return <div className="flex items-center justify-center h-full text-red-400 text-sm">Failed to load memories.</div>;
   }
-  if (!memories || memories.length === 0) {
+  if (memories.length === 0 && !service && !search) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 text-text-muted">
         <span className="text-sm">No archived memories yet.</span>
@@ -65,9 +77,25 @@ export default function MemoriesView() {
     <div className="h-full overflow-auto p-4">
       <div className="mb-3">
         <h2 className="text-sm font-semibold text-text-primary">
-          Event Memories <span className="text-text-muted font-normal">({memories.length})</span>
+          Event Memories <span className="text-text-muted font-normal">(loaded {memories.length}{hasNextPage ? '+' : ''})</span>
         </h2>
       </div>
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
+            value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search symptom or service..." />
+        </div>
+        <input className="bg-bg-primary border border-border rounded px-2 py-1.5 text-xs text-text-primary w-40"
+          value={service} onChange={e => setService(e.target.value)}
+          placeholder="Filter by service..." />
+      </div>
+      {memories.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 gap-2 text-text-muted">
+          <span className="text-sm">No memories match this filter.</span>
+        </div>
+      ) : (
       <div className="border border-border rounded-lg overflow-hidden">
         <table className="w-full text-xs" style={{ tableLayout: 'auto' }}>
           <thead>
@@ -172,6 +200,13 @@ export default function MemoriesView() {
           </tbody>
         </table>
       </div>
+      )}
+      {hasNextPage && (
+        <button onClick={() => fetchNextPage()} disabled={isFetchingNextPage}
+          className="w-full mt-2 py-2 rounded text-xs font-medium text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+          {isFetchingNextPage ? <><Loader2 size={12} className="animate-spin" /> Loading...</> : 'Load more'}
+        </button>
+      )}
     </div>
   );
 }

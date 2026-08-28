@@ -11,6 +11,10 @@
 // 9. [Pattern]: Ripple overlay via DOM: sigma.getContainer().appendChild(div.skill-ripple). activeRipplesRef cap=10. idempotent cleanup via `cleaned` flag.
 // 10. [Pattern]: KG Service nodes (kgServices prop) placed in knowledge ring as circles (NEURON_COLORS.service, size 5).
 //     Service-event edges via activeEvent.service match, max 3 per service. Pulse glow propagation via eventServiceMapRef.
+// 11. [Pattern]: Knowledge-ring node materialize/evict/rebuild logic lives in cortex-pulse-handler.ts
+//     (pure functions, unit-tested there) -- this file only owns the refs (materializedNodesRef,
+//     typeCountsRef, lastPulseRef) and calls into that module. Do NOT reimplement LRU/materialize
+//     logic inline here; extend cortex-pulse-handler.ts instead.
 import { useEffect, useRef, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
@@ -22,6 +26,10 @@ import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS, SKILL_TAG_COL
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor, PHASE_SKILL_FOLDERS,
 } from './cortex-constants';
+import {
+  materializeNeuron, evictLru, rebuildMerge, seedLastPulse,
+  KNOWLEDGE_RING, type KnowledgeNodeAttributes,
+} from './cortex-pulse-handler';
 import type { ActiveEvent, KGServiceEntity } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
 // import BrainCore from './BrainCore'; // disabled -- needs its own dedicated view
@@ -75,10 +83,23 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   const activeRipplesRef = useRef(0);
   const lastPulseRef = useRef<Map<string, number>>(new Map());
   const baseSizeRef = useRef<Map<string, number>>(new Map());
+  // Knowledge-ring working-set state (Step 6: 600/type budget + pulse materialize + LRU).
+  const materializedNodesRef = useRef<Map<string, KnowledgeNodeAttributes>>(new Map());
+  const typeCountsRef = useRef<Map<string, number>>(new Map());
+
+  // Clear materialized working-set ONLY on unmount (Cortex page navigation away) -- it must
+  // survive every periodic loadGraph() rebuild while the page stays mounted.
+  useEffect(() => {
+    return () => {
+      materializedNodesRef.current.clear();
+      typeCountsRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     processedBatchesRef.current.clear();
     baseSizeRef.current.clear();
+    typeCountsRef.current.clear();
     const graph = new MultiGraph();
     const executive = getExecutiveNeurons();
     const allNeurons = [...neurons, ...executive];
@@ -89,7 +110,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     }
 
     // Concentric ring layout: brain core -> executive (ring 1) -> skills (ring 2) -> knowledge (ring 3) -> events (ring 4)
-    const RING = { executive: 280, skills: 460, knowledge: { min: 560, max: 720 }, events: 880 };
+    const RING = { executive: 280, skills: 460, knowledge: KNOWLEDGE_RING, events: 880 };
 
     // Count executive and skill nodes for even distribution
     const toolNodes = allNeurons.filter(n => n.type === 'tool');
@@ -157,8 +178,20 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         type: 'circle',
         fixed: isFixed,
         weight: isFixed ? 1 : 1 + Math.log(n.heat + 1),
+        ...(isKnowledge ? { neuronType: n.type } : {}),
       });
+
+      if (isKnowledge) {
+        typeCountsRef.current.set(n.type, (typeCountsRef.current.get(n.type) ?? 0) + 1);
+        // Write-if-absent: don't zero a node's timestamp if it was pulsed before this rebuild.
+        seedLastPulse(lastPulseRef.current, n.id);
+      }
     }
+
+    // Re-merge pulse-materialized nodes the fresh cold-start sample didn't already place
+    // (hasNode guard inside rebuildMerge means cold-start always wins a collision), then trim
+    // back to budget if the merge pushed any type over.
+    rebuildMerge(graph, materializedNodesRef.current, typeCountsRef.current, lastPulseRef.current);
 
     // Ring 3b: KG Service nodes in knowledge band (capped at 15, sorted by relationship_count desc)
     const cappedServices = (kgServices ?? [])
@@ -299,10 +332,28 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       for (let pulseIdx = 0; pulseIdx < batch.pulses.length; pulseIdx++) {
         const pulse = batch.pulses[pulseIdx];
         const edgeId = `activity:${evtId}:${pulse.neuron_id}:${batch.timestamp}`;
-        if (graph.hasEdge(edgeId) || !graph.hasNode(pulse.neuron_id)) continue;
+        if (graph.hasEdge(edgeId)) continue;
 
-        // Record pulse time for temporal decay (breathing effect)
+        let justMaterialized = false;
+        if (!graph.hasNode(pulse.neuron_id)) {
+          // Materialize a missing knowledge-ring node (lesson/memory/knowledge) so a live recall
+          // outside the cold-start 600/type sample still lights up on the ring. Non-knowledge-ring
+          // pulses (tool/phase/agent/...) for a missing node are skipped, same as before.
+          justMaterialized = materializeNeuron(graph, pulse, materializedNodesRef.current, typeCountsRef.current);
+          if (!justMaterialized) continue;
+        }
+
+        // Record pulse time for temporal decay (breathing effect) -- set BEFORE eviction so a
+        // freshly materialized node never becomes its own eviction victim (a brand-new node with
+        // no timestamp yet would otherwise look like the coldest node of its type).
         lastPulseRef.current.set(pulse.neuron_id, Date.now());
+
+        if (justMaterialized) {
+          const evicted = evictLru(
+            graph, pulse.neuron_type, typeCountsRef.current, lastPulseRef.current, materializedNodesRef.current,
+          );
+          if (evicted === pulse.neuron_id) continue; // defensive -- shouldn't happen, just pulsed
+        }
 
         let source = evtId;
         let size = 4;

@@ -1,21 +1,25 @@
 // BlackBoard/ui/src/components/memory/MemoryPage.tsx
 // @ai-rules:
-// 1. [Pattern]: Sub-nav with Memories | Lessons | Facts | Field Notes | Extract tabs.
+// 1. [Pattern]: Sub-nav with Memories | Lessons | Facts | Graph | Field Notes | Extract tabs.
 // 2. [Pattern]: URL hash or state-based sub-navigation within the Memory tab.
+// 3. [Pattern]: Graph tab surfaces the Postgres knowledge graph (existing KG REST API) as a
+//    Memory sub-view -- distinct from Cortex's live ring, which stays capped at 15 service nodes.
 import { useState } from 'react';
-import { Database, BookOpen, FileText, Sparkles, Download, Library } from 'lucide-react';
+import { Database, BookOpen, FileText, Sparkles, Download, Library, Network } from 'lucide-react';
 import MemoriesView from './MemoriesView';
 import LessonsView from './LessonsView';
 import KnowledgeView from './KnowledgeView';
+import GraphView from './GraphView';
 import ExtractWizard from './ExtractWizard';
 import NotebookPanel from '../notebook/NotebookPanel';
 
-type SubView = 'memories' | 'lessons' | 'facts' | 'field-notes' | 'extract';
+type SubView = 'memories' | 'lessons' | 'facts' | 'graph' | 'field-notes' | 'extract';
 
 const SUB_TABS: { id: SubView; label: string; icon: typeof Database }[] = [
   { id: 'memories', label: 'Memories', icon: Database },
   { id: 'lessons', label: 'Lessons', icon: BookOpen },
   { id: 'facts', label: 'Facts', icon: Library },
+  { id: 'graph', label: 'Graph', icon: Network },
   { id: 'field-notes', label: 'Field Notes', icon: FileText },
   { id: 'extract', label: 'Extract', icon: Sparkles },
 ];
@@ -52,6 +56,7 @@ export default function MemoryPage() {
         {active === 'memories' && <MemoriesView />}
         {active === 'lessons' && <LessonsView />}
         {active === 'facts' && <KnowledgeView />}
+        {active === 'graph' && <GraphView />}
         {active === 'field-notes' && <NotebookPanel />}
         {active === 'extract' && <ExtractWizard />}
       </div>

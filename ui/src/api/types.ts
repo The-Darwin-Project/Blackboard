@@ -707,6 +707,13 @@ export interface KnowledgePoint {
   payload: KnowledgeFact;
 }
 
+/** Cursor-scroll envelope for GET /queue/admin/knowledge. Mirrors ReportSearchResponse. */
+export interface KnowledgeScrollResponse {
+  items: KnowledgePoint[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 // =============================================================================
 // Knowledge Graph (Postgres KG service entities)
 // =============================================================================
