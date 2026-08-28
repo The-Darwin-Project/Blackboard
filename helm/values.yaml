@@ -572,6 +572,7 @@ jenkinsObserver:
     timeout: "15"
     circuitBreakerThreshold: "3"
     circuitBreakerCooldown: "300" # seconds before the breaker auto-unlatches for a retry
+    retriggerCooldownSeconds: "21600" # 6h — one retrigger per job per cooldown window
   skillsCatalog:
     url: ""
     skills: "" # Comma-separated skill slugs for observer Flash Lite triage. Production values in GitOps overlay.

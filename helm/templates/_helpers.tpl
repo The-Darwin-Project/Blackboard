@@ -92,3 +92,17 @@ Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of 
   value: "{{ .Values.jenkinsObserver.skillsCatalog.url }}"
 {{- end }}
 {{- end }}
+
+{{/*
+Jenkins credentials env block — wires JENKINS_URL onto sidecar containers.
+Gated on .Values.jenkinsObserver.jenkins.existingSecret being set.
+The actual secret must be volume mounted to avoid raw env var leakage.
+*/}}
+{{- define "darwin.jenkinsCredsEnv" -}}
+{{- if and .Values.jenkinsObserver .Values.jenkinsObserver.jenkins .Values.jenkinsObserver.jenkins.existingSecret }}
+- name: JENKINS_URL
+  value: "{{ .Values.jenkinsObserver.jenkins.url }}"
+- name: JENKINS_CREDENTIALS_PATH
+  value: "/secrets/jenkins"
+{{- end }}
+{{- end }}

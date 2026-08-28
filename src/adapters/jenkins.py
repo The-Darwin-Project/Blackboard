@@ -72,8 +72,8 @@ class JenkinsPlatformPort(Protocol):
     """Port for Jenkins CI platform operations."""
 
     async def scan_view(self, view: str) -> ViewScanResult: ...
-    async def get_build_details(self, job: str, build: int) -> BuildDetails | None: ...
-    async def restart_job(self, job: str, params: dict[str, str] | None = None) -> bool: ...
+    async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None: ...
+    async def restart_job(self, job: str, params: dict[str, str] | None = None, *, count_failures: bool = True) -> bool: ...
     def enabled(self) -> bool: ...
 
     @property
@@ -267,10 +267,10 @@ class JenkinsAdapter:
                 ))
         return ViewScanResult(jobs, 200)
 
-    async def get_build_details(self, job: str, build: int) -> BuildDetails | None:
+    async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None:
         """Fetch build details including parameters and console tail."""
-        path = f"/job/{job}/{build}/api/json?tree=result,actions[parameters[name,value]],url"
-        resp = await self._request("GET", path)
+        path = f"/job/{urllib.parse.quote(job, safe='')}/{build}/api/json?tree=result,actions[parameters[name,value]],url"
+        resp = await self._request("GET", path, count_failures=count_failures)
         if not resp or resp.status_code != 200:
             return None
         try:
@@ -301,14 +301,15 @@ class JenkinsAdapter:
             url=data.get("url", ""),
         )
 
-    async def restart_job(self, job: str, params: dict[str, str] | None = None) -> bool:
+    async def restart_job(self, job: str, params: dict[str, str] | None = None, *, count_failures: bool = True) -> bool:
         """Trigger a new build for a job. Returns True on success."""
+        safe_job = urllib.parse.quote(job, safe="")
         if params:
-            path = f"/job/{job}/buildWithParameters"
-            resp = await self._request("POST", path, params=params)
+            path = f"/job/{safe_job}/buildWithParameters"
+            resp = await self._request("POST", path, data=params, count_failures=count_failures)
         else:
-            path = f"/job/{job}/build"
-            resp = await self._request("POST", path)
+            path = f"/job/{safe_job}/build"
+            resp = await self._request("POST", path, count_failures=count_failures)
         return resp is not None and resp.status_code in (200, 201, 302)
 
     async def close(self) -> None:

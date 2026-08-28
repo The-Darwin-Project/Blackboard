@@ -38,7 +38,7 @@ _TOOL_NAMES = frozenset({
     "wait_for_agent", "hold_watch", "wait_for_jarvis",
     "post_sticky_note", "read_sticky_notes", "wait_for_verification",
     "respond_to_jarvis", "lookup_journal",
-    "greenwave", "ask_release_ai",
+    "greenwave", "ask_release_ai", "retrigger_jenkins_build",
 })
 
 
@@ -263,6 +263,15 @@ class TestTS3CiGatingEnvironment:
         assert "ask_release_ai" not in body, \
             "Body must NOT contain literal 'ask_release_ai' — tool names in frontmatter only"
 
+    def test_retrigger_jenkins_build_in_frontmatter_tools(self, frontmatter):
+        tools = frontmatter.get("tools", [])
+        assert "retrigger_jenkins_build" in tools, \
+            "retrigger_jenkins_build must be listed in frontmatter tools:"
+
+    def test_retrigger_jenkins_build_not_in_body(self, body):
+        assert "retrigger_jenkins_build" not in body, \
+            "Body must NOT contain literal 'retrigger_jenkins_build' — tool names in frontmatter only"
+
 
 # =========================================================================
 # T-S4: dispatch/coordination-triage.md investigation-first for ci_gating
@@ -286,6 +295,20 @@ class TestTS4CoordinationTriage:
         has_investigation = "investigat" in body_lower
         assert has_investigation, \
             "CI gating dispatch must mention investigation-first approach"
+
+    def test_native_retrigger_over_agent_dispatch(self, body):
+        """Plan Step 5: coordination-triage must steer toward native tools for transient infra retests."""
+        body_lower = body.lower()
+        has_native = "native" in body_lower or "brain" in body_lower or "retest" in body_lower or "retrigger" in body_lower
+        assert has_native, \
+            "coordination-triage.md must mention native tool retest for transient CI failures"
+
+    def test_no_developer_dispatch_for_infra_retest(self, body):
+        """Plan Step 5: transient infra failures should NOT dispatch Developer/SysAdmin for retest."""
+        body_lower = body.lower()
+        has_transient_guidance = "transient" in body_lower
+        assert has_transient_guidance, \
+            "coordination-triage.md must mention transient infrastructure failures"
 
 
 # =========================================================================

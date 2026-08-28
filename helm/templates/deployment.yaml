@@ -528,6 +528,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerThreshold }}"
             - name: JENKINS_CIRCUIT_BREAKER_COOLDOWN
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerCooldown }}"
+            - name: JENKINS_RETRIGGER_COOLDOWN_SECONDS
+              value: "{{ .Values.jenkinsObserver.jenkins.retriggerCooldownSeconds }}"
             {{- if .Values.jenkinsObserver.jenkins.existingSecret }}
             - name: JENKINS_USER
               valueFrom:
@@ -1121,6 +1123,7 @@ spec:
                   key: host
             {{- end }}
             {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
+            {{- include "darwin.jenkinsCredsEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -1168,6 +1171,11 @@ spec:
             {{- if .Values.registry.enabled }}
             - name: registry-secret
               mountPath: /secrets/registry
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.jenkinsObserver .Values.jenkinsObserver.jenkins .Values.jenkinsObserver.jenkins.existingSecret }}
+            - name: jenkins-secret
+              mountPath: /secrets/jenkins
               readOnly: true
             {{- end }}
             {{- range $name, $cluster := .Values.remoteClusters }}
@@ -1594,6 +1602,11 @@ spec:
         - name: registry-secret
           secret:
             secretName: {{ .Values.registry.existingSecret | default (printf "%s-registry" .Release.Name) }}
+        {{- end }}
+        {{- if and .Values.jenkinsObserver .Values.jenkinsObserver.jenkins .Values.jenkinsObserver.jenkins.existingSecret }}
+        - name: jenkins-secret
+          secret:
+            secretName: {{ .Values.jenkinsObserver.jenkins.existingSecret }}
         {{- end }}
         {{- range $name, $cluster := .Values.remoteClusters }}
         {{- if $cluster.enabled }}
