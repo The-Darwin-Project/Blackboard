@@ -1300,7 +1300,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "Retrigger a failed Jenkins CI gating build. Use only after investigation "
             "concludes the failure is transient infrastructure (network, mirror, quota), "
             "not a test or product regression. Scoped to jobs already failed in this "
-            "event's CI context. One retrigger per job per cooldown window (6h default). "
+            "event's CI context. One retrigger per job per cooldown window. "
             "Wrapper jobs re-run all lanes."
         ),
         "input_schema": {

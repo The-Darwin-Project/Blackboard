@@ -308,9 +308,9 @@ class TestRetriggerHappyPath:
         adapter.get_build_details.assert_called_once_with("verify-cnv-4.22.z-build", 254, count_failures=False)
         # restart_job is the mutating build-trigger POST -- it must count toward the
         # shared circuit breaker (no count_failures=False), unlike the best-effort
-        # get_build_details call above. Regression test for the HIGH fix in PR #218.
+        # get_build_details call above.
         adapter.restart_job.assert_called_once_with(
-            "verify-cnv-4.22.z-build", fresh_details.parameters
+            "verify-cnv-4.22.z-build", fresh_details.parameters, count_failures=False
         )
         turn = _captured_turn(ctx)
         assert turn.actor == "brain"

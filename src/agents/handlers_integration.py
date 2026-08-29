@@ -1140,7 +1140,7 @@ async def handle_ask_release_ai(
 _JENKINS_RETRIGGER_COOLDOWN = int(os.getenv("JENKINS_RETRIGGER_COOLDOWN_SECONDS", "21600"))
 # Hard wall-clock ceiling for the two sequential Jenkins calls in _do_retrigger
 # (get_build_details + restart_job), distinct from the adapter's per-request timeout.
-_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 30
+_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 40
 
 
 async def handle_retrigger_jenkins_build(
@@ -1246,7 +1246,7 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
                     f"Jenkins may be unreachable. Escalate to maintainer."
                 )
 
-            success = await adapter.restart_job(job_name, fresh_details.parameters)
+            success = await adapter.restart_job(job_name, fresh_details.parameters, count_failures=False)
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 
@@ -1256,7 +1256,7 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
         return f"Retrigger for '{job_name}' timed out after {_JENKINS_RETRIGGER_HANDLER_TIMEOUT}s. Escalate to maintainer."
     except Exception as e:
         logger.error("Error in _do_retrigger for %s: %s", job_name, e)
-        return f"Internal error during retrigger for '{job_name}': {e}. Escalate to maintainer."
+        return f"Internal error during retrigger for '{job_name}'. Escalate to maintainer."
     finally:
         if not success:
             try:
