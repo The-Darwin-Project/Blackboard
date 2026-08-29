@@ -211,7 +211,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         color: NEURON_COLORS.service,
         label: svc.entity_id.replace(/^service:/, '').slice(0, 20),
         type: 'circle',
-        fixed: false,
+        fixed: true,
       });
     }
 
