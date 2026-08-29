@@ -72,8 +72,8 @@ class JenkinsPlatformPort(Protocol):
     """Port for Jenkins CI platform operations."""
 
     async def scan_view(self, view: str) -> ViewScanResult: ...
-    async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None: ...
-    async def restart_job(self, job: str, params: dict[str, str] | None = None, *, count_failures: bool = True) -> bool: ...
+    async def get_build_details(self, job: str, build: int) -> BuildDetails | None: ...
+    async def restart_job(self, job: str, params: dict[str, str] | None = None) -> bool: ...
     def enabled(self) -> bool: ...
 
     @property
@@ -286,7 +286,9 @@ class JenkinsAdapter:
         console_tail = ""
         # Best-effort: an oversized/slow console log must not trip the breaker on its own.
         tail_resp = await self._request(
-            "GET", f"/job/{job}/{build}/logText/progressiveText?start=0", count_failures=False
+            "GET",
+            f"/job/{urllib.parse.quote(job, safe='')}/{build}/logText/progressiveText?start=0",
+            count_failures=False,
         )
         if tail_resp and tail_resp.status_code == 200:
             text = tail_resp.text

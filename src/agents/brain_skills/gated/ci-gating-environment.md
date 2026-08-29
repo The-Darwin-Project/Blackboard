@@ -67,7 +67,10 @@ is transient infrastructure — network timeouts, mirror unavailability, quota e
 Artifactory satellite issues — and NOT a test regression or product defect, you can
 directly retest the job. The mechanism is scoped to jobs already present in this event's
 failed_jobs context (cannot retrigger arbitrary Jenkins jobs) and rate-limited per job
-(one retrigger per cooldown window, default 6 hours).
+to one retrigger per cooldown window. The window length is deployment-configured and
+can change without notice -- if a retrigger is rejected as still-cooling-down, trust
+the tool's response over any duration you recall, and don't assume a repeat failure
+after that rejection is abuse rather than a genuinely new issue.
 
 Retriggering a wrapper job re-runs all lanes within it (see Wrapper vs Leaf Topology
 above). The cost is the full runtime — consider whether only one lane's transient

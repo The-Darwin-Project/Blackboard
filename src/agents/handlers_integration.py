@@ -1138,6 +1138,9 @@ async def handle_ask_release_ai(
 # retrigger_jenkins_build
 # ---------------------------------------------------------------------------
 _JENKINS_RETRIGGER_COOLDOWN = int(os.getenv("JENKINS_RETRIGGER_COOLDOWN_SECONDS", "21600"))
+# Hard wall-clock ceiling for the two sequential Jenkins calls in _do_retrigger
+# (get_build_details + restart_job), distinct from the adapter's per-request timeout.
+_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 30
 
 
 async def handle_retrigger_jenkins_build(
@@ -1171,14 +1174,25 @@ async def handle_retrigger_jenkins_build(
             else:
                 cooldown_key = f"darwin:jenkins:retrigger:{job_name}"
                 acquired = await bb.redis.set(
-                    cooldown_key, "1", nx=True, ex=_JENKINS_RETRIGGER_COOLDOWN
+                    cooldown_key, event_id, nx=True, ex=_JENKINS_RETRIGGER_COOLDOWN
                 )
                 if not acquired:
-                    result_text = (
-                        f"Job '{job_name}' was already retriggered within the "
-                        f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s). "
-                        f"Wait for cooldown to expire before retrying."
-                    )
+                    holder_event = await bb.redis.get(cooldown_key)
+                    if holder_event and holder_event != event_id:
+                        result_text = (
+                            f"Job '{job_name}' was already retriggered within the "
+                            f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s) by a "
+                            f"different event ({holder_event}). This may be an "
+                            f"unrelated new failure being suppressed by the rate "
+                            f"cap, not abuse -- investigate directly in Jenkins if "
+                            f"this failure looks distinct from the earlier one."
+                        )
+                    else:
+                        result_text = (
+                            f"Job '{job_name}' was already retriggered within the "
+                            f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s). "
+                            f"Wait for cooldown to expire before retrying."
+                        )
                 else:
                     result_text = await _do_retrigger(
                         ctx, bb, job_name, matched, cooldown_key
@@ -1212,24 +1226,34 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
         if not build_number:
             return f"No build_number for '{job_name}' — cannot fetch fresh parameters. Escalate to maintainer."
 
-        # get_build_details requires a separate network call to fetch console logs,
-        # doubling the round trips per retrigger. This is an accepted trade-off 
-        # since count_failures=False isolates it from the shared circuit breaker.
-        fresh_details = await adapter.get_build_details(job_name, build_number, count_failures=False)
-        if not fresh_details:
+        job_metadata = matched.get("job_metadata") or {}
+        is_wrapper = job_metadata.get("type") == "wrapper"
+        if is_wrapper:
             return (
-                f"Could not fetch build details for {job_name} #{build_number}. "
-                f"Jenkins may be unreachable. Escalate to maintainer."
+                f"'{job_name}' is a wrapper job — retriggering it re-runs all lanes. "
+                f"Automatic retrigger is not permitted for wrapper jobs; escalate to "
+                f"maintainer for a human-supervised retrigger."
             )
 
-        success = await adapter.restart_job(job_name, fresh_details.parameters, count_failures=False)
+        async with asyncio.timeout(_JENKINS_RETRIGGER_HANDLER_TIMEOUT):
+            # get_build_details requires a separate network call to fetch fresh
+            # parameters (avoiding a repost of redacted ci_context values). Best-effort:
+            # count_failures=False keeps it isolated from the shared circuit breaker.
+            fresh_details = await adapter.get_build_details(job_name, build_number, count_failures=False)
+            if not fresh_details:
+                return (
+                    f"Could not fetch build details for {job_name} #{build_number}. "
+                    f"Jenkins may be unreachable. Escalate to maintainer."
+                )
+
+            success = await adapter.restart_job(job_name, fresh_details.parameters)
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 
-        job_metadata = matched.get("job_metadata") or {}
-        is_wrapper = job_metadata.get("type") == "wrapper"
-        suffix = " (wrapper job — all lanes will re-run)" if is_wrapper else ""
-        return f"Successfully retriggered '{job_name}' #{build_number}{suffix}. Monitor for new build result."
+        return f"Successfully retriggered '{job_name}' #{build_number}. Monitor for new build result."
+    except TimeoutError:
+        logger.error("Timed out retriggering %s after %ds", job_name, _JENKINS_RETRIGGER_HANDLER_TIMEOUT)
+        return f"Retrigger for '{job_name}' timed out after {_JENKINS_RETRIGGER_HANDLER_TIMEOUT}s. Escalate to maintainer."
     except Exception as e:
         logger.error("Error in _do_retrigger for %s: %s", job_name, e)
         return f"Internal error during retrigger for '{job_name}': {e}. Escalate to maintainer."
