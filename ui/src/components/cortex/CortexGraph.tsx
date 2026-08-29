@@ -48,7 +48,7 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 
 function getNeuronSize(heat: number, type: string): number {
   const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
-    : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : type === 'service' ? 5 : 3;
+    : type === 'tool' ? 4 : type === 'event' ? 5 : type === 'skill' ? 3 : type === 'service' ? 5 : 3;
   const maxGrowth = type === 'skill' ? 2 : 4;
   // Logarithmic scaling: heat=1→+0.7, heat=10→+2.3, heat=50→+3.9, heat=100→+4 (capped)
   const growth = heat > 0 ? Math.min(Math.log(heat + 1) * 1.0, maxGrowth) : 0;
@@ -65,7 +65,7 @@ interface GraphLoaderProps {
 }
 
 const FA2_SETTINGS = {
-  gravity: 0.8,
+  gravity: 0.1,
   scalingRatio: 30,
   strongGravityMode: false,
   barnesHutOptimize: true,
@@ -82,7 +82,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   const processedBatchesRef = useRef<Set<string>>(new Set());
   const activeRipplesRef = useRef(0);
   const lastPulseRef = useRef<Map<string, number>>(new Map());
-  const baseSizeRef = useRef<Map<string, number>>(new Map());
   // Knowledge-ring working-set state (Step 6: 600/type budget + pulse materialize + LRU).
   const materializedNodesRef = useRef<Map<string, KnowledgeNodeAttributes>>(new Map());
   const typeCountsRef = useRef<Map<string, number>>(new Map());
@@ -98,7 +97,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
   useEffect(() => {
     processedBatchesRef.current.clear();
-    baseSizeRef.current.clear();
     typeCountsRef.current.clear();
     const graph = new MultiGraph();
     const executive = getExecutiveNeurons();
@@ -173,6 +171,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
+        trueBaseSize: getNeuronSize(n.heat, n.type),
         color: nodeColor,
         label: n.type === 'skill' ? '' : label,
         type: 'circle',
@@ -208,6 +207,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         x: radius * Math.cos(angle),
         y: radius * Math.sin(angle),
         size: getNeuronSize(0, 'service'),
+        trueBaseSize: getNeuronSize(0, 'service'),
         color: NEURON_COLORS.service,
         label: svc.entity_id.replace(/^service:/, '').slice(0, 20),
         type: 'circle',
@@ -224,10 +224,12 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         graph.addNode(evt.id, {
           x: RING.events * Math.cos(angle),
           y: RING.events * Math.sin(angle),
-          size: 8,
+          size: 5,
+          trueBaseSize: 5,
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
           type: 'square',
+          fixed: true,
         });
       }
     }
@@ -320,12 +322,14 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
         }).length;
         graph.addNode(evtId, {
-          x: 600 * Math.cos(evtCount * 1.5),
-          y: 600 * Math.sin(evtCount * 1.5),
-          size: 8,
+          x: 880 * Math.cos(evtCount * 1.5),
+          y: 880 * Math.sin(evtCount * 1.5),
+          size: 5,
+          trueBaseSize: 5,
           color: eventColor(evtId),
           label: evtId.slice(0, 12),
           type: 'square',
+          fixed: true,
         });
       }
 
@@ -384,18 +388,16 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, { color, size, structural: false });
 
           // Temporal decay: briefly enlarge target node then decay back, emit spark on settle
-          // Use baseSizeRef to avoid compounding when multiple pulses hit before decay completes
-          if (!baseSizeRef.current.has(pulse.neuron_id)) {
-            baseSizeRef.current.set(pulse.neuron_id, graph.getNodeAttribute(pulse.neuron_id, 'size') as number);
-          }
-          const baseSize = baseSizeRef.current.get(pulse.neuron_id)!;
+          // Use trueBaseSize to avoid compounding when multiple pulses hit before decay completes
+          const baseSize = (graph.getNodeAttribute(pulse.neuron_id, 'trueBaseSize') as number) || 4;
           graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize * 1.6);
           setTimeout(() => {
             if (!graph.hasNode(pulse.neuron_id)) return;
             graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize * 1.2);
             setTimeout(() => {
               if (!graph.hasNode(pulse.neuron_id)) return;
-              graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize);
+              const currentBase = (graph.getNodeAttribute(pulse.neuron_id, 'trueBaseSize') as number) || baseSize;
+              graph.setNodeAttribute(pulse.neuron_id, 'size', currentBase);
               // Emit glowing spark outward on settle
               const sparkContainer = sigma.getContainer();
               if (sparkContainer && graph.hasNode(pulse.neuron_id)) {
@@ -471,17 +473,15 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const glowDelay = batch.pulses.length * 120;
         setTimeout(() => {
           if (!graph.hasNode(serviceNodeId)) return;
-          if (!baseSizeRef.current.has(serviceNodeId)) {
-            baseSizeRef.current.set(serviceNodeId, graph.getNodeAttribute(serviceNodeId, 'size') as number);
-          }
           const origColor = graph.getNodeAttribute(serviceNodeId, 'color') as string;
-          const svcBase = baseSizeRef.current.get(serviceNodeId)!;
+          const svcBase = (graph.getNodeAttribute(serviceNodeId, 'trueBaseSize') as number) || 5;
           graph.setNodeAttribute(serviceNodeId, 'color', '#fbbf24');
           graph.setNodeAttribute(serviceNodeId, 'size', svcBase * 1.5);
           setTimeout(() => {
             if (!graph.hasNode(serviceNodeId)) return;
             graph.setNodeAttribute(serviceNodeId, 'color', origColor);
-            graph.setNodeAttribute(serviceNodeId, 'size', svcBase);
+            const currentBase = (graph.getNodeAttribute(serviceNodeId, 'trueBaseSize') as number) || svcBase;
+            graph.setNodeAttribute(serviceNodeId, 'size', currentBase);
           }, 2000);
         }, glowDelay);
       }
@@ -500,7 +500,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     sigma.setSetting('nodeReducer', (node, data) => {
       if (dimmedIds?.has(node)) return { ...data, color: '#1e293b', size: 2, label: '' };
       if (glowingIds.has(node)) {
-        const glowData: Record<string, unknown> = { ...data, color: '#fbbf24', size: (data.size ?? 4) * 1.8 };
+        const glowData: Record<string, unknown> = { ...data, color: '#fbbf24', size: ((data.trueBaseSize as number) || (data.size as number) || 4) * 1.8 };
         // Reveal skill labels when glowing (normally hidden)
         if (node.startsWith('skill:')) {
           const n = neurons.find(nn => nn.id === node);

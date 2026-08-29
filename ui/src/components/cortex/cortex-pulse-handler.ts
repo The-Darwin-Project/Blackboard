@@ -27,6 +27,7 @@ export interface KnowledgeNodeAttributes {
   x: number;
   y: number;
   size: number;
+  trueBaseSize: number;
   color: string;
   label: string;
   type: string;
@@ -70,6 +71,7 @@ export function materializeNeuron(
     x,
     y,
     size: 4,
+    trueBaseSize: 4,
     color: knowledgeRingColor(pulse.neuron_type),
     label: knowledgeRingLabel(pulse.neuron_id),
     type: 'circle',
