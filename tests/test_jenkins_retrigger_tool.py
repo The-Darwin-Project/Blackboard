@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 
+from src.agents.handlers_integration import _JENKINS_RETRIGGER_COOLDOWN
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,6 +30,7 @@ def _make_ctx(
     adapter=None,
     observer=None,
     redis_set_result=True,
+    redis_get_result=None,
 ) -> AsyncMock:
     """Build a minimal ToolContext mock matching the Protocol in tool_router.py."""
     ctx = AsyncMock()
@@ -39,6 +42,7 @@ def _make_ctx(
     bb.get_event = AsyncMock(return_value=event)
     bb.redis = AsyncMock()
     bb.redis.set = AsyncMock(return_value=redis_set_result)
+    bb.redis.get = AsyncMock(return_value=redis_get_result)
     bb.redis.delete = AsyncMock()
     ctx.get_blackboard = MagicMock(return_value=bb)
 
@@ -76,10 +80,22 @@ def _make_event_doc(failed_jobs: list[dict] | None = None):
     return event_doc
 
 
-def _make_adapter(*, enabled: bool = True, restart_result: bool = True, build_details=None):
-    """Build a mock JenkinsAdapter."""
+def _make_adapter(
+    *,
+    enabled: bool = True,
+    restart_result: bool = True,
+    build_details=None,
+    breaker_open: bool = False,
+):
+    """Build a mock JenkinsAdapter.
+
+    `breaker_open` is set explicitly (not left as AsyncMock's auto-truthy child
+    attribute) so tests can distinguish the "not configured" vs "circuit breaker
+    open" message branches in `_do_retrigger`.
+    """
     adapter = AsyncMock()
     adapter.enabled = MagicMock(return_value=enabled)
+    adapter.breaker_open = breaker_open
     adapter.restart_job = AsyncMock(return_value=restart_result)
     adapter.get_build_details = AsyncMock(return_value=build_details)
     return adapter
@@ -185,6 +201,60 @@ class TestRetriggerRateLimit:
         assert "cooldown" in turn_text.lower() or "retri" in turn_text.lower() or "recently" in turn_text.lower()
         adapter.restart_job.assert_not_called()
 
+    async def test_cooldown_blocked_by_different_event_names_holder(self):
+        """Cross-event cooldown rejection must explicitly name the other event and
+        distinguish 'abuse prevented' from 'unrelated new failure suppressed' --
+        regression for the cooldown-key-scoping MEDIUM fix."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(
+            event=event_doc,
+            adapter=adapter,
+            redis_set_result=False,
+            redis_get_result="evt-other-holder",
+        )
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0012", args, None)
+
+        assert result is True
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "evt-other-holder" in turn_text
+        assert "different event" in turn_text.lower() or "unrelated" in turn_text.lower()
+        adapter.restart_job.assert_not_called()
+
+    async def test_cooldown_blocked_by_same_event_uses_generic_message(self):
+        """When the cooldown holder IS this event (e.g. a retry), the message must
+        not claim a 'different event' triggered it."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(
+            event=event_doc,
+            adapter=adapter,
+            redis_set_result=False,
+            redis_get_result="evt-test0013",
+        )
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0013", args, None)
+
+        assert result is True
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "different event" not in turn_text.lower()
+        adapter.restart_job.assert_not_called()
+
     async def test_first_call_sets_redis_key(self):
         """First call (SET NX returns True) proceeds to retrigger."""
         from src.agents.handlers_integration import handle_retrigger_jenkins_build
@@ -202,9 +272,12 @@ class TestRetriggerRateLimit:
 
         assert result is True
         bb = ctx.get_blackboard()
-        bb.redis.set.assert_called_once()
-        call_kwargs = bb.redis.set.call_args
-        assert call_kwargs[1].get("nx") is True or (len(call_kwargs[0]) > 2)
+        bb.redis.set.assert_called_once_with(
+            "darwin:jenkins:retrigger:verify-cnv-4.22.z-build",
+            "evt-test0011",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
         adapter.restart_job.assert_called_once()
 
 
@@ -233,8 +306,11 @@ class TestRetriggerHappyPath:
 
         assert result is True
         adapter.get_build_details.assert_called_once_with("verify-cnv-4.22.z-build", 254, count_failures=False)
+        # restart_job is the mutating build-trigger POST -- it must count toward the
+        # shared circuit breaker (no count_failures=False), unlike the best-effort
+        # get_build_details call above. Regression test for the HIGH fix in PR #218.
         adapter.restart_job.assert_called_once_with(
-            "verify-cnv-4.22.z-build", fresh_details.parameters, count_failures=False
+            "verify-cnv-4.22.z-build", fresh_details.parameters
         )
         turn = _captured_turn(ctx)
         assert turn.actor == "brain"
@@ -265,6 +341,62 @@ class TestRetriggerHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# Test: matched.get("build_number") is falsy/0 -> escalation, no adapter calls
+# ---------------------------------------------------------------------------
+
+class TestRetriggerBuildNumberMissing:
+    """`if not build_number:` in `_do_retrigger` treats a missing OR 0 build_number
+    as 'cannot fetch fresh parameters'. Every other fixture in this file hardcodes
+    build_number=254, so this branch had zero coverage before this PR."""
+
+    async def test_build_number_zero_is_treated_as_missing(self):
+        """build_number: 0 hits the same escalation path as a missing key (falsy
+        check, not an is-None check) -- documents current behavior."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 0, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0025", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "build_number" in turn_text or "build number" in turn_text.lower()
+
+    async def test_build_number_missing_key_is_treated_as_missing(self):
+        """No 'build_number' key at all in the matched failed_job dict -> same
+        escalation path as build_number=0 or None."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0026", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+
+
+# ---------------------------------------------------------------------------
 # Test: get_build_details returns None -> graceful message, rate-limit released
 # ---------------------------------------------------------------------------
 
@@ -287,7 +419,7 @@ class TestRetriggerBuildDetailsNone:
 
         assert result is True
         bb = ctx.get_blackboard()
-        bb.redis.delete.assert_called()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
         adapter.restart_job.assert_not_called()
 
         turn = _captured_turn(ctx)
@@ -319,7 +451,7 @@ class TestRetriggerRestartFails:
 
         assert result is True
         bb = ctx.get_blackboard()
-        bb.redis.delete.assert_called()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
 
         turn = _captured_turn(ctx)
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
@@ -342,6 +474,14 @@ class TestRetriggerRestartFails:
 
         bb = ctx.get_blackboard()
         bb.redis.delete.assert_not_called()
+        # True end-to-end positive: the key set at the top of the handler used the
+        # right key/TTL, not just "some delete didn't happen".
+        bb.redis.set.assert_called_once_with(
+            "darwin:jenkins:retrigger:verify-cnv-4.22.z-build",
+            "evt-test0041",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -374,15 +514,18 @@ class TestRetriggerAdapterUnavailable:
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         assert "not configured" in turn_text.lower() or "unavailable" in turn_text.lower() or "not available" in turn_text.lower()
 
-    async def test_adapter_disabled_releases_key(self):
-        """Adapter exists but enabled() returns False -> graceful rejection, key released."""
+    async def test_adapter_not_configured_releases_key(self):
+        """Adapter disabled with breaker_open=False -> 'not configured' message, not
+        the circuit-breaker message. Previously `_make_adapter` left `breaker_open`
+        as an AsyncMock auto-truthy child attribute, so this branch could never be
+        distinguished from test_adapter_breaker_open_releases_key below."""
         from src.agents.handlers_integration import handle_retrigger_jenkins_build
 
         failed_jobs = [
             {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
         ]
         event_doc = _make_event_doc(failed_jobs=failed_jobs)
-        adapter = _make_adapter(enabled=False)
+        adapter = _make_adapter(enabled=False, breaker_open=False)
         ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
 
         args = {"job_name": "verify-cnv-4.22.z-build"}
@@ -394,7 +537,32 @@ class TestRetriggerAdapterUnavailable:
 
         turn = _captured_turn(ctx)
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
-        assert "not configured" in turn_text.lower() or "disabled" in turn_text.lower() or "breaker" in turn_text.lower() or "unavailable" in turn_text.lower()
+        assert "not configured" in turn_text.lower()
+        assert "breaker" not in turn_text.lower()
+
+    async def test_adapter_breaker_open_releases_key(self):
+        """Adapter disabled with breaker_open=True -> circuit-breaker message,
+        distinct from the 'not configured' message above."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(enabled=False, breaker_open=True)
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0051b", args, None)
+
+        assert result is True
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "breaker" in turn_text.lower()
+        assert "not configured" not in turn_text.lower()
 
     async def test_observer_none_releases_key(self):
         """get_agent_instance returns None -> graceful rejection, key released."""
@@ -446,6 +614,12 @@ class TestRetriggerWrapperLeafMessaging:
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         lower = turn_text.lower()
         assert "wrapper" in lower or "all lane" in lower or "all sub" in lower
+        # Code-level guard (PR #218 MEDIUM fix): wrapper jobs are rejected BEFORE
+        # the mutating call, not just labeled after the fact.
+        adapter.restart_job.assert_not_called()
+        adapter.get_build_details.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
 
     async def test_leaf_job_no_wrapper_mention(self):
         """When job_metadata.type != 'wrapper' or absent, no wrapper/lanes text."""
