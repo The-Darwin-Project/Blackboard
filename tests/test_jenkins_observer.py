@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import urllib.parse
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1742,3 +1743,224 @@ class TestTV21FailureNullTimestampStaged:
         bb.stage_jenkins_signal.assert_called()
         staged_key = bb.stage_jenkins_signal.call_args[0][0]
         assert "broken-job" in staged_key
+
+
+# =========================================================================
+# T-A1: restart_job HTTP transport -- params=->data= change (PR #218)
+# =========================================================================
+#
+# Regression coverage for a HIGH testing finding from PR #218's review: no test,
+# before or after the PR, exercised the real JenkinsAdapter.restart_job /
+# get_build_details against a mocked httpx client. These tests patch _get_client
+# (not _request) so the real _request/restart_job/get_build_details code -- the
+# param transport and urllib.parse.quote calls -- actually runs.
+
+def _make_test_adapter():
+    from src.adapters.jenkins import JenkinsAdapter
+    return JenkinsAdapter(
+        base_url="https://jenkins.example.com",
+        user="sa-user",
+        token="sa-token",
+        verify_tls=False,
+    )
+
+
+class TestJenkinsAdapterRestartJobTransport:
+
+    async def test_restart_job_with_params_sends_form_body_not_query_string(self):
+        """PR #218 changed restart_job's param transport from params= (query
+        string) to data= (form body). No test ever asserted on the actual kwarg
+        passed to the httpx client."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 201
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                result = await adapter.restart_job("verify-cnv-4.22.z-build", {"CNV_VERSION": "4.22"})
+
+            assert result is True
+            mock_client.request.assert_called_once()
+            call = mock_client.request.call_args
+            method, url = call.args[0], call.args[1]
+            assert method == "POST"
+            assert url.endswith("/job/verify-cnv-4.22.z-build/buildWithParameters")
+            assert call.kwargs.get("data") == {"CNV_VERSION": "4.22"}
+            assert "params" not in call.kwargs
+
+    async def test_restart_job_without_params_posts_to_build_endpoint(self):
+        """No params -> POST /build with no data/params body."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                result = await adapter.restart_job("verify-cnv-4.22.z-build")
+
+            assert result is True
+            call = mock_client.request.call_args
+            method, url = call.args[0], call.args[1]
+            assert method == "POST"
+            assert url.endswith("/job/verify-cnv-4.22.z-build/build")
+            assert "data" not in call.kwargs
+            assert "params" not in call.kwargs
+
+    async def test_restart_job_url_encodes_job_name(self):
+        """A job name containing '/' must be percent-encoded (safe='') in the
+        request URL -- the raw string must never reach the outbound URL."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            unsafe_job = "feature/../secret-job"
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                await adapter.restart_job(unsafe_job)
+
+            call = mock_client.request.call_args
+            url = call.args[1]
+            expected = urllib.parse.quote(unsafe_job, safe="")
+            assert expected in url
+            assert unsafe_job not in url
+
+    async def test_restart_job_false_on_client_error_status(self):
+        """A 404 (job doesn't exist) is swallowed by _request (count_failures=True
+        default -> returns None), so restart_job reports failure."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                result = await adapter.restart_job("missing-job")
+
+            assert result is False
+
+
+# =========================================================================
+# T-A2: get_build_details HTTP transport + URL encoding of BOTH calls
+# =========================================================================
+#
+# Regression coverage for the HIGH security finding: get_build_details's primary
+# api/json call was URL-encoded, but the console-log-tail fetch two lines later
+# in the same function still interpolated the raw, unencoded job name -- an
+# incomplete fix within the very function this PR patched.
+
+class TestJenkinsAdapterGetBuildDetailsTransport:
+
+    async def test_get_build_details_parses_params_and_console_tail(self):
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {
+                "result": "FAILURE",
+                "url": "https://jenkins.example.com/job/verify-cnv-4.22.z-build/254/",
+                "actions": [{"parameters": [{"name": "CNV_VERSION", "value": "4.22"}]}],
+            }
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.text = "...console output..."
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("verify-cnv-4.22.z-build", 254)
+
+            assert details is not None
+            assert details.result == "FAILURE"
+            assert details.parameters == {"CNV_VERSION": "4.22"}
+            assert details.console_tail == "...console output..."
+            assert mock_client.request.call_count == 2
+
+    async def test_get_build_details_url_encodes_job_in_both_calls(self):
+        """Both the api/json call AND the console-log-tail call must URL-encode
+        the job name -- the tail fetch was the incomplete part of the original
+        fix (path-traversal / request-injection HIGH finding)."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            unsafe_job = "feature/weird job"
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "SUCCESS", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.text = ""
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                await adapter.get_build_details(unsafe_job, 42)
+
+            expected = urllib.parse.quote(unsafe_job, safe="")
+            calls = mock_client.request.call_args_list
+            assert len(calls) == 2, "expected both the api/json call and the console-tail call"
+            for call in calls:
+                url = call.args[1]
+                assert expected in url, f"job name not encoded in {url}"
+                assert unsafe_job not in url, f"raw unescaped job name leaked into {url}"
+
+    async def test_get_build_details_returns_none_on_non_200_api_response(self):
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 404
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=api_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("missing-job", 1)
+
+            assert details is None
+            # 404 on the primary call means _request never even reaches the
+            # console-tail fetch.
+            mock_client.request.assert_called_once()
+
+    async def test_get_build_details_console_tail_failure_is_best_effort(self):
+        """If the console-log-tail fetch itself fails (e.g. 500), get_build_details
+        must still return BuildDetails with an empty console_tail -- a best-effort
+        fetch must not fail the whole call."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 500
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("verify-cnv-4.22.z-build", 254)
+
+            assert details is not None
+            assert details.result == "FAILURE"
+            assert details.console_tail == ""

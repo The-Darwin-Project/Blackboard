@@ -49,6 +49,7 @@ EXPECTED_HANDLERS = {
     "wait_for_verification",
     "greenwave",
     "ask_release_ai",
+    "retrigger_jenkins_build",
 }
 
 
@@ -65,10 +66,10 @@ def test_handler_registry_completeness():
 
 
 def test_handler_registry_count():
-    """Sanity check: exactly 42 handlers registered."""
+    """Sanity check: exactly 43 handlers registered."""
     import src.agents.brain  # noqa: F401
     from src.agents.tool_router import HANDLER_REGISTRY
 
-    assert len(HANDLER_REGISTRY) == 42, (
-        f"Expected 42 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
+    assert len(HANDLER_REGISTRY) == 43, (
+        f"Expected 43 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
     )

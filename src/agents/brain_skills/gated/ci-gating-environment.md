@@ -2,7 +2,7 @@
 description: "CI gating environment capabilities and verification principles"
 tag_type: context
 tags: [ci_gating, environment]
-tools: [greenwave, ask_release_ai]
+tools: [greenwave, ask_release_ai, retrigger_jenkins_build]
 ---
 # CI Gating Environment
 
@@ -59,3 +59,24 @@ time of recording, not what is true now. A "known flaky job" memory from last we
 have been fixed since. Before acting on historical patterns, validate the assumption
 against current evidence: has the job's failure signature changed? Has the infrastructure
 issue been resolved? Stale memory applied as current fact leads to misdiagnosis.
+
+## Retriggering Transient Failures
+
+When investigation (your own analysis or an agent's findings) concludes the root cause
+is transient infrastructure — network timeouts, mirror unavailability, quota exhaustion,
+Artifactory satellite issues — and NOT a test regression or product defect, you can
+directly retest the job. The mechanism is scoped to jobs already present in this event's
+failed_jobs context (cannot retrigger arbitrary Jenkins jobs) and rate-limited per job
+to one retrigger per cooldown window. The window length is deployment-configured and
+can change without notice -- if a retrigger is rejected as still-cooling-down, trust
+the tool's response over any duration you recall, and don't assume a repeat failure
+after that rejection is abuse rather than a genuinely new issue.
+
+Retriggering a wrapper job re-runs all lanes within it (see Wrapper vs Leaf Topology
+above). The cost is the full runtime — consider whether only one lane's transient
+failure justifies re-running all lanes, or whether the scope warrants deeper
+investigation first.
+
+Do not retrigger when the failure evidence indicates a code defect, a test regression,
+or a persistent infrastructure problem (repeated identical failures across multiple
+builds). In those cases, escalate to the owning team or dispatch investigation.

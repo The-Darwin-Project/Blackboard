@@ -92,3 +92,4 @@ Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of 
   value: "{{ .Values.jenkinsObserver.skillsCatalog.url }}"
 {{- end }}
 {{- end }}
+

@@ -130,6 +130,7 @@ _TOOL_TO_BEHAVIOR: dict[str, str] = {
     "google_web_search": "searching the web for current information",
     "greenwave": "validating CI gating decision",
     "ask_release_ai": "consulting release AI for CI context",
+    "retrigger_jenkins_build": "retriggering a CI gating build",
 }
 
 _ALL_TOOL_NAMES: frozenset[str] = frozenset(_TOOL_TO_BEHAVIOR.keys())

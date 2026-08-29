@@ -1293,6 +1293,30 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["question"],
         },
     },
+    # --- retrigger_jenkins_build (CI gating retrigger for transient infra failures) ---
+    {
+        "name": "retrigger_jenkins_build",
+        "description": (
+            "Retrigger a failed Jenkins CI gating build. Use only after investigation "
+            "concludes the failure is transient infrastructure (network, mirror, quota), "
+            "not a test or product regression. Scoped to jobs already failed in this "
+            "event's CI context. One retrigger per job per cooldown window. "
+            "Wrapper jobs re-run all lanes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact job name from this event's failed_jobs list "
+                        "(e.g. 'verify-cnv-4.22.z-build')."
+                    ),
+                },
+            },
+            "required": ["job_name"],
+        },
+    },
 ]
 
 

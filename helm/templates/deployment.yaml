@@ -528,6 +528,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerThreshold }}"
             - name: JENKINS_CIRCUIT_BREAKER_COOLDOWN
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerCooldown }}"
+            - name: JENKINS_RETRIGGER_COOLDOWN_SECONDS
+              value: "{{ .Values.jenkinsObserver.jenkins.retriggerCooldownSeconds }}"
             {{- if .Values.jenkinsObserver.jenkins.existingSecret }}
             - name: JENKINS_USER
               valueFrom:

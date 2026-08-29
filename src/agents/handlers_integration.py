@@ -5,7 +5,7 @@
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: notify_user_slack uses _resolve_slack_user (extracted as standalone helper).
-"""Group D: 11 external integration tool handlers."""
+"""Group D: 12 external integration tool handlers."""
 from __future__ import annotations
 
 import asyncio
@@ -1135,6 +1135,137 @@ async def handle_ask_release_ai(
 
 
 # ---------------------------------------------------------------------------
+# retrigger_jenkins_build
+# ---------------------------------------------------------------------------
+_JENKINS_RETRIGGER_COOLDOWN = int(os.getenv("JENKINS_RETRIGGER_COOLDOWN_SECONDS", "21600"))
+# Hard wall-clock ceiling for the two sequential Jenkins calls in _do_retrigger
+# (get_build_details + restart_job), distinct from the adapter's per-request timeout.
+_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 40
+
+
+async def handle_retrigger_jenkins_build(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    """Retrigger a Jenkins job scoped to this event's failed_jobs, with per-job rate cap."""
+    job_name = (args.get("job_name") or "").strip()
+    bb = ctx.get_blackboard()
+
+    if not job_name:
+        result_text = "Missing required parameter: job_name."
+    else:
+        event_doc = await bb.get_event(event_id)
+        ci_context = None
+        if event_doc and event_doc.event and event_doc.event.evidence:
+            ci_context = getattr(event_doc.event.evidence, "ci_context", None)
+
+        if not ci_context:
+            result_text = f"No CI context on event {event_id}. Cannot scope retrigger."
+        else:
+            failed_jobs = ci_context.get("failed_jobs", [])
+            matched = next(
+                (j for j in failed_jobs if j.get("job_name") == job_name), None
+            )
+            if not matched:
+                available = [j.get("job_name", "?") for j in failed_jobs[:10]]
+                result_text = (
+                    f"Job '{job_name}' is not in this event's failed_jobs. "
+                    f"Available: {available}. Retrigger rejected (scope check)."
+                )
+            else:
+                cooldown_key = f"darwin:jenkins:retrigger:{job_name}"
+                acquired = await bb.redis.set(
+                    cooldown_key, event_id, nx=True, ex=_JENKINS_RETRIGGER_COOLDOWN
+                )
+                if not acquired:
+                    holder_event = await bb.redis.get(cooldown_key)
+                    if holder_event and holder_event != event_id:
+                        result_text = (
+                            f"Job '{job_name}' was already retriggered within the "
+                            f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s) by a "
+                            f"different event ({holder_event}). This may be an "
+                            f"unrelated new failure being suppressed by the rate "
+                            f"cap, not abuse -- investigate directly in Jenkins if "
+                            f"this failure looks distinct from the earlier one."
+                        )
+                    else:
+                        result_text = (
+                            f"Job '{job_name}' was already retriggered within the "
+                            f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s). "
+                            f"Wait for cooldown to expire before retrying."
+                        )
+                else:
+                    result_text = await _do_retrigger(
+                        ctx, bb, job_name, matched, cooldown_key
+                    )
+
+    logger.info("retrigger_jenkins_build: event=%s job=%s result=%s", event_id, job_name, result_text[:120])
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain",
+        action="tool_result",
+        waitingFor="retrigger_jenkins_build",
+        thoughts=result_text,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
+async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cooldown_key: str) -> str:
+    """Execute the retrigger after scope + rate checks pass. Releases cooldown key on failure."""
+    observer = ctx.get_agent_instance("_jenkins_observer")
+    adapter = getattr(observer, "_adapter", None) if observer else None
+    
+    success = False
+    try:
+        if not adapter or not adapter.enabled():
+            reason = "circuit breaker open" if (adapter and adapter.breaker_open) else "not configured"
+            return f"Jenkins adapter {reason}. Retrigger skipped. Escalate to maintainer."
+
+        build_number = matched.get("build_number")
+        if not build_number:
+            return f"No build_number for '{job_name}' — cannot fetch fresh parameters. Escalate to maintainer."
+
+        job_metadata = matched.get("job_metadata") or {}
+        is_wrapper = job_metadata.get("type") == "wrapper"
+        if is_wrapper:
+            return (
+                f"'{job_name}' is a wrapper job — retriggering it re-runs all lanes. "
+                f"Automatic retrigger is not permitted for wrapper jobs; escalate to "
+                f"maintainer for a human-supervised retrigger."
+            )
+
+        async with asyncio.timeout(_JENKINS_RETRIGGER_HANDLER_TIMEOUT):
+            # get_build_details requires a separate network call to fetch fresh
+            # parameters (avoiding a repost of redacted ci_context values). Best-effort:
+            # count_failures=False keeps it isolated from the shared circuit breaker.
+            fresh_details = await adapter.get_build_details(job_name, build_number, count_failures=False)
+            if not fresh_details:
+                return (
+                    f"Could not fetch build details for {job_name} #{build_number}. "
+                    f"Jenkins may be unreachable. Escalate to maintainer."
+                )
+
+            success = await adapter.restart_job(job_name, fresh_details.parameters)
+        if not success:
+            return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
+
+        return f"Successfully retriggered '{job_name}' #{build_number}. Monitor for new build result."
+    except TimeoutError:
+        logger.error("Timed out retriggering %s after %ds", job_name, _JENKINS_RETRIGGER_HANDLER_TIMEOUT)
+        return f"Retrigger for '{job_name}' timed out after {_JENKINS_RETRIGGER_HANDLER_TIMEOUT}s. Escalate to maintainer."
+    except Exception as e:
+        logger.error("Error in _do_retrigger for %s: %s", job_name, e)
+        return f"Internal error during retrigger for '{job_name}'. Escalate to maintainer."
+    finally:
+        if not success:
+            try:
+                await bb.redis.delete(cooldown_key)
+            except Exception as redis_exc:
+                logger.error("Failed to release cooldown key %s: %s", cooldown_key, redis_exc)
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 from .tool_router import HANDLER_REGISTRY
@@ -1150,3 +1281,4 @@ HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result
 HANDLER_REGISTRY["search_open_incidents"] = handle_search_open_incidents
 HANDLER_REGISTRY["greenwave"] = handle_greenwave
 HANDLER_REGISTRY["ask_release_ai"] = handle_ask_release_ai
+HANDLER_REGISTRY["retrigger_jenkins_build"] = handle_retrigger_jenkins_build

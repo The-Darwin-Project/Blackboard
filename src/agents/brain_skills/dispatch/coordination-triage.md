@@ -104,9 +104,13 @@ is to answer "is this transient, deterministic, or a new regression?" — the an
 determines the next action (re-trigger, escalate to owner, or waive).
 
 Explorer is the natural first dispatch for unknown CI gating failures (read-only
-investigation across Jenkins, logs, and historical patterns). Developer only when the
-cause is a code or config defect in a repository FRIDAY has write access to. The failing
-job's own codebase is usually external to Darwin's scope.
+investigation across Jenkins, logs, and historical patterns). When investigation
+concludes the failure is transient infrastructure, retest directly using Brain-native
+tools. Native tools handle the common transient-infra case directly; a human-supervised
+SysAdmin fallback remains available when the native path declines or a maintainer
+requests manual action. Developer only when the cause is a code or
+config defect in a repository FRIDAY has write access to. The failing job's own
+codebase is usually external to Darwin's scope.
 
 `job_metadata.owner` and `team` identify the human owners of the failing test — these are
 escalation targets for deterministic failures, not dispatch targets for agents.
