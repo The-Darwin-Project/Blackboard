@@ -1246,7 +1246,7 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
                     f"Jenkins may be unreachable. Escalate to maintainer."
                 )
 
-            success = await adapter.restart_job(job_name, fresh_details.parameters, count_failures=False)
+            success = await adapter.restart_job(job_name, fresh_details.parameters)
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 

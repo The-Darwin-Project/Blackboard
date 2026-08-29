@@ -308,9 +308,9 @@ class TestRetriggerHappyPath:
         adapter.get_build_details.assert_called_once_with("verify-cnv-4.22.z-build", 254, count_failures=False)
         # restart_job is the mutating build-trigger POST -- it must count toward the
         # shared circuit breaker (no count_failures=False), unlike the best-effort
-        # get_build_details call above.
+        # get_build_details call above. Regression test for the HIGH fix in PR #218.
         adapter.restart_job.assert_called_once_with(
-            "verify-cnv-4.22.z-build", fresh_details.parameters, count_failures=False
+            "verify-cnv-4.22.z-build", fresh_details.parameters
         )
         turn = _captured_turn(ctx)
         assert turn.actor == "brain"
@@ -728,4 +728,33 @@ class TestRetriggerExceptions:
         turn = _captured_turn(ctx)
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         assert "internal error" in turn_text.lower() or "escalate" in turn_text.lower()
+
+
+    async def test_timeout_error_is_caught_and_handled(self):
+        """TimeoutError during the external call releases the key and returns a graceful message."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+        
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        
+        # Make the adapter call raise a TimeoutError
+        adapter.get_build_details.side_effect = TimeoutError("Connection timed out")
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+        
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0090", args, None)
+        
+        assert result is True
+        bb = ctx.get_blackboard()
+        
+        # The key should be released
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+        
+        # Turn should contain a timeout message
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "timed out" in turn_text.lower() or "timeout" in turn_text.lower()
 
