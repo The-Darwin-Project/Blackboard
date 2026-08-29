@@ -34,6 +34,29 @@ import pytest
 # Helpers
 # =========================================================================
 
+def _make_adapter(enabled=True):
+    adapter = AsyncMock()
+    adapter.enabled = MagicMock(return_value=enabled)
+    adapter.scan_view = AsyncMock(return_value=_make_view_scan_result([]))
+    
+    # Needs to return a valid object that has console_tail string to avoid TypeError in redact_secrets
+    details = MagicMock()
+    details.console_tail = "Mock console tail"
+    details.parameters = {}
+    adapter.get_build_details = AsyncMock(return_value=details)
+    return adapter
+
+def _make_observer(bb, adapter, views=None, dry_run=False):
+    from src.agents.jenkins_observer import JenkinsObserver
+    import os
+    from unittest.mock import patch
+    
+    with patch.dict(os.environ, {"JENKINS_OBSERVER_DRY_RUN": str(dry_run).lower()}):
+        obs = JenkinsObserver(blackboard=bb, jenkins_adapter=adapter)
+        obs._views = views or ["Gating Wrappers"]
+        obs._get_wip_headroom = AsyncMock(return_value=10)
+        return obs
+
 def _mock_blackboard():
     """Build a minimal BlackboardState mock matching the JenkinsObserver contract.
 
@@ -54,6 +77,8 @@ def _mock_blackboard():
     bb.commit_jenkins_signal = AsyncMock(return_value=None)
     bb.restage_jenkins_signal = AsyncMock(return_value=None)
     bb.count_jenkins_pending = AsyncMock(return_value=0)
+    bb.get_jenkins_last_alerted_build = AsyncMock(return_value=0)
+    bb.set_jenkins_last_alerted_build = AsyncMock(return_value=None)
     bb.redis = AsyncMock()
     bb.redis.get.return_value = None
     bb.redis.hget.return_value = None
@@ -1964,3 +1989,254 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details is not None
             assert details.result == "FAILURE"
             assert details.console_tail == ""
+
+# =========================================================================
+# T-DP1: Jenkins Duplicate Prevention - Staging Filter
+# =========================================================================
+
+class TestDuplicatePreventionStaging:
+    """Jobs with build_number <= last_alerted_build bypass staging."""
+
+    async def test_skips_staging_already_alerted_build(self):
+        """If get_jenkins_last_alerted_build returns a number >= job.build_number, it skips."""
+        bb = _mock_blackboard()
+        bb.get_jenkins_last_alerted_build.return_value = 100
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("already-alerted-job", result="FAILURE", build_number=100)
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+
+        bb.get_jenkins_last_alerted_build.assert_called_once_with("already-alerted-job")
+        bb.stage_jenkins_signal.assert_not_called()
+
+    async def test_skips_staging_older_build(self):
+        """If last_alerted_build is newer than the polled build, it skips."""
+        bb = _mock_blackboard()
+        bb.get_jenkins_last_alerted_build.return_value = 101
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("older-job", result="FAILURE", build_number=100)
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+        bb.stage_jenkins_signal.assert_not_called()
+
+    async def test_stages_new_build_above_last_alerted(self):
+        """If polled build is newer than last_alerted_build, it stages."""
+        bb = _mock_blackboard()
+        bb.get_jenkins_last_alerted_build.return_value = 99
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("newer-job", result="FAILURE", build_number=100)
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+        bb.stage_jenkins_signal.assert_called_once()
+
+    async def test_zero_last_alerted_stages_normally(self):
+        """If last_alerted_build is 0 (missing), a valid build stages normally."""
+        bb = _mock_blackboard()
+        bb.get_jenkins_last_alerted_build.return_value = 0
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("new-job", result="FAILURE", build_number=1)
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+        bb.stage_jenkins_signal.assert_called_once()
+
+    async def test_filter_skips_jobs_without_build_number(self):
+        """Jobs with build_number=None (e.g. MISSING) bypass the filter completely."""
+        bb = _mock_blackboard()
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("missing-job", result=None, build_number=None)
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+
+        bb.get_jenkins_last_alerted_build.assert_not_called()
+        bb.stage_jenkins_signal.assert_called_once()
+
+    async def test_mixed_jobs_only_skips_already_alerted(self):
+        """Filter applies correctly per-job in a view."""
+        bb = _mock_blackboard()
+        
+        async def mock_get_last_alerted(job_name):
+            if job_name == "skip-me": return 100
+            return 0
+        bb.get_jenkins_last_alerted_build.side_effect = mock_get_last_alerted
+        
+        adapter = _make_adapter()
+        adapter.scan_view.return_value = _make_view_scan_result([
+            _make_job_result("skip-me", result="FAILURE", build_number=100),
+            _make_job_result("stage-me", result="FAILURE", build_number=100),
+        ])
+        obs = _make_observer(bb, adapter, views=["test-view"])
+
+        await obs._poll_and_stage()
+        
+        bb.stage_jenkins_signal.assert_called_once()
+        call_args = bb.stage_jenkins_signal.call_args[0]
+        assert call_args[0] == "stage-me"
+
+
+# =========================================================================
+# T-DP2: Jenkins Duplicate Prevention - Commitment
+# =========================================================================
+
+class TestDuplicatePreventionCommitment:
+    """Records build_number in last_alerted_build AFTER successful create_event."""
+
+    async def test_records_last_alerted_after_create(self):
+        """Happy path: create_event succeeds, set_jenkins_last_alerted_build is called."""
+        bb = _mock_blackboard()
+        bb.create_event.return_value = True
+        obs = _make_observer(bb, _make_adapter())
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.create_event.assert_called_once()
+        bb.set_jenkins_last_alerted_build.assert_called_once_with("test-job", 100)
+        bb.commit_jenkins_signal.assert_called_once_with("test-job")
+
+    async def test_no_commit_on_dry_run(self):
+        """If DRY_RUN=true, create_event is skipped, so set_last_alerted is skipped."""
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter(), dry_run=True)
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.create_event.assert_not_called()
+        bb.set_jenkins_last_alerted_build.assert_not_called()
+        bb.commit_jenkins_signal.assert_called_once()
+
+    async def test_no_commit_on_wip_gate(self):
+        """If WIP gate prevents creation, set_last_alerted is skipped and restaged."""
+        bb = _mock_blackboard()
+        # Force WIP ceiling
+        obs = _make_observer(bb, _make_adapter())
+        obs._get_wip_headroom = AsyncMock(return_value=0)
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.create_event.assert_not_called()
+        bb.set_jenkins_last_alerted_build.assert_not_called()
+        bb.restage_jenkins_signal.assert_called_once()
+
+    async def test_no_commit_on_dedup(self):
+        """If active-event dedup returns True, set_last_alerted is skipped."""
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+        obs._is_duplicate_or_escalated = AsyncMock(return_value=True)
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.create_event.assert_not_called()
+        bb.set_jenkins_last_alerted_build.assert_not_called()
+        bb.commit_jenkins_signal.assert_called_once()
+
+    async def test_no_commit_on_create_event_failure(self):
+        """If create_event raises, set_last_alerted is skipped."""
+        bb = _mock_blackboard()
+        bb.create_event.side_effect = Exception("Redis write failed")
+        obs = _make_observer(bb, _make_adapter())
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.set_jenkins_last_alerted_build.assert_not_called()
+        bb.restage_jenkins_signal.assert_called_once()
+
+    async def test_set_last_alerted_failure_is_non_fatal(self):
+        """If set_last_alerted raises, the signal is still committed (non-fatal error)."""
+        bb = _mock_blackboard()
+        bb.set_jenkins_last_alerted_build.side_effect = Exception("Redis blip")
+        obs = _make_observer(bb, _make_adapter())
+
+        meta = _make_meta(job_name="test-job", build_number=100)
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        # Should still commit despite the exception
+        bb.commit_jenkins_signal.assert_called_once_with("test-job")
+
+    async def test_flood_commits_all_jobs_last_alerted(self):
+        """In a ci-gating-flood group, every job in the group has its build_number committed."""
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        meta1 = _make_meta(job_name="job-1", build_number=101)
+        meta2 = _make_meta(job_name="job-2", build_number=202)
+        groups = [[("job-1", meta1), ("job-2", meta2)]]
+        
+        await obs._process_candidates(groups)
+        
+        assert bb.set_jenkins_last_alerted_build.call_count == 2
+        bb.set_jenkins_last_alerted_build.assert_any_call("job-1", 101)
+        bb.set_jenkins_last_alerted_build.assert_any_call("job-2", 202)
+
+    async def test_none_build_number_skips_recording(self):
+        """If meta is missing a build_number, it skips recording but commits."""
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        meta = _make_meta(job_name="test-job") # No build_number
+        if "build_number" in meta:
+            del meta["build_number"]
+        groups = [[("test-job", meta)]]
+        
+        await obs._process_candidates(groups)
+        
+        bb.set_jenkins_last_alerted_build.assert_not_called()
+        bb.commit_jenkins_signal.assert_called_once_with("test-job")
+
+
+# =========================================================================
+# T-DP3: Blackboard State Last Alerted Build Tests
+# =========================================================================
+
+class TestBlackboardLastAlertedBuild:
+    """Tests for get/set_jenkins_last_alerted_build."""
+
+    async def test_get_returns_zero_when_missing(self):
+        """Missing key returns 0."""
+        import fakeredis.aioredis
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        from src.state.blackboard import BlackboardState
+        bb = BlackboardState(redis)
+
+        assert await bb.get_jenkins_last_alerted_build("missing-job") == 0
+
+    async def test_get_handles_corrupt_value_gracefully(self):
+        """If Redis returns garbage, get_jenkins_last_alerted_build returns 0."""
+        import fakeredis.aioredis
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        from src.state.blackboard import BlackboardState
+        bb = BlackboardState(redis)
+
+        await redis.set("darwin:jenkins:last_alert:corrupt-job", "not-an-int")
+        assert await bb.get_jenkins_last_alerted_build("corrupt-job") == 0
+

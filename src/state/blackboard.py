@@ -185,6 +185,13 @@ redis.call('SADD', KEYS[3], ARGV[2])
 return 1
 """
 
+    _LUA_SET_MAX = """
+if tonumber(redis.call('GET', KEYS[1]) or 0) < tonumber(ARGV[1]) then
+    redis.call('SETEX', KEYS[1], ARGV[2], ARGV[1])
+end
+return 1
+"""
+
     def __init__(self, redis: Redis):
         self.redis = redis
         self._clear_escalation_script = self.redis.register_script(
@@ -192,6 +199,9 @@ return 1
         )
         self._rename_obs_script = self.redis.register_script(
             self._LUA_RENAME_OBS
+        )
+        self._set_max_script = self.redis.register_script(
+            self._LUA_SET_MAX
         )
     
     # =========================================================================
@@ -2898,6 +2908,35 @@ return 1
     async def count_jenkins_pending(self) -> int:
         """Count of pending CI gating signals in the dwell queue."""
         return await self._count_pending(self.JENKINS_PENDING)
+
+    # =========================================================================
+    # Jenkins Duplicate Prevention (last_alerted_build)
+    # =========================================================================
+    _JENKINS_LAST_ALERT_PREFIX = "darwin:jenkins:last_alert:"
+    _JENKINS_LAST_ALERT_TTL = 604800  # 7 days
+
+    async def get_jenkins_last_alerted_build(self, job_name: str) -> int:
+        """Return the last alerted build_number for a Jenkins job, or 0 if missing/corrupt."""
+        val = await self.redis.get(f"{self._JENKINS_LAST_ALERT_PREFIX}{job_name}")
+        try:
+            return int(val.decode("utf-8", errors="replace")) if isinstance(val, bytes) else int(val)
+        except (TypeError, ValueError):
+            return 0
+
+    async def set_jenkins_last_alerted_build(
+        self, job_name: str, build_number: int,
+    ) -> None:
+        """Record *build_number* as the last alerted build for *job_name*.
+
+        Only writes if *build_number* exceeds the currently stored value
+        (monotonic-increase guard). 7-day TTL auto-expires stale entries.
+        Uses a Lua script for atomicity.
+        """
+        key = f"{self._JENKINS_LAST_ALERT_PREFIX}{job_name}"
+        try:
+            await self._set_max_script(keys=[key], args=[str(build_number), str(self._JENKINS_LAST_ALERT_TTL)])
+        except Exception as e:
+            logger.warning("Failed to set last_alerted_build for %s: %s", job_name, e)
 
     # =========================================================================
     # Observations (FRIDAY numeric series -- event-scoped + global timeline)

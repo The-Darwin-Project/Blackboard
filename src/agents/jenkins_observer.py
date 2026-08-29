@@ -502,6 +502,12 @@ class JenkinsObserver:
             # Stage each failing/missing job individually
             for job in post_recency:
                 if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
+                    if job.build_number is not None:
+                        last_alert = await self.blackboard.get_jenkins_last_alerted_build(job.job_name)
+                        if job.build_number <= last_alert:
+                            logger.debug("JenkinsObserver: skipping already-alerted build %s for %s", job.build_number, job.job_name)
+                            continue
+
                     version = self._extract_version_from_name(job.job_name)
                     key = job.job_name
                     metadata = {
@@ -665,6 +671,19 @@ class JenkinsObserver:
                     evidence=evidence_obj,
                     subject_type="ci_gating",
                 )
+                
+                for _, meta in signals:
+                    bn = meta.get("build_number")
+                    jn = meta.get("job_name", "")
+                    if bn is not None and jn:
+                        try:
+                            await self.blackboard.set_jenkins_last_alerted_build(jn, bn)
+                            logger.debug(
+                                "JenkinsObserver: committed last_alerted_build %s for %s", bn, jn,
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to set last_alerted_build for %s: %s", jn, e, exc_info=True)
+
                 for key, _ in signals:
                     await self.blackboard.commit_jenkins_signal(key)
             except Exception:
