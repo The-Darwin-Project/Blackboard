@@ -65,7 +65,7 @@ interface GraphLoaderProps {
 }
 
 const FA2_SETTINGS = {
-  gravity: 0.1,
+  gravity: 0.8,
   scalingRatio: 30,
   strongGravityMode: false,
   barnesHutOptimize: true,
@@ -159,7 +159,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
 
       const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain';
-      const isFixed = isExecutive || n.type === 'skill';
+      const isFixed = isExecutive || n.type === 'skill' || isKnowledge;
       // Skill color resolved inline (tag_type in payload, not available in getNeuronColor signature)
       let nodeColor = n.type === 'skill'
         ? (SKILL_TAG_COLORS[(n.payload as { tag_type?: string })?.tag_type ?? ''] ?? NEURON_COLORS.skill)

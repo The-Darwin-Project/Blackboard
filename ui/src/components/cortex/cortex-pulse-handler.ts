@@ -32,6 +32,7 @@ export interface KnowledgeNodeAttributes {
   label: string;
   type: string;
   neuronType: string;
+  fixed: boolean;
 }
 
 function knowledgeRingColor(neuronType: string): string {
@@ -76,6 +77,7 @@ export function materializeNeuron(
     label: knowledgeRingLabel(pulse.neuron_id),
     type: 'circle',
     neuronType: pulse.neuron_type,
+    fixed: true,
   };
 
   graph.addNode(pulse.neuron_id, attrs);
