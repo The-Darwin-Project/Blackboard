@@ -43,6 +43,15 @@ CORPUS = [
     # bearer-token redaction can still see the literal word "Bearer".
     "ha:////AAAABearer sometoken123",
     "filler text ha:////AAAABearersecrettoken123",
+    # F10: adversarial follow-up -- a single `=` was accepted as
+    # unconditional padding proof, but a lone `=` is exactly the common
+    # `KEY=value` secret delimiter and is genuinely ambiguous with real
+    # single-char base64 padding. Must now also pass a lookahead check.
+    "ha:////AAAtoken=abc123xyz",
+    "ha:////AAApassword=hunter2",
+    "ha:////AAAsecret=xyz",
+    "before ha:////ABC1= after",
+    "ha:////AAA=ha:////BBB==",
     "\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n",
     "[Pipeline] }\n[Pipeline] // container\nreal output",
     "output\n[Pipeline] End of Pipeline",

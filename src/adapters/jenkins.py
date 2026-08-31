@@ -79,45 +79,70 @@ _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 
 # The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]), bounded to
 # at most _MAX_BLOB_LEN chars (see above). A match is only accepted as a
-# genuine ConsoleNote blob if it terminates via one of two STRUCTURAL
+# genuine ConsoleNote blob if it terminates via one of three STRUCTURAL
 # signals baked into the match itself (not merely asserted via a
-# zero-width lookahead): mandatory `=`/`==` padding, optionally followed by
-# a consumed trailing ANSI escape; or a trailing ANSI escape with no
-# padding at all. A single optional leading ANSI wrapper (not a `*`
-# quantifier -- an unbounded repeated-quantifier around a literal that then
-# fails to match is quadratic on long ANSI-only runs, see
+# zero-width lookahead, except where noted below): double `==` padding;
+# single `=` padding that is ALSO immediately followed by one of the
+# traditionally-safe terminators (whitespace, ANSI escape, another
+# `ha:////` occurrence, or end-of-string); or a trailing ANSI escape with
+# no padding at all. Each padding alternative may optionally consume a
+# trailing ANSI escape too. A single optional leading ANSI wrapper (not a
+# `*` quantifier -- an unbounded repeated-quantifier around a literal that
+# then fails to match is quadratic on long ANSI-only runs, see
 # get_build_details' pre-strip window comment) is still allowed.
 #
 # Bare whitespace and bare end-of-string are deliberately NOT accepted as
-# termination signals (they used to be, via a lookahead alternative, until
-# a MEDIUM secret-redaction-bypass finding on this exact regex). The base64
-# alphabet [A-Za-z0-9+/] is a superset of ordinary English letters and
-# digits, so it cannot be distinguished from adjacent real text using only
-# "where's the next whitespace/EOS" -- an unpadded, non-ANSI-wrapped blob
-# immediately abutted by a real secret composed entirely of
-# letters/digits (e.g. "ha:////AAAABearer sometoken123", or the same thing
-# sitting at the very end of the currently-fetched log tail) let the greedy
-# body class silently consume through the real word before downstream
-# `_redact_secrets_in_text()`'s literal "bearer"/key-text matching in
-# jenkins_observer.py ever got a chance to see it, deleting the secret's
-# own redaction trigger along with the blob. Padding and ANSI escapes are
-# both structurally impossible to appear inside ordinary prose (a raw ESC
-# byte in particular can never be part of English text), so requiring one
-# of them as the actual terminator -- not just a lookahead check -- closes
-# the gap without reintroducing the F3 (adjacent-blobs) or F4
+# unconditional termination signals (they used to be, via a lookahead
+# alternative, until a MEDIUM secret-redaction-bypass finding on this exact
+# regex). The base64 alphabet [A-Za-z0-9+/] is a superset of ordinary
+# English letters and digits, so it cannot be distinguished from adjacent
+# real text using only "where's the next whitespace/EOS" -- an unpadded,
+# non-ANSI-wrapped blob immediately abutted by a real secret composed
+# entirely of letters/digits (e.g. "ha:////AAAABearer sometoken123", or the
+# same thing sitting at the very end of the currently-fetched log tail) let
+# the greedy body class silently consume through the real word before
+# downstream `_redact_secrets_in_text()`'s literal "bearer"/key-text
+# matching in jenkins_observer.py ever got a chance to see it, deleting the
+# secret's own redaction trigger along with the blob. ANSI escapes and
+# double `==` padding are both structurally impossible to appear inside
+# ordinary prose (a raw ESC byte in particular can never be part of
+# English text; two literal `=` characters back-to-back never occur in a
+# real single-delimiter `KEY=value` string), so either alone is accepted as
+# a self-sufficient terminator with no further check.
+#
+# A SINGLE `=`, however, is exactly the common `KEY=value` secret delimiter
+# (see jenkins_observer.py's `_SECRET_TEXT_PATTERN`, which redacts both
+# "key: value" and "key=value" forms) and is therefore genuinely
+# indistinguishable from real single-char base64 padding using only local
+# regex context -- e.g. "ha:////AAAtoken=abc123xyz" is exactly as
+# plausible a real base64 blob ending in one padding char as it is a blob
+# abutting a "token=" secret delimiter. To resolve the ambiguity, a lone
+# `=` is only accepted as a real terminator when a lookahead confirms one
+# of the traditionally-safe delimiters immediately follows it (whitespace,
+# ANSI escape, another `ha:////`, or end-of-string). If that lookahead
+# fails, this alternative does not match at this position, the whole match
+# fails, and the abutting secret text (including the "token=" delimiter)
+# survives untouched for downstream redaction -- the same "leave ambiguous
+# content alone" philosophy already applied throughout this fix. This
+# closes the gap without reintroducing the F3 (adjacent-blobs) or F4
 # (colon-delimited abutment, safe because `:` is outside the base64
 # alphabet and so already can't be consumed) regressions: each blob is
 # still matched independently once it has its own valid terminator, so no
-# separate "or another ha:////" alternative is needed.
+# separate "or another ha:////" alternative is needed outside the
+# single-`=` lookahead itself.
 #
-# Accepted trade-off: a genuinely valid, unpadded, non-ANSI-wrapped blob
-# positioned at the very end of the currently-fetched log will no longer be
-# recognized and will show through as literal noise instead of being
-# stripped -- a narrow, cosmetic-only regression accepted in exchange for
-# closing the exploitable secret-leak case.
+# Accepted trade-off (narrower than the prior round's): a genuinely valid
+# blob needing exactly one padding character, NOT followed by
+# whitespace/ANSI/EOS/another blob (i.e. directly abutting more real log
+# content with no separator), will no longer be recognized and will show
+# through as literal noise instead of being stripped -- narrower still
+# than the previous trade-off (which covered all unpadded/non-ANSI-wrapped
+# blobs), but still cosmetic-only.
 _PIPELINE_ANNOTATION_RE = re.compile(
     r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}"
-    r"(?:={1,2}(?:\x1b\[[0-9;]*m)?|\x1b\[[0-9;]*m)",
+    r"(?:==(?:\x1b\[[0-9;]*m)?"
+    r"|=(?=[\s\x1b]|ha:////|$)(?:\x1b\[[0-9;]*m)?"
+    r"|\x1b\[[0-9;]*m)",
 )
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
 # console output (verified against production Jenkins logs). Anchoring to

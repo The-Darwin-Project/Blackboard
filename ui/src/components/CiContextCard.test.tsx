@@ -47,7 +47,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build', jenkins_link: 'https://jenkins.example.com/job/build/5' }],
       };
       render(<CiContextCard context={context} />);
-      fireEvent.click(screen.getByText('Jenkins →'));
+      fireEvent.click(screen.getByText('Jenkins \u2192'));
       expect(mockSafeOpen).toHaveBeenCalledWith('https://jenkins.example.com/job/build/5');
     });
 
@@ -57,7 +57,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build', build_number: 42 }],
       };
       render(<CiContextCard context={context} />);
-      fireEvent.click(screen.getByText('Jenkins →'));
+      fireEvent.click(screen.getByText('Jenkins \u2192'));
       expect(mockSafeOpen).toHaveBeenCalledWith('https://jenkins.example.com/job/build/42');
     });
 
@@ -66,7 +66,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build' }],
       };
       render(<CiContextCard context={context} />);
-      expect(screen.queryByText('Jenkins →')).toBeNull();
+      expect(screen.queryByText('Jenkins \u2192')).toBeNull();
     });
   });
 
@@ -150,7 +150,7 @@ describe('CiContextCard', () => {
     });
   });
 
-  describe('stripJenkinsNoise (F1/F3/F4/F8/F9 hardening regressions)', () => {
+  describe('stripJenkinsNoise (F1/F3/F4/F8/F9/F10 hardening regressions)', () => {
     it('strips a ha:////  blob, preserving surrounding text', () => {
       expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
     });
@@ -196,6 +196,34 @@ describe('CiContextCard', () => {
       // longer accepted as a delimiter.
       const text = 'filler text ha:////AAAABearersecrettoken123';
       expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=` "token=" delimiter abutment verbatim (F10)', () => {
+      // F10 regression: F9's fix accepted a single `=` as sufficient
+      // padding proof unconditionally, but a lone `=` is exactly the
+      // common KEY=value secret delimiter and is genuinely ambiguous with
+      // real single-char base64 padding. Must now also require a safe
+      // lookahead terminator (whitespace/ANSI/another blob/EOS) before a
+      // single `=` counts -- absent here, so the whole match fails.
+      const text = 'ha:////AAAtoken=abc123xyz';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it.each(['secret', 'password', 'passwd', 'pwd', 'key', 'credential', 'authorization'])(
+      'preserves a single-`=` "%s=" delimiter abutment verbatim (F10 board sweep)',
+      (keyword) => {
+        const text = `ha:////AAA${keyword}=xyz`;
+        expect(stripJenkinsNoise(text)).toBe(text);
+      },
+    );
+
+    it('still strips when a single `=` is followed by a safe lookahead terminator (F10 positive control)', () => {
+      expect(stripJenkinsNoise('before ha:////ABC1= after')).toBe('before  after');
+    });
+
+    it('double-`==` padding remains self-sufficient, no regression (F10)', () => {
+      expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
     });
 
     it('still strips a Timestamper-prefixed [Pipeline] boundary line (F8 parity)', () => {

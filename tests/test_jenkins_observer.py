@@ -2675,6 +2675,65 @@ class TestT22StripPipelineAnnotations:
         )
         assert result == "filler text ha:////AAAABearersecrettoken123"
 
+    # ---- F10: single-`=` key=value secret-abutment bypass (adversarial follow-up) ----
+
+    def test_single_equals_token_delimiter_preserved(self):
+        """F10 regression: F9 closed the whitespace/EOS-terminated abutment
+        case by requiring mandatory padding or a trailing ANSI escape to
+        terminate a blob match. That fix introduced a NEW, narrower gap: a
+        single `=` was accepted as sufficient padding proof unconditionally,
+        but a lone `=` is exactly the common `KEY=value` secret delimiter
+        (see jenkins_observer.py's _SECRET_TEXT_PATTERN, which redacts both
+        "key: value" and "key=value" forms) and is genuinely indistinguishable
+        from real single-char base64 padding using only local regex context.
+        The pre-fix regex misread 'token=abc123xyz' as body-plus-padding and
+        silently deleted the literal word "token" and its "=" delimiter,
+        defeating downstream key=value redaction. The fix requires a single
+        `=` to ALSO be followed by a safe lookahead terminator (whitespace,
+        ANSI, another ha:////, or EOS) before it counts -- absent here, so
+        the whole match fails and the secret text survives verbatim."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken=abc123xyz")
+        assert result == "ha:////AAAtoken=abc123xyz"
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["secret", "password", "passwd", "pwd", "key", "credential", "authorization"],
+    )
+    def test_single_equals_other_secret_keywords_preserved(self, keyword):
+        """F10 regression, board sweep: every bare-alphabetic keyword from
+        _SECRET_TEXT_PATTERN's list (excluding hyphen/underscore-containing
+        variants like api-key/api_key, which are already safe since `-`/`_`
+        aren't in the base64 alphabet) must survive a single-`=` abutment
+        intact, same as the "token" case above."""
+        text = f"ha:////AAA{keyword}=xyz"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_followed_by_whitespace_still_strips(self):
+        """F10 positive control: a single `=` immediately followed by a safe
+        lookahead terminator (whitespace here) is still recognized as
+        genuine padding and the blob still strips cleanly -- the lookahead
+        requirement narrows the accepted cases, it doesn't remove single-`=`
+        padding support entirely."""
+        assert _strip_pipeline_annotations("before ha:////ABC1= after") == "before  after"
+
+    def test_single_equals_followed_by_another_blob_still_strips(self):
+        """F10 positive control: single `=` immediately followed by another
+        `ha:////` occurrence (no separator) is a safe lookahead terminator
+        too -- both blobs strip fully, matching the F3 adjacent-blobs
+        guarantee."""
+        result = _strip_pipeline_annotations("ha:////AAA=ha:////BBB==")
+        assert result == ""
+
+    def test_double_equals_padding_still_self_sufficient_no_regression(self):
+        """F10 non-regression: double `==` padding remains self-sufficient
+        with no lookahead requirement (implausible as coincidental real
+        text) -- unaffected by the single-`=` narrowing. Re-asserts the F1/
+        F3/F4 baseline cases to guard against the split introducing any
+        collateral regression in the already-fixed double-`==` path."""
+        assert _strip_pipeline_annotations("before ha:////ABC123== after") == "before  after"
+        assert _strip_pipeline_annotations("ha:////AAA==ha:////BBB==") == ""
+        assert "password:hunter2" in _strip_pipeline_annotations("ha:////ABC==password:hunter2")
+
     # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
 
     def test_large_ansi_only_payload_completes_quickly(self):
