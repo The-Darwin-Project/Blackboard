@@ -81,7 +81,9 @@ class JenkinsPlatformPort(Protocol):
 
     async def scan_view(self, view: str) -> ViewScanResult: ...
     async def get_job_run_state(self, job: str, *, count_failures: bool = True) -> JobRunState | None: ...
-    async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None: ...
+    async def get_build_details(
+        self, job: str, build: int, *, count_failures: bool = True, include_console_tail: bool = True,
+    ) -> BuildDetails | None: ...
     async def restart_job(self, job: str, params: dict[str, str] | None = None, *, count_failures: bool = True) -> bool: ...
     def enabled(self) -> bool: ...
 
@@ -309,8 +311,15 @@ class JenkinsAdapter:
             last_build_number=last_build_number,
         )
 
-    async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None:
-        """Fetch build details including parameters and console tail."""
+    async def get_build_details(
+        self, job: str, build: int, *, count_failures: bool = True, include_console_tail: bool = True,
+    ) -> BuildDetails | None:
+        """Fetch build details including parameters and, optionally, console tail.
+
+        include_console_tail=False skips the second (console-log) HTTP call for
+        callers that only need `.parameters` -- e.g. the retrigger flow, which is
+        wall-clock-budgeted and has no use for console output.
+        """
         path = f"/job/{urllib.parse.quote(job, safe='')}/{build}/api/json?tree=result,actions[parameters[name,value]],url"
         resp = await self._request("GET", path, count_failures=count_failures)
         if not resp or resp.status_code != 200:
@@ -326,15 +335,16 @@ class JenkinsAdapter:
                     params[p["name"]] = str(p.get("value", ""))
 
         console_tail = ""
-        # Best-effort: an oversized/slow console log must not trip the breaker on its own.
-        tail_resp = await self._request(
-            "GET",
-            f"/job/{urllib.parse.quote(job, safe='')}/{build}/logText/progressiveText?start=0",
-            count_failures=False,
-        )
-        if tail_resp and tail_resp.status_code == 200:
-            text = tail_resp.text
-            console_tail = text[-5000:] if len(text) > 5000 else text
+        if include_console_tail:
+            # Best-effort: an oversized/slow console log must not trip the breaker on its own.
+            tail_resp = await self._request(
+                "GET",
+                f"/job/{urllib.parse.quote(job, safe='')}/{build}/logText/progressiveText?start=0",
+                count_failures=False,
+            )
+            if tail_resp and tail_resp.status_code == 200:
+                text = tail_resp.text
+                console_tail = text[-5000:] if len(text) > 5000 else text
 
         return BuildDetails(
             job_name=job,

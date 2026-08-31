@@ -37,12 +37,17 @@ def _make_ctx(
     observer=None,
     redis_set_result=True,
     redis_get_result=None,
+    slack_channel=None,
 ) -> AsyncMock:
     """Build a minimal ToolContext mock matching the Protocol in tool_router.py."""
     ctx = AsyncMock()
     ctx.next_turn_number = AsyncMock(return_value=1)
     ctx.append_and_broadcast = AsyncMock(return_value=1)
     ctx.emit_pulse = AsyncMock()
+    # get_slack_channel is a sync method on the Protocol -- must be a MagicMock
+    # (not the default AsyncMock attribute) or callers get an unawaited coroutine
+    # back instead of None/a channel object.
+    ctx.get_slack_channel = MagicMock(return_value=slack_channel)
 
     bb = AsyncMock()
     bb.get_event = AsyncMock(return_value=event)
@@ -341,10 +346,11 @@ class TestRetriggerHappyPath:
         result = await handle_retrigger_jenkins_build(ctx, "evt-test0020", args, None)
 
         assert result is True
-        adapter.get_build_details.assert_called_once_with("verify-cnv-4.22.z-build", 254, count_failures=False)
+        adapter.get_build_details.assert_called_once_with(
+            "verify-cnv-4.22.z-build", 254, include_console_tail=False
+        )
         # restart_job is the mutating build-trigger POST -- it must count toward the
-        # shared circuit breaker (no count_failures=False), unlike the best-effort
-        # get_build_details call above. Regression test for the HIGH fix in PR #218.
+        # shared circuit breaker. Regression test for the HIGH fix in PR #218.
         adapter.restart_job.assert_called_once_with(
             "verify-cnv-4.22.z-build", fresh_details.parameters
         )
@@ -370,7 +376,9 @@ class TestRetriggerHappyPath:
         args = {"job_name": "verify-cnv-4.22.z-build"}
         await handle_retrigger_jenkins_build(ctx, "evt-test0021", args, None)
 
-        adapter.get_build_details.assert_called_once_with("verify-cnv-4.22.z-build", 254, count_failures=False)
+        adapter.get_build_details.assert_called_once_with(
+            "verify-cnv-4.22.z-build", 254, include_console_tail=False
+        )
         restart_call_params = adapter.restart_job.call_args[0][1]
         assert "***REDACTED***" not in restart_call_params.values()
         assert restart_call_params["TOKEN"] == "real-value"
@@ -379,9 +387,8 @@ class TestRetriggerHappyPath:
 # ---------------------------------------------------------------------------
 # Test: get_job_run_state guard (C4 HIGH increment) -- T-IF-1..5
 #
-# Spec: inside the existing 40s `_do_retrigger` timeout, BEFORE
-# `get_build_details` + `restart_job`, the handler must call
-# `adapter.get_job_run_state(job_name, count_failures=False)`:
+# Spec: inside the `_do_retrigger` timeout, BEFORE `get_build_details` +
+# `restart_job`, the handler must call `adapter.get_job_run_state(job_name)`:
 #   - None                          -> escalate, RELEASE cooldown (redis.delete called)
 #   - building=True OR in_queue=True -> skip POST, KEEP cooldown (redis.delete NOT called)
 #   - idle (both False)             -> existing retrigger path unchanged
@@ -415,9 +422,7 @@ class TestRetriggerRunStateGuard:
         result = await handle_retrigger_jenkins_build(ctx, "evt-test0100", args, None)
 
         assert result is True
-        adapter.get_job_run_state.assert_called_once_with(
-            "verify-cnv-4.22.z-build", count_failures=False
-        )
+        adapter.get_job_run_state.assert_called_once_with("verify-cnv-4.22.z-build")
         adapter.restart_job.assert_called_once()
         bb = ctx.get_blackboard()
         bb.redis.delete.assert_not_called()
@@ -973,4 +978,291 @@ class TestRetriggerExceptions:
         turn = _captured_turn(ctx)
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         assert "timed out" in turn_text.lower() or "timeout" in turn_text.lower()
+
+    async def test_get_job_run_state_exception_releases_key(self):
+        """An exception raised directly from get_job_run_state (not get_build_details)
+        must also release the cooldown key -- MEDIUM testing-gap fix: this call had
+        no dedicated failure-injection coverage before."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        adapter.get_job_run_state.side_effect = ConnectionError("Mocked Jenkins connection failure")
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0091", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "internal error" in turn_text.lower() or "escalate" in turn_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Test: real asyncio.timeout firing from cumulative elapsed wall-clock time
+# (HIGH fix: previously only a mocked side_effect=TimeoutError was exercised)
+# ---------------------------------------------------------------------------
+
+class TestRetriggerRealTimeout:
+    """Shrinks the module-level timeout constant and makes one mocked Jenkins
+    call genuinely sleep past it, so asyncio.timeout's real cancellation path
+    fires -- not a raised TimeoutError side_effect standing in for it."""
+
+    async def test_real_timeout_fires_from_cumulative_elapsed_time(self, monkeypatch):
+        import asyncio as asyncio_module
+
+        from src.agents import handlers_integration
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        monkeypatch.setattr(handlers_integration, "_JENKINS_RETRIGGER_HANDLER_TIMEOUT", 0.05)
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+
+        async def _slow_run_state(*_args, **_kwargs):
+            await asyncio_module.sleep(0.2)
+            return _make_run_state()
+
+        adapter.get_job_run_state = AsyncMock(side_effect=_slow_run_state)
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0230", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "timed out" in turn_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Test: wrapper-specific system-wide rate limit (HIGH fix -- restores a
+# code-level control for wrapper jobs, distinct from the per-job cooldown)
+# ---------------------------------------------------------------------------
+
+class TestRetriggerWrapperRateLimit:
+    """A separate, system-wide lock caps how often ANY wrapper job can be
+    retriggered, independent of the per-job cooldown."""
+
+    async def test_wrapper_global_lock_blocks_a_different_wrapper_job(self):
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {
+                "job_name": "verify-cnv-4.23.z-build",
+                "build_number": 900,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.23"},
+            },
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(event=event_doc, adapter=adapter)
+        bb = ctx.get_blackboard()
+        # First SET (per-job cooldown) succeeds; second SET (wrapper global lock)
+        # fails because a different wrapper job is already within its cooldown.
+        bb.redis.set = AsyncMock(side_effect=[True, False])
+        bb.redis.get = AsyncMock(return_value="verify-cnv-4.22.z-build")
+
+        args = {"job_name": "verify-cnv-4.23.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0200", args, None)
+
+        assert result is True
+        adapter.get_job_run_state.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        # No actual retrigger happened -- the per-job cooldown key acquired at the
+        # top of the handler must be released, not left dangling.
+        bb.redis.delete.assert_called_once_with(
+            "darwin:jenkins:retrigger:verify-cnv-4.23.z-build"
+        )
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "wrapper" in lower
+        assert "verify-cnv-4.22.z-build" in turn_text
+
+    async def test_leaf_job_never_touches_wrapper_lock(self):
+        """A leaf (non-wrapper) job only ever performs the one per-job cooldown
+        SET -- the wrapper-specific gate must not apply to it."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build-tier1", "build_number": 100, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        fresh_details = _make_build_details(job_name="verify-cnv-4.22.z-build-tier1", build_number=100)
+        adapter = _make_adapter(build_details=fresh_details, restart_result=True)
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build-tier1"}
+        await handle_retrigger_jenkins_build(ctx, "evt-test0201", args, None)
+
+        bb = ctx.get_blackboard()
+        assert bb.redis.set.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: structured alerting for actual wrapper retriggers (HIGH fix)
+# ---------------------------------------------------------------------------
+
+class TestRetriggerWrapperAlerting:
+    """A successful wrapper retrigger posts a best-effort alert to the infra
+    Slack channel; a leaf retrigger does not."""
+
+    async def test_wrapper_retrigger_posts_infra_alert(self):
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {
+                "job_name": "verify-cnv-4.22.z-build",
+                "build_number": 254,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.22"},
+            },
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        fresh_details = _make_build_details()
+        adapter = _make_adapter(build_details=fresh_details, restart_result=True)
+
+        slack_channel = MagicMock()
+        slack_channel._infra_channel = "C123INFRA"
+        slack_channel._app.client.chat_postMessage = AsyncMock(return_value={"ok": True})
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True, slack_channel=slack_channel)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        await handle_retrigger_jenkins_build(ctx, "evt-test0210", args, None)
+
+        slack_channel._app.client.chat_postMessage.assert_called_once()
+        _, kwargs = slack_channel._app.client.chat_postMessage.call_args
+        assert kwargs["channel"] == "C123INFRA"
+        assert "verify-cnv-4.22.z-build" in kwargs["text"]
+
+    async def test_leaf_retrigger_does_not_alert(self):
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build-tier1", "build_number": 100, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        fresh_details = _make_build_details(job_name="verify-cnv-4.22.z-build-tier1", build_number=100)
+        adapter = _make_adapter(build_details=fresh_details, restart_result=True)
+
+        slack_channel = MagicMock()
+        slack_channel._infra_channel = "C123INFRA"
+        slack_channel._app.client.chat_postMessage = AsyncMock(return_value={"ok": True})
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True, slack_channel=slack_channel)
+
+        args = {"job_name": "verify-cnv-4.22.z-build-tier1"}
+        await handle_retrigger_jenkins_build(ctx, "evt-test0211", args, None)
+
+        slack_channel._app.client.chat_postMessage.assert_not_called()
+
+    async def test_wrapper_alert_failure_does_not_affect_result(self):
+        """A Slack post failure during the alert must not change the retrigger's
+        own success result -- alerting is best-effort."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {
+                "job_name": "verify-cnv-4.22.z-build",
+                "build_number": 254,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.22"},
+            },
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        fresh_details = _make_build_details()
+        adapter = _make_adapter(build_details=fresh_details, restart_result=True)
+
+        slack_channel = MagicMock()
+        slack_channel._infra_channel = "C123INFRA"
+        slack_channel._app.client.chat_postMessage = AsyncMock(side_effect=RuntimeError("Slack down"))
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True, slack_channel=slack_channel)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0212", args, None)
+
+        assert result is True
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "successfully retriggered" in turn_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Test: no-op (observed-running) cooldown messaging (MEDIUM fix -- success
+# no longer conflates "actually POSTed" with "observed already running")
+# ---------------------------------------------------------------------------
+
+class TestRetriggerNoopCooldownMessaging:
+    async def test_building_job_tags_cooldown_as_observed_running(self):
+        """The skip-POST path re-tags the cooldown value (xx=True, keepttl=True)
+        so a later blocked caller isn't told a retrigger happened when none did."""
+        from src.agents.handlers_integration import _NOOP_COOLDOWN_MARKER, handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(
+            run_state=_make_run_state(building=True, in_queue=False, last_build_number=300)
+        )
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        await handle_retrigger_jenkins_build(ctx, "evt-test0221", args, None)
+
+        bb = ctx.get_blackboard()
+        tag_call = bb.redis.set.call_args_list[-1]
+        assert tag_call[0] == (
+            "darwin:jenkins:retrigger:verify-cnv-4.22.z-build",
+            f"evt-test0221{_NOOP_COOLDOWN_MARKER}",
+        )
+        assert tag_call[1] == {"xx": True, "keepttl": True}
+
+    async def test_observed_running_does_not_claim_retriggered(self):
+        """A caller blocked by a cooldown key tagged as observed-running must not
+        be told the job 'was already retriggered' -- that never happened."""
+        from src.agents.handlers_integration import _NOOP_COOLDOWN_MARKER, handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter()
+        ctx = _make_ctx(
+            event=event_doc,
+            adapter=adapter,
+            redis_set_result=False,
+            redis_get_result=f"evt-original{_NOOP_COOLDOWN_MARKER}",
+        )
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0220", args, None)
+
+        assert result is True
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "was already retriggered" not in lower
+        assert "evt-original" in turn_text
+        assert "running" in lower or "queued" in lower
+        adapter.restart_job.assert_not_called()
 
