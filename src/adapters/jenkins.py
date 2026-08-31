@@ -117,18 +117,27 @@ _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 # regex context -- e.g. "ha:////AAAtoken=abc123xyz" is exactly as
 # plausible a real base64 blob ending in one padding char as it is a blob
 # abutting a "token=" secret delimiter. To resolve the ambiguity, a lone
-# `=` is only accepted as a real terminator when a lookahead confirms one
-# of the traditionally-safe delimiters immediately follows it (an ANSI
-# escape, another `ha:////`, or end-of-string). If that lookahead fails,
-# this alternative does not match at this position, the whole match fails,
-# and the abutting secret text (including the "token=" delimiter) survives
-# untouched for downstream redaction -- the same "leave ambiguous content
-# alone" philosophy already applied throughout this fix. This closes the
-# gap without reintroducing the F3 (adjacent-blobs) or F4 (colon-delimited
-# abutment, safe because `:` is outside the base64 alphabet and so already
-# can't be consumed) regressions: each blob is still matched independently
-# once it has its own valid terminator, so no separate "or another
-# ha:////" alternative is needed outside the single-`=` lookahead itself.
+# `=` is only accepted as a real terminator when a lookahead confirms an
+# ANSI escape (`\x1b[`) immediately follows it. Neither `ha:////` nor
+# end-of-string (`$`) are accepted in this lookahead -- a following
+# `ha:////` occurrence was independently verified to let the greedy body
+# class consume through a `password=`/`token=` delimiter when the next
+# blob's `ha:////` header coincidentally satisfies the lookahead, and `$`
+# has Python/JS parity issues (Python `$` matches before a trailing `\n`;
+# JS `$` without `m` flag matches only true end-of-input). Removing both
+# closes the CRITICAL (cross-blob `password=` consumption) and HIGH (P/JS
+# `$` parity split) findings fail-closed. If the lookahead fails, the
+# whole match fails and the abutting secret text (including the "token="
+# delimiter) survives untouched for downstream redaction -- the same
+# "leave ambiguous content alone" philosophy already applied throughout.
+#
+# Accepted trade-off (narrower than the prior round's): a genuinely valid
+# single-pad blob (`...=`) with no ANSI wrapper, whether at end-of-string,
+# before whitespace, or immediately followed by another `ha:////`, is left
+# as cosmetic noise. Adjacent blobs that use `==` padding still strip
+# cleanly (the `==` alternative is unconditional). Fail-closed: never eat
+# `password=` / `token=` / `Bearer ` by treating a following `ha:////` or
+# `$` as proof of padding.
 #
 # Whitespace was DELIBERATELY REMOVED from that lookahead set (it used to
 # be a member, until a MORE SERIOUS follow-on secret-redaction-bypass
@@ -153,7 +162,7 @@ _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 _PIPELINE_ANNOTATION_RE = re.compile(
     r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}"
     r"(?:==(?:\x1b\[[0-9;]*m)?"
-    r"|=(?=\x1b|ha:////|$)(?:\x1b\[[0-9;]*m)?"
+    r"|=(?=\x1b\[)(?:\x1b\[[0-9;]*m)?"
     r"|\x1b\[[0-9;]*m)",
 )
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in

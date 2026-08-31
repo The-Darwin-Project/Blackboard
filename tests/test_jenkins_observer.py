@@ -2784,13 +2784,15 @@ class TestT22StripPipelineAnnotations:
         result = _strip_pipeline_annotations("before ha:////ABC1=\x1b[0m after")
         assert result == "before  after"
 
-    def test_single_equals_followed_by_another_blob_still_strips(self):
-        """F10 positive control: single `=` immediately followed by another
-        `ha:////` occurrence (no separator) is a safe lookahead terminator
-        too -- both blobs strip fully, matching the F3 adjacent-blobs
-        guarantee."""
+    def test_single_equals_followed_by_another_blob_is_noise_tradeoff(self):
+        """F12 trade-off: single `=` followed by another `ha:////` is NO
+        LONGER a safe lookahead terminator (removed to close the CRITICAL
+        cross-blob password= consumption bypass). The first single-pad blob
+        remains as cosmetic noise; the second `==` blob still strips
+        cleanly. This is an accepted, documented narrowing."""
         result = _strip_pipeline_annotations("ha:////AAA=ha:////BBB==")
-        assert result == ""
+        assert "ha:////BBB==" not in result  # second blob (==) stripped
+        # First single-pad blob is leftover noise -- do not assert it vanishes
 
     def test_double_equals_padding_still_self_sufficient_no_regression(self):
         """F10 non-regression: double `==` padding remains self-sufficient
@@ -2801,6 +2803,44 @@ class TestT22StripPipelineAnnotations:
         assert _strip_pipeline_annotations("before ha:////ABC123== after") == "before  after"
         assert _strip_pipeline_annotations("ha:////AAA==ha:////BBB==") == ""
         assert "password:hunter2" in _strip_pipeline_annotations("ha:////ABC==password:hunter2")
+
+    # ---- F12: CRITICAL cross-blob password= consumption + HIGH Python/JS $ parity ----
+
+    def test_critical_cross_blob_password_consumption_closed(self):
+        """F12 CRITICAL: `ha:////AAApassword=ha:////BBB==hunter2` -- the old
+        regex's single-`=` lookahead accepted `ha:////` as proof of
+        padding, so `ha:////AAApassword=` was consumed as one blob (eating
+        the `password=` delimiter), then `ha:////BBB==` stripped via `==`,
+        leaving `hunter2` unredacted. With `ha:////` removed from the
+        lookahead, the first blob's `=` fails to match, `password=`
+        survives intact for downstream `_redact_secrets_in_text`."""
+        text = "ha:////AAApassword=ha:////BBB==hunter2"
+        stripped = _strip_pipeline_annotations(text)
+        assert "password=" in stripped
+        assert "hunter2" in stripped  # still present for redaction to catch
+
+    def test_critical_cross_blob_token_consumption_closed(self):
+        """F12 CRITICAL variant: `ha:////AAAtoken=ha:////forged leftoversecret`
+        -- same class as password= above. `token=` must survive."""
+        text = "ha:////AAAtoken=ha:////forged leftoversecret"
+        stripped = _strip_pipeline_annotations(text)
+        assert "token=" in stripped
+
+    def test_adjacent_double_padded_blobs_still_fully_strip(self):
+        """F12 non-regression: adjacent `==` blobs are unaffected by the
+        lookahead change -- `==` is an unconditional terminator."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+
+    def test_high_parity_eos_newline_token_preserved(self):
+        """F12 HIGH: `ha:////AAAtoken=\\n` -- Python `$` matches before the
+        trailing `\\n`; JS `$` (no `m`) matches only true end-of-input.
+        With `$` removed from the lookahead, both languages now leave this
+        string untouched (the `=` has no ANSI follower). Verifies the
+        Python side; the parity corpus covers cross-language agreement."""
+        text = "ha:////AAAtoken=\n"
+        stripped = _strip_pipeline_annotations(text)
+        assert "token=" in stripped
 
     # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
 

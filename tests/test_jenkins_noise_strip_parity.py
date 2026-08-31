@@ -62,6 +62,11 @@ CORPUS = [
     "ha:////AAApassword= hunter2",
     "ha:////AAAtoken=\nsomevalue",
     "before ha:////ABC1=\x1b[0m after",
+    # F12 CRITICAL: cross-blob password=/token= consumption bypass
+    "ha:////AAApassword=ha:////BBB==hunter2",
+    "ha:////AAAtoken=ha:////forged leftoversecret",
+    # F12 HIGH: Python/JS $ parity split on trailing newline
+    "ha:////AAAtoken=\n",
     "\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n",
     "[Pipeline] }\n[Pipeline] // container\nreal output",
     "output\n[Pipeline] End of Pipeline",

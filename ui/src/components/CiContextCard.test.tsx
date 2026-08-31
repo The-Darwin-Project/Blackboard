@@ -235,8 +235,9 @@ describe('CiContextCard', () => {
       expect(stripJenkinsNoise('before ha:////ABC1=\x1b[0m after')).toBe('before  after');
     });
 
-    it('still strips when a single `=` is followed by another blob (F10 positive control)', () => {
-      expect(stripJenkinsNoise('ha:////AAA=ha:////BBB==')).toBe('');
+    it('single-pad blob + adjacent == blob: second strips, first is noise trade-off (F12)', () => {
+      const result = stripJenkinsNoise('ha:////AAA=ha:////BBB==');
+      expect(result).not.toContain('ha:////BBB==');
     });
 
     it('preserves a single-`=`-then-space "token=" abutment verbatim (F11)', () => {
@@ -273,6 +274,29 @@ describe('CiContextCard', () => {
     it('still strips a Timestamper-prefixed [Pipeline] boundary line (F8 parity)', () => {
       const text = '[2026-08-31T11:23:24.854Z] [Pipeline] // container\nreal output';
       expect(stripJenkinsNoise(text)).toBe('real output');
+    });
+
+    it('preserves password= across a cross-blob boundary (F12 CRITICAL)', () => {
+      const text = 'ha:////AAApassword=ha:////BBB==hunter2';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('password=');
+      expect(stripped).toContain('hunter2');
+    });
+
+    it('preserves token= across a cross-blob boundary (F12 CRITICAL variant)', () => {
+      const text = 'ha:////AAAtoken=ha:////forged leftoversecret';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('token=');
+    });
+
+    it('adjacent == blobs still fully strip (F12 non-regression)', () => {
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
+    });
+
+    it('preserves token= before trailing newline (F12 HIGH parity)', () => {
+      const text = 'ha:////AAAtoken=\n';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('token=');
     });
   });
 
