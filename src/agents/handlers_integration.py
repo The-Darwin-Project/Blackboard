@@ -1138,8 +1138,9 @@ async def handle_ask_release_ai(
 # retrigger_jenkins_build
 # ---------------------------------------------------------------------------
 _JENKINS_RETRIGGER_COOLDOWN = int(os.getenv("JENKINS_RETRIGGER_COOLDOWN_SECONDS", "21600"))
-# Hard wall-clock ceiling for the two sequential Jenkins calls in _do_retrigger
-# (get_build_details + restart_job), distinct from the adapter's per-request timeout.
+# Hard wall-clock ceiling for the three sequential Jenkins calls in _do_retrigger
+# (get_job_run_state + get_build_details + restart_job), distinct from the adapter's
+# per-request timeout.
 _JENKINS_RETRIGGER_HANDLER_TIMEOUT = 40
 
 
@@ -1215,7 +1216,7 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
     """Execute the retrigger after scope + rate checks pass. Releases cooldown key on failure."""
     observer = ctx.get_agent_instance("_jenkins_observer")
     adapter = getattr(observer, "_adapter", None) if observer else None
-    
+
     success = False
     try:
         if not adapter or not adapter.enabled():
@@ -1228,14 +1229,31 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
 
         job_metadata = matched.get("job_metadata") or {}
         is_wrapper = job_metadata.get("type") == "wrapper"
-        if is_wrapper:
-            return (
-                f"'{job_name}' is a wrapper job — retriggering it re-runs all lanes. "
-                f"Automatic retrigger is not permitted for wrapper jobs; escalate to "
-                f"maintainer for a human-supervised retrigger."
-            )
 
         async with asyncio.timeout(_JENKINS_RETRIGGER_HANDLER_TIMEOUT):
+            run_state = await adapter.get_job_run_state(job_name, count_failures=False)
+            if run_state is None:
+                return (
+                    f"Could not fetch job run state for '{job_name}'. "
+                    f"Jenkins may be unreachable. Escalate to maintainer."
+                )
+            if run_state.building or run_state.in_queue:
+                success = True
+                state_bits: list[str] = []
+                if run_state.building:
+                    state_bits.append("already running")
+                if run_state.in_queue:
+                    state_bits.append("already queued")
+                state_text = " and ".join(state_bits)
+                last_build_suffix = ""
+                if run_state.last_build_number is not None:
+                    last_build_suffix = f" Last build: #{run_state.last_build_number}."
+                return (
+                    f"Job '{job_name}' is {state_text}; retrigger skipped. "
+                    f"Defer until the current run finishes. Cooldown remains in place."
+                    f"{last_build_suffix}"
+                )
+
             # get_build_details requires a separate network call to fetch fresh
             # parameters (avoiding a repost of redacted ci_context values). Best-effort:
             # count_failures=False keeps it isolated from the shared circuit breaker.
@@ -1250,7 +1268,11 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 
-        return f"Successfully retriggered '{job_name}' #{build_number}. Monitor for new build result."
+        suffix = " (wrapper job — all lanes will re-run)" if is_wrapper else ""
+        return (
+            f"Successfully retriggered '{job_name}' #{build_number}. "
+            f"Monitor for new build result.{suffix}"
+        )
     except TimeoutError:
         logger.error("Timed out retriggering %s after %ds", job_name, _JENKINS_RETRIGGER_HANDLER_TIMEOUT)
         return f"Retrigger for '{job_name}' timed out after {_JENKINS_RETRIGGER_HANDLER_TIMEOUT}s. Escalate to maintainer."

@@ -21,7 +21,7 @@
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
 """
-Jenkins CI platform adapter -- poll jobs, get build details, restart.
+Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
 Used by JenkinsObserver for CI gating reconciliation.
 """
@@ -61,6 +61,14 @@ class BuildDetails:
 
 
 @dataclass
+class JobRunState:
+    """Lightweight job-level run state. Not a full build dump -- no console, no params."""
+    building: bool = False
+    in_queue: bool = False
+    last_build_number: int | None = None
+
+
+@dataclass
 class ViewScanResult:
     """Result of scanning a Jenkins view."""
     jobs: list[JobResult]
@@ -72,6 +80,7 @@ class JenkinsPlatformPort(Protocol):
     """Port for Jenkins CI platform operations."""
 
     async def scan_view(self, view: str) -> ViewScanResult: ...
+    async def get_job_run_state(self, job: str, *, count_failures: bool = True) -> JobRunState | None: ...
     async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None: ...
     async def restart_job(self, job: str, params: dict[str, str] | None = None, *, count_failures: bool = True) -> bool: ...
     def enabled(self) -> bool: ...
@@ -266,6 +275,39 @@ class JenkinsAdapter:
                     color=color,
                 ))
         return ViewScanResult(jobs, 200)
+
+    async def get_job_run_state(self, job: str, *, count_failures: bool = True) -> JobRunState | None:
+        """Fetch lightweight job-level state without console or parameter details."""
+        path = (
+            f"/job/{urllib.parse.quote(job, safe='')}/api/json"
+            f"?tree=color,inQueue,lastBuild[number,result,building]"
+        )
+        resp = await self._request("GET", path, count_failures=count_failures)
+        if not resp or resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        in_queue = bool(data.get("inQueue"))
+        building = False
+        last_build_number: int | None = None
+        last_build = data.get("lastBuild")
+        if isinstance(last_build, dict):
+            building = bool(last_build.get("building"))
+            raw_number = last_build.get("number")
+            last_build_number = raw_number if isinstance(raw_number, int) else None
+        if str(data.get("color") or "").endswith("_anime"):
+            building = True
+
+        return JobRunState(
+            building=building,
+            in_queue=in_queue,
+            last_build_number=last_build_number,
+        )
 
     async def get_build_details(self, job: str, build: int, *, count_failures: bool = True) -> BuildDetails | None:
         """Fetch build details including parameters and console tail."""

@@ -114,6 +114,23 @@ class TestT14AfterRewrite:
         body_lower = skill_body.lower()
         assert "hour" in body_lower or "6" in skill_body or "9" in skill_body
 
+    def test_hygiene_terms_removed(self, skill_body):
+        body_lower = skill_body.lower()
+        assert "cnv" not in body_lower
+        assert "nvr" not in body_lower
+
+    def test_retry_section_mentions_wrapper_cost(self, skill_body):
+        """Locks the Fix-1 rewrite: the Retry Before Investigation section must
+        distinguish leaf-restart cheapness from wrapper-restart cost, not just
+        assert cheapness unconditionally."""
+        section_match = re.search(
+            r"##\s*Retry Before Investigation(.*?)(?=\n##\s|\Z)", skill_body, re.DOTALL
+        )
+        assert section_match, "Retry Before Investigation section not found"
+        section = section_match.group(1)
+        assert "wrapper" in section.lower(), \
+            "Retry Before Investigation section must mention 'wrapper' cost distinction"
+
 
 # =========================================================================
 # T-S1: close/when-to-close.md CI gating content
@@ -248,7 +265,14 @@ class TestTS3CiGatingEnvironment:
     def test_timing_cadence_mentioned(self, body):
         body_lower = body.lower()
         assert "hour" in body_lower or "6" in body or "9" in body, \
-            "Must mention timing cadence (6-9 hours for wrappers)"
+            "Must mention timing cadence (hours, cadence-relative to schedule)"
+
+    def test_hygiene_terms_removed(self, body):
+        body_lower = body.lower()
+        assert "cnv" not in body_lower
+        assert "nvr" not in body_lower
+        assert "artifactory" not in body_lower
+        assert "hour" in body_lower
 
     def test_tag_type_is_context(self, frontmatter):
         assert frontmatter.get("tag_type") == "context", \

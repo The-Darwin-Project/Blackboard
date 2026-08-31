@@ -5,6 +5,12 @@
 # 3. [Pattern]: ToolContext mocked via AsyncMock with next_turn_number/append_and_broadcast stubs.
 # 4. [Gotcha]: asyncio_mode=auto in pytest.ini — no @pytest.mark.asyncio needed.
 # 5. [Contract]: Tests assert planned public interface from plan Step 8, NOT implementation internals.
+# 6. [Gotcha]: `_make_adapter` distinguishes the sentinel default (IDLE run state)
+#    from an explicit `run_state=None` (adapter returns None to exercise the
+#    unreachable/unavailable branch). Do not collapse these back together.
+#    This is a required change for the C4 HIGH increment's run-state guard in `_do_retrigger` --
+#    without it, a bare AsyncMock's `.building` child attribute is truthy and every
+#    happy-path test would silently skip `restart_job`.
 """
 Step 8: retrigger_jenkins_build handler tests.
 
@@ -80,24 +86,54 @@ def _make_event_doc(failed_jobs: list[dict] | None = None):
     return event_doc
 
 
+def _make_run_state(*, building: bool = False, in_queue: bool = False, last_build_number=254):
+    """Build a mock JobRunState-shaped object (planned dataclass in src/adapters/jenkins.py).
+
+    Uses MagicMock with explicit attributes rather than importing the dataclass
+    directly, since this test file must not depend on the code executor's
+    parallel implementation landing first.
+    """
+    state = MagicMock()
+    state.building = building
+    state.in_queue = in_queue
+    state.last_build_number = last_build_number
+    return state
+
+
+_IDLE_RUN_STATE = object()
+
+
 def _make_adapter(
     *,
     enabled: bool = True,
     restart_result: bool = True,
     build_details=None,
     breaker_open: bool = False,
+    run_state=_IDLE_RUN_STATE,
 ):
     """Build a mock JenkinsAdapter.
 
     `breaker_open` is set explicitly (not left as AsyncMock's auto-truthy child
     attribute) so tests can distinguish the "not configured" vs "circuit breaker
     open" message branches in `_do_retrigger`.
+
+    `run_state` uses a private sentinel default to mean IDLE
+    (building=False, in_queue=False). Passing `run_state=None` is distinct and
+    makes `get_job_run_state` return None so tests can exercise the unreachable
+    Jenkins branch explicitly. This sentinel split is REQUIRED for all existing
+    happy-path tests to keep passing once `_do_retrigger` gates on
+    `get_job_run_state` before `restart_job` -- a bare AsyncMock's
+    auto-generated `.building` child attribute is truthy, which would make every
+    happy-path test silently skip the retrigger POST (a regression, not a pass).
     """
     adapter = AsyncMock()
     adapter.enabled = MagicMock(return_value=enabled)
     adapter.breaker_open = breaker_open
     adapter.restart_job = AsyncMock(return_value=restart_result)
     adapter.get_build_details = AsyncMock(return_value=build_details)
+    adapter.get_job_run_state = AsyncMock(
+        return_value=_make_run_state() if run_state is _IDLE_RUN_STATE else run_state
+    )
     return adapter
 
 
@@ -338,6 +374,181 @@ class TestRetriggerHappyPath:
         restart_call_params = adapter.restart_job.call_args[0][1]
         assert "***REDACTED***" not in restart_call_params.values()
         assert restart_call_params["TOKEN"] == "real-value"
+
+
+# ---------------------------------------------------------------------------
+# Test: get_job_run_state guard (C4 HIGH increment) -- T-IF-1..5
+#
+# Spec: inside the existing 40s `_do_retrigger` timeout, BEFORE
+# `get_build_details` + `restart_job`, the handler must call
+# `adapter.get_job_run_state(job_name, count_failures=False)`:
+#   - None                          -> escalate, RELEASE cooldown (redis.delete called)
+#   - building=True OR in_queue=True -> skip POST, KEEP cooldown (redis.delete NOT called)
+#   - idle (both False)             -> existing retrigger path unchanged
+# The guard is job-level, not wrapper-type-gated (T-IF-5 proves this explicitly).
+# ---------------------------------------------------------------------------
+
+class TestRetriggerRunStateGuard:
+    """T-IF-1..5: get_job_run_state pre-check gates the retrigger POST."""
+
+    async def test_idle_job_still_retriggers(self):
+        """T-IF-1: get_job_run_state idle -> existing retrigger path proceeds
+        unchanged (restart_job called, cooldown retained). Likely already
+        covered by TestRetriggerHappyPath.test_successful_retrigger once
+        `_make_adapter` defaults to idle -- kept here as an explicit,
+        spec-ID-traceable duplicate for the new run-state contract."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        fresh_details = _make_build_details()
+        adapter = _make_adapter(
+            build_details=fresh_details,
+            restart_result=True,
+            run_state=_make_run_state(building=False, in_queue=False, last_build_number=254),
+        )
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0100", args, None)
+
+        assert result is True
+        adapter.get_job_run_state.assert_called_once_with(
+            "verify-cnv-4.22.z-build", count_failures=False
+        )
+        adapter.restart_job.assert_called_once()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_not_called()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "success" in turn_text.lower() or "trigger" in turn_text.lower() or "retrigger" in turn_text.lower()
+
+    async def test_building_job_skips_post_keeps_cooldown(self):
+        """T-IF-2: building=True -> restart_job and get_build_details are NOT
+        called, redis.delete is NOT called (cooldown retained), and the
+        message mentions the job is already running/queued AND the cooldown."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(
+            run_state=_make_run_state(building=True, in_queue=False, last_build_number=300)
+        )
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0101", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_not_called()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "running" in lower or "queued" in lower or "in progress" in lower or "building" in lower
+        assert "cooldown" in lower
+
+    async def test_queued_job_skips_post_keeps_cooldown(self):
+        """T-IF-3: in_queue=True (building=False) -> same no-POST/keep-cooldown
+        behavior as T-IF-2 -- proves the guard checks both fields."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(
+            run_state=_make_run_state(building=False, in_queue=True, last_build_number=254)
+        )
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0102", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_not_called()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "running" in lower or "queued" in lower or "in progress" in lower or "building" in lower
+        assert "cooldown" in lower
+
+    async def test_run_state_none_releases_cooldown(self):
+        """T-IF-4: get_job_run_state returns None (fetch failed / Jenkins
+        unreachable) -> restart_job NOT called, cooldown key IS released
+        (redis.delete called), and the message escalates as unreachable."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {"job_name": "verify-cnv-4.22.z-build", "build_number": 254, "parameters": {}},
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(run_state=None)
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0103", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "unreachable" in lower or "escalate" in lower or "could not" in lower or "unable" in lower
+
+    async def test_wrapper_job_building_also_skips(self):
+        """T-IF-5: A wrapper-type job (job_metadata.type='wrapper') that is
+        building=True must ALSO skip the POST and keep cooldown -- proves the
+        run-state guard applies at the job level, not only to non-wrapper
+        (leaf) jobs. Must NOT restore any assertion that wrapper retrigger is
+        categorically blocked -- this is the run-state guard, not a
+        wrapper-type block."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        failed_jobs = [
+            {
+                "job_name": "verify-cnv-4.22.z-build",
+                "build_number": 254,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.22"},
+            },
+        ]
+        event_doc = _make_event_doc(failed_jobs=failed_jobs)
+        adapter = _make_adapter(
+            run_state=_make_run_state(building=True, in_queue=False, last_build_number=254)
+        )
+        ctx = _make_ctx(event=event_doc, adapter=adapter, redis_set_result=True)
+
+        args = {"job_name": "verify-cnv-4.22.z-build"}
+        result = await handle_retrigger_jenkins_build(ctx, "evt-test0104", args, None)
+
+        assert result is True
+        adapter.get_build_details.assert_not_called()
+        adapter.restart_job.assert_not_called()
+        bb = ctx.get_blackboard()
+        bb.redis.delete.assert_not_called()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "running" in lower or "queued" in lower or "in progress" in lower or "building" in lower
+        assert "cooldown" in lower
 
 
 # ---------------------------------------------------------------------------
@@ -614,12 +825,11 @@ class TestRetriggerWrapperLeafMessaging:
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         lower = turn_text.lower()
         assert "wrapper" in lower or "all lane" in lower or "all sub" in lower
-        # Code-level guard (PR #218 MEDIUM fix): wrapper jobs are rejected BEFORE
-        # the mutating call, not just labeled after the fact.
-        adapter.restart_job.assert_not_called()
-        adapter.get_build_details.assert_not_called()
+        assert "successfully retriggered" in lower
+        adapter.restart_job.assert_called_once()
+        adapter.get_build_details.assert_called_once()
         bb = ctx.get_blackboard()
-        bb.redis.delete.assert_called_once_with("darwin:jenkins:retrigger:verify-cnv-4.22.z-build")
+        bb.redis.delete.assert_not_called()
 
     async def test_leaf_job_no_wrapper_mention(self):
         """When job_metadata.type != 'wrapper' or absent, no wrapper/lanes text."""
@@ -647,6 +857,7 @@ class TestRetriggerWrapperLeafMessaging:
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
         lower = turn_text.lower()
         assert "wrapper" not in lower
+        adapter.restart_job.assert_called_once()
 
     async def test_no_job_metadata_graceful(self):
         """When job_metadata is absent entirely, retrigger still works."""
@@ -665,6 +876,11 @@ class TestRetriggerWrapperLeafMessaging:
 
         assert result is True
         adapter.restart_job.assert_called_once()
+
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        lower = turn_text.lower()
+        assert "wrapper" not in lower
 
 
 # ---------------------------------------------------------------------------
