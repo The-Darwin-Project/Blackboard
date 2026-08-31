@@ -1278,6 +1278,12 @@ async def _do_retrigger(
 
     success = False
     wrapper_gate_owned = False
+    # True only once an actual wrapper retrigger POST has succeeded -- distinct
+    # from `success`, which is also set True on the no-op "observed already
+    # running/queued" path to keep the per-job cooldown tagged. The wrapper
+    # global lock must NOT be held for the no-op path; only `success` would
+    # falsely keep it locked for the full cooldown with nothing to show for it.
+    wrapper_retrigger_posted = False
     try:
         if not adapter or not adapter.enabled():
             reason = "circuit breaker open" if (adapter and adapter.breaker_open) else "not configured"
@@ -1361,6 +1367,8 @@ async def _do_retrigger(
                 )
 
             success = await adapter.restart_job(job_name, fresh_details.parameters)
+            if is_wrapper:
+                wrapper_retrigger_posted = success
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 
@@ -1383,11 +1391,15 @@ async def _do_retrigger(
                 await bb.redis.delete(cooldown_key)
             except Exception as redis_exc:
                 logger.error("Failed to release cooldown key %s: %s", cooldown_key, redis_exc)
-            if wrapper_gate_owned:
-                try:
-                    await bb.redis.delete(_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY)
-                except Exception as redis_exc:
-                    logger.error("Failed to release wrapper cooldown key: %s", redis_exc)
+        # Release the wrapper lock whenever we own it and no wrapper retrigger
+        # was actually posted -- covers the no-op "observed already running"
+        # path (where `success` is True but nothing was retriggered) as well
+        # as every failure/exception path, not just `not success`.
+        if wrapper_gate_owned and not wrapper_retrigger_posted:
+            try:
+                await bb.redis.delete(_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY)
+            except Exception as redis_exc:
+                logger.error("Failed to release wrapper cooldown key: %s", redis_exc)
 
 
 # ---------------------------------------------------------------------------

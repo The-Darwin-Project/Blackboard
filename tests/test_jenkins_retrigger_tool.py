@@ -519,12 +519,20 @@ class TestRetriggerRunStateGuard:
 
     async def test_wrapper_job_building_also_skips(self):
         """T-IF-5: A wrapper-type job (job_metadata.type='wrapper') that is
-        building=True must ALSO skip the POST and keep cooldown -- proves the
-        run-state guard applies at the job level, not only to non-wrapper
-        (leaf) jobs. Must NOT restore any assertion that wrapper retrigger is
-        categorically blocked -- this is the run-state guard, not a
-        wrapper-type block."""
-        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+        building=True must ALSO skip the POST and keep the per-job cooldown --
+        proves the run-state guard applies at the job level, not only to
+        non-wrapper (leaf) jobs. Must NOT restore any assertion that wrapper
+        retrigger is categorically blocked -- this is the run-state guard, not
+        a wrapper-type block.
+
+        Regression coverage for the wrapper-lock-leak fix: the wrapper-global
+        lock acquired earlier in `_do_retrigger` must be released here since
+        no wrapper retrigger was actually posted -- only the per-job cooldown
+        key stays held (correctly, the job really is still running)."""
+        from src.agents.handlers_integration import (
+            _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY,
+            handle_retrigger_jenkins_build,
+        )
 
         failed_jobs = [
             {
@@ -547,7 +555,9 @@ class TestRetriggerRunStateGuard:
         adapter.get_build_details.assert_not_called()
         adapter.restart_job.assert_not_called()
         bb = ctx.get_blackboard()
-        bb.redis.delete.assert_not_called()
+        # Wrapper-global lock released (no-op, nothing was actually retriggered);
+        # per-job cooldown key is NOT among the deletions (it stays held).
+        bb.redis.delete.assert_called_once_with(_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY)
 
         turn = _captured_turn(ctx)
         turn_text = (turn.thoughts or "") + (turn.evidence or "")
@@ -1117,6 +1127,70 @@ class TestRetriggerWrapperRateLimit:
 
         bb = ctx.get_blackboard()
         assert bb.redis.set.call_count == 1
+
+    async def test_noop_wrapper_lock_does_not_block_a_different_wrappers_genuine_retrigger(self):
+        """End-to-end regression test against a real (fake) Redis backend --
+        not mocked call-counting -- for the wrapper-lock-leak fix: a wrapper
+        job observed already-building (no-op, nothing retriggered) must not
+        leave the system-wide wrapper lock held, or a completely unrelated
+        wrapper job's later GENUINE retrigger would be wrongly blocked for the
+        full cooldown window."""
+        import fakeredis.aioredis
+
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+        # --- Call 1: wrapper job A is observed already building -> no-op ---
+        failed_jobs_a = [
+            {
+                "job_name": "verify-cnv-4.22.z-build",
+                "build_number": 254,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.22"},
+            },
+        ]
+        event_doc_a = _make_event_doc(failed_jobs=failed_jobs_a)
+        adapter_a = _make_adapter(
+            run_state=_make_run_state(building=True, in_queue=False, last_build_number=254)
+        )
+        ctx_a = _make_ctx(event=event_doc_a, adapter=adapter_a)
+        ctx_a.get_blackboard().redis = redis
+
+        result_a = await handle_retrigger_jenkins_build(
+            ctx_a, "evt-noop-a", {"job_name": "verify-cnv-4.22.z-build"}, None
+        )
+        assert result_a is True
+        adapter_a.restart_job.assert_not_called()
+
+        # --- Call 2: a DIFFERENT wrapper job attempts a genuine retrigger ---
+        failed_jobs_b = [
+            {
+                "job_name": "verify-cnv-4.23.z-build",
+                "build_number": 900,
+                "parameters": {},
+                "job_metadata": {"type": "wrapper", "version": "4.23"},
+            },
+        ]
+        event_doc_b = _make_event_doc(failed_jobs=failed_jobs_b)
+        fresh_details = _make_build_details(job_name="verify-cnv-4.23.z-build", build_number=900)
+        adapter_b = _make_adapter(build_details=fresh_details, restart_result=True)
+        ctx_b = _make_ctx(event=event_doc_b, adapter=adapter_b)
+        ctx_b.get_blackboard().redis = redis
+
+        result_b = await handle_retrigger_jenkins_build(
+            ctx_b, "evt-noop-b", {"job_name": "verify-cnv-4.23.z-build"}, None
+        )
+        assert result_b is True
+
+        # The bug would have left job A's no-op holding the global wrapper
+        # lock, blocking this genuine retrigger for job B entirely.
+        adapter_b.restart_job.assert_called_once()
+        turn_b = _captured_turn(ctx_b)
+        turn_b_text = (turn_b.thoughts or "") + (turn_b.evidence or "")
+        assert "successfully retriggered" in turn_b_text.lower()
+
+        await redis.aclose()
 
 
 # ---------------------------------------------------------------------------

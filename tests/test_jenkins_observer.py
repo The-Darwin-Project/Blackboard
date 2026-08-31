@@ -1990,6 +1990,65 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details.result == "FAILURE"
             assert details.console_tail == ""
 
+    async def test_include_console_tail_false_skips_second_http_call(self):
+        """include_console_tail=False (used by the jenkins-retrigger call site,
+        which only needs `.parameters`) must skip the console-log-tail HTTP
+        request entirely -- adapter-level regression coverage for the HIGH
+        timeout-budget fix, whose 3-sequential-calls math depends on this call
+        site actually making one fewer HTTP request, not just passing the flag."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {
+                "result": "FAILURE",
+                "url": "https://jenkins.example.com/job/verify-cnv-4.22.z-build/254/",
+                "actions": [{"parameters": [{"name": "CNV_VERSION", "value": "4.22"}]}],
+            }
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=api_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details(
+                    "verify-cnv-4.22.z-build", 254, include_console_tail=False,
+                )
+
+            assert details is not None
+            assert details.result == "FAILURE"
+            assert details.parameters == {"CNV_VERSION": "4.22"}
+            assert details.console_tail == ""
+            # Only the primary api/json call -- the console-log-tail fetch must
+            # never happen when include_console_tail=False.
+            mock_client.request.assert_called_once()
+
+    async def test_include_console_tail_true_default_still_makes_both_calls(self):
+        """Sanity companion to the test above: the default (True, unspecified)
+        behavior for every OTHER caller of get_build_details is unchanged --
+        both calls still happen."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.text = "...console output..."
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("verify-cnv-4.22.z-build", 254)
+
+            assert details is not None
+            assert details.console_tail == "...console output..."
+            assert mock_client.request.call_count == 2
+
 
 # =========================================================================
 # T-A-1..4: JenkinsAdapter.get_job_run_state (C4 HIGH increment)
