@@ -160,11 +160,32 @@ _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 # edge case further -- real Jenkins ConsoleNote blobs are near-universally
 # ANSI-wrapped in practice -- and remains cosmetic-only.
 _PIPELINE_ANNOTATION_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}"
+    r"(?:\x1b\[[0-9;]*m)?ha:////(?P<body>[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"})"
     r"(?:==(?:\x1b\[[0-9;]*m)?"
     r"|=(?=\x1b\[)(?:\x1b\[[0-9;]*m)?"
     r"|\x1b\[[0-9;]*m)",
 )
+# Post-match reject: if the blob body ends with a redaction-trigger keyword
+# (case-insensitive), the match is returned unchanged so downstream
+# _redact_secrets_in_text() can still see the keyword and redact the secret
+# value that follows.  This closes the `==`-terminated and bare-ANSI-terminated
+# variants of the secret-eating bug without removing those terminators (both
+# are structurally necessary for stripping real Jenkins ConsoleNote blobs).
+# Accepted trade-off: a genuine ConsoleNote whose base64 body happens to end
+# with one of these English words will not strip (cosmetic leftover).  Fail-closed.
+# Keep in sync with stripAnsi.ts REDACTION_TRIGGER_KEYWORDS.
+_REDACTION_TRIGGER_KEYWORDS = (
+    "password", "passwd", "token", "secret", "bearer", "credential", "authorization",
+)
+
+
+def _annotation_replace(match: "re.Match[str]") -> str:
+    body = match.group("body").lower()
+    if any(body.endswith(kw) for kw in _REDACTION_TRIGGER_KEYWORDS):
+        return match.group(0)
+    return ""
+
+
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
 # console output (verified against production Jenkins logs). Anchoring to
 # line-start (optionally after a Timestamper prefix, e.g.
@@ -200,7 +221,7 @@ def _strip_pipeline_annotations(text: str, *, window: int = _PRESTRIP_WINDOW) ->
         return text
     if len(text) > window:
         text = text[-window:]
-    text = _PIPELINE_ANNOTATION_RE.sub("", text)
+    text = _PIPELINE_ANNOTATION_RE.sub(_annotation_replace, text)
     text = _PIPELINE_BOUNDARY_RE.sub("", text)
     text = _BLANK_RUN_RE.sub("\n\n", text)
     return text.strip()

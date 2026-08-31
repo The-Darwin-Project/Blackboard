@@ -119,12 +119,15 @@ def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
 # the value may be double-quoted, single-quoted, or a bare run of non-whitespace/delimiter
 # characters. `[:=]` covers both "key: value" and "key=value" separators.
 _SECRET_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s,}\]\"']+)"
+_ANSI_CSI_SEQUENCE = r"(?:\x1b\[[0-9;]*m)+"
 _SECRET_TEXT_PATTERN = re.compile(
     r"(?im)(\"?(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|"
     r"private[_-]?key|secret[_-]?key|key|credential|authorization)\"?"
-    r"\s*[:=]\s*)" + _SECRET_VALUE
+    r"(?:\s*:\s*|\s*=+\s*|" + _ANSI_CSI_SEQUENCE + r"))" + _SECRET_VALUE
 )
-_BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)" + _SECRET_VALUE)
+_BEARER_TEXT_PATTERN = re.compile(
+    r"(?i)(bearer(?:\s+|=+|" + _ANSI_CSI_SEQUENCE + r"))" + _SECRET_VALUE
+)
 
 
 def _redact_match(m: "re.Match") -> str:

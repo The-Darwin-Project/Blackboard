@@ -1021,6 +1021,24 @@ class TestT21RedactSecretsInText:
         result = _redact_secrets_in_text("Authorization: Bearer eyJhbGciOiJIUzI1NiIs")
         assert "eyJhbGciOiJIUzI1NiIs" not in result
 
+    @pytest.mark.parametrize(("raw_text", "surviving_prefix"), [
+        ("ha:////AAAABearer==sometoken123", "Bearer="),
+        ("ha:////AAApassword\x1b[0mhunter2", "password"),
+        ("ha:////AAAtoken\x1b[32mhunter2", "token"),
+    ])
+    def test_strip_then_redact_closes_f13_follow_on_leaks(self, raw_text, surviving_prefix):
+        """Post-strip redaction must catch the F13 survivors where the keyword
+        is preserved but the value used to leak via `==` or bare ANSI."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        stripped = _strip_pipeline_annotations(raw_text)
+        result = _redact_secrets_in_text(stripped)
+
+        assert surviving_prefix.lower() in result.lower()
+        assert "hunter2" not in result
+        assert "sometoken123" not in result
+        assert "***REDACTED***" in result
+
     def test_shell_export_single_quoted(self):
         """export SECRET='value' shell-style assignment."""
         from src.agents.jenkins_observer import _redact_secrets_in_text
@@ -2841,6 +2859,82 @@ class TestT22StripPipelineAnnotations:
         text = "ha:////AAAtoken=\n"
         stripped = _strip_pipeline_annotations(text)
         assert "token=" in stripped
+
+    # ---- F13: post-match body-end keyword reject (`==` / bare-ANSI terminators) ----
+
+    def test_double_equals_keyword_password_rejected(self):
+        """F13 CRITICAL: `ha:////AAApassword==hunter2` -- the `==` terminator
+        makes the regex match `ha:////AAApassword==`, eating the `password`
+        keyword. Post-match reject detects `password` at body end and returns
+        the match unchanged so downstream redaction catches it."""
+        result = _strip_pipeline_annotations("ha:////AAApassword==hunter2")
+        assert "password=" in result
+        assert "hunter2" in result
+
+    def test_double_equals_keyword_token_rejected(self):
+        """F13 CRITICAL: same class as password, `token` keyword."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken==hunter2")
+        assert "token=" in result
+        assert "hunter2" in result
+
+    def test_double_equals_keyword_bearer_rejected(self):
+        """F13 CRITICAL: `Bearer` keyword at body end, `==` terminator."""
+        result = _strip_pipeline_annotations("ha:////AAAABearer==sometoken123")
+        assert "Bearer" in result
+        assert "sometoken123" in result
+
+    def test_bare_ansi_keyword_password_rejected(self):
+        """F13 CRITICAL: `password` eaten by bare-ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAApassword\x1b[0mhunter2")
+        assert "password" in result
+        assert "hunter2" in result
+
+    def test_bare_ansi_keyword_token_rejected(self):
+        """F13 CRITICAL: `token` eaten by bare-ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken\x1b[32mhunter2")
+        assert "token" in result
+        assert "hunter2" in result
+
+    def test_single_equals_ansi_keyword_password_rejected(self):
+        """F13 CRITICAL: `password=` eaten by single-`=` + ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAApassword=\x1b[0mhunter2")
+        assert "password=" in result
+        assert "hunter2" in result
+
+    def test_safe_colon_abutment_still_strips_blob(self):
+        """F13 SAFE non-regression: `ha:////AAA==password:hunter2` -- the blob
+        body is `AAA` (no keyword), so `==` still strips the blob normally.
+        The colon-delimited secret survives untouched for downstream redaction."""
+        result = _strip_pipeline_annotations("ha:////AAA==password:hunter2")
+        assert "password:hunter2" in result
+        assert "ha:////" not in result
+
+    def test_double_equals_no_keyword_still_fully_strips(self):
+        """F13 non-regression: adjacent `==` blobs whose bodies don't end with
+        a keyword still strip cleanly."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+
+    @pytest.mark.parametrize("keyword", [
+        "password", "passwd", "token", "secret", "bearer", "credential", "authorization",
+    ])
+    def test_double_equals_keyword_board_sweep(self, keyword):
+        """F13 board sweep: every keyword in _REDACTION_TRIGGER_KEYWORDS must
+        survive a `==` terminator."""
+        text = f"ha:////AAA{keyword}==value123"
+        result = _strip_pipeline_annotations(text)
+        assert keyword in result.lower()
+        assert "value123" in result
+
+    @pytest.mark.parametrize("keyword", [
+        "password", "passwd", "token", "secret", "bearer", "credential", "authorization",
+    ])
+    def test_bare_ansi_keyword_board_sweep(self, keyword):
+        """F13 board sweep: every keyword must survive a bare-ANSI terminator."""
+        text = f"ha:////AAA{keyword}\x1b[0mvalue123"
+        result = _strip_pipeline_annotations(text)
+        assert keyword in result.lower()
+        assert "value123" in result
 
     # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
 

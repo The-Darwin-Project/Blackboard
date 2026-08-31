@@ -298,6 +298,74 @@ describe('CiContextCard', () => {
       const stripped = stripJenkinsNoise(text);
       expect(stripped).toContain('token=');
     });
+
+    it('rejects == blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword==hunter2');
+      expect(result).toContain('password=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects == blob whose body ends with token (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAtoken==hunter2');
+      expect(result).toContain('token=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects == blob whose body ends with Bearer (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAABearer==sometoken123');
+      expect(result).toContain('Bearer');
+      expect(result).toContain('sometoken123');
+    });
+
+    it('rejects bare-ANSI blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword\x1b[0mhunter2');
+      expect(result).toContain('password');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects bare-ANSI blob whose body ends with token (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAtoken\x1b[32mhunter2');
+      expect(result).toContain('token');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects single-=+ANSI blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword=\x1b[0mhunter2');
+      expect(result).toContain('password=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('still strips == blob whose body has no keyword (F13 SAFE)', () => {
+      const result = stripJenkinsNoise('ha:////AAA==password:hunter2');
+      expect(result).toContain('password:hunter2');
+      expect(result).not.toContain('ha:////');
+    });
+
+    it('adjacent == blobs without keywords still fully strip (F13 non-regression)', () => {
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
+    });
+
+    it.each([
+      'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+    ])(
+      'rejects == blob whose body ends with %s (F13 board sweep)',
+      (keyword) => {
+        const result = stripJenkinsNoise(`ha:////AAA${keyword}==value123`);
+        expect(result.toLowerCase()).toContain(keyword);
+        expect(result).toContain('value123');
+      },
+    );
+
+    it.each([
+      'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+    ])(
+      'rejects bare-ANSI blob whose body ends with %s (F13 board sweep)',
+      (keyword) => {
+        const result = stripJenkinsNoise(`ha:////AAA${keyword}\x1b[0mvalue123`);
+        expect(result.toLowerCase()).toContain(keyword);
+        expect(result).toContain('value123');
+      },
+    );
   });
 
   describe('llm_triage to failed_jobs correlation (triageMap by job_name)', () => {

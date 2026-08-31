@@ -97,9 +97,28 @@ const MAX_BLOB_LEN = 8192;
 // a following `ha:////` or `$` as proof of padding.
 // Keep in sync with jenkins.py's _PIPELINE_ANNOTATION_RE.
 const PIPELINE_ANNOTATION_RE = new RegExp(
-  `(?:\\x1b\\[[0-9;]*m)?ha:\\/\\/\\/\\/[A-Za-z0-9+\\/]{1,${MAX_BLOB_LEN}}(?:==(?:\\x1b\\[[0-9;]*m)?|=(?=\\x1b\\[)(?:\\x1b\\[[0-9;]*m)?|\\x1b\\[[0-9;]*m)`,
+  `(?:\\x1b\\[[0-9;]*m)?ha:\\/\\/\\/\\/(?<body>[A-Za-z0-9+\\/]{1,${MAX_BLOB_LEN}})(?:==(?:\\x1b\\[[0-9;]*m)?|=(?=\\x1b\\[)(?:\\x1b\\[[0-9;]*m)?|\\x1b\\[[0-9;]*m)`,
   'g',
 );
+// Post-match reject: if the blob body ends with a redaction-trigger keyword
+// (case-insensitive), the match is returned unchanged so downstream secret
+// redaction can still see the keyword. Closes the `==`-terminated and
+// bare-ANSI-terminated variants of the secret-eating bug without removing
+// those terminators. Accepted trade-off: a genuine ConsoleNote whose base64
+// body happens to end with one of these English words will not strip
+// (cosmetic leftover). Fail-closed.
+// Keep in sync with jenkins.py's _REDACTION_TRIGGER_KEYWORDS.
+const REDACTION_TRIGGER_KEYWORDS = [
+  'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+];
+
+function annotationReplacer(match: string, body: string): string {
+  const lower = body.toLowerCase();
+  if (REDACTION_TRIGGER_KEYWORDS.some(kw => lower.endsWith(kw))) {
+    return match;
+  }
+  return '';
+}
 // Real Jenkins `[Pipeline]` step-boundary markers are always full-line;
 // anchored to line-start (optionally after a Timestamper prefix like
 // "[2026-08-31T11:23:24.854Z] ") so a marker substring appearing mid-line in
@@ -114,7 +133,7 @@ const BLANK_RUN_RE = /(?:\r?\n){3,}/g;
 
 export function stripJenkinsNoise(text: string): string {
   return text
-    .replace(PIPELINE_ANNOTATION_RE, '')
+    .replace(PIPELINE_ANNOTATION_RE, annotationReplacer)
     .replace(PIPELINE_BOUNDARY_RE, '')
     .replace(BLANK_RUN_RE, '\n\n')
     .trim();
