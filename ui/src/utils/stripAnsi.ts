@@ -109,7 +109,12 @@ const PIPELINE_ANNOTATION_RE = new RegExp(
 // (cosmetic leftover). Fail-closed.
 // Keep in sync with jenkins.py's _REDACTION_TRIGGER_KEYWORDS.
 const REDACTION_TRIGGER_KEYWORDS = [
-  'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+  'password', 'passwd', 'pwd', 'token', 'secret', 'bearer', 'credential',
+  'authorization', 'key', 'apikey', 'accesskey', 'privatekey', 'secretkey',
+  // `key` and `pwd` are short -- a genuine ConsoleNote base64 body that
+  // coincidentally ends with those letters will not strip (cosmetic leftover).
+  // Longer compounds (`privatekey`, `secretkey`) are rare accidental endings.
+  // Fail-closed: never eat a redaction-trigger keyword.
 ];
 
 function annotationReplacer(match: string, body: string): string {

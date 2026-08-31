@@ -346,7 +346,8 @@ describe('CiContextCard', () => {
     });
 
     it.each([
-      'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+      'password', 'passwd', 'pwd', 'token', 'secret', 'bearer', 'credential',
+      'authorization', 'key', 'apikey', 'accesskey', 'privatekey', 'secretkey',
     ])(
       'rejects == blob whose body ends with %s (F13 board sweep)',
       (keyword) => {
@@ -357,7 +358,8 @@ describe('CiContextCard', () => {
     );
 
     it.each([
-      'password', 'passwd', 'token', 'secret', 'bearer', 'credential', 'authorization',
+      'password', 'passwd', 'pwd', 'token', 'secret', 'bearer', 'credential',
+      'authorization', 'key', 'apikey', 'accesskey', 'privatekey', 'secretkey',
     ])(
       'rejects bare-ANSI blob whose body ends with %s (F13 board sweep)',
       (keyword) => {

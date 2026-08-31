@@ -1039,6 +1039,27 @@ class TestT21RedactSecretsInText:
         assert "sometoken123" not in result
         assert "***REDACTED***" in result
 
+    @pytest.mark.parametrize(("raw_text", "keyword"), [
+        ("ha:////AAApwd==hunter2", "pwd"),
+        ("ha:////AAAkey==hunter2", "key"),
+        ("ha:////AAAapikey==hunter2", "apikey"),
+        ("ha:////AAAaccesskey==hunter2", "accesskey"),
+        ("ha:////AAAprivatekey==hunter2", "privatekey"),
+        ("ha:////AAAsecretkey==hunter2", "secretkey"),
+    ])
+    def test_strip_then_redact_closes_body_end_keyword_leak(self, raw_text, keyword):
+        """F14 CRITICAL: keywords omitted from _REDACTION_TRIGGER_KEYWORDS
+        let the greedy body class eat the keyword suffix via `==` terminator,
+        leaking the abutting value. After the fix, strip preserves the keyword
+        and redact catches the value."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        stripped = _strip_pipeline_annotations(raw_text)
+        assert keyword in stripped.lower(), f"strip must preserve keyword '{keyword}'"
+        result = _redact_secrets_in_text(stripped)
+        assert "hunter2" not in result, f"value leaked past keyword '{keyword}'"
+        assert "***REDACTED***" in result
+
     def test_shell_export_single_quoted(self):
         """export SECRET='value' shell-style assignment."""
         from src.agents.jenkins_observer import _redact_secrets_in_text
@@ -1060,6 +1081,57 @@ class TestT21RedactSecretsInText:
 
         assert _redact_secrets_in_text("") == ""
         assert _redact_secrets_in_text(None) is None
+
+
+# =========================================================================
+# T-21b: 3000-char slice order — redact BEFORE slice to prevent straddle leak
+# =========================================================================
+
+class TestT21bSliceAfterRedact:
+    """HIGH: console_tail slice at 3000 chars must happen AFTER redaction, not
+    before. A `TOKEN=value` pattern straddling the cut loses the keyword if
+    sliced first, leaking the bare value into ci_context."""
+
+    def test_secret_straddling_3000_cut_is_redacted(self):
+        """Craft a console_tail where 'TOKEN=value' straddles the 3000-char
+        boundary: keyword is >3000 from the end, value is within the last
+        3000. The production path (redact full, then slice) catches it."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text, _sanitize_console_tail
+
+        secret_value = "abc123def456"
+        # Position so [-3000:] cut falls between TOKEN= and the value:
+        # raw = "A"*100 + "TOKEN=" + value + " " + "X"*N
+        # total = 100 + 6 + 12 + 1 + N = 119 + N
+        # Cut at total - 3000 = 119 + N - 3000. Want cut = 106 (start of value).
+        trailing_filler = "X" * 2987
+        raw_tail = "A" * 100 + "TOKEN=" + secret_value + " " + trailing_filler
+
+        # Sanity: total > 3000, keyword NOT in [-3000:], value IS in [-3000:]
+        assert len(raw_tail) > 3000
+        assert "TOKEN=" not in raw_tail[-3000:]
+        assert secret_value in raw_tail[-3000:]
+
+        # Production path: redact full text first, then slice
+        redacted = _redact_secrets_in_text(raw_tail)
+        sliced = redacted[-3000:] if len(redacted) > 3000 else redacted
+        result = _sanitize_console_tail(sliced)
+        assert secret_value not in result, "value leaked — slice happened before redact"
+
+    def test_wrong_order_would_leak(self):
+        """Counter-proof: slicing BEFORE redacting loses the keyword and leaks."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        secret_value = "abc123def456"
+        trailing_filler = "X" * 2987
+        raw_tail = "A" * 100 + "TOKEN=" + secret_value + " " + trailing_filler
+
+        # Wrong order: slice first — keyword is outside the window
+        sliced_first = raw_tail[-3000:]
+        assert "TOKEN=" not in sliced_first, "test setup: keyword should be outside the 3000 window"
+        assert secret_value in sliced_first, "test setup: value should be inside the 3000 window"
+        result = _redact_secrets_in_text(sliced_first)
+        # The value survives because the keyword was lost
+        assert secret_value in result, "expected the wrong-order path to leak"
 
 
 # =========================================================================
@@ -2916,7 +2988,8 @@ class TestT22StripPipelineAnnotations:
         assert result == ""
 
     @pytest.mark.parametrize("keyword", [
-        "password", "passwd", "token", "secret", "bearer", "credential", "authorization",
+        "password", "passwd", "pwd", "token", "secret", "bearer", "credential",
+        "authorization", "key", "apikey", "accesskey", "privatekey", "secretkey",
     ])
     def test_double_equals_keyword_board_sweep(self, keyword):
         """F13 board sweep: every keyword in _REDACTION_TRIGGER_KEYWORDS must
@@ -2927,7 +3000,8 @@ class TestT22StripPipelineAnnotations:
         assert "value123" in result
 
     @pytest.mark.parametrize("keyword", [
-        "password", "passwd", "token", "secret", "bearer", "credential", "authorization",
+        "password", "passwd", "pwd", "token", "secret", "bearer", "credential",
+        "authorization", "key", "apikey", "accesskey", "privatekey", "secretkey",
     ])
     def test_bare_ansi_keyword_board_sweep(self, keyword):
         """F13 board sweep: every keyword must survive a bare-ANSI terminator."""

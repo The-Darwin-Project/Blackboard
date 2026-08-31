@@ -725,7 +725,8 @@ class JenkinsObserver:
                     )
                     details_fetched += 1
                     if details:
-                        tail = _redact_secrets_in_text(details.console_tail[-3000:])
+                        redacted_tail = _redact_secrets_in_text(details.console_tail) if details.console_tail else ""
+                        tail = redacted_tail[-3000:] if len(redacted_tail) > 3000 else redacted_tail
                         job_entry["console_tail"] = _sanitize_console_tail(tail)
                         redacted_params = _redact_build_parameters(details.parameters)
                         job_metadata = _parse_job_metadata(redacted_params)

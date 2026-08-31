@@ -70,6 +70,9 @@ CORPUS = [
     # F13 CRITICAL: `==` and bare-ANSI terminators eating redaction-trigger keywords
     "ha:////AAApassword==hunter2",
     "ha:////AAAtoken==hunter2",
+    # F14 CRITICAL: missing keywords in _REDACTION_TRIGGER_KEYWORDS
+    "ha:////AAApwd==hunter2",
+    "ha:////AAAkey==hunter2",
     "ha:////AAAABearer==sometoken123",
     "ha:////AAApassword\x1b[0mhunter2",
     "ha:////AAAtoken\x1b[32mhunter2",
