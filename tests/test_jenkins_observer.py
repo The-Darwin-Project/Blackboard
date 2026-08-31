@@ -2146,26 +2146,23 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
 
     async def test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped(self):
         """F7 regression guard (bounded pre-strip window correctness).
-        `get_build_details` has called `_strip_pipeline_annotations` BEFORE
-        the final `[-5000:]` slice since this feature's very first commit --
-        that ordering was never buggy and this test does not fix an ordering
-        defect. What IS new (added later in this same change set) is the
-        bounded `_PRESTRIP_WINDOW`/`_MAX_BLOB_LEN` truncation inside
-        `_strip_pipeline_annotations` itself. All other tests in this class
-        call `_strip_pipeline_annotations` directly as a unit-level helper --
-        none of them exercise the real `get_build_details` async method with
-        an HTTP response large enough for the final `[-5000:]` slice to
-        matter.
+        `get_build_details` returns the full stripped text (no adapter-level
+        slice -- the observer handles redact-then-slice). The bounded
+        `_PRESTRIP_WINDOW`/`_MAX_BLOB_LEN` truncation inside
+        `_strip_pipeline_annotations` itself is the key mechanism: all other
+        tests in this class call `_strip_pipeline_annotations` directly as a
+        unit-level helper -- none of them exercise the real `get_build_details`
+        async method with an HTTP response large enough for the pre-strip
+        window to matter.
 
-        If a future change reintroduced slice-then-strip (or the bounded
-        pre-strip window in jenkins.py were miscomputed), a `ha:////...==`
-        blob positioned to straddle the naive `[-5000:]` cut would leak a
-        partial, un-matchable fragment (missing its `ha:` prefix) into
+        If a future change reintroduced an intermediate slice, a
+        `ha:////...==` blob straddling the cut would leak a partial,
+        un-matchable fragment (missing its `ha:` prefix) into
         `console_tail` -- which would also defeat the observer's downstream
         `_redact_secrets_in_text` if a secret abutted it. Assert the
-        strip-before-slice pipeline (jenkins.py's `get_build_details`,
-        correct since inception) plus the bounded pre-strip window leave no
-        trace of the blob at all, regardless of total log size."""
+        strip pipeline (jenkins.py's `get_build_details`) plus the bounded
+        pre-strip window leave no trace of the blob at all, regardless of
+        total log size."""
         with patch.dict("os.environ", _env_vars()):
             adapter = _make_test_adapter()
 
@@ -2173,9 +2170,10 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             filler = "A" * 20000
             suffix = "\nreal failure output line\n"
             raw = filler + blob + suffix
-            # Sanity: the blob must straddle where a naive slice-first
-            # `[-5000:]` cut would land -- otherwise this fixture doesn't
-            # actually exercise the regression this test guards against.
+            # Sanity: the blob must straddle where a naive (now-removed)
+            # intermediate slice would have landed -- ensures this fixture
+            # guards against any future reintroduction of an adapter-level
+            # slice before the observer's redact-then-slice pipeline.
             naive_cut = len(raw) - 5000
             assert len(filler) < naive_cut < len(filler) + len(blob), (
                 "test fixture must position the blob straddling the naive "
@@ -2201,6 +2199,55 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert "ha:" not in details.console_tail
             assert ":////" not in details.console_tail
             assert "real failure output line" in details.console_tail
+
+    async def test_console_tail_preserves_secret_across_old_5000_slice_boundary(self):
+        """CRITICAL regression guard: a `password=hunter2` whose keyword sits
+        just before where the old 5000-char slice used to cut and whose value
+        sits after it must survive into console_tail so the observer's
+        downstream `_redact_secrets_in_text` can still catch it.
+
+        The adapter must return the full stripped text -- no intermediate
+        _CONSOLE_TAIL_SIZE slice -- leaving all slicing to the observer's
+        redact-then-slice pipeline."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            filler_before = "x" * 20
+            secret = "password=hunter2"
+            filler_after = "y" * 4990
+            raw = filler_before + secret + filler_after
+            # Sanity: the old `[-5000:]` cut must land INSIDE the secret --
+            # `password=` straddles the cut (keyword prefix dropped),
+            # `hunter2` after it (kept) -- so redaction loses its trigger.
+            old_naive_cut = len(raw) - 5000
+            pw_start = raw.index("password=")
+            pw_end = pw_start + len("password=")
+            assert pw_start < old_naive_cut < pw_end, (
+                "test fixture: old 5000-char cut must land inside 'password=' "
+                f"(pw_start={pw_start}, cut={old_naive_cut}, pw_end={pw_end})"
+            )
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.content = raw.encode()
+            tail_resp.encoding = "utf-8"
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("gating-job", 99)
+
+            assert details is not None
+            assert "password=" in details.console_tail, (
+                "adapter must return full stripped text -- no intermediate "
+                "5000-char slice that would drop the redaction trigger"
+            )
+            assert "hunter2" in details.console_tail
 
 
 # =========================================================================

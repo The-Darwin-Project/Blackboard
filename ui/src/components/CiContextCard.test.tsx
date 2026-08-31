@@ -148,6 +148,17 @@ describe('CiContextCard', () => {
       const { container } = render(<CiContextCard context={context} />);
       expect(container.querySelector('pre')?.textContent).toBe('Finished: UNSTABLE');
     });
+
+    it('strips ANSI-wrapped ha:////  blobs when Jenkins noise is removed before ANSI strip', () => {
+      const context: CiContext = {
+        failed_jobs: [{
+          job_name: 'build',
+          console_tail: 'before \x1b[8mha:////ABC123==\x1b[0m after',
+        }],
+      };
+      const { container } = render(<CiContextCard context={context} />);
+      expect(container.querySelector('pre')?.textContent).toBe('before  after');
+    });
   });
 
   describe('stripJenkinsNoise (F1/F3/F4/F8/F9/F10 hardening regressions)', () => {

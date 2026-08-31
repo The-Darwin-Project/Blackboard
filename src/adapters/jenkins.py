@@ -20,9 +20,10 @@
 #    HTTP call per view, not a fan-out. _record_success/_record_failure called directly.
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
-# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter
-#    BEFORE slice, bounded to a fixed pre-strip window -- bounded wire-format cleanup on an
-#    attacker-influenceable log body, not business logic.
+# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter,
+#    bounded to a fixed pre-strip window -- bounded wire-format cleanup on an
+#    attacker-influenceable log body, not business logic. The adapter returns the FULL
+#    stripped text; all downstream slicing (redact-then-slice) belongs to the observer.
 """
 Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
@@ -46,12 +47,14 @@ logger = logging.getLogger(__name__)
 # _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW. That inequality is
 # the actual safety invariant -- it guarantees that any blob whose position
 # could possibly matter (i.e. one that ends close enough to the end of the
-# fetched log to threaten the final _CONSOLE_TAIL_SIZE-char output) is
-# *provably* short enough to have its `ha:////` header fall inside the
-# window too, so it is always fully recognized and stripped rather than
-# truncated into a headerless, unmatchable leftover. Before this bound
-# existed, that guarantee was just an unverified comment ("4x margin, more
-# than enough") resting on an unbounded regex -- see
+# stripped text to matter for the observer's downstream redact-then-slice
+# pipeline) is *provably* short enough to have its `ha:////` header fall
+# inside the window too, so it is always fully recognized and stripped rather
+# than truncated into a headerless, unmatchable leftover. The adapter itself
+# no longer slices to _CONSOLE_TAIL_SIZE -- the observer handles
+# redact-then-slice -- but the invariant is preserved for strip completeness.
+# Before this bound existed, that guarantee was just an unverified comment
+# ("4x margin, more than enough") resting on an unbounded regex -- see
 # TestT22StripPipelineAnnotations::test_max_length_blob_header_at_prestrip_window_start_is_recognized
 # in tests/test_jenkins_observer.py for the regression coverage. A real blob
 # longer than _MAX_BLOB_LEN (not expected in practice -- Jenkins durable-task
@@ -560,8 +563,7 @@ class JenkinsAdapter:
                     # This is a best-effort log-tail fetch -- fall back to utf-8
                     # rather than letting an uncaught LookupError escape this path.
                     raw = raw_bytes.decode("utf-8", errors="replace")
-                text = _strip_pipeline_annotations(raw)
-                console_tail = text[-_CONSOLE_TAIL_SIZE:] if len(text) > _CONSOLE_TAIL_SIZE else text
+                console_tail = _strip_pipeline_annotations(raw)
 
         return BuildDetails(
             job_name=job,
