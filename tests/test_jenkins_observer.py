@@ -29,6 +29,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.adapters.jenkins import _strip_pipeline_annotations
+
 
 # =========================================================================
 # Helpers
@@ -2049,6 +2051,56 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details.console_tail == "...console output..."
             assert mock_client.request.call_count == 2
 
+    async def test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped(self):
+        """F7 regression guard (strip-before-slice ordering + bounded pre-strip
+        window). All other tests in this class call `_strip_pipeline_annotations`
+        directly as a unit-level helper -- none of them exercise the real
+        `get_build_details` async method with an HTTP response large enough for
+        the final `[-5000:]` slice to matter.
+
+        If a future change reintroduced slice-then-strip (or the bounded
+        pre-strip window in jenkins.py were miscomputed), a `ha:////...==`
+        blob positioned to straddle the naive `[-5000:]` cut would leak a
+        partial, un-matchable fragment (missing its `ha:` prefix) into
+        `console_tail` -- which would also defeat the observer's downstream
+        `_redact_secrets_in_text` if a secret abutted it. Assert the fixed
+        strip-before-slice pipeline (jenkins.py's `get_build_details`) leaves
+        no trace of the blob at all, regardless of total log size."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            blob = "ha:////" + "B" * 4970 + "=="
+            filler = "A" * 20000
+            suffix = "\nreal failure output line\n"
+            raw = filler + blob + suffix
+            # Sanity: the blob must straddle where a naive slice-first
+            # `[-5000:]` cut would land -- otherwise this fixture doesn't
+            # actually exercise the regression this test guards against.
+            naive_cut = len(raw) - 5000
+            assert len(filler) < naive_cut < len(filler) + len(blob), (
+                "test fixture must position the blob straddling the naive "
+                "slice boundary -- adjust filler/blob length"
+            )
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.text = raw
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("gating-job", 99)
+
+            assert details is not None
+            assert "ha:" not in details.console_tail
+            assert ":////" not in details.console_tail
+            assert "real failure output line" in details.console_tail
+
 
 # =========================================================================
 # T-A-1..4: JenkinsAdapter.get_job_run_state (C4 HIGH increment)
@@ -2473,4 +2525,118 @@ class TestBlackboardLastAlertedBuild:
 
         await redis.set("darwin:jenkins:last_alert:corrupt-job", "not-an-int")
         assert await bb.get_jenkins_last_alerted_build("corrupt-job") == 0
+
+
+# =========================================================================
+# T22: _strip_pipeline_annotations -- pipeline noise stripping (jenkins.py)
+#
+# Covers blob removal (ha:////...), step-boundary marker removal
+# ([Pipeline] ...), blank-run collapse, and the hardening fixes landed
+# alongside the original noise-stripping feature: line-anchored boundary
+# matching (no mid-line over-strip), delimiter-bounded blob matching (no
+# adjacent-blob concatenation, no secret-abutment leak), and a bounded
+# single-occurrence ANSI wrapper (no quadratic blowup on ANSI-dense logs).
+# See TestJenkinsAdapterGetBuildDetailsTransport for the integration-level
+# counterpart exercising the real async get_build_details call site.
+# =========================================================================
+
+class TestT22StripPipelineAnnotations:
+
+    def test_ha_blob_stripped_surrounding_text_preserved(self):
+        assert _strip_pipeline_annotations("before ha:////ABC123== after") == "before  after"
+
+    def test_pipeline_boundary_markers_removed(self):
+        text = "[Pipeline] }\n[Pipeline] // container\nreal output"
+        assert _strip_pipeline_annotations(text) == "real output"
+
+    def test_end_of_pipeline_removed(self):
+        text = "output\n[Pipeline] End of Pipeline"
+        assert _strip_pipeline_annotations(text) == "output"
+
+    def test_blank_run_collapsed_to_two_newlines(self):
+        assert _strip_pipeline_annotations("a\n\n\n\n\nb") == "a\n\nb"
+
+    def test_empty_and_none_input_returns_empty(self):
+        assert _strip_pipeline_annotations("") == ""
+        assert _strip_pipeline_annotations(None) is None
+
+    def test_real_world_sample_reduces_to_finished_line(self):
+        text = "[Pipeline] // container\n[2026-08-31T11:23:24.854Z] Finished: UNSTABLE"
+        assert _strip_pipeline_annotations(text) == "[2026-08-31T11:23:24.854Z] Finished: UNSTABLE"
+
+    def test_ansi_wrapped_blob_and_crlf_runs_collapse_to_empty(self):
+        assert _strip_pipeline_annotations("\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n") == ""
+
+    def test_timestamped_pipeline_line_still_stripped(self):
+        """A Jenkins Timestamper-prefixed [Pipeline] line is still recognized
+        as a boundary marker and stripped; real content on the next line
+        survives untouched."""
+        text = "[2026-08-31T11:23:24.854Z] [Pipeline] // container\nreal output"
+        assert _strip_pipeline_annotations(text) == "real output"
+
+    # ---- F1: mid-line over-strip (fixed via line-start anchoring) ----
+
+    def test_mid_line_marker_text_preserved_not_truncated(self):
+        """F1 regression: a [Pipeline] substring appearing mid-line (preceded
+        by real content on the same line) is no longer mistaken for a
+        boundary marker -- the whole line, including trailing content, is
+        preserved. The pre-fix regex truncated this to just 'Running'."""
+        result = _strip_pipeline_annotations("Running [Pipeline] } leftover")
+        assert result == "Running [Pipeline] } leftover"
+        assert result != "Running"  # the old buggy truncation
+
+    def test_mid_line_marker_from_alternation_set_preserved(self):
+        """F2 fix: the original T-7 test asserted on 'step X', but 'step' is
+        not in the boundary alternation (// \\w+, End of Pipeline, {, },
+        stage) -- that input was never at risk of the F1 bug and proved
+        nothing. This test uses an actual alternation member ('stage')
+        appearing mid-line in real prose, which the pre-fix (unanchored)
+        regex WOULD have matched and corrupted."""
+        result = _strip_pipeline_annotations("Deploying [Pipeline] stage now, please wait")
+        assert result == "Deploying [Pipeline] stage now, please wait"
+
+    # ---- F3: greedy blob concatenation (fixed via right-delimiter lookahead) ----
+
+    def test_adjacent_blobs_no_separator_fully_stripped(self):
+        """F3 regression: two ha:////...== blobs directly abutting with no
+        separator must both fully strip with no leftover fragment. The
+        pre-fix greedy regex produced ':////BBB==' (a mangled partial second
+        blob) instead of a clean removal."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+        assert ":////" not in result
+
+    # ---- F4: secret abutment / redaction bypass ----
+
+    def test_secret_abutment_preserves_key_intact_for_downstream_redaction(self):
+        """F4 regression: a blob immediately followed by a secret key:value
+        pair with no delimiter must not corrupt the key text. The pre-fix
+        regex consumed the 'password' key entirely, leaving only ':hunter2'
+        -- defeating the observer's downstream _redact_secrets_in_text
+        (which matches on the literal key text). Real ha:////  blobs are
+        never followed by arbitrary prose in production Jenkins output, so
+        the fixed regex has no safe delimiter to anchor on here and
+        conservatively leaves the whole substring untouched rather than
+        partially matching -- 'password:hunter2' must survive intact."""
+        result = _strip_pipeline_annotations("ha:////ABC==password:hunter2")
+        assert "password:hunter2" in result
+
+    # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
+
+    def test_large_ansi_only_payload_completes_quickly(self):
+        """F5 regression: a long run of complete ANSI escape sequences with no
+        ha:////  present must not trigger quadratic backtracking. The pre-fix
+        `(?:\\x1b\\[[0-9;]*m)*` (repeated `*` quantifier) measured ~41s at
+        50000 reps; the fixed single-optional-occurrence quantifier is
+        sub-millisecond. Generous 2.0s ceiling avoids CI flakiness while
+        still catching a reintroduced quadratic regression by a wide margin.
+        No ha:////  or [Pipeline] marker is present, so the payload passes
+        through unchanged (modulo the trailing .strip()) -- this test is
+        purely a timing guard, not a content-stripping assertion."""
+        payload = "\x1b[8m" * 50000
+        start = time.perf_counter()
+        result = _strip_pipeline_annotations(payload)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"took {elapsed:.2f}s -- possible quadratic regression"
+        assert result == payload
 

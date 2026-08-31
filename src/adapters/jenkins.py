@@ -21,7 +21,8 @@
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
 # 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter
-#    BEFORE slice to prevent split base64 blobs from leaking to LLM/UI.
+#    BEFORE slice, bounded to a fixed pre-strip window -- bounded wire-format cleanup on an
+#    attacker-influenceable log body, not business logic.
 """
 Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
@@ -40,11 +41,29 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]) with optional
+# `=`/`==` padding at the very end only. A single optional ANSI wrapper (not a
+# `*` quantifier -- an unbounded repeated-quantifier around a literal that then
+# fails to match is quadratic on long ANSI-only runs, see get_build_details'
+# pre-strip window comment) plus a right-delimiter lookahead (whitespace, ESC,
+# another `ha:////`, or end-of-string) bound the match to its own blob: it can
+# never consume into adjacent real text (e.g. a "password:..." key that
+# happens to abut the blob) or swallow a second, immediately-adjacent blob
+# with no separator between them.
 _PIPELINE_ANNOTATION_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*m)*ha:////[A-Za-z0-9+/=]+(?:\x1b\[[0-9;]*m)*",
+    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]+={0,2}(?:\x1b\[[0-9;]*m)?(?=[\s\x1b]|ha:////|$)",
 )
+# Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
+# console output (verified against production Jenkins logs). Anchoring to
+# line-start (optionally after a Timestamper prefix, e.g.
+# "[2026-08-31T11:23:24.854Z] ") means a marker substring that happens to
+# appear mid-line in real log text (e.g. "Running [Pipeline] } leftover") is
+# never mistaken for a boundary and the whole line is preserved untouched. A
+# genuine line-start marker with trailing same-line text is still fully
+# consumed -- real Jenkins never emits real content on the same line as one
+# of these markers, so this is an accepted, documented assumption.
 _PIPELINE_BOUNDARY_RE = re.compile(
-    r"\[Pipeline\]\s*(?://\s*\w+|End of Pipeline|\{|\}|stage).*?(?:\r?\n|$)",
+    r"^(?:\[[0-9T:.\-]+Z\]\s*)?\[Pipeline\]\s*(?://\s*\w+|End of Pipeline|\{|\}|stage)[^\r\n]*(?:\r?\n|$)",
     re.MULTILINE,
 )
 _BLANK_RUN_RE = re.compile(r"(?:\r?\n){3,}")
@@ -365,7 +384,18 @@ class JenkinsAdapter:
                 count_failures=False,
             )
             if tail_resp and tail_resp.status_code == 200:
-                text = _strip_pipeline_annotations(tail_resp.text)
+                # Bound the strip's input to the last 20000 chars -- 4x the
+                # final 5000-char output window, more than enough margin for
+                # any single ConsoleNote blob or [Pipeline] marker to be
+                # fully contained within the pre-strip window even if it
+                # starts just before the final 5000 chars. Jenkins console
+                # logs are attacker-influenceable (pipeline authors control
+                # their own output); without this bound, strip runs on the
+                # FULL response body on every call, regardless of actual log
+                # size, on the Brain's shared asyncio event loop.
+                raw = tail_resp.text
+                window = raw[-20000:] if len(raw) > 20000 else raw
+                text = _strip_pipeline_annotations(window)
                 console_tail = text[-5000:] if len(text) > 5000 else text
 
         return BuildDetails(

@@ -3,6 +3,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import CiContextCard from './CiContextCard';
 import type { CiContext } from '../api/types';
+import { stripJenkinsNoise } from '../utils/stripAnsi';
 
 vi.mock('../utils/safeOpen', () => ({
   safeOpen: vi.fn(),
@@ -135,6 +136,54 @@ describe('CiContextCard', () => {
       render(<CiContextCard context={context} />);
       expect(screen.queryByText(/Show all/)).toBeNull();
       expect(screen.queryByText('Collapse')).toBeNull();
+    });
+
+    it('strips ha:////  blobs and [Pipeline] boundary noise before rendering', () => {
+      const context: CiContext = {
+        failed_jobs: [{
+          job_name: 'build',
+          console_tail: 'ha:////ABC123==\n[Pipeline] // container\nFinished: UNSTABLE',
+        }],
+      };
+      const { container } = render(<CiContextCard context={context} />);
+      expect(container.querySelector('pre')?.textContent).toBe('Finished: UNSTABLE');
+    });
+  });
+
+  describe('stripJenkinsNoise (F1/F3/F4/F8 hardening regressions)', () => {
+    it('strips a ha:////  blob, preserving surrounding text', () => {
+      expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
+    });
+
+    it('removes [Pipeline] boundary marker lines, preserving real output', () => {
+      const text = '[Pipeline] }\n[Pipeline] // container\nreal output';
+      expect(stripJenkinsNoise(text)).toBe('real output');
+    });
+
+    it('preserves a mid-line [Pipeline] substring not at line start (F1)', () => {
+      const text = 'Running [Pipeline] } leftover';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a mid-line boundary-alternation word ("stage") appearing in real prose', () => {
+      const text = 'Deploying [Pipeline] stage now, please wait';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('fully strips two adjacent ha:////  blobs with no separator (F3)', () => {
+      const result = stripJenkinsNoise('ha:////AAA==ha:////BBB==');
+      expect(result).toBe('');
+      expect(result).not.toContain(':////');
+    });
+
+    it('preserves an abutting secret key:value intact for downstream redaction (F4)', () => {
+      const result = stripJenkinsNoise('ha:////ABC==password:hunter2');
+      expect(result).toContain('password:hunter2');
+    });
+
+    it('still strips a Timestamper-prefixed [Pipeline] boundary line (F8 parity)', () => {
+      const text = '[2026-08-31T11:23:24.854Z] [Pipeline] // container\nreal output';
+      expect(stripJenkinsNoise(text)).toBe('real output');
     });
   });
 
