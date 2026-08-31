@@ -1138,9 +1138,31 @@ async def handle_ask_release_ai(
 # retrigger_jenkins_build
 # ---------------------------------------------------------------------------
 _JENKINS_RETRIGGER_COOLDOWN = int(os.getenv("JENKINS_RETRIGGER_COOLDOWN_SECONDS", "21600"))
-# Hard wall-clock ceiling for the two sequential Jenkins calls in _do_retrigger
-# (get_build_details + restart_job), distinct from the adapter's per-request timeout.
-_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 40
+# Hard wall-clock ceiling for the sequential Jenkins calls in _do_retrigger
+# (get_job_run_state + get_build_details + restart_job -- 3 calls now that
+# get_build_details skips its console-tail sub-request for this call site),
+# distinct from the adapter's per-request timeout (JenkinsAdapter default 15s,
+# see JENKINS_TIMEOUT in main.py). Worst case is 3 * 15s = 45s; set comfortably
+# above that so a run of legitimately-slow-but-successful calls isn't mistaken
+# for a hang.
+_JENKINS_RETRIGGER_HANDLER_TIMEOUT = 60
+
+# Wrapper jobs re-run every lane in the CI view, so a wrapper retrigger is far
+# costlier than a leaf retrigger. This is a SEPARATE, system-wide (not per-job)
+# rate limit on top of the per-job cooldown above -- it caps how often ANY
+# wrapper job can be retriggered, regardless of which one, since two different
+# wrappers retriggered back-to-back are just as costly as the same one twice.
+_JENKINS_WRAPPER_RETRIGGER_COOLDOWN = int(
+    os.getenv("JENKINS_WRAPPER_RETRIGGER_COOLDOWN_SECONDS", str(_JENKINS_RETRIGGER_COOLDOWN))
+)
+_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY = "darwin:jenkins:retrigger:wrapper:global"
+
+# Marker appended to a cooldown key's stored value when the cooldown was kept
+# because the job was OBSERVED already building/queued, not because Darwin
+# actually POSTed a retrigger. Lets a later blocked caller get an accurate
+# message instead of being told the job "was already retriggered" when no
+# retrigger ever happened.
+_NOOP_COOLDOWN_MARKER = ":observed-running"
 
 
 async def handle_retrigger_jenkins_build(
@@ -1178,7 +1200,15 @@ async def handle_retrigger_jenkins_build(
                 )
                 if not acquired:
                     holder_event = await bb.redis.get(cooldown_key)
-                    if holder_event and holder_event != event_id:
+                    if holder_event and holder_event.endswith(_NOOP_COOLDOWN_MARKER):
+                        origin_event = holder_event[: -len(_NOOP_COOLDOWN_MARKER)]
+                        result_text = (
+                            f"Job '{job_name}' is already running or queued (observed "
+                            f"by event {origin_event}; Darwin did not retrigger it). "
+                            f"Cooldown stays active until it finishes or the window "
+                            f"({_JENKINS_RETRIGGER_COOLDOWN}s) expires."
+                        )
+                    elif holder_event and holder_event != event_id:
                         result_text = (
                             f"Job '{job_name}' was already retriggered within the "
                             f"cooldown window ({_JENKINS_RETRIGGER_COOLDOWN}s) by a "
@@ -1195,7 +1225,7 @@ async def handle_retrigger_jenkins_build(
                         )
                 else:
                     result_text = await _do_retrigger(
-                        ctx, bb, job_name, matched, cooldown_key
+                        ctx, bb, event_id, job_name, matched, cooldown_key
                     )
 
     logger.info("retrigger_jenkins_build: event=%s job=%s result=%s", event_id, job_name, result_text[:120])
@@ -1211,12 +1241,49 @@ async def handle_retrigger_jenkins_build(
     return True
 
 
-async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cooldown_key: str) -> str:
+async def _alert_wrapper_retrigger(ctx: ToolContext, event_id: str, job_name: str, build_number: int) -> None:
+    """Best-effort structured alert for an actual wrapper-job retrigger (all lanes re-run).
+
+    Always emits a structured log line -- observable via log-based monitoring even
+    with no Slack configured. The Slack post is best-effort on top of that: a
+    Slack outage must never affect the retrigger's own result, so failures here
+    are swallowed after logging.
+    """
+    logger.warning(
+        "JENKINS_WRAPPER_RETRIGGER: event=%s job=%s build=%s -- all lanes will re-run",
+        event_id, job_name, build_number,
+    )
+    slack_channel = ctx.get_slack_channel()
+    infra_channel = getattr(slack_channel, "_infra_channel", None)
+    if not slack_channel or not infra_channel:
+        return
+    try:
+        await slack_channel._app.client.chat_postMessage(
+            channel=infra_channel,
+            text=(
+                f":rotating_light: *Wrapper job retriggered*: `{job_name}` #{build_number} "
+                f"(event `{event_id}`) — all lanes will re-run."
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Wrapper-retrigger Slack alert failed for %s: %s", job_name, exc)
+
+
+async def _do_retrigger(
+    ctx: ToolContext, bb, event_id: str, job_name: str, matched: dict, cooldown_key: str,
+) -> str:
     """Execute the retrigger after scope + rate checks pass. Releases cooldown key on failure."""
     observer = ctx.get_agent_instance("_jenkins_observer")
     adapter = getattr(observer, "_adapter", None) if observer else None
-    
+
     success = False
+    wrapper_gate_owned = False
+    # True only once an actual wrapper retrigger POST has succeeded -- distinct
+    # from `success`, which is also set True on the no-op "observed already
+    # running/queued" path to keep the per-job cooldown tagged. The wrapper
+    # global lock must NOT be held for the no-op path; only `success` would
+    # falsely keep it locked for the full cooldown with nothing to show for it.
+    wrapper_retrigger_posted = False
     try:
         if not adapter or not adapter.enabled():
             reason = "circuit breaker open" if (adapter and adapter.breaker_open) else "not configured"
@@ -1228,18 +1295,71 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
 
         job_metadata = matched.get("job_metadata") or {}
         is_wrapper = job_metadata.get("type") == "wrapper"
+
         if is_wrapper:
-            return (
-                f"'{job_name}' is a wrapper job — retriggering it re-runs all lanes. "
-                f"Automatic retrigger is not permitted for wrapper jobs; escalate to "
-                f"maintainer for a human-supervised retrigger."
+            # Wrapper-specific hard gate (HIGH fix): distinct from, and in addition
+            # to, the per-job cooldown above. Re-running a wrapper is costly
+            # regardless of which wrapper job it is, so this is a single
+            # system-wide lock rather than scoped to job_name.
+            wrapper_gate_owned = await bb.redis.set(
+                _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY,
+                job_name,
+                nx=True,
+                ex=_JENKINS_WRAPPER_RETRIGGER_COOLDOWN,
             )
+            if not wrapper_gate_owned:
+                holder = await bb.redis.get(_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY)
+                return (
+                    f"Wrapper job '{job_name}' retrigger blocked: wrapper retriggers "
+                    f"re-run every lane and are rate-limited system-wide "
+                    f"({_JENKINS_WRAPPER_RETRIGGER_COOLDOWN}s), independent of the "
+                    f"per-job cooldown. '{holder}' was retriggered within that "
+                    f"window. Escalate to maintainer if this is urgent."
+                )
 
         async with asyncio.timeout(_JENKINS_RETRIGGER_HANDLER_TIMEOUT):
+            run_state = await adapter.get_job_run_state(job_name)
+            if run_state is None:
+                return (
+                    f"Could not fetch job run state for '{job_name}'. "
+                    f"Jenkins may be unreachable. Escalate to maintainer."
+                )
+            if run_state.building or run_state.in_queue:
+                success = True
+                try:
+                    # Tag the cooldown value so a later blocked caller can tell
+                    # "job was observed already running" apart from "Darwin
+                    # actually retriggered it" (MEDIUM fix -- see
+                    # _NOOP_COOLDOWN_MARKER).
+                    await bb.redis.set(
+                        cooldown_key, f"{event_id}{_NOOP_COOLDOWN_MARKER}",
+                        xx=True, keepttl=True,
+                    )
+                except Exception as redis_exc:
+                    logger.error("Failed to tag cooldown key %s as observed-running: %s", cooldown_key, redis_exc)
+                state_bits: list[str] = []
+                if run_state.building:
+                    state_bits.append("already running")
+                if run_state.in_queue:
+                    state_bits.append("already queued")
+                state_text = " and ".join(state_bits)
+                last_build_suffix = ""
+                if run_state.last_build_number is not None:
+                    last_build_suffix = f" Last build: #{run_state.last_build_number}."
+                return (
+                    f"Job '{job_name}' is {state_text}; retrigger skipped. "
+                    f"Defer until the current run finishes. Cooldown remains in place."
+                    f"{last_build_suffix}"
+                )
+
             # get_build_details requires a separate network call to fetch fresh
-            # parameters (avoiding a repost of redacted ci_context values). Best-effort:
-            # count_failures=False keeps it isolated from the shared circuit breaker.
-            fresh_details = await adapter.get_build_details(job_name, build_number, count_failures=False)
+            # parameters (avoiding a repost of redacted ci_context values).
+            # include_console_tail=False skips its second (console-log) HTTP call
+            # since only `.parameters` is used here -- keeps this handler to 3
+            # sequential Jenkins calls instead of 4 (see _JENKINS_RETRIGGER_HANDLER_TIMEOUT).
+            fresh_details = await adapter.get_build_details(
+                job_name, build_number, include_console_tail=False,
+            )
             if not fresh_details:
                 return (
                     f"Could not fetch build details for {job_name} #{build_number}. "
@@ -1247,10 +1367,18 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
                 )
 
             success = await adapter.restart_job(job_name, fresh_details.parameters)
+            if is_wrapper:
+                wrapper_retrigger_posted = success
         if not success:
             return f"Retrigger failed for '{job_name}'. Jenkins rejected the request — check credentials/permissions."
 
-        return f"Successfully retriggered '{job_name}' #{build_number}. Monitor for new build result."
+        if is_wrapper:
+            await _alert_wrapper_retrigger(ctx, event_id, job_name, build_number)
+        suffix = " (wrapper job — all lanes will re-run)" if is_wrapper else ""
+        return (
+            f"Successfully retriggered '{job_name}' #{build_number}. "
+            f"Monitor for new build result.{suffix}"
+        )
     except TimeoutError:
         logger.error("Timed out retriggering %s after %ds", job_name, _JENKINS_RETRIGGER_HANDLER_TIMEOUT)
         return f"Retrigger for '{job_name}' timed out after {_JENKINS_RETRIGGER_HANDLER_TIMEOUT}s. Escalate to maintainer."
@@ -1263,6 +1391,15 @@ async def _do_retrigger(ctx: ToolContext, bb, job_name: str, matched: dict, cool
                 await bb.redis.delete(cooldown_key)
             except Exception as redis_exc:
                 logger.error("Failed to release cooldown key %s: %s", cooldown_key, redis_exc)
+        # Release the wrapper lock whenever we own it and no wrapper retrigger
+        # was actually posted -- covers the no-op "observed already running"
+        # path (where `success` is True but nothing was retriggered) as well
+        # as every failure/exception path, not just `not success`.
+        if wrapper_gate_owned and not wrapper_retrigger_posted:
+            try:
+                await bb.redis.delete(_JENKINS_WRAPPER_RETRIGGER_LOCK_KEY)
+            except Exception as redis_exc:
+                logger.error("Failed to release wrapper cooldown key: %s", redis_exc)
 
 
 # ---------------------------------------------------------------------------

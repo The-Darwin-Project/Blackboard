@@ -1990,6 +1990,240 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details.result == "FAILURE"
             assert details.console_tail == ""
 
+    async def test_include_console_tail_false_skips_second_http_call(self):
+        """include_console_tail=False (used by the jenkins-retrigger call site,
+        which only needs `.parameters`) must skip the console-log-tail HTTP
+        request entirely -- adapter-level regression coverage for the HIGH
+        timeout-budget fix, whose 3-sequential-calls math depends on this call
+        site actually making one fewer HTTP request, not just passing the flag."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {
+                "result": "FAILURE",
+                "url": "https://jenkins.example.com/job/verify-cnv-4.22.z-build/254/",
+                "actions": [{"parameters": [{"name": "CNV_VERSION", "value": "4.22"}]}],
+            }
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=api_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details(
+                    "verify-cnv-4.22.z-build", 254, include_console_tail=False,
+                )
+
+            assert details is not None
+            assert details.result == "FAILURE"
+            assert details.parameters == {"CNV_VERSION": "4.22"}
+            assert details.console_tail == ""
+            # Only the primary api/json call -- the console-log-tail fetch must
+            # never happen when include_console_tail=False.
+            mock_client.request.assert_called_once()
+
+    async def test_include_console_tail_true_default_still_makes_both_calls(self):
+        """Sanity companion to the test above: the default (True, unspecified)
+        behavior for every OTHER caller of get_build_details is unchanged --
+        both calls still happen."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.text = "...console output..."
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("verify-cnv-4.22.z-build", 254)
+
+            assert details is not None
+            assert details.console_tail == "...console output..."
+            assert mock_client.request.call_count == 2
+
+
+# =========================================================================
+# T-A-1..4: JenkinsAdapter.get_job_run_state (C4 HIGH increment)
+#
+# Spec: GET /job/{urlencoded}/api/json?tree=color,inQueue,lastBuild[number,result,building]
+#   - None on non-200 / transport / bad JSON
+#   - inQueue -> in_queue
+#   - lastBuild.building -> building; lastBuild.number -> last_build_number
+#   - color ending "_anime" -> building True (fallback, e.g. lastBuild missing/false)
+#
+# Follows the TestJenkinsAdapterGetBuildDetailsTransport/RestartJobTransport
+# pattern: patches `_get_client` (not `_request`) so the real adapter HTTP
+# code -- URL construction, urllib.parse.quote, JSON parsing -- actually runs.
+# =========================================================================
+
+class TestJenkinsAdapterGetJobRunStateTransport:
+
+    async def test_parses_last_build_building_and_in_queue(self):
+        """T-A-1: 200 JSON with inQueue=false, lastBuild.building=true,
+        lastBuild.number=9, color='blue_anime' -> JobRunState(building=True,
+        in_queue=False, last_build_number=9). Exactly one HTTP GET; the
+        requested path contains the url-encoded job name and a tree= query."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "inQueue": False,
+                "lastBuild": {"number": 9, "building": True, "result": None},
+                "color": "blue_anime",
+            }
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                state = await adapter.get_job_run_state("verify-cnv-4.22.z-build")
+
+            assert state is not None
+            assert state.building is True
+            assert state.in_queue is False
+            assert state.last_build_number == 9
+
+            mock_client.request.assert_called_once()
+            call = mock_client.request.call_args
+            url = call.args[1]
+            assert urllib.parse.quote("verify-cnv-4.22.z-build", safe="") in url
+            assert "tree=" in url
+
+    async def test_url_encodes_job_name(self):
+        """T-A-2: A job name with unsafe characters (slash/space) must be
+        percent-encoded via urllib.parse.quote(job, safe="") in the request path."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            unsafe_job = "feature/weird job"
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "inQueue": False,
+                "lastBuild": {"number": 1, "building": False, "result": "SUCCESS"},
+                "color": "blue",
+            }
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                await adapter.get_job_run_state(unsafe_job)
+
+            call = mock_client.request.call_args
+            url = call.args[1]
+            expected = urllib.parse.quote(unsafe_job, safe="")
+            assert expected in url
+            assert unsafe_job not in url
+
+    async def test_returns_none_on_non_200(self):
+        """T-A-3: A non-200 response (e.g. 500) -> get_job_run_state returns None."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 500
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                state = await adapter.get_job_run_state("verify-cnv-4.22.z-build")
+
+            assert state is None
+
+    async def test_color_anime_fallback_when_last_build_not_building(self):
+        """T-A-4: lastBuild dict present but without a 'building' key (or
+        building=False), and color ends in '_anime' (Jenkins' "currently
+        running" ball-color suffix) -> building must resolve True via the
+        color fallback."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "inQueue": False,
+                "lastBuild": {"number": 42, "result": None},
+                "color": "red_anime",
+            }
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                state = await adapter.get_job_run_state("verify-cnv-4.22.z-build")
+
+            assert state is not None
+            assert state.building is True
+
+    async def test_returns_none_on_transport_error(self):
+        """T-A-3b: transport-level failure (connect/timeout) -> None, matching
+        the same contract as get_build_details/restart_job/scan_view."""
+        import httpx as httpx_mod
+
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=httpx_mod.ConnectError("boom"))
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                state = await adapter.get_job_run_state("verify-cnv-4.22.z-build")
+
+            assert state is None
+
+    async def test_returns_none_on_malformed_json(self):
+        """T-A-3c: 200 response with malformed/non-JSON body -> None, matching
+        scan_view's malformed-JSON handling."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.side_effect = ValueError("not json")
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                state = await adapter.get_job_run_state("verify-cnv-4.22.z-build")
+
+            assert state is None
+
+    async def test_count_failures_false_passed_through_from_handler_call_site(self):
+        """T-A-5: The handler call site (`_do_retrigger`) is specified to call
+        `get_job_run_state(job, count_failures=False)` -- this is a best-effort
+        pre-check that must not trip the shared circuit breaker on its own.
+        Verifies the adapter method accepts and threads the kwarg to `_request`."""
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 500
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(return_value=mock_resp)
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                await adapter.get_job_run_state("verify-cnv-4.22.z-build", count_failures=False)
+
+            # A 500 with count_failures=False must NOT record a breaker strike.
+            assert adapter._consecutive_failures == 0
+            assert adapter._breaker_latched is False
+
+
 # =========================================================================
 # T-DP1: Jenkins Duplicate Prevention - Staging Filter
 # =========================================================================

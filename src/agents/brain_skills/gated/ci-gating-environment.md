@@ -15,7 +15,7 @@ infrastructure flakiness, test regression, or product defect — not which Cynef
 applies. Domain assessment is independent.
 
 Parsed `job_metadata` (when present) adds topology: `type` distinguishes wrappers from
-test leaves, `version` provides an authoritative CNV version, and `owner` / `team` /
+test leaves, `version` provides an authoritative product version, and `owner` / `team` /
 `labels` identify the human owners of the failing test. Owners are escalation targets,
 not dispatch targets — Darwin investigates; humans own the test code.
 
@@ -38,17 +38,18 @@ non-terminal state: defer, do not close.
 
 The release-console AI synthesizes across Jenkins, Prow, ReportPortal, Jira, and Errata.
 It can provide root cause analysis for specific job failures, historical failure patterns
-for the same job/NVR, and cross-references with known issues.
+for the same job/build identifier, and cross-references with known issues.
 
-Frame questions precisely: include the NVR, job name, and failure evidence. One
-well-framed question yields more context than multiple narrow queries because the
+Frame questions precisely: include the build identifier, job name, and failure evidence.
+One well-framed question yields more context than multiple narrow queries because the
 synthesis happens across data sources internally.
 
 ## Timing Cadence
 
-Wrapper and tier jobs take 6–9 hours. Nightly builds run overnight; candidate builds
-follow release milestones. "Late" is relative to the pipeline cadence, not wall-clock.
-A nightly job absent at 06:00 UTC is expected; absent at 12:00 UTC warrants investigation.
+Wrapper and tier jobs take several hours. CI pipelines run on varied schedules — some
+overnight, some tied to release milestones. "Late" is relative to the pipeline's own
+cadence, not wall-clock time. A scheduled overnight job still running in the morning is
+expected; the same job absent well past its expected completion warrants investigation.
 Deferral intervals should be proportional to the expected remaining job duration — not
 a fixed default.
 
@@ -63,8 +64,8 @@ issue been resolved? Stale memory applied as current fact leads to misdiagnosis.
 ## Retriggering Transient Failures
 
 When investigation (your own analysis or an agent's findings) concludes the root cause
-is transient infrastructure — network timeouts, mirror unavailability, quota exhaustion,
-Artifactory satellite issues — and NOT a test regression or product defect, you can
+is transient infrastructure — network timeouts, quota exhaustion, artifact mirror
+unavailability — and NOT a test regression or product defect, you can
 directly retest the job. The mechanism is scoped to jobs already present in this event's
 failed_jobs context (cannot retrigger arbitrary Jenkins jobs) and rate-limited per job
 to one retrigger per cooldown window. The window length is deployment-configured and
@@ -73,8 +74,10 @@ the tool's response over any duration you recall, and don't assume a repeat fail
 after that rejection is abuse rather than a genuinely new issue.
 
 Retriggering a wrapper job re-runs all lanes within it (see Wrapper vs Leaf Topology
-above). The cost is the full runtime — consider whether only one lane's transient
-failure justifies re-running all lanes, or whether the scope warrants deeper
+above), consuming significant CI compute across every lane for however many hours the
+full run takes — not just the one lane that failed. Confirm the root cause is transient
+infrastructure, not a test regression, before retriggering a wrapper; a single flaky
+lane rarely justifies re-running the whole wrapper, and the scope often warrants deeper
 investigation first.
 
 Do not retrigger when the failure evidence indicates a code defect, a test regression,

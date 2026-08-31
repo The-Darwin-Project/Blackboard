@@ -26,7 +26,7 @@ is*, not which Cynefin domain applies — independent domain assessment is still
 
 Parsed `job_metadata` (from the JOB_METADATA build parameter, when present) provides:
 - `type`: wrapper vs test leaf — wrappers aggregate independent lanes
-- `version`: CNV version from the metadata, more authoritative than name-regex extraction
+- `version`: product version from the metadata, more authoritative than name-regex extraction
 - `owner` / `team` / `labels`: identify the human owners of the failing test (escalation
   targets, not dispatch targets)
 
@@ -40,32 +40,50 @@ the cost is proportional to the total remaining work, not just the failed lane.
 ## Retry Before Investigation
 
 CI job failures are overwhelmingly transient — infrastructure flakiness, resource
-contention, and timing issues account for the majority. A restart before deeper
-analysis is the natural first response because the expected value of a retry succeeding
-exceeds the expected value of immediate investigation for most failure types.
+contention, and timing issues account for the majority of them. For a single lane —
+a leaf job restarted on its own — a restart carries far lower cost than an
+investigation cycle, so ordering matters: attempting a restart before committing to
+deeper analysis is the higher-expected-value move whenever nothing in the evidence
+already points to a deterministic cause (a code defect or a persistent, repeating
+failure signature). The asymmetry — restart is cheap, investigation is expensive —
+is what justifies trying restart/retry first for a leaf, not a blanket rule that
+every failure gets retried.
 
-After a restart, the job needs time to complete. Wrapper and tier jobs take 6–9 hours.
-Attempting to check results immediately after a restart wastes a processing cycle with
-no new information — defer proportional to the expected job duration.
+That cheapness does not carry over to a wrapper (see Wrapper vs Leaf Topology
+above): retriggering a wrapper re-runs every lane inside it, not just the one that
+failed, so the cost scales with the whole remaining run rather than one job.
+Restarting a wrapper before investigation is only the higher-expected-value move
+when the evidence points to transient infrastructure affecting the run broadly —
+not when a single lane inside it looks flaky. A wrapper restart on thin evidence
+trades a cheap leaf-level retry's economics for an expensive one; escalate or
+investigate the failing lane first when that confidence is missing.
 
-If a retry also fails, the failure is likely deterministic. At that point, investigation
-is warranted: consult the release AI for root cause context, historical patterns, and
-prior art on the same job. Escalation to release maintainers is the last resort, after
-retry failure AND investigation confirms the issue is beyond automated resolution.
+A restart's outcome only becomes evidence once the job has had time to run; wrapper and
+tier jobs run for multiple hours, so checking results immediately after a restart
+produces no new information and wastes a processing cycle. Let the elapsed time
+approach the job's expected duration before re-checking.
+
+When a restart does not resolve the failure, that outcome itself is diagnostic — it
+shifts the probability toward a deterministic cause and justifies investigation: consult
+the release AI for root cause context, historical patterns, and prior art on the same
+job. Escalate to the release maintainers only after both retry and investigation have
+been exhausted and the issue remains beyond automated resolution — escalation is a last
+resort, not a parallel path to retry.
 
 ## Missing vs Never-Built
 
 A "missing" CI job (expected but absent) is fundamentally different from a "never-built"
-status (no build was ever attempted for this NVR). Missing jobs indicate a pipeline gap
-or scheduling failure. Never-built may be normal for newly onboarded components or skipped
-configurations. The CI context evidence distinguishes these cases.
+status (no build was ever attempted for this build identifier). Missing jobs indicate
+a pipeline gap or scheduling failure. Never-built may be normal for newly onboarded
+components or skipped configurations. The CI context evidence distinguishes these cases.
 
 ## Timing Cadence
 
-CI pipelines have natural cadences. Nightly builds run overnight; candidate builds follow
-release milestones. When assessing whether a job is "late" or "stuck," consider the
-pipeline's expected schedule, not wall-clock elapsed time alone. A nightly job absent
-at 06:00 UTC is expected; absent at 12:00 UTC warrants investigation.
+CI pipelines run on varied schedules — some overnight, some tied to release milestones.
+When assessing whether a job is "late" or "stuck," consider the pipeline's own expected
+schedule, not wall-clock elapsed time alone. A scheduled overnight job still running in
+the morning is expected; the same job absent well past its expected completion warrants
+investigation.
 
 ## Scope Boundary
 
