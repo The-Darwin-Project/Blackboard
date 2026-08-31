@@ -118,30 +118,42 @@ _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 # plausible a real base64 blob ending in one padding char as it is a blob
 # abutting a "token=" secret delimiter. To resolve the ambiguity, a lone
 # `=` is only accepted as a real terminator when a lookahead confirms one
-# of the traditionally-safe delimiters immediately follows it (whitespace,
-# ANSI escape, another `ha:////`, or end-of-string). If that lookahead
-# fails, this alternative does not match at this position, the whole match
-# fails, and the abutting secret text (including the "token=" delimiter)
-# survives untouched for downstream redaction -- the same "leave ambiguous
-# content alone" philosophy already applied throughout this fix. This
-# closes the gap without reintroducing the F3 (adjacent-blobs) or F4
-# (colon-delimited abutment, safe because `:` is outside the base64
-# alphabet and so already can't be consumed) regressions: each blob is
-# still matched independently once it has its own valid terminator, so no
-# separate "or another ha:////" alternative is needed outside the
-# single-`=` lookahead itself.
+# of the traditionally-safe delimiters immediately follows it (an ANSI
+# escape, another `ha:////`, or end-of-string). If that lookahead fails,
+# this alternative does not match at this position, the whole match fails,
+# and the abutting secret text (including the "token=" delimiter) survives
+# untouched for downstream redaction -- the same "leave ambiguous content
+# alone" philosophy already applied throughout this fix. This closes the
+# gap without reintroducing the F3 (adjacent-blobs) or F4 (colon-delimited
+# abutment, safe because `:` is outside the base64 alphabet and so already
+# can't be consumed) regressions: each blob is still matched independently
+# once it has its own valid terminator, so no separate "or another
+# ha:////" alternative is needed outside the single-`=` lookahead itself.
+#
+# Whitespace was DELIBERATELY REMOVED from that lookahead set (it used to
+# be a member, until a MORE SERIOUS follow-on secret-redaction-bypass
+# finding on this exact branch). Whitespace after a real `=` is not a rare,
+# deliberately-constructed pattern the way an ANSI escape or a chained
+# `ha:////` occurrence is -- it is the single most common, completely
+# benign way a real secret is ever written in log output or config dumps
+# ("KEY= value", "KEY=\nvalue"). Treating "followed by whitespace" as proof
+# of genuine base64 padding was backwards: whitespace commonly follows a
+# real `=` delimiter too, so its presence proves nothing about which case
+# this is, and the old rule silently deleted the "token="/"password="/etc.
+# delimiter along with the blob, defeating downstream redaction exactly
+# like the un-lookahead-guarded version this branch was meant to fix.
 #
 # Accepted trade-off (narrower than the prior round's): a genuinely valid
-# blob needing exactly one padding character, NOT followed by
-# whitespace/ANSI/EOS/another blob (i.e. directly abutting more real log
-# content with no separator), will no longer be recognized and will show
-# through as literal noise instead of being stripped -- narrower still
-# than the previous trade-off (which covered all unpadded/non-ANSI-wrapped
-# blobs), but still cosmetic-only.
+# blob needing exactly one padding character, followed by plain whitespace
+# with no ANSI wrapper (i.e. no ANSI escape, no chained blob, and not at
+# end-of-string), will no longer be recognized and will show through as
+# literal noise instead of being stripped. This narrows an already-narrow
+# edge case further -- real Jenkins ConsoleNote blobs are near-universally
+# ANSI-wrapped in practice -- and remains cosmetic-only.
 _PIPELINE_ANNOTATION_RE = re.compile(
     r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}"
     r"(?:==(?:\x1b\[[0-9;]*m)?"
-    r"|=(?=[\s\x1b]|ha:////|$)(?:\x1b\[[0-9;]*m)?"
+    r"|=(?=\x1b|ha:////|$)(?:\x1b\[[0-9;]*m)?"
     r"|\x1b\[[0-9;]*m)",
 )
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in

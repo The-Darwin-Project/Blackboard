@@ -2708,13 +2708,81 @@ class TestT22StripPipelineAnnotations:
         text = f"ha:////AAA{keyword}=xyz"
         assert _strip_pipeline_annotations(text) == text
 
-    def test_single_equals_followed_by_whitespace_still_strips(self):
-        """F10 positive control: a single `=` immediately followed by a safe
-        lookahead terminator (whitespace here) is still recognized as
-        genuine padding and the blob still strips cleanly -- the lookahead
-        requirement narrows the accepted cases, it doesn't remove single-`=`
-        padding support entirely."""
-        assert _strip_pipeline_annotations("before ha:////ABC1= after") == "before  after"
+    # ---- F11: whitespace-terminated single-`=` secret-abutment bypass
+    # (MORE SERIOUS follow-up to F10) ----
+
+    def test_single_equals_space_terminated_token_preserved(self):
+        """F11 regression: F10 closed the bare (no-terminator) single-`=`
+        abutment but left whitespace in the "safe" lookahead set. A single
+        `=` followed by a plain space is exactly the most common, entirely
+        ordinary way a real secret gets written ("token= value") -- not a
+        rare or deliberately-constructed pattern the way an ANSI escape or
+        chained `ha:////` occurrence is. The pre-fix regex misread the
+        space as proof of genuine base64 padding and silently deleted
+        "token=" along with the blob, defeating downstream redaction. The
+        fix removes whitespace from the lookahead entirely: the match now
+        fails and the secret text (including "token=") survives verbatim."""
+        text = "ha:////AAAtoken= somevalue"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_space_terminated_password_preserved(self):
+        """F11 regression, second keyword: same whitespace-abutment gap as
+        above, using "password=" instead of "token=" to prove the fix isn't
+        keyword-specific."""
+        text = "ha:////AAApassword= hunter2"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_newline_terminated_token_preserved(self):
+        """F11 regression, newline variant: `\\s` in the old lookahead
+        matched ANY whitespace, not just literal spaces -- a newline
+        immediately after the `=` (e.g. a secret sitting alone on its own
+        line in a config dump) is exactly as common and exactly as
+        unsound a signal as a space. Must be preserved verbatim too."""
+        text = "ha:////AAAtoken=\nsomevalue"
+        assert _strip_pipeline_annotations(text) == text
+
+    @pytest.mark.parametrize(
+        "keyword",
+        [
+            "token", "secret", "password", "passwd", "pwd", "key",
+            "credential", "authorization",
+            "apikey", "accesskey", "privatekey", "secretkey",
+        ],
+    )
+    def test_single_equals_space_terminated_all_keywords_preserved(self, keyword):
+        """F11 regression, full board sweep: every bare-alphabetic keyword
+        from _SECRET_TEXT_PATTERN's list, INCLUDING the no-separator forms
+        (apikey/accesskey/privatekey/secretkey) that F10's original sweep
+        omitted, must survive a single-`=`-then-whitespace abutment intact.
+        This is the critical sweep for the whitespace-removal fix -- any
+        keyword that still leaks here reopens the most common real-world
+        secret-formatting pattern."""
+        text = f"ha:////AAA{keyword}= value123"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_followed_by_whitespace_no_longer_strips(self):
+        """F11 regression (MORE SERIOUS follow-up to F10): whitespace was
+        REMOVED from the single-`=` lookahead's safe-terminator set.
+        Whitespace after a real `=` delimiter is not a rare, deliberately-
+        constructed pattern the way an ANSI escape or a chained `ha:////`
+        occurrence is -- it is the single most common, completely benign
+        way a real secret is ever written ("KEY= value"). The old rule
+        (this test used to assert the OPPOSITE, that this case strips)
+        treated "followed by whitespace" as proof of genuine base64
+        padding, which is backwards, and silently deleted the "token="
+        delimiter along with the blob. Whitespace is no longer accepted:
+        the match now fails entirely and the text survives verbatim."""
+        text = "before ha:////ABC1= after"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_followed_by_ansi_still_strips(self):
+        """F11 positive control: a single `=` immediately followed by an
+        ANSI escape (not whitespace) is still a safe lookahead terminator
+        and the blob still strips cleanly -- proves the whitespace removal
+        narrowed the accepted cases without breaking the still-legitimate
+        ANSI-terminated path."""
+        result = _strip_pipeline_annotations("before ha:////ABC1=\x1b[0m after")
+        assert result == "before  after"
 
     def test_single_equals_followed_by_another_blob_still_strips(self):
         """F10 positive control: single `=` immediately followed by another

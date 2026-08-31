@@ -217,9 +217,53 @@ describe('CiContextCard', () => {
       },
     );
 
-    it('still strips when a single `=` is followed by a safe lookahead terminator (F10 positive control)', () => {
-      expect(stripJenkinsNoise('before ha:////ABC1= after')).toBe('before  after');
+    it('preserves a single-`=`-then-whitespace abutment verbatim (F11, was wrongly a positive control)', () => {
+      // F11 regression (MORE SERIOUS follow-up to F10): whitespace was
+      // REMOVED from the single-`=` lookahead's safe-terminator set. This
+      // test used to assert the OPPOSITE (that this case strips) -- that
+      // was wrong: whitespace after a real `=` delimiter is the single
+      // most common, entirely benign way a real secret is ever written
+      // ("token= value"), not a rare/deliberate pattern like an ANSI
+      // escape or chained blob. The match must now fail entirely.
+      const text = 'before ha:////ABC1= after';
+      expect(stripJenkinsNoise(text)).toBe(text);
     });
+
+    it('still strips when a single `=` is followed by an ANSI escape (F11 positive control)', () => {
+      // Proves the whitespace removal narrowed the accepted cases without
+      // breaking the still-legitimate ANSI-terminated path.
+      expect(stripJenkinsNoise('before ha:////ABC1=\x1b[0m after')).toBe('before  after');
+    });
+
+    it('still strips when a single `=` is followed by another blob (F10 positive control)', () => {
+      expect(stripJenkinsNoise('ha:////AAA=ha:////BBB==')).toBe('');
+    });
+
+    it('preserves a single-`=`-then-space "token=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAAtoken= somevalue';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=`-then-space "password=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAApassword= hunter2';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=`-then-newline "token=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAAtoken=\nsomevalue';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it.each([
+      'token', 'secret', 'password', 'passwd', 'pwd', 'key', 'credential', 'authorization',
+      'apikey', 'accesskey', 'privatekey', 'secretkey',
+    ])(
+      'preserves a single-`=`-then-space "%s=" abutment verbatim (F11 board sweep)',
+      (keyword) => {
+        const text = `ha:////AAA${keyword}= value123`;
+        expect(stripJenkinsNoise(text)).toBe(text);
+      },
+    );
 
     it('double-`==` padding remains self-sufficient, no regression (F10)', () => {
       expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');

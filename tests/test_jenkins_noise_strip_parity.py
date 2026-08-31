@@ -52,6 +52,16 @@ CORPUS = [
     "ha:////AAAsecret=xyz",
     "before ha:////ABC1= after",
     "ha:////AAA=ha:////BBB==",
+    # F11: MORE SERIOUS follow-up -- whitespace was removed from the
+    # single-`=` lookahead's safe-terminator set. A single `=` followed by
+    # plain whitespace (space or newline) is the single most common,
+    # completely benign way a real secret is ever written ("token= value",
+    # "token=\nvalue") and must now be left fully untouched, same as the
+    # no-terminator F10 case above.
+    "ha:////AAAtoken= somevalue",
+    "ha:////AAApassword= hunter2",
+    "ha:////AAAtoken=\nsomevalue",
+    "before ha:////ABC1=\x1b[0m after",
     "\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n",
     "[Pipeline] }\n[Pipeline] // container\nreal output",
     "output\n[Pipeline] End of Pipeline",
