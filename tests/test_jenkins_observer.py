@@ -1095,8 +1095,9 @@ class TestT21bSliceAfterRedact:
     def test_secret_straddling_3000_cut_is_redacted(self):
         """Craft a console_tail where 'TOKEN=value' straddles the 3000-char
         boundary: keyword is >3000 from the end, value is within the last
-        3000. The production path (redact full, then slice) catches it."""
-        from src.agents.jenkins_observer import _redact_secrets_in_text, _sanitize_console_tail
+        3000. The production path (_prepare_console_tail: redact -> strip ->
+        slice) catches it."""
+        from src.agents.jenkins_observer import _prepare_console_tail
 
         secret_value = "abc123def456"
         # Position so [-3000:] cut falls between TOKEN= and the value:
@@ -1111,11 +1112,9 @@ class TestT21bSliceAfterRedact:
         assert "TOKEN=" not in raw_tail[-3000:]
         assert secret_value in raw_tail[-3000:]
 
-        # Production path: redact full text first, then slice
-        redacted = _redact_secrets_in_text(raw_tail)
-        sliced = redacted[-3000:] if len(redacted) > 3000 else redacted
-        result = _sanitize_console_tail(sliced)
-        assert secret_value not in result, "value leaked — slice happened before redact"
+        # Production path: _prepare_console_tail (redact -> strip -> slice)
+        result = _prepare_console_tail(raw_tail)
+        assert secret_value not in result, "value leaked -- slice happened before redact"
 
     def test_wrong_order_would_leak(self):
         """Counter-proof: slicing BEFORE redacting loses the keyword and leaks."""
@@ -1132,6 +1131,44 @@ class TestT21bSliceAfterRedact:
         result = _redact_secrets_in_text(sliced_first)
         # The value survives because the keyword was lost
         assert secret_value in result, "expected the wrong-order path to leak"
+
+    def test_secret_straddling_prestrip_window_is_redacted(self):
+        """HIGH regression guard: the old adapter path ran _strip_pipeline_annotations
+        (which truncates to _PRESTRIP_WINDOW chars) BEFORE redaction. A password=
+        keyword sitting just before the 20k window cut with its value inside the
+        window leaked the bare value. _prepare_console_tail (redact -> strip -> slice)
+        closes this."""
+        from src.agents.jenkins_observer import (
+            _prepare_console_tail,
+            _redact_secrets_in_text,
+        )
+
+        kw, val = "password=", "hunter2"
+        head = "x" * 50 + kw
+        tail = val + ("y" * (_PRESTRIP_WINDOW - len(val)))
+        raw = head + tail
+
+        # Production path: redact first, then strip -- value is gone
+        result = _prepare_console_tail(raw)
+        assert val not in result, (
+            "hunter2 leaked through _prepare_console_tail -- redact-before-strip invariant broken"
+        )
+
+    def test_wrong_order_strip_then_redact_leaks_prestrip_window(self):
+        """Counter-proof: strip-first (the old order) windows away the keyword
+        and leaks the value -- proving the fix is not vacuous."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        kw, val = "password=", "hunter2"
+        head = "x" * 50 + kw
+        tail = val + ("y" * (_PRESTRIP_WINDOW - len(val)))
+        raw = head + tail
+
+        # Wrong order: strip first (truncates to last _PRESTRIP_WINDOW chars,
+        # which starts at the value, dropping the keyword)
+        stripped = _strip_pipeline_annotations(raw)
+        result = _redact_secrets_in_text(stripped)
+        assert val in result, "expected the wrong-order (strip-then-redact) path to leak"
 
 
 # =========================================================================
@@ -2146,23 +2183,12 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
 
     async def test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped(self):
         """F7 regression guard (bounded pre-strip window correctness).
-        `get_build_details` returns the full stripped text (no adapter-level
-        slice -- the observer handles redact-then-slice). The bounded
-        `_PRESTRIP_WINDOW`/`_MAX_BLOB_LEN` truncation inside
-        `_strip_pipeline_annotations` itself is the key mechanism: all other
-        tests in this class call `_strip_pipeline_annotations` directly as a
-        unit-level helper -- none of them exercise the real `get_build_details`
-        async method with an HTTP response large enough for the pre-strip
-        window to matter.
+        The adapter now returns the decoded byte-windowed raw tail (no strip).
+        The observer's `_prepare_console_tail` owns the strip. Assert:
+        1) adapter returns the blob (or at least the real content suffix);
+        2) `_prepare_console_tail` strips the blob and keeps real content."""
+        from src.agents.jenkins_observer import _prepare_console_tail
 
-        If a future change reintroduced an intermediate slice, a
-        `ha:////...==` blob straddling the cut would leak a partial,
-        un-matchable fragment (missing its `ha:` prefix) into
-        `console_tail` -- which would also defeat the observer's downstream
-        `_redact_secrets_in_text` if a secret abutted it. Assert the
-        strip pipeline (jenkins.py's `get_build_details`) plus the bounded
-        pre-strip window leave no trace of the blob at all, regardless of
-        total log size."""
         with patch.dict("os.environ", _env_vars()):
             adapter = _make_test_adapter()
 
@@ -2171,9 +2197,7 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             suffix = "\nreal failure output line\n"
             raw = filler + blob + suffix
             # Sanity: the blob must straddle where a naive (now-removed)
-            # intermediate slice would have landed -- ensures this fixture
-            # guards against any future reintroduction of an adapter-level
-            # slice before the observer's redact-then-slice pipeline.
+            # intermediate slice would have landed.
             naive_cut = len(raw) - 5000
             assert len(filler) < naive_cut < len(filler) + len(blob), (
                 "test fixture must position the blob straddling the naive "
@@ -2196,19 +2220,26 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
                 details = await adapter.get_build_details("gating-job", 99)
 
             assert details is not None
-            assert "ha:" not in details.console_tail
-            assert ":////" not in details.console_tail
+            # Adapter returns raw -- blob may still be present
             assert "real failure output line" in details.console_tail
+
+            # Observer helper strips the blob and keeps real content
+            prepared = _prepare_console_tail(details.console_tail)
+            assert "ha:" not in prepared
+            assert ":////" not in prepared
+            assert "real failure output line" in prepared
 
     async def test_console_tail_preserves_secret_across_old_5000_slice_boundary(self):
         """CRITICAL regression guard: a `password=hunter2` whose keyword sits
         just before where the old 5000-char slice used to cut and whose value
         sits after it must survive into console_tail so the observer's
-        downstream `_redact_secrets_in_text` can still catch it.
+        _prepare_console_tail can still catch it.
 
-        The adapter must return the full stripped text -- no intermediate
-        _CONSOLE_TAIL_SIZE slice -- leaving all slicing to the observer's
-        redact-then-slice pipeline."""
+        The adapter returns the decoded byte-windowed raw tail -- no intermediate
+        _CONSOLE_TAIL_SIZE slice -- and the observer's _prepare_console_tail
+        redacts the secret before slicing."""
+        from src.agents.jenkins_observer import _prepare_console_tail
+
         with patch.dict("os.environ", _env_vars()):
             adapter = _make_test_adapter()
 
@@ -2244,10 +2275,14 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
 
             assert details is not None
             assert "password=" in details.console_tail, (
-                "adapter must return full stripped text -- no intermediate "
+                "adapter must return raw decoded tail -- no intermediate "
                 "5000-char slice that would drop the redaction trigger"
             )
             assert "hunter2" in details.console_tail
+
+            # Observer helper redacts the secret
+            prepared = _prepare_console_tail(details.console_tail)
+            assert "hunter2" not in prepared
 
 
 # =========================================================================

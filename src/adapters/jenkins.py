@@ -20,10 +20,12 @@
 #    HTTP call per view, not a fan-out. _record_success/_record_failure called directly.
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
-# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter,
-#    bounded to a fixed pre-strip window -- bounded wire-format cleanup on an
-#    attacker-influenceable log body, not business logic. The adapter returns the FULL
-#    stripped text; all downstream slicing (redact-then-slice) belongs to the observer.
+# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) is DEFINED in the Adapter
+#    (wire-format regexes live next to Jenkins ConsoleNote knowledge) but the production CALL
+#    SITE is observer `_prepare_console_tail` (redact -> strip -> slice).  The adapter
+#    returns the decoded byte-windowed raw tail; the observer owns the sequencing.
+#    Accepted bound: `_DECODE_WINDOW_BYTES` (80k bytes) can still straddle a keyword --
+#    closing that requires fetching unbounded logs (DoS risk).
 """
 Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
@@ -549,9 +551,10 @@ class JenkinsAdapter:
                 # BYTES down to a generous pre-decode window first and decode
                 # only that -- decode cost is now bounded regardless of
                 # actual log size. A slice boundary can land mid-codepoint;
-                # errors="replace" swaps at most one leading char for U+FFFD,
-                # which is discarded anyway once _strip_pipeline_annotations
-                # applies its own (smaller, char-based) _PRESTRIP_WINDOW bound.
+                # errors="replace" swaps at most one leading char for U+FFFD.
+                # Accepted bound: _DECODE_WINDOW_BYTES (80k bytes) can still
+                # straddle a secret keyword -- closing that requires fetching
+                # unbounded logs (DoS risk), so it is left as documented.
                 raw_bytes = tail_resp.content
                 if len(raw_bytes) > _DECODE_WINDOW_BYTES:
                     raw_bytes = raw_bytes[-_DECODE_WINDOW_BYTES:]
@@ -563,7 +566,7 @@ class JenkinsAdapter:
                     # This is a best-effort log-tail fetch -- fall back to utf-8
                     # rather than letting an uncaught LookupError escape this path.
                     raw = raw_bytes.decode("utf-8", errors="replace")
-                console_tail = _strip_pipeline_annotations(raw)
+                console_tail = raw
 
         return BuildDetails(
             job_name=job,
