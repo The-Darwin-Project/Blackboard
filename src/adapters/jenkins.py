@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # truncated into a headerless, unmatchable leftover. Before this bound
 # existed, that guarantee was just an unverified comment ("4x margin, more
 # than enough") resting on an unbounded regex -- see
-# TestT22StripPipelineAnnotations::test_console_tail_blob_straddling_prestrip_window_start_is_recognized
+# TestT22StripPipelineAnnotations::test_max_length_blob_header_at_prestrip_window_start_is_recognized
 # in tests/test_jenkins_observer.py for the regression coverage. A real blob
 # longer than _MAX_BLOB_LEN (not expected in practice -- Jenkins durable-task
 # blobs are a serialized exception, typically well under 1KB) simply isn't

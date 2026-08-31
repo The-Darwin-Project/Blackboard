@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.adapters.jenkins import _strip_pipeline_annotations
+from src.adapters.jenkins import _MAX_BLOB_LEN, _PRESTRIP_WINDOW, _strip_pipeline_annotations
 
 
 # =========================================================================
@@ -2105,73 +2105,6 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert ":////" not in details.console_tail
             assert "real failure output line" in details.console_tail
 
-    async def test_console_tail_max_length_blob_at_window_start_boundary_is_recognized(self):
-        """HIGH regression: the blob regex used to have no length bound (a
-        plain `+`), so the safety of the 20000-char pre-strip window rested
-        entirely on an unverified comment ("4x margin, more than enough")
-        about how long a real blob could be -- nothing in the code actually
-        enforced it. The regex is now bounded to `_MAX_BLOB_LEN`, chosen so
-        `_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW`. That
-        inequality is what this test guards: it constructs the worst case the
-        invariant must cover -- a maximum-length blob positioned as close as
-        the fixture can get to the final output slice -- and asserts the
-        `ha:////` header is still comfortably inside the pre-strip window and
-        gets fully recognized/stripped, rather than being silently truncated
-        into an unmatchable leftover. If `_MAX_BLOB_LEN` is ever raised
-        without a matching `_PRESTRIP_WINDOW` increase, the module-level
-        assert in jenkins.py fails fast; this test additionally proves the
-        end-to-end behavior the invariant is meant to guarantee.
-
-        Distinct from test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped
-        above (F7), which exercises the final 5000-char OUTPUT slice -- this
-        test exercises the 20000-char WINDOW-START cutoff instead."""
-        from src.adapters.jenkins import _CONSOLE_TAIL_SIZE, _MAX_BLOB_LEN, _PRESTRIP_WINDOW
-
-        assert _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW, (
-            "invariant broken: _MAX_BLOB_LEN grew without a matching "
-            "_PRESTRIP_WINDOW increase -- the fixture below no longer "
-            "exercises the worst case this test is meant to guard"
-        )
-
-        with patch.dict("os.environ", _env_vars()):
-            adapter = _make_test_adapter()
-
-            blob = "ha:////" + "B" * _MAX_BLOB_LEN + "=="
-            marker = "\nreal failure output line\n"
-            # Trailer is exactly _CONSOLE_TAIL_SIZE chars, with the blob
-            # ending right where the final output slice begins -- the
-            # closest a max-length blob can get to console_tail while still
-            # needing its header to be as far as possible from the end.
-            trailer = ("T" * (_CONSOLE_TAIL_SIZE - len(marker))) + marker
-            filler = "F" * 50000  # simulates the rest of a much larger real log
-            raw = filler + blob + trailer
-
-            header_distance_from_end = len(blob) + len(trailer)
-            assert header_distance_from_end < _PRESTRIP_WINDOW, (
-                "fixture no longer positions the blob header inside the "
-                "pre-strip window -- adjust padding"
-            )
-
-            api_resp = MagicMock()
-            api_resp.status_code = 200
-            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
-            tail_resp = MagicMock()
-            tail_resp.status_code = 200
-            tail_resp.content = raw.encode()
-            tail_resp.encoding = "utf-8"
-
-            mock_client = AsyncMock()
-            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
-
-            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
-                mock_get_client.return_value = mock_client
-                details = await adapter.get_build_details("gating-job", 100)
-
-            assert details is not None
-            assert "ha:" not in details.console_tail
-            assert "B" not in details.console_tail
-            assert "real failure output line" in details.console_tail
-
 
 # =========================================================================
 # T-A-1..4: JenkinsAdapter.get_job_run_state (C4 HIGH increment)
@@ -2716,4 +2649,60 @@ class TestT22StripPipelineAnnotations:
         elapsed = time.perf_counter() - start
         assert elapsed < 2.0, f"took {elapsed:.2f}s -- possible quadratic regression"
         assert result == payload
+
+    # ---- HIGH regression: blob-length bound / window-start truncation ----
+
+    def test_max_length_blob_header_at_prestrip_window_start_is_recognized(self):
+        """HIGH regression: the blob regex used to have no length bound (a
+        plain `+`), so the safety of the 20000-char pre-strip window rested
+        entirely on an unverified comment ("4x margin, more than enough")
+        about how long a real blob could be -- nothing in the code actually
+        enforced it. The regex is now bounded to `_MAX_BLOB_LEN`, chosen so
+        `_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW`.
+
+        This test positions a maximum-length blob's `ha:////` header EXACTLY
+        at the pre-strip window's start boundary -- the worst case that
+        inequality must cover -- and asserts directly on
+        `_strip_pipeline_annotations`'s own output that the header survived
+        truncation and the blob was fully stripped.
+
+        Asserting on the function's own output (rather than on
+        `get_build_details`'s further-sliced `console_tail`, as an earlier
+        version of this test did) matters: the invariant above guarantees a
+        compliant blob positioned at the window-start boundary can *never*
+        actually reach the final `_CONSOLE_TAIL_SIZE`-char output slice,
+        stripped or not (blob length + trailing content <= window length by
+        construction). The earlier version appended a `_CONSOLE_TAIL_SIZE`-
+        sized trailer after the blob and asserted on `console_tail` -- since
+        that trailer alone always fills the entire final slice regardless of
+        whether the blob ahead of it stripped correctly, those assertions
+        could never fail (confirmed by disabling the stripping regex
+        entirely and observing the old test still pass). Exercising the
+        window-start cutoff requires checking the window's own output, not
+        a slice that the invariant guarantees never sees it."""
+        blob = "ha:////" + "B" * _MAX_BLOB_LEN + "=="
+        marker = "real failure output line"
+        # Trailer starts with a real delimiter (newline) -- required for the
+        # blob regex's right-delimiter lookahead to match at all; every real
+        # Jenkins blob is followed by one (end of line/ESC/another blob).
+        trailer_len = _PRESTRIP_WINDOW - len(blob)
+        assert trailer_len > len(marker) + 1, (
+            "fixture constants no longer fit -- adjust padding"
+        )
+        trailer = "\n" + ("T" * (trailer_len - 1 - len(marker))) + marker
+        assert len(trailer) == trailer_len
+        filler = "F" * 50000  # simulates the rest of a much larger real log
+        raw = filler + blob + trailer
+
+        header_distance_from_end = len(blob) + len(trailer)
+        assert header_distance_from_end == _PRESTRIP_WINDOW, (
+            "fixture must position the blob header exactly at the pre-strip "
+            "window's start boundary -- adjust padding"
+        )
+
+        result = _strip_pipeline_annotations(raw)
+
+        assert "ha:" not in result
+        assert "B" * 10 not in result
+        assert marker in result
 
