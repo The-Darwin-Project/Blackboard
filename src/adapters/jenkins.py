@@ -61,10 +61,15 @@ logger = logging.getLogger(__name__)
 _PRESTRIP_WINDOW = 20000
 _CONSOLE_TAIL_SIZE = 5000
 _MAX_BLOB_LEN = 8192
-assert _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW, (
-    "_MAX_BLOB_LEN grew without a matching _PRESTRIP_WINDOW increase -- "
-    "the window-start truncation guarantee no longer holds"
-)
+# Explicit runtime check, not `assert` -- `assert` is compiled out entirely
+# under `python -O`/`PYTHONOPTIMIZE`, which would silently drop this safety
+# invariant in an optimized deployment instead of failing loudly at import
+# time.
+if not (_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW):
+    raise ValueError(
+        "_MAX_BLOB_LEN grew without a matching _PRESTRIP_WINDOW increase -- "
+        "the window-start truncation guarantee no longer holds"
+    )
 # Byte-level (not char-level) pre-decode window for get_build_details' console-log
 # fetch -- generous 4x-per-char headroom over _PRESTRIP_WINDOW so a UTF-8 log with
 # multi-byte characters throughout still has at least _PRESTRIP_WINDOW *characters*
@@ -72,19 +77,47 @@ assert _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW, (
 # smaller char-based bound afterward regardless.
 _DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
 
-# The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]) with optional
-# `=`/`==` padding at the very end only, bounded to at most _MAX_BLOB_LEN
-# chars (see above). A single optional ANSI wrapper (not a `*` quantifier --
-# an unbounded repeated-quantifier around a literal that then fails to match
-# is quadratic on long ANSI-only runs, see get_build_details' pre-strip
-# window comment) plus a right-delimiter lookahead (whitespace, ESC, another
-# `ha:////`, or end-of-string) bound the match to its own blob: it can never
-# consume into adjacent real text (e.g. a "password:..." key that happens to
-# abut the blob) or swallow a second, immediately-adjacent blob with no
-# separator between them.
+# The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]), bounded to
+# at most _MAX_BLOB_LEN chars (see above). A match is only accepted as a
+# genuine ConsoleNote blob if it terminates via one of two STRUCTURAL
+# signals baked into the match itself (not merely asserted via a
+# zero-width lookahead): mandatory `=`/`==` padding, optionally followed by
+# a consumed trailing ANSI escape; or a trailing ANSI escape with no
+# padding at all. A single optional leading ANSI wrapper (not a `*`
+# quantifier -- an unbounded repeated-quantifier around a literal that then
+# fails to match is quadratic on long ANSI-only runs, see
+# get_build_details' pre-strip window comment) is still allowed.
+#
+# Bare whitespace and bare end-of-string are deliberately NOT accepted as
+# termination signals (they used to be, via a lookahead alternative, until
+# a MEDIUM secret-redaction-bypass finding on this exact regex). The base64
+# alphabet [A-Za-z0-9+/] is a superset of ordinary English letters and
+# digits, so it cannot be distinguished from adjacent real text using only
+# "where's the next whitespace/EOS" -- an unpadded, non-ANSI-wrapped blob
+# immediately abutted by a real secret composed entirely of
+# letters/digits (e.g. "ha:////AAAABearer sometoken123", or the same thing
+# sitting at the very end of the currently-fetched log tail) let the greedy
+# body class silently consume through the real word before downstream
+# `_redact_secrets_in_text()`'s literal "bearer"/key-text matching in
+# jenkins_observer.py ever got a chance to see it, deleting the secret's
+# own redaction trigger along with the blob. Padding and ANSI escapes are
+# both structurally impossible to appear inside ordinary prose (a raw ESC
+# byte in particular can never be part of English text), so requiring one
+# of them as the actual terminator -- not just a lookahead check -- closes
+# the gap without reintroducing the F3 (adjacent-blobs) or F4
+# (colon-delimited abutment, safe because `:` is outside the base64
+# alphabet and so already can't be consumed) regressions: each blob is
+# still matched independently once it has its own valid terminator, so no
+# separate "or another ha:////" alternative is needed.
+#
+# Accepted trade-off: a genuinely valid, unpadded, non-ANSI-wrapped blob
+# positioned at the very end of the currently-fetched log will no longer be
+# recognized and will show through as literal noise instead of being
+# stripped -- a narrow, cosmetic-only regression accepted in exchange for
+# closing the exploitable secret-leak case.
 _PIPELINE_ANNOTATION_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}={0,2}"
-    r"(?:\x1b\[[0-9;]*m)?(?=[\s\x1b]|ha:////|$)",
+    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}"
+    r"(?:={1,2}(?:\x1b\[[0-9;]*m)?|\x1b\[[0-9;]*m)",
 )
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
 # console output (verified against production Jenkins logs). Anchoring to
@@ -447,7 +480,14 @@ class JenkinsAdapter:
                 raw_bytes = tail_resp.content
                 if len(raw_bytes) > _DECODE_WINDOW_BYTES:
                     raw_bytes = raw_bytes[-_DECODE_WINDOW_BYTES:]
-                raw = raw_bytes.decode(tail_resp.encoding or "utf-8", errors="replace")
+                try:
+                    raw = raw_bytes.decode(tail_resp.encoding or "utf-8", errors="replace")
+                except LookupError:
+                    # httpx-derived charset name (e.g. from a malformed/unusual
+                    # Content-Type header) is not a codec Python recognizes.
+                    # This is a best-effort log-tail fetch -- fall back to utf-8
+                    # rather than letting an uncaught LookupError escape this path.
+                    raw = raw_bytes.decode("utf-8", errors="replace")
                 text = _strip_pipeline_annotations(raw)
                 console_tail = text[-_CONSOLE_TAIL_SIZE:] if len(text) > _CONSOLE_TAIL_SIZE else text
 

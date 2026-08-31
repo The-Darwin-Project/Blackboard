@@ -23,14 +23,41 @@ export function stripAnsi(text: string): string {
 // defense-in-depth copy, always fed an already-windowed console_tail).
 const MAX_BLOB_LEN = 8192;
 
-// Blob body is base64 ([A-Za-z0-9+/]) with optional `=`/`==` padding at the
-// very end only, bounded to at most MAX_BLOB_LEN chars. A right-delimiter
-// lookahead (whitespace, ESC, another `ha:////`, or end-of-string) bounds
-// the match to its own blob so it can never consume into adjacent real text
-// or swallow a second, immediately adjacent blob with no separator. Keep in
-// sync with jenkins.py's _PIPELINE_ANNOTATION_RE.
+// Blob body is base64 ([A-Za-z0-9+/]), bounded to at most MAX_BLOB_LEN
+// chars. A match is only accepted as a genuine ConsoleNote blob if it
+// terminates via one of two STRUCTURAL signals baked into the match
+// itself (not merely asserted via a zero-width lookahead): mandatory
+// `=`/`==` padding, optionally followed by a consumed trailing ANSI
+// escape; or a trailing ANSI escape with no padding at all.
+//
+// Bare whitespace and bare end-of-string are deliberately NOT accepted as
+// termination signals (they used to be, via a lookahead alternative, until
+// a MEDIUM secret-redaction-bypass finding on this exact regex). The
+// base64 alphabet [A-Za-z0-9+/] is a superset of ordinary English letters
+// and digits, so it cannot be distinguished from adjacent real text using
+// only "where's the next whitespace/EOS" -- an unpadded, non-ANSI-wrapped
+// blob immediately abutted by a real secret composed entirely of
+// letters/digits (e.g. "ha:////AAAABearer sometoken123", or the same thing
+// sitting at the very end of the currently-fetched log tail) let the
+// greedy body class silently consume through the real word before
+// downstream redaction ever got a chance to see it, deleting the secret's
+// own redaction trigger along with the blob. Padding and ANSI escapes are
+// both structurally impossible inside ordinary prose (a raw ESC byte in
+// particular can never be part of English text), so requiring one of them
+// as the actual terminator -- not just a lookahead check -- closes the gap
+// without reintroducing the F3 (adjacent-blobs) or F4 (colon-delimited
+// abutment, already safe since `:` is outside the base64 alphabet) cases:
+// each blob is still matched independently once it has its own valid
+// terminator, so no separate "or another ha:////" alternative is needed.
+//
+// Accepted trade-off: a genuinely valid, unpadded, non-ANSI-wrapped blob
+// positioned at the very end of the currently-fetched log will no longer
+// be recognized and will show through as literal noise instead of being
+// stripped -- a narrow, cosmetic-only regression accepted in exchange for
+// closing the exploitable secret-leak case. Keep in sync with jenkins.py's
+// _PIPELINE_ANNOTATION_RE.
 const PIPELINE_ANNOTATION_RE = new RegExp(
-  `(?:\\x1b\\[[0-9;]*m)?ha:\\/\\/\\/\\/[A-Za-z0-9+\\/]{1,${MAX_BLOB_LEN}}={0,2}(?:\\x1b\\[[0-9;]*m)?(?=[\\s\\x1b]|ha:\\/\\/\\/\\/|$)`,
+  `(?:\\x1b\\[[0-9;]*m)?ha:\\/\\/\\/\\/[A-Za-z0-9+\\/]{1,${MAX_BLOB_LEN}}(?:={1,2}(?:\\x1b\\[[0-9;]*m)?|\\x1b\\[[0-9;]*m)`,
   'g',
 );
 // Real Jenkins `[Pipeline]` step-boundary markers are always full-line;

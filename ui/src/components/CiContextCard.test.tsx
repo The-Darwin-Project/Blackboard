@@ -150,7 +150,7 @@ describe('CiContextCard', () => {
     });
   });
 
-  describe('stripJenkinsNoise (F1/F3/F4/F8 hardening regressions)', () => {
+  describe('stripJenkinsNoise (F1/F3/F4/F8/F9 hardening regressions)', () => {
     it('strips a ha:////  blob, preserving surrounding text', () => {
       expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
     });
@@ -179,6 +179,23 @@ describe('CiContextCard', () => {
     it('preserves an abutting secret key:value intact for downstream redaction (F4)', () => {
       const result = stripJenkinsNoise('ha:////ABC==password:hunter2');
       expect(result).toContain('password:hunter2');
+    });
+
+    it('preserves an unpadded blob abutting an alphanumeric secret verbatim, mid-string (F9)', () => {
+      // MEDIUM secret-redaction-bypass finding: an unpadded, non-ANSI-wrapped
+      // blob directly abutted by a real all-alphanumeric secret (e.g. the
+      // literal word "Bearer") must be left fully untouched -- mandatory
+      // padding or a trailing ANSI escape is now required to terminate a
+      // match; bare whitespace is no longer accepted as a delimiter.
+      const text = 'ha:////AAAABearer sometoken123';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves an unpadded blob abutting an alphanumeric secret verbatim, end-of-string (F9)', () => {
+      // Same finding, end-of-string variant: bare end-of-string is also no
+      // longer accepted as a delimiter.
+      const text = 'filler text ha:////AAAABearersecrettoken123';
+      expect(stripJenkinsNoise(text)).toBe(text);
     });
 
     it('still strips a Timestamper-prefixed [Pipeline] boundary line (F8 parity)', () => {

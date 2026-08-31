@@ -2055,20 +2055,27 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert mock_client.request.call_count == 2
 
     async def test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped(self):
-        """F7 regression guard (strip-before-slice ordering + bounded pre-strip
-        window). All other tests in this class call `_strip_pipeline_annotations`
-        directly as a unit-level helper -- none of them exercise the real
-        `get_build_details` async method with an HTTP response large enough for
-        the final `[-5000:]` slice to matter.
+        """F7 regression guard (bounded pre-strip window correctness).
+        `get_build_details` has called `_strip_pipeline_annotations` BEFORE
+        the final `[-5000:]` slice since this feature's very first commit --
+        that ordering was never buggy and this test does not fix an ordering
+        defect. What IS new (added later in this same change set) is the
+        bounded `_PRESTRIP_WINDOW`/`_MAX_BLOB_LEN` truncation inside
+        `_strip_pipeline_annotations` itself. All other tests in this class
+        call `_strip_pipeline_annotations` directly as a unit-level helper --
+        none of them exercise the real `get_build_details` async method with
+        an HTTP response large enough for the final `[-5000:]` slice to
+        matter.
 
         If a future change reintroduced slice-then-strip (or the bounded
         pre-strip window in jenkins.py were miscomputed), a `ha:////...==`
         blob positioned to straddle the naive `[-5000:]` cut would leak a
         partial, un-matchable fragment (missing its `ha:` prefix) into
         `console_tail` -- which would also defeat the observer's downstream
-        `_redact_secrets_in_text` if a secret abutted it. Assert the fixed
-        strip-before-slice pipeline (jenkins.py's `get_build_details`) leaves
-        no trace of the blob at all, regardless of total log size."""
+        `_redact_secrets_in_text` if a secret abutted it. Assert the
+        strip-before-slice pipeline (jenkins.py's `get_build_details`,
+        correct since inception) plus the bounded pre-strip window leave no
+        trace of the blob at all, regardless of total log size."""
         with patch.dict("os.environ", _env_vars()):
             adapter = _make_test_adapter()
 
@@ -2624,6 +2631,49 @@ class TestT22StripPipelineAnnotations:
         partially matching -- 'password:hunter2' must survive intact."""
         result = _strip_pipeline_annotations("ha:////ABC==password:hunter2")
         assert "password:hunter2" in result
+
+    # ---- F9: whitespace/EOS-terminated secret-abutment bypass (MEDIUM) ----
+
+    def test_unpadded_blob_abutting_alphanumeric_secret_preserved_mid_string(self):
+        """F9 regression (MEDIUM secret-redaction-bypass finding): F4 covers
+        the colon-delimited abutment case ('password:hunter2'), which was
+        always safe because `:` sits outside the base64 alphabet and so the
+        greedy body class can't consume through it. This test covers the
+        narrower, genuinely exploitable gap: an UNPADDED, non-ANSI-wrapped
+        blob immediately abutted by a real secret composed entirely of
+        base64-alphabet characters (letters/digits, no punctuation) -- e.g.
+        the literal word "Bearer" immediately after the blob body. The
+        pre-fix regex accepted bare whitespace as a valid right-delimiter,
+        so the greedy body class silently consumed straight through
+        "Bearer" (indistinguishable from more blob content) and stopped
+        only at the first space, deleting the word "Bearer" along with the
+        blob -- which defeats jenkins_observer.py's downstream
+        `_BEARER_TEXT_PATTERN` (`_redact_secrets_in_text`), which requires
+        the literal text "bearer" to still be present to redact the token
+        that follows it. The fixed regex requires mandatory padding or a
+        mandatory trailing ANSI escape to terminate a match -- neither is
+        present here, so the whole match fails and the entire string,
+        including "Bearer", survives verbatim for downstream redaction to
+        see."""
+        result = _strip_pipeline_annotations("ha:////AAAABearer sometoken123")
+        assert result == "ha:////AAAABearer sometoken123"
+
+    def test_unpadded_blob_abutting_alphanumeric_secret_preserved_at_end_of_string(self):
+        """F9 regression, end-of-string variant: the pre-fix regex also
+        accepted a bare `$` (end-of-string) as a valid right-delimiter,
+        which is independently exploitable -- `get_build_details` fetches
+        console log "up to now" for an in-progress build, so an attacker
+        able to influence log content can position a crafted unpadded blob
+        + abutting secret as the literal last bytes of the currently-fetched
+        tail, reproducing the exact same leak at the string boundary instead
+        of mid-string. The fixed regex has no bare-`$` termination path at
+        all, so this variant is closed the same way as the mid-string case:
+        the whole match fails and the text (including the secret) survives
+        verbatim."""
+        result = _strip_pipeline_annotations(
+            "filler text ha:////AAAABearersecrettoken123"
+        )
+        assert result == "filler text ha:////AAAABearersecrettoken123"
 
     # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
 

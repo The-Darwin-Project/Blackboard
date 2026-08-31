@@ -13,7 +13,7 @@
 CI guard: ensures the Jenkins console-noise stripping regex logic
 (`_strip_pipeline_annotations` in jenkins.py / `stripJenkinsNoise` in
 stripAnsi.ts) behaves IDENTICALLY across a shared corpus covering every fixed
-bug (F1/F3/F4/F5) and the boundary-hardening cases added afterward. This
+bug (F1/F3/F4/F5/F9) and the boundary-hardening cases added afterward. This
 logic is hand-duplicated across Python and TypeScript with no shared source
 -- a future fix landing on only one side must fail this test, not ship
 silently drifted.
@@ -36,6 +36,13 @@ CORPUS = [
     "before ha:////ABC123== after",
     "ha:////AAA==ha:////BBB==",
     "ha:////ABC==password:hunter2",
+    # F9: MEDIUM secret-redaction-bypass finding -- an unpadded, non-ANSI-
+    # wrapped blob directly abutting a real, all-alphanumeric secret must
+    # be left fully untouched (mandatory padding/ANSI-escape termination
+    # required; bare whitespace/EOS no longer accepted) so downstream
+    # bearer-token redaction can still see the literal word "Bearer".
+    "ha:////AAAABearer sometoken123",
+    "filler text ha:////AAAABearersecrettoken123",
     "\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n",
     "[Pipeline] }\n[Pipeline] // container\nreal output",
     "output\n[Pipeline] End of Pipeline",
