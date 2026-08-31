@@ -29,6 +29,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.adapters.jenkins import _MAX_BLOB_LEN, _PRESTRIP_WINDOW, _strip_pipeline_annotations
+
 
 # =========================================================================
 # Helpers
@@ -1019,6 +1021,45 @@ class TestT21RedactSecretsInText:
         result = _redact_secrets_in_text("Authorization: Bearer eyJhbGciOiJIUzI1NiIs")
         assert "eyJhbGciOiJIUzI1NiIs" not in result
 
+    @pytest.mark.parametrize(("raw_text", "surviving_prefix"), [
+        ("ha:////AAAABearer==sometoken123", "Bearer="),
+        ("ha:////AAApassword\x1b[0mhunter2", "password"),
+        ("ha:////AAAtoken\x1b[32mhunter2", "token"),
+    ])
+    def test_strip_then_redact_closes_f13_follow_on_leaks(self, raw_text, surviving_prefix):
+        """Post-strip redaction must catch the F13 survivors where the keyword
+        is preserved but the value used to leak via `==` or bare ANSI."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        stripped = _strip_pipeline_annotations(raw_text)
+        result = _redact_secrets_in_text(stripped)
+
+        assert surviving_prefix.lower() in result.lower()
+        assert "hunter2" not in result
+        assert "sometoken123" not in result
+        assert "***REDACTED***" in result
+
+    @pytest.mark.parametrize(("raw_text", "keyword"), [
+        ("ha:////AAApwd==hunter2", "pwd"),
+        ("ha:////AAAkey==hunter2", "key"),
+        ("ha:////AAAapikey==hunter2", "apikey"),
+        ("ha:////AAAaccesskey==hunter2", "accesskey"),
+        ("ha:////AAAprivatekey==hunter2", "privatekey"),
+        ("ha:////AAAsecretkey==hunter2", "secretkey"),
+    ])
+    def test_strip_then_redact_closes_body_end_keyword_leak(self, raw_text, keyword):
+        """F14 CRITICAL: keywords omitted from _REDACTION_TRIGGER_KEYWORDS
+        let the greedy body class eat the keyword suffix via `==` terminator,
+        leaking the abutting value. After the fix, strip preserves the keyword
+        and redact catches the value."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        stripped = _strip_pipeline_annotations(raw_text)
+        assert keyword in stripped.lower(), f"strip must preserve keyword '{keyword}'"
+        result = _redact_secrets_in_text(stripped)
+        assert "hunter2" not in result, f"value leaked past keyword '{keyword}'"
+        assert "***REDACTED***" in result
+
     def test_shell_export_single_quoted(self):
         """export SECRET='value' shell-style assignment."""
         from src.agents.jenkins_observer import _redact_secrets_in_text
@@ -1040,6 +1081,94 @@ class TestT21RedactSecretsInText:
 
         assert _redact_secrets_in_text("") == ""
         assert _redact_secrets_in_text(None) is None
+
+
+# =========================================================================
+# T-21b: 3000-char slice order — redact BEFORE slice to prevent straddle leak
+# =========================================================================
+
+class TestT21bSliceAfterRedact:
+    """HIGH: console_tail slice at 3000 chars must happen AFTER redaction, not
+    before. A `TOKEN=value` pattern straddling the cut loses the keyword if
+    sliced first, leaking the bare value into ci_context."""
+
+    def test_secret_straddling_3000_cut_is_redacted(self):
+        """Craft a console_tail where 'TOKEN=value' straddles the 3000-char
+        boundary: keyword is >3000 from the end, value is within the last
+        3000. The production path (_prepare_console_tail: redact -> strip ->
+        slice) catches it."""
+        from src.agents.jenkins_observer import _prepare_console_tail
+
+        secret_value = "abc123def456"
+        # Position so [-3000:] cut falls between TOKEN= and the value:
+        # raw = "A"*100 + "TOKEN=" + value + " " + "X"*N
+        # total = 100 + 6 + 12 + 1 + N = 119 + N
+        # Cut at total - 3000 = 119 + N - 3000. Want cut = 106 (start of value).
+        trailing_filler = "X" * 2987
+        raw_tail = "A" * 100 + "TOKEN=" + secret_value + " " + trailing_filler
+
+        # Sanity: total > 3000, keyword NOT in [-3000:], value IS in [-3000:]
+        assert len(raw_tail) > 3000
+        assert "TOKEN=" not in raw_tail[-3000:]
+        assert secret_value in raw_tail[-3000:]
+
+        # Production path: _prepare_console_tail (redact -> strip -> slice)
+        result = _prepare_console_tail(raw_tail)
+        assert secret_value not in result, "value leaked -- slice happened before redact"
+
+    def test_wrong_order_would_leak(self):
+        """Counter-proof: slicing BEFORE redacting loses the keyword and leaks."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        secret_value = "abc123def456"
+        trailing_filler = "X" * 2987
+        raw_tail = "A" * 100 + "TOKEN=" + secret_value + " " + trailing_filler
+
+        # Wrong order: slice first — keyword is outside the window
+        sliced_first = raw_tail[-3000:]
+        assert "TOKEN=" not in sliced_first, "test setup: keyword should be outside the 3000 window"
+        assert secret_value in sliced_first, "test setup: value should be inside the 3000 window"
+        result = _redact_secrets_in_text(sliced_first)
+        # The value survives because the keyword was lost
+        assert secret_value in result, "expected the wrong-order path to leak"
+
+    def test_secret_straddling_prestrip_window_is_redacted(self):
+        """HIGH regression guard: the old adapter path ran _strip_pipeline_annotations
+        (which truncates to _PRESTRIP_WINDOW chars) BEFORE redaction. A password=
+        keyword sitting just before the 20k window cut with its value inside the
+        window leaked the bare value. _prepare_console_tail (redact -> strip -> slice)
+        closes this."""
+        from src.agents.jenkins_observer import (
+            _prepare_console_tail,
+            _redact_secrets_in_text,
+        )
+
+        kw, val = "password=", "hunter2"
+        head = "x" * 50 + kw
+        tail = val + ("y" * (_PRESTRIP_WINDOW - len(val)))
+        raw = head + tail
+
+        # Production path: redact first, then strip -- value is gone
+        result = _prepare_console_tail(raw)
+        assert val not in result, (
+            "hunter2 leaked through _prepare_console_tail -- redact-before-strip invariant broken"
+        )
+
+    def test_wrong_order_strip_then_redact_leaks_prestrip_window(self):
+        """Counter-proof: strip-first (the old order) windows away the keyword
+        and leaks the value -- proving the fix is not vacuous."""
+        from src.agents.jenkins_observer import _redact_secrets_in_text
+
+        kw, val = "password=", "hunter2"
+        head = "x" * 50 + kw
+        tail = val + ("y" * (_PRESTRIP_WINDOW - len(val)))
+        raw = head + tail
+
+        # Wrong order: strip first (truncates to last _PRESTRIP_WINDOW chars,
+        # which starts at the value, dropping the keyword)
+        stripped = _strip_pipeline_annotations(raw)
+        result = _redact_secrets_in_text(stripped)
+        assert val in result, "expected the wrong-order (strip-then-redact) path to leak"
 
 
 # =========================================================================
@@ -1903,7 +2032,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             }
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = "...console output..."
+            tail_resp.content = b"...console output..."
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -1931,7 +2061,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             api_resp.json.return_value = {"result": "SUCCESS", "url": "", "actions": []}
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = ""
+            tail_resp.content = b""
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -2036,7 +2167,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = "...console output..."
+            tail_resp.content = b"...console output..."
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -2048,6 +2180,109 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details is not None
             assert details.console_tail == "...console output..."
             assert mock_client.request.call_count == 2
+
+    async def test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped(self):
+        """F7 regression guard (bounded pre-strip window correctness).
+        The adapter now returns the decoded byte-windowed raw tail (no strip).
+        The observer's `_prepare_console_tail` owns the strip. Assert:
+        1) adapter returns the blob (or at least the real content suffix);
+        2) `_prepare_console_tail` strips the blob and keeps real content."""
+        from src.agents.jenkins_observer import _prepare_console_tail
+
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            blob = "ha:////" + "B" * 4970 + "=="
+            filler = "A" * 20000
+            suffix = "\nreal failure output line\n"
+            raw = filler + blob + suffix
+            # Sanity: the blob must straddle where a naive (now-removed)
+            # intermediate slice would have landed.
+            naive_cut = len(raw) - 5000
+            assert len(filler) < naive_cut < len(filler) + len(blob), (
+                "test fixture must position the blob straddling the naive "
+                "slice boundary -- adjust filler/blob length"
+            )
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.content = raw.encode()
+            tail_resp.encoding = "utf-8"
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("gating-job", 99)
+
+            assert details is not None
+            # Adapter returns raw -- blob may still be present
+            assert "real failure output line" in details.console_tail
+
+            # Observer helper strips the blob and keeps real content
+            prepared = _prepare_console_tail(details.console_tail)
+            assert "ha:" not in prepared
+            assert ":////" not in prepared
+            assert "real failure output line" in prepared
+
+    async def test_console_tail_preserves_secret_across_old_5000_slice_boundary(self):
+        """CRITICAL regression guard: a `password=hunter2` whose keyword sits
+        just before where the old 5000-char slice used to cut and whose value
+        sits after it must survive into console_tail so the observer's
+        _prepare_console_tail can still catch it.
+
+        The adapter returns the decoded byte-windowed raw tail -- no intermediate
+        _CONSOLE_TAIL_SIZE slice -- and the observer's _prepare_console_tail
+        redacts the secret before slicing."""
+        from src.agents.jenkins_observer import _prepare_console_tail
+
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            filler_before = "x" * 20
+            secret = "password=hunter2"
+            filler_after = "y" * 4990
+            raw = filler_before + secret + filler_after
+            # Sanity: the old `[-5000:]` cut must land INSIDE the secret --
+            # `password=` straddles the cut (keyword prefix dropped),
+            # `hunter2` after it (kept) -- so redaction loses its trigger.
+            old_naive_cut = len(raw) - 5000
+            pw_start = raw.index("password=")
+            pw_end = pw_start + len("password=")
+            assert pw_start < old_naive_cut < pw_end, (
+                "test fixture: old 5000-char cut must land inside 'password=' "
+                f"(pw_start={pw_start}, cut={old_naive_cut}, pw_end={pw_end})"
+            )
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.content = raw.encode()
+            tail_resp.encoding = "utf-8"
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("gating-job", 99)
+
+            assert details is not None
+            assert "password=" in details.console_tail, (
+                "adapter must return raw decoded tail -- no intermediate "
+                "5000-char slice that would drop the redaction trigger"
+            )
+            assert "hunter2" in details.console_tail
+
+            # Observer helper redacts the secret
+            prepared = _prepare_console_tail(details.console_tail)
+            assert "hunter2" not in prepared
 
 
 # =========================================================================
@@ -2473,4 +2708,468 @@ class TestBlackboardLastAlertedBuild:
 
         await redis.set("darwin:jenkins:last_alert:corrupt-job", "not-an-int")
         assert await bb.get_jenkins_last_alerted_build("corrupt-job") == 0
+
+
+# =========================================================================
+# T22: _strip_pipeline_annotations -- pipeline noise stripping (jenkins.py)
+#
+# Covers blob removal (ha:////...), step-boundary marker removal
+# ([Pipeline] ...), blank-run collapse, and the hardening fixes landed
+# alongside the original noise-stripping feature: line-anchored boundary
+# matching (no mid-line over-strip), delimiter-bounded blob matching (no
+# adjacent-blob concatenation, no secret-abutment leak), and a bounded
+# single-occurrence ANSI wrapper (no quadratic blowup on ANSI-dense logs).
+# See TestJenkinsAdapterGetBuildDetailsTransport for the integration-level
+# counterpart exercising the real async get_build_details call site.
+# =========================================================================
+
+class TestT22StripPipelineAnnotations:
+
+    def test_ha_blob_stripped_surrounding_text_preserved(self):
+        assert _strip_pipeline_annotations("before ha:////ABC123== after") == "before  after"
+
+    def test_pipeline_boundary_markers_removed(self):
+        text = "[Pipeline] }\n[Pipeline] // container\nreal output"
+        assert _strip_pipeline_annotations(text) == "real output"
+
+    def test_end_of_pipeline_removed(self):
+        text = "output\n[Pipeline] End of Pipeline"
+        assert _strip_pipeline_annotations(text) == "output"
+
+    def test_blank_run_collapsed_to_two_newlines(self):
+        assert _strip_pipeline_annotations("a\n\n\n\n\nb") == "a\n\nb"
+
+    def test_empty_and_none_input_returns_empty(self):
+        assert _strip_pipeline_annotations("") == ""
+        assert _strip_pipeline_annotations(None) is None
+
+    def test_real_world_sample_reduces_to_finished_line(self):
+        text = "[Pipeline] // container\n[2026-08-31T11:23:24.854Z] Finished: UNSTABLE"
+        assert _strip_pipeline_annotations(text) == "[2026-08-31T11:23:24.854Z] Finished: UNSTABLE"
+
+    def test_ansi_wrapped_blob_and_crlf_runs_collapse_to_empty(self):
+        assert _strip_pipeline_annotations("\x1b[8mha:////ABC\x1b[0m\r\n\r\n\r\n") == ""
+
+    def test_timestamped_pipeline_line_still_stripped(self):
+        """A Jenkins Timestamper-prefixed [Pipeline] line is still recognized
+        as a boundary marker and stripped; real content on the next line
+        survives untouched."""
+        text = "[2026-08-31T11:23:24.854Z] [Pipeline] // container\nreal output"
+        assert _strip_pipeline_annotations(text) == "real output"
+
+    # ---- F1: mid-line over-strip (fixed via line-start anchoring) ----
+
+    def test_mid_line_marker_text_preserved_not_truncated(self):
+        """F1 regression: a [Pipeline] substring appearing mid-line (preceded
+        by real content on the same line) is no longer mistaken for a
+        boundary marker -- the whole line, including trailing content, is
+        preserved. The pre-fix regex truncated this to just 'Running'."""
+        result = _strip_pipeline_annotations("Running [Pipeline] } leftover")
+        assert result == "Running [Pipeline] } leftover"
+        assert result != "Running"  # the old buggy truncation
+
+    def test_mid_line_marker_from_alternation_set_preserved(self):
+        """F2 fix: the original T-7 test asserted on 'step X', but 'step' is
+        not in the boundary alternation (// \\w+, End of Pipeline, {, },
+        stage) -- that input was never at risk of the F1 bug and proved
+        nothing. This test uses an actual alternation member ('stage')
+        appearing mid-line in real prose, which the pre-fix (unanchored)
+        regex WOULD have matched and corrupted."""
+        result = _strip_pipeline_annotations("Deploying [Pipeline] stage now, please wait")
+        assert result == "Deploying [Pipeline] stage now, please wait"
+
+    # ---- F3: greedy blob concatenation (fixed via right-delimiter lookahead) ----
+
+    def test_adjacent_blobs_no_separator_fully_stripped(self):
+        """F3 regression: two ha:////...== blobs directly abutting with no
+        separator must both fully strip with no leftover fragment. The
+        pre-fix greedy regex produced ':////BBB==' (a mangled partial second
+        blob) instead of a clean removal."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+        assert ":////" not in result
+
+    # ---- F4: secret abutment / redaction bypass ----
+
+    def test_secret_abutment_preserves_key_intact_for_downstream_redaction(self):
+        """F4 regression: a blob immediately followed by a secret key:value
+        pair with no delimiter must not corrupt the key text. The pre-fix
+        regex consumed the 'password' key entirely, leaving only ':hunter2'
+        -- defeating the observer's downstream _redact_secrets_in_text
+        (which matches on the literal key text). Real ha:////  blobs are
+        never followed by arbitrary prose in production Jenkins output, so
+        the fixed regex has no safe delimiter to anchor on here and
+        conservatively leaves the whole substring untouched rather than
+        partially matching -- 'password:hunter2' must survive intact."""
+        result = _strip_pipeline_annotations("ha:////ABC==password:hunter2")
+        assert "password:hunter2" in result
+
+    # ---- F9: whitespace/EOS-terminated secret-abutment bypass (MEDIUM) ----
+
+    def test_unpadded_blob_abutting_alphanumeric_secret_preserved_mid_string(self):
+        """F9 regression (MEDIUM secret-redaction-bypass finding): F4 covers
+        the colon-delimited abutment case ('password:hunter2'), which was
+        always safe because `:` sits outside the base64 alphabet and so the
+        greedy body class can't consume through it. This test covers the
+        narrower, genuinely exploitable gap: an UNPADDED, non-ANSI-wrapped
+        blob immediately abutted by a real secret composed entirely of
+        base64-alphabet characters (letters/digits, no punctuation) -- e.g.
+        the literal word "Bearer" immediately after the blob body. The
+        pre-fix regex accepted bare whitespace as a valid right-delimiter,
+        so the greedy body class silently consumed straight through
+        "Bearer" (indistinguishable from more blob content) and stopped
+        only at the first space, deleting the word "Bearer" along with the
+        blob -- which defeats jenkins_observer.py's downstream
+        `_BEARER_TEXT_PATTERN` (`_redact_secrets_in_text`), which requires
+        the literal text "bearer" to still be present to redact the token
+        that follows it. The fixed regex requires mandatory padding or a
+        mandatory trailing ANSI escape to terminate a match -- neither is
+        present here, so the whole match fails and the entire string,
+        including "Bearer", survives verbatim for downstream redaction to
+        see."""
+        result = _strip_pipeline_annotations("ha:////AAAABearer sometoken123")
+        assert result == "ha:////AAAABearer sometoken123"
+
+    def test_unpadded_blob_abutting_alphanumeric_secret_preserved_at_end_of_string(self):
+        """F9 regression, end-of-string variant: the pre-fix regex also
+        accepted a bare `$` (end-of-string) as a valid right-delimiter,
+        which is independently exploitable -- `get_build_details` fetches
+        console log "up to now" for an in-progress build, so an attacker
+        able to influence log content can position a crafted unpadded blob
+        + abutting secret as the literal last bytes of the currently-fetched
+        tail, reproducing the exact same leak at the string boundary instead
+        of mid-string. The fixed regex has no bare-`$` termination path at
+        all, so this variant is closed the same way as the mid-string case:
+        the whole match fails and the text (including the secret) survives
+        verbatim."""
+        result = _strip_pipeline_annotations(
+            "filler text ha:////AAAABearersecrettoken123"
+        )
+        assert result == "filler text ha:////AAAABearersecrettoken123"
+
+    # ---- F10: single-`=` key=value secret-abutment bypass (adversarial follow-up) ----
+
+    def test_single_equals_token_delimiter_preserved(self):
+        """F10 regression: F9 closed the whitespace/EOS-terminated abutment
+        case by requiring mandatory padding or a trailing ANSI escape to
+        terminate a blob match. That fix introduced a NEW, narrower gap: a
+        single `=` was accepted as sufficient padding proof unconditionally,
+        but a lone `=` is exactly the common `KEY=value` secret delimiter
+        (see jenkins_observer.py's _SECRET_TEXT_PATTERN, which redacts both
+        "key: value" and "key=value" forms) and is genuinely indistinguishable
+        from real single-char base64 padding using only local regex context.
+        The pre-fix regex misread 'token=abc123xyz' as body-plus-padding and
+        silently deleted the literal word "token" and its "=" delimiter,
+        defeating downstream key=value redaction. The fix requires a single
+        `=` to ALSO be followed by a safe lookahead terminator (whitespace,
+        ANSI, another ha:////, or EOS) before it counts -- absent here, so
+        the whole match fails and the secret text survives verbatim."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken=abc123xyz")
+        assert result == "ha:////AAAtoken=abc123xyz"
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["secret", "password", "passwd", "pwd", "key", "credential", "authorization"],
+    )
+    def test_single_equals_other_secret_keywords_preserved(self, keyword):
+        """F10 regression, board sweep: every bare-alphabetic keyword from
+        _SECRET_TEXT_PATTERN's list (excluding hyphen/underscore-containing
+        variants like api-key/api_key, which are already safe since `-`/`_`
+        aren't in the base64 alphabet) must survive a single-`=` abutment
+        intact, same as the "token" case above."""
+        text = f"ha:////AAA{keyword}=xyz"
+        assert _strip_pipeline_annotations(text) == text
+
+    # ---- F11: whitespace-terminated single-`=` secret-abutment bypass
+    # (MORE SERIOUS follow-up to F10) ----
+
+    def test_single_equals_space_terminated_token_preserved(self):
+        """F11 regression: F10 closed the bare (no-terminator) single-`=`
+        abutment but left whitespace in the "safe" lookahead set. A single
+        `=` followed by a plain space is exactly the most common, entirely
+        ordinary way a real secret gets written ("token= value") -- not a
+        rare or deliberately-constructed pattern the way an ANSI escape or
+        chained `ha:////` occurrence is. The pre-fix regex misread the
+        space as proof of genuine base64 padding and silently deleted
+        "token=" along with the blob, defeating downstream redaction. The
+        fix removes whitespace from the lookahead entirely: the match now
+        fails and the secret text (including "token=") survives verbatim."""
+        text = "ha:////AAAtoken= somevalue"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_space_terminated_password_preserved(self):
+        """F11 regression, second keyword: same whitespace-abutment gap as
+        above, using "password=" instead of "token=" to prove the fix isn't
+        keyword-specific."""
+        text = "ha:////AAApassword= hunter2"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_newline_terminated_token_preserved(self):
+        """F11 regression, newline variant: `\\s` in the old lookahead
+        matched ANY whitespace, not just literal spaces -- a newline
+        immediately after the `=` (e.g. a secret sitting alone on its own
+        line in a config dump) is exactly as common and exactly as
+        unsound a signal as a space. Must be preserved verbatim too."""
+        text = "ha:////AAAtoken=\nsomevalue"
+        assert _strip_pipeline_annotations(text) == text
+
+    @pytest.mark.parametrize(
+        "keyword",
+        [
+            "token", "secret", "password", "passwd", "pwd", "key",
+            "credential", "authorization",
+            "apikey", "accesskey", "privatekey", "secretkey",
+        ],
+    )
+    def test_single_equals_space_terminated_all_keywords_preserved(self, keyword):
+        """F11 regression, full board sweep: every bare-alphabetic keyword
+        from _SECRET_TEXT_PATTERN's list, INCLUDING the no-separator forms
+        (apikey/accesskey/privatekey/secretkey) that F10's original sweep
+        omitted, must survive a single-`=`-then-whitespace abutment intact.
+        This is the critical sweep for the whitespace-removal fix -- any
+        keyword that still leaks here reopens the most common real-world
+        secret-formatting pattern."""
+        text = f"ha:////AAA{keyword}= value123"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_followed_by_whitespace_no_longer_strips(self):
+        """F11 regression (MORE SERIOUS follow-up to F10): whitespace was
+        REMOVED from the single-`=` lookahead's safe-terminator set.
+        Whitespace after a real `=` delimiter is not a rare, deliberately-
+        constructed pattern the way an ANSI escape or a chained `ha:////`
+        occurrence is -- it is the single most common, completely benign
+        way a real secret is ever written ("KEY= value"). The old rule
+        (this test used to assert the OPPOSITE, that this case strips)
+        treated "followed by whitespace" as proof of genuine base64
+        padding, which is backwards, and silently deleted the "token="
+        delimiter along with the blob. Whitespace is no longer accepted:
+        the match now fails entirely and the text survives verbatim."""
+        text = "before ha:////ABC1= after"
+        assert _strip_pipeline_annotations(text) == text
+
+    def test_single_equals_followed_by_ansi_still_strips(self):
+        """F11 positive control: a single `=` immediately followed by an
+        ANSI escape (not whitespace) is still a safe lookahead terminator
+        and the blob still strips cleanly -- proves the whitespace removal
+        narrowed the accepted cases without breaking the still-legitimate
+        ANSI-terminated path."""
+        result = _strip_pipeline_annotations("before ha:////ABC1=\x1b[0m after")
+        assert result == "before  after"
+
+    def test_single_equals_followed_by_another_blob_is_noise_tradeoff(self):
+        """F12 trade-off: single `=` followed by another `ha:////` is NO
+        LONGER a safe lookahead terminator (removed to close the CRITICAL
+        cross-blob password= consumption bypass). The first single-pad blob
+        remains as cosmetic noise; the second `==` blob still strips
+        cleanly. This is an accepted, documented narrowing."""
+        result = _strip_pipeline_annotations("ha:////AAA=ha:////BBB==")
+        assert "ha:////BBB==" not in result  # second blob (==) stripped
+        # First single-pad blob is leftover noise -- do not assert it vanishes
+
+    def test_double_equals_padding_still_self_sufficient_no_regression(self):
+        """F10 non-regression: double `==` padding remains self-sufficient
+        with no lookahead requirement (implausible as coincidental real
+        text) -- unaffected by the single-`=` narrowing. Re-asserts the F1/
+        F3/F4 baseline cases to guard against the split introducing any
+        collateral regression in the already-fixed double-`==` path."""
+        assert _strip_pipeline_annotations("before ha:////ABC123== after") == "before  after"
+        assert _strip_pipeline_annotations("ha:////AAA==ha:////BBB==") == ""
+        assert "password:hunter2" in _strip_pipeline_annotations("ha:////ABC==password:hunter2")
+
+    # ---- F12: CRITICAL cross-blob password= consumption + HIGH Python/JS $ parity ----
+
+    def test_critical_cross_blob_password_consumption_closed(self):
+        """F12 CRITICAL: `ha:////AAApassword=ha:////BBB==hunter2` -- the old
+        regex's single-`=` lookahead accepted `ha:////` as proof of
+        padding, so `ha:////AAApassword=` was consumed as one blob (eating
+        the `password=` delimiter), then `ha:////BBB==` stripped via `==`,
+        leaving `hunter2` unredacted. With `ha:////` removed from the
+        lookahead, the first blob's `=` fails to match, `password=`
+        survives intact for downstream `_redact_secrets_in_text`."""
+        text = "ha:////AAApassword=ha:////BBB==hunter2"
+        stripped = _strip_pipeline_annotations(text)
+        assert "password=" in stripped
+        assert "hunter2" in stripped  # still present for redaction to catch
+
+    def test_critical_cross_blob_token_consumption_closed(self):
+        """F12 CRITICAL variant: `ha:////AAAtoken=ha:////forged leftoversecret`
+        -- same class as password= above. `token=` must survive."""
+        text = "ha:////AAAtoken=ha:////forged leftoversecret"
+        stripped = _strip_pipeline_annotations(text)
+        assert "token=" in stripped
+
+    def test_adjacent_double_padded_blobs_still_fully_strip(self):
+        """F12 non-regression: adjacent `==` blobs are unaffected by the
+        lookahead change -- `==` is an unconditional terminator."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+
+    def test_high_parity_eos_newline_token_preserved(self):
+        """F12 HIGH: `ha:////AAAtoken=\\n` -- Python `$` matches before the
+        trailing `\\n`; JS `$` (no `m`) matches only true end-of-input.
+        With `$` removed from the lookahead, both languages now leave this
+        string untouched (the `=` has no ANSI follower). Verifies the
+        Python side; the parity corpus covers cross-language agreement."""
+        text = "ha:////AAAtoken=\n"
+        stripped = _strip_pipeline_annotations(text)
+        assert "token=" in stripped
+
+    # ---- F13: post-match body-end keyword reject (`==` / bare-ANSI terminators) ----
+
+    def test_double_equals_keyword_password_rejected(self):
+        """F13 CRITICAL: `ha:////AAApassword==hunter2` -- the `==` terminator
+        makes the regex match `ha:////AAApassword==`, eating the `password`
+        keyword. Post-match reject detects `password` at body end and returns
+        the match unchanged so downstream redaction catches it."""
+        result = _strip_pipeline_annotations("ha:////AAApassword==hunter2")
+        assert "password=" in result
+        assert "hunter2" in result
+
+    def test_double_equals_keyword_token_rejected(self):
+        """F13 CRITICAL: same class as password, `token` keyword."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken==hunter2")
+        assert "token=" in result
+        assert "hunter2" in result
+
+    def test_double_equals_keyword_bearer_rejected(self):
+        """F13 CRITICAL: `Bearer` keyword at body end, `==` terminator."""
+        result = _strip_pipeline_annotations("ha:////AAAABearer==sometoken123")
+        assert "Bearer" in result
+        assert "sometoken123" in result
+
+    def test_bare_ansi_keyword_password_rejected(self):
+        """F13 CRITICAL: `password` eaten by bare-ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAApassword\x1b[0mhunter2")
+        assert "password" in result
+        assert "hunter2" in result
+
+    def test_bare_ansi_keyword_token_rejected(self):
+        """F13 CRITICAL: `token` eaten by bare-ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAAtoken\x1b[32mhunter2")
+        assert "token" in result
+        assert "hunter2" in result
+
+    def test_single_equals_ansi_keyword_password_rejected(self):
+        """F13 CRITICAL: `password=` eaten by single-`=` + ANSI terminator."""
+        result = _strip_pipeline_annotations("ha:////AAApassword=\x1b[0mhunter2")
+        assert "password=" in result
+        assert "hunter2" in result
+
+    def test_safe_colon_abutment_still_strips_blob(self):
+        """F13 SAFE non-regression: `ha:////AAA==password:hunter2` -- the blob
+        body is `AAA` (no keyword), so `==` still strips the blob normally.
+        The colon-delimited secret survives untouched for downstream redaction."""
+        result = _strip_pipeline_annotations("ha:////AAA==password:hunter2")
+        assert "password:hunter2" in result
+        assert "ha:////" not in result
+
+    def test_double_equals_no_keyword_still_fully_strips(self):
+        """F13 non-regression: adjacent `==` blobs whose bodies don't end with
+        a keyword still strip cleanly."""
+        result = _strip_pipeline_annotations("ha:////AAA==ha:////BBB==")
+        assert result == ""
+
+    @pytest.mark.parametrize("keyword", [
+        "password", "passwd", "pwd", "token", "secret", "bearer", "credential",
+        "authorization", "key", "apikey", "accesskey", "privatekey", "secretkey",
+    ])
+    def test_double_equals_keyword_board_sweep(self, keyword):
+        """F13 board sweep: every keyword in _REDACTION_TRIGGER_KEYWORDS must
+        survive a `==` terminator."""
+        text = f"ha:////AAA{keyword}==value123"
+        result = _strip_pipeline_annotations(text)
+        assert keyword in result.lower()
+        assert "value123" in result
+
+    @pytest.mark.parametrize("keyword", [
+        "password", "passwd", "pwd", "token", "secret", "bearer", "credential",
+        "authorization", "key", "apikey", "accesskey", "privatekey", "secretkey",
+    ])
+    def test_bare_ansi_keyword_board_sweep(self, keyword):
+        """F13 board sweep: every keyword must survive a bare-ANSI terminator."""
+        text = f"ha:////AAA{keyword}\x1b[0mvalue123"
+        result = _strip_pipeline_annotations(text)
+        assert keyword in result.lower()
+        assert "value123" in result
+
+    # ---- F5: quadratic ANSI-prefix blowup (fixed via bounded quantifier) ----
+
+    def test_large_ansi_only_payload_completes_quickly(self):
+        """F5 regression: a long run of complete ANSI escape sequences with no
+        ha:////  present must not trigger quadratic backtracking. The pre-fix
+        `(?:\\x1b\\[[0-9;]*m)*` (repeated `*` quantifier) measured ~41s at
+        50000 reps; the fixed single-optional-occurrence quantifier is
+        sub-millisecond. Generous 2.0s ceiling avoids CI flakiness while
+        still catching a reintroduced quadratic regression by a wide margin.
+        No ha:////  or [Pipeline] marker is present, so the payload passes
+        through unchanged (modulo the trailing .strip()) -- this test is
+        purely a timing guard, not a content-stripping assertion.
+
+        Explicit `window=len(payload)` opts this call out of the default
+        _PRESTRIP_WINDOW truncation (added when the window-bound moved inside
+        this function) so all 50000 reps are still actually exercised by the
+        regex engine -- the real production call site (get_build_details)
+        never sees a payload this large without truncating it first anyway."""
+        payload = "\x1b[8m" * 50000
+        start = time.perf_counter()
+        result = _strip_pipeline_annotations(payload, window=len(payload))
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"took {elapsed:.2f}s -- possible quadratic regression"
+        assert result == payload
+
+    # ---- HIGH regression: blob-length bound / window-start truncation ----
+
+    def test_max_length_blob_header_at_prestrip_window_start_is_recognized(self):
+        """HIGH regression: the blob regex used to have no length bound (a
+        plain `+`), so the safety of the 20000-char pre-strip window rested
+        entirely on an unverified comment ("4x margin, more than enough")
+        about how long a real blob could be -- nothing in the code actually
+        enforced it. The regex is now bounded to `_MAX_BLOB_LEN`, chosen so
+        `_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW`.
+
+        This test positions a maximum-length blob's `ha:////` header EXACTLY
+        at the pre-strip window's start boundary -- the worst case that
+        inequality must cover -- and asserts directly on
+        `_strip_pipeline_annotations`'s own output that the header survived
+        truncation and the blob was fully stripped.
+
+        Asserting on the function's own output (rather than on
+        `get_build_details`'s further-sliced `console_tail`, as an earlier
+        version of this test did) matters: the invariant above guarantees a
+        compliant blob positioned at the window-start boundary can *never*
+        actually reach the final `_CONSOLE_TAIL_SIZE`-char output slice,
+        stripped or not (blob length + trailing content <= window length by
+        construction). The earlier version appended a `_CONSOLE_TAIL_SIZE`-
+        sized trailer after the blob and asserted on `console_tail` -- since
+        that trailer alone always fills the entire final slice regardless of
+        whether the blob ahead of it stripped correctly, those assertions
+        could never fail (confirmed by disabling the stripping regex
+        entirely and observing the old test still pass). Exercising the
+        window-start cutoff requires checking the window's own output, not
+        a slice that the invariant guarantees never sees it."""
+        blob = "ha:////" + "B" * _MAX_BLOB_LEN + "=="
+        marker = "real failure output line"
+        # Trailer starts with a real delimiter (newline) -- required for the
+        # blob regex's right-delimiter lookahead to match at all; every real
+        # Jenkins blob is followed by one (end of line/ESC/another blob).
+        trailer_len = _PRESTRIP_WINDOW - len(blob)
+        assert trailer_len > len(marker) + 1, (
+            "fixture constants no longer fit -- adjust padding"
+        )
+        trailer = "\n" + ("T" * (trailer_len - 1 - len(marker))) + marker
+        assert len(trailer) == trailer_len
+        filler = "F" * 50000  # simulates the rest of a much larger real log
+        raw = filler + blob + trailer
+
+        header_distance_from_end = len(blob) + len(trailer)
+        assert header_distance_from_end == _PRESTRIP_WINDOW, (
+            "fixture must position the blob header exactly at the pre-strip "
+            "window's start boundary -- adjust padding"
+        )
+
+        result = _strip_pipeline_annotations(raw)
+
+        assert "ha:" not in result
+        assert "B" * 10 not in result
+        assert marker in result
 

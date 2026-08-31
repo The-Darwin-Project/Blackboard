@@ -3,6 +3,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import CiContextCard from './CiContextCard';
 import type { CiContext } from '../api/types';
+import { stripJenkinsNoise } from '../utils/stripAnsi';
 
 vi.mock('../utils/safeOpen', () => ({
   safeOpen: vi.fn(),
@@ -46,7 +47,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build', jenkins_link: 'https://jenkins.example.com/job/build/5' }],
       };
       render(<CiContextCard context={context} />);
-      fireEvent.click(screen.getByText('Jenkins →'));
+      fireEvent.click(screen.getByText('Jenkins \u2192'));
       expect(mockSafeOpen).toHaveBeenCalledWith('https://jenkins.example.com/job/build/5');
     });
 
@@ -56,7 +57,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build', build_number: 42 }],
       };
       render(<CiContextCard context={context} />);
-      fireEvent.click(screen.getByText('Jenkins →'));
+      fireEvent.click(screen.getByText('Jenkins \u2192'));
       expect(mockSafeOpen).toHaveBeenCalledWith('https://jenkins.example.com/job/build/42');
     });
 
@@ -65,7 +66,7 @@ describe('CiContextCard', () => {
         failed_jobs: [{ job_name: 'build' }],
       };
       render(<CiContextCard context={context} />);
-      expect(screen.queryByText('Jenkins →')).toBeNull();
+      expect(screen.queryByText('Jenkins \u2192')).toBeNull();
     });
   });
 
@@ -136,6 +137,248 @@ describe('CiContextCard', () => {
       expect(screen.queryByText(/Show all/)).toBeNull();
       expect(screen.queryByText('Collapse')).toBeNull();
     });
+
+    it('strips ha:////  blobs and [Pipeline] boundary noise before rendering', () => {
+      const context: CiContext = {
+        failed_jobs: [{
+          job_name: 'build',
+          console_tail: 'ha:////ABC123==\n[Pipeline] // container\nFinished: UNSTABLE',
+        }],
+      };
+      const { container } = render(<CiContextCard context={context} />);
+      expect(container.querySelector('pre')?.textContent).toBe('Finished: UNSTABLE');
+    });
+
+    it('strips ANSI-wrapped ha:////  blobs when Jenkins noise is removed before ANSI strip', () => {
+      const context: CiContext = {
+        failed_jobs: [{
+          job_name: 'build',
+          console_tail: 'before \x1b[8mha:////ABC123==\x1b[0m after',
+        }],
+      };
+      const { container } = render(<CiContextCard context={context} />);
+      expect(container.querySelector('pre')?.textContent).toBe('before  after');
+    });
+  });
+
+  describe('stripJenkinsNoise (F1/F3/F4/F8/F9/F10 hardening regressions)', () => {
+    it('strips a ha:////  blob, preserving surrounding text', () => {
+      expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
+    });
+
+    it('removes [Pipeline] boundary marker lines, preserving real output', () => {
+      const text = '[Pipeline] }\n[Pipeline] // container\nreal output';
+      expect(stripJenkinsNoise(text)).toBe('real output');
+    });
+
+    it('preserves a mid-line [Pipeline] substring not at line start (F1)', () => {
+      const text = 'Running [Pipeline] } leftover';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a mid-line boundary-alternation word ("stage") appearing in real prose', () => {
+      const text = 'Deploying [Pipeline] stage now, please wait';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('fully strips two adjacent ha:////  blobs with no separator (F3)', () => {
+      const result = stripJenkinsNoise('ha:////AAA==ha:////BBB==');
+      expect(result).toBe('');
+      expect(result).not.toContain(':////');
+    });
+
+    it('preserves an abutting secret key:value intact for downstream redaction (F4)', () => {
+      const result = stripJenkinsNoise('ha:////ABC==password:hunter2');
+      expect(result).toContain('password:hunter2');
+    });
+
+    it('preserves an unpadded blob abutting an alphanumeric secret verbatim, mid-string (F9)', () => {
+      // MEDIUM secret-redaction-bypass finding: an unpadded, non-ANSI-wrapped
+      // blob directly abutted by a real all-alphanumeric secret (e.g. the
+      // literal word "Bearer") must be left fully untouched -- mandatory
+      // padding or a trailing ANSI escape is now required to terminate a
+      // match; bare whitespace is no longer accepted as a delimiter.
+      const text = 'ha:////AAAABearer sometoken123';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves an unpadded blob abutting an alphanumeric secret verbatim, end-of-string (F9)', () => {
+      // Same finding, end-of-string variant: bare end-of-string is also no
+      // longer accepted as a delimiter.
+      const text = 'filler text ha:////AAAABearersecrettoken123';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=` "token=" delimiter abutment verbatim (F10)', () => {
+      // F10 regression: F9's fix accepted a single `=` as sufficient
+      // padding proof unconditionally, but a lone `=` is exactly the
+      // common KEY=value secret delimiter and is genuinely ambiguous with
+      // real single-char base64 padding. Must now also require a safe
+      // lookahead terminator (whitespace/ANSI/another blob/EOS) before a
+      // single `=` counts -- absent here, so the whole match fails.
+      const text = 'ha:////AAAtoken=abc123xyz';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it.each(['secret', 'password', 'passwd', 'pwd', 'key', 'credential', 'authorization'])(
+      'preserves a single-`=` "%s=" delimiter abutment verbatim (F10 board sweep)',
+      (keyword) => {
+        const text = `ha:////AAA${keyword}=xyz`;
+        expect(stripJenkinsNoise(text)).toBe(text);
+      },
+    );
+
+    it('preserves a single-`=`-then-whitespace abutment verbatim (F11, was wrongly a positive control)', () => {
+      // F11 regression (MORE SERIOUS follow-up to F10): whitespace was
+      // REMOVED from the single-`=` lookahead's safe-terminator set. This
+      // test used to assert the OPPOSITE (that this case strips) -- that
+      // was wrong: whitespace after a real `=` delimiter is the single
+      // most common, entirely benign way a real secret is ever written
+      // ("token= value"), not a rare/deliberate pattern like an ANSI
+      // escape or chained blob. The match must now fail entirely.
+      const text = 'before ha:////ABC1= after';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('still strips when a single `=` is followed by an ANSI escape (F11 positive control)', () => {
+      // Proves the whitespace removal narrowed the accepted cases without
+      // breaking the still-legitimate ANSI-terminated path.
+      expect(stripJenkinsNoise('before ha:////ABC1=\x1b[0m after')).toBe('before  after');
+    });
+
+    it('single-pad blob + adjacent == blob: second strips, first is noise trade-off (F12)', () => {
+      const result = stripJenkinsNoise('ha:////AAA=ha:////BBB==');
+      expect(result).not.toContain('ha:////BBB==');
+    });
+
+    it('preserves a single-`=`-then-space "token=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAAtoken= somevalue';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=`-then-space "password=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAApassword= hunter2';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it('preserves a single-`=`-then-newline "token=" abutment verbatim (F11)', () => {
+      const text = 'ha:////AAAtoken=\nsomevalue';
+      expect(stripJenkinsNoise(text)).toBe(text);
+    });
+
+    it.each([
+      'token', 'secret', 'password', 'passwd', 'pwd', 'key', 'credential', 'authorization',
+      'apikey', 'accesskey', 'privatekey', 'secretkey',
+    ])(
+      'preserves a single-`=`-then-space "%s=" abutment verbatim (F11 board sweep)',
+      (keyword) => {
+        const text = `ha:////AAA${keyword}= value123`;
+        expect(stripJenkinsNoise(text)).toBe(text);
+      },
+    );
+
+    it('double-`==` padding remains self-sufficient, no regression (F10)', () => {
+      expect(stripJenkinsNoise('before ha:////ABC123== after')).toBe('before  after');
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
+    });
+
+    it('still strips a Timestamper-prefixed [Pipeline] boundary line (F8 parity)', () => {
+      const text = '[2026-08-31T11:23:24.854Z] [Pipeline] // container\nreal output';
+      expect(stripJenkinsNoise(text)).toBe('real output');
+    });
+
+    it('preserves password= across a cross-blob boundary (F12 CRITICAL)', () => {
+      const text = 'ha:////AAApassword=ha:////BBB==hunter2';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('password=');
+      expect(stripped).toContain('hunter2');
+    });
+
+    it('preserves token= across a cross-blob boundary (F12 CRITICAL variant)', () => {
+      const text = 'ha:////AAAtoken=ha:////forged leftoversecret';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('token=');
+    });
+
+    it('adjacent == blobs still fully strip (F12 non-regression)', () => {
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
+    });
+
+    it('preserves token= before trailing newline (F12 HIGH parity)', () => {
+      const text = 'ha:////AAAtoken=\n';
+      const stripped = stripJenkinsNoise(text);
+      expect(stripped).toContain('token=');
+    });
+
+    it('rejects == blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword==hunter2');
+      expect(result).toContain('password=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects == blob whose body ends with token (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAtoken==hunter2');
+      expect(result).toContain('token=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects == blob whose body ends with Bearer (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAABearer==sometoken123');
+      expect(result).toContain('Bearer');
+      expect(result).toContain('sometoken123');
+    });
+
+    it('rejects bare-ANSI blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword\x1b[0mhunter2');
+      expect(result).toContain('password');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects bare-ANSI blob whose body ends with token (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAAtoken\x1b[32mhunter2');
+      expect(result).toContain('token');
+      expect(result).toContain('hunter2');
+    });
+
+    it('rejects single-=+ANSI blob whose body ends with password (F13 CRITICAL)', () => {
+      const result = stripJenkinsNoise('ha:////AAApassword=\x1b[0mhunter2');
+      expect(result).toContain('password=');
+      expect(result).toContain('hunter2');
+    });
+
+    it('still strips == blob whose body has no keyword (F13 SAFE)', () => {
+      const result = stripJenkinsNoise('ha:////AAA==password:hunter2');
+      expect(result).toContain('password:hunter2');
+      expect(result).not.toContain('ha:////');
+    });
+
+    it('adjacent == blobs without keywords still fully strip (F13 non-regression)', () => {
+      expect(stripJenkinsNoise('ha:////AAA==ha:////BBB==')).toBe('');
+    });
+
+    it.each([
+      'password', 'passwd', 'pwd', 'token', 'secret', 'bearer', 'credential',
+      'authorization', 'key', 'apikey', 'accesskey', 'privatekey', 'secretkey',
+    ])(
+      'rejects == blob whose body ends with %s (F13 board sweep)',
+      (keyword) => {
+        const result = stripJenkinsNoise(`ha:////AAA${keyword}==value123`);
+        expect(result.toLowerCase()).toContain(keyword);
+        expect(result).toContain('value123');
+      },
+    );
+
+    it.each([
+      'password', 'passwd', 'pwd', 'token', 'secret', 'bearer', 'credential',
+      'authorization', 'key', 'apikey', 'accesskey', 'privatekey', 'secretkey',
+    ])(
+      'rejects bare-ANSI blob whose body ends with %s (F13 board sweep)',
+      (keyword) => {
+        const result = stripJenkinsNoise(`ha:////AAA${keyword}\x1b[0mvalue123`);
+        expect(result.toLowerCase()).toContain(keyword);
+        expect(result).toContain('value123');
+      },
+    );
   });
 
   describe('llm_triage to failed_jobs correlation (triageMap by job_name)', () => {

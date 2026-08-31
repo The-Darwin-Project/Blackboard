@@ -24,9 +24,10 @@
 # 13. [Constraint]: LLM triage output (from _parse_triage_response) must be passed through
 #     _validate_triage_entry() -- it is untrusted (LLM-generated from an attacker-influenceable
 #     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py.
-# 14. [Constraint]: console_tail must be passed through _redact_secrets_in_text() (inline
-#     TOKEN=/password:/Bearer patterns) in addition to _sanitize_console_tail() -- same
-#     ci_context exposure vector as build parameters, but for unstructured log text.
+# 14. [Constraint]: console_tail must be passed through _prepare_console_tail() which owns
+#     the security-invariant order: redact -> strip pipeline noise -> slice -> sanitize.
+#     _strip_pipeline_annotations is defined in the adapter (wire-format knowledge) but
+#     called here (agents -> adapters is the correct hexagonal direction).
 # 15. [Pattern]: _poll_and_stage() only stages FAILURE/UNSTABLE/ABORTED and truly-missing
 #     jobs (no build at all). A job with result=None but a build_number is in-progress and
 #     must not be staged as a failure signal.
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from ..adapters.jenkins import JenkinsAdapter
     from ..state.blackboard import BlackboardState
 
+from ..adapters.jenkins import _strip_pipeline_annotations
 from ..models import EventEvidence
 from ..skills_catalog import download_skill_md
 
@@ -119,12 +121,15 @@ def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
 # the value may be double-quoted, single-quoted, or a bare run of non-whitespace/delimiter
 # characters. `[:=]` covers both "key: value" and "key=value" separators.
 _SECRET_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s,}\]\"']+)"
+_ANSI_CSI_SEQUENCE = r"(?:\x1b\[[0-9;]*m)+"
 _SECRET_TEXT_PATTERN = re.compile(
     r"(?im)(\"?(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|"
     r"private[_-]?key|secret[_-]?key|key|credential|authorization)\"?"
-    r"\s*[:=]\s*)" + _SECRET_VALUE
+    r"(?:\s*:\s*|\s*=+\s*|" + _ANSI_CSI_SEQUENCE + r"))" + _SECRET_VALUE
 )
-_BEARER_TEXT_PATTERN = re.compile(r"(?i)(bearer\s+)" + _SECRET_VALUE)
+_BEARER_TEXT_PATTERN = re.compile(
+    r"(?i)(bearer(?:\s+|=+|" + _ANSI_CSI_SEQUENCE + r"))" + _SECRET_VALUE
+)
 
 
 def _redact_match(m: "re.Match") -> str:
@@ -154,6 +159,22 @@ def _redact_secrets_in_text(text: str) -> str:
     text = _BEARER_TEXT_PATTERN.sub(_redact_match, text)
     text = _SECRET_TEXT_PATTERN.sub(_redact_match, text)
     return text
+
+
+def _prepare_console_tail(raw: str) -> str:
+    """Redact -> strip pipeline noise -> slice.  Order is a security invariant.
+
+    The adapter returns a decoded byte-windowed raw tail; this helper owns the
+    production sequencing that closes the pre-strip-window secret leak (HIGH).
+    Importing _strip_pipeline_annotations from the adapter is the correct
+    hexagonal direction (agents -> adapters); the adapter never imports back.
+    """
+    if not raw:
+        return ""
+    redacted = _redact_secrets_in_text(raw)
+    stripped = _strip_pipeline_annotations(redacted)
+    sliced = stripped[-3000:] if len(stripped) > 3000 else stripped
+    return _sanitize_console_tail(sliced)
 
 
 _VALID_TRIAGE_CLASSIFICATIONS = frozenset({"infrastructure", "test", "product"})
@@ -722,8 +743,7 @@ class JenkinsObserver:
                     )
                     details_fetched += 1
                     if details:
-                        tail = _redact_secrets_in_text(details.console_tail[-3000:])
-                        job_entry["console_tail"] = _sanitize_console_tail(tail)
+                        job_entry["console_tail"] = _prepare_console_tail(details.console_tail or "")
                         redacted_params = _redact_build_parameters(details.parameters)
                         job_metadata = _parse_job_metadata(redacted_params)
                         if job_metadata:

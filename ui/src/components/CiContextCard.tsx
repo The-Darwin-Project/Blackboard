@@ -2,7 +2,9 @@
 // @ai-rules:
 // 1. [Pattern]: 4-tier progressive disclosure for CI event context.
 // 2. [Constraint]: All CiContext fields are optional — guard every access.
-// 3. [Pattern]: console_tail rendered via stripJenkinsNoise(stripAnsi(text)). LLM triage correlated by job_name.
+// 3. [Pattern]: console_tail rendered via stripAnsi(stripJenkinsNoise(text)) -- Jenkins strip first
+//    (while ANSI escapes are still present for blob terminator matching), then ANSI strip.
+//    LLM triage correlated by job_name.
 // 4. [Gotcha]: jenkins_url may be falsy — hide links when absent.
 // 5. [Pattern]: Tiers 3/4 (Missing Jobs, LLM Triage) use the shared CollapsibleSection component for their expand/collapse chrome -- do not hand-roll another chevron+useState toggle here.
 import { useState } from 'react';
@@ -13,7 +15,7 @@ import CollapsibleSection from './CollapsibleSection';
 
 function ConsoleTailBlock({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
-  const cleaned = stripJenkinsNoise(stripAnsi(text));
+  const cleaned = stripAnsi(stripJenkinsNoise(text));
   const lines = cleaned.split('\n');
   const preview = lines.slice(-8).join('\n');
 

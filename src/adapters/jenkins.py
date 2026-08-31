@@ -20,8 +20,12 @@
 #    HTTP call per view, not a fan-out. _record_success/_record_failure called directly.
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
-# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter
-#    BEFORE slice to prevent split base64 blobs from leaking to LLM/UI.
+# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) is DEFINED in the Adapter
+#    (wire-format regexes live next to Jenkins ConsoleNote knowledge) but the production CALL
+#    SITE is observer `_prepare_console_tail` (redact -> strip -> slice).  The adapter
+#    returns the decoded byte-windowed raw tail; the observer owns the sequencing.
+#    Accepted bound: `_DECODE_WINDOW_BYTES` (80k bytes) can still straddle a keyword --
+#    closing that requires fetching unbounded logs (DoS risk).
 """
 Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
@@ -40,21 +44,194 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Pre-strip window sizing (see _strip_pipeline_annotations): _MAX_BLOB_LEN is
+# a hard cap on how long a single `ha:////` match can be, chosen so that
+# _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW. That inequality is
+# the actual safety invariant -- it guarantees that any blob whose position
+# could possibly matter (i.e. one that ends close enough to the end of the
+# stripped text to matter for the observer's downstream redact-then-slice
+# pipeline) is *provably* short enough to have its `ha:////` header fall
+# inside the window too, so it is always fully recognized and stripped rather
+# than truncated into a headerless, unmatchable leftover. The adapter itself
+# no longer slices to _CONSOLE_TAIL_SIZE -- the observer handles
+# redact-then-slice -- but the invariant is preserved for strip completeness.
+# Before this bound existed, that guarantee was just an unverified comment
+# ("4x margin, more than enough") resting on an unbounded regex -- see
+# TestT22StripPipelineAnnotations::test_max_length_blob_header_at_prestrip_window_start_is_recognized
+# in tests/test_jenkins_observer.py for the regression coverage. A real blob
+# longer than _MAX_BLOB_LEN (not expected in practice -- Jenkins durable-task
+# blobs are a serialized exception, typically well under 1KB) simply isn't
+# matched at all and passes through as noise, the same documented,
+# accepted trade-off as the F4 secret-abutment case below.
+_PRESTRIP_WINDOW = 20000
+_CONSOLE_TAIL_SIZE = 5000
+_MAX_BLOB_LEN = 8192
+# Explicit runtime check, not `assert` -- `assert` is compiled out entirely
+# under `python -O`/`PYTHONOPTIMIZE`, which would silently drop this safety
+# invariant in an optimized deployment instead of failing loudly at import
+# time.
+if not (_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW):
+    raise ValueError(
+        "_MAX_BLOB_LEN grew without a matching _PRESTRIP_WINDOW increase -- "
+        "the window-start truncation guarantee no longer holds"
+    )
+# Byte-level (not char-level) pre-decode window for get_build_details' console-log
+# fetch -- generous 4x-per-char headroom over _PRESTRIP_WINDOW so a UTF-8 log with
+# multi-byte characters throughout still has at least _PRESTRIP_WINDOW *characters*
+# available after decoding. _strip_pipeline_annotations applies the authoritative,
+# smaller char-based bound afterward regardless.
+_DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
+
+# The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]), bounded to
+# at most _MAX_BLOB_LEN chars (see above). A match is only accepted as a
+# genuine ConsoleNote blob if it terminates via one of three STRUCTURAL
+# signals baked into the match itself (not merely asserted via a
+# zero-width lookahead, except where noted below): double `==` padding;
+# single `=` padding that is ALSO immediately followed by one of the
+# traditionally-safe terminators (whitespace, ANSI escape, another
+# `ha:////` occurrence, or end-of-string); or a trailing ANSI escape with
+# no padding at all. Each padding alternative may optionally consume a
+# trailing ANSI escape too. A single optional leading ANSI wrapper (not a
+# `*` quantifier -- an unbounded repeated-quantifier around a literal that
+# then fails to match is quadratic on long ANSI-only runs, see
+# get_build_details' pre-strip window comment) is still allowed.
+#
+# Bare whitespace and bare end-of-string are deliberately NOT accepted as
+# unconditional termination signals (they used to be, via a lookahead
+# alternative, until a MEDIUM secret-redaction-bypass finding on this exact
+# regex). The base64 alphabet [A-Za-z0-9+/] is a superset of ordinary
+# English letters and digits, so it cannot be distinguished from adjacent
+# real text using only "where's the next whitespace/EOS" -- an unpadded,
+# non-ANSI-wrapped blob immediately abutted by a real secret composed
+# entirely of letters/digits (e.g. "ha:////AAAABearer sometoken123", or the
+# same thing sitting at the very end of the currently-fetched log tail) let
+# the greedy body class silently consume through the real word before
+# downstream `_redact_secrets_in_text()`'s literal "bearer"/key-text
+# matching in jenkins_observer.py ever got a chance to see it, deleting the
+# secret's own redaction trigger along with the blob. ANSI escapes and
+# double `==` padding are both structurally impossible to appear inside
+# ordinary prose (a raw ESC byte in particular can never be part of
+# English text; two literal `=` characters back-to-back never occur in a
+# real single-delimiter `KEY=value` string), so either alone is accepted as
+# a self-sufficient terminator with no further check.
+#
+# A SINGLE `=`, however, is exactly the common `KEY=value` secret delimiter
+# (see jenkins_observer.py's `_SECRET_TEXT_PATTERN`, which redacts both
+# "key: value" and "key=value" forms) and is therefore genuinely
+# indistinguishable from real single-char base64 padding using only local
+# regex context -- e.g. "ha:////AAAtoken=abc123xyz" is exactly as
+# plausible a real base64 blob ending in one padding char as it is a blob
+# abutting a "token=" secret delimiter. To resolve the ambiguity, a lone
+# `=` is only accepted as a real terminator when a lookahead confirms an
+# ANSI escape (`\x1b[`) immediately follows it. Neither `ha:////` nor
+# end-of-string (`$`) are accepted in this lookahead -- a following
+# `ha:////` occurrence was independently verified to let the greedy body
+# class consume through a `password=`/`token=` delimiter when the next
+# blob's `ha:////` header coincidentally satisfies the lookahead, and `$`
+# has Python/JS parity issues (Python `$` matches before a trailing `\n`;
+# JS `$` without `m` flag matches only true end-of-input). Removing both
+# closes the CRITICAL (cross-blob `password=` consumption) and HIGH (P/JS
+# `$` parity split) findings fail-closed. If the lookahead fails, the
+# whole match fails and the abutting secret text (including the "token="
+# delimiter) survives untouched for downstream redaction -- the same
+# "leave ambiguous content alone" philosophy already applied throughout.
+#
+# Accepted trade-off (narrower than the prior round's): a genuinely valid
+# single-pad blob (`...=`) with no ANSI wrapper, whether at end-of-string,
+# before whitespace, or immediately followed by another `ha:////`, is left
+# as cosmetic noise. Adjacent blobs that use `==` padding still strip
+# cleanly (the `==` alternative is unconditional). Fail-closed: never eat
+# `password=` / `token=` / `Bearer ` by treating a following `ha:////` or
+# `$` as proof of padding.
+#
+# Whitespace was DELIBERATELY REMOVED from that lookahead set (it used to
+# be a member, until a MORE SERIOUS follow-on secret-redaction-bypass
+# finding on this exact branch). Whitespace after a real `=` is not a rare,
+# deliberately-constructed pattern the way an ANSI escape or a chained
+# `ha:////` occurrence is -- it is the single most common, completely
+# benign way a real secret is ever written in log output or config dumps
+# ("KEY= value", "KEY=\nvalue"). Treating "followed by whitespace" as proof
+# of genuine base64 padding was backwards: whitespace commonly follows a
+# real `=` delimiter too, so its presence proves nothing about which case
+# this is, and the old rule silently deleted the "token="/"password="/etc.
+# delimiter along with the blob, defeating downstream redaction exactly
+# like the un-lookahead-guarded version this branch was meant to fix.
+#
+# Accepted trade-off (narrower than the prior round's): a genuinely valid
+# blob needing exactly one padding character, followed by plain whitespace
+# with no ANSI wrapper (i.e. no ANSI escape, no chained blob, and not at
+# end-of-string), will no longer be recognized and will show through as
+# literal noise instead of being stripped. This narrows an already-narrow
+# edge case further -- real Jenkins ConsoleNote blobs are near-universally
+# ANSI-wrapped in practice -- and remains cosmetic-only.
 _PIPELINE_ANNOTATION_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*m)*ha:////[A-Za-z0-9+/=]+(?:\x1b\[[0-9;]*m)*",
+    r"(?:\x1b\[[0-9;]*m)?ha:////(?P<body>[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"})"
+    r"(?:==(?:\x1b\[[0-9;]*m)?"
+    r"|=(?=\x1b\[)(?:\x1b\[[0-9;]*m)?"
+    r"|\x1b\[[0-9;]*m)",
 )
+# Post-match reject: if the blob body ends with a redaction-trigger keyword
+# (case-insensitive), the match is returned unchanged so downstream
+# _redact_secrets_in_text() can still see the keyword and redact the secret
+# value that follows.  This closes the `==`-terminated and bare-ANSI-terminated
+# variants of the secret-eating bug without removing those terminators (both
+# are structurally necessary for stripping real Jenkins ConsoleNote blobs).
+# Accepted trade-off: a genuine ConsoleNote whose base64 body happens to end
+# with one of these English words will not strip (cosmetic leftover).  Fail-closed.
+# Keep in sync with stripAnsi.ts REDACTION_TRIGGER_KEYWORDS.
+_REDACTION_TRIGGER_KEYWORDS = (
+    "password", "passwd", "pwd", "token", "secret", "bearer", "credential",
+    "authorization", "key", "apikey", "accesskey", "privatekey", "secretkey",
+    # `key` and `pwd` are short -- a genuine ConsoleNote base64 body that
+    # coincidentally ends with those letters will not strip (cosmetic leftover).
+    # Longer compounds (`privatekey`, `secretkey`) are rare accidental endings.
+    # Fail-closed: never eat a redaction-trigger keyword.
+)
+
+
+def _annotation_replace(match: "re.Match[str]") -> str:
+    body = match.group("body").lower()
+    if any(body.endswith(kw) for kw in _REDACTION_TRIGGER_KEYWORDS):
+        return match.group(0)
+    return ""
+
+
+# Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
+# console output (verified against production Jenkins logs). Anchoring to
+# line-start (optionally after a Timestamper prefix, e.g.
+# "[2026-08-31T11:23:24.854Z] ") means a marker substring that happens to
+# appear mid-line in real log text (e.g. "Running [Pipeline] } leftover") is
+# never mistaken for a boundary and the whole line is preserved untouched. A
+# genuine line-start marker with trailing same-line text is still fully
+# consumed -- real Jenkins never emits real content on the same line as one
+# of these markers, so this is an accepted, documented assumption. The
+# trailing `\b` after the `\w+`/`stage`/`Pipeline` alternatives (but not
+# after the bare `{`/`}` literals, which aren't word characters and would
+# wrongly reject a legitimate marker immediately followed by a newline)
+# stops a marker substring that is merely a PREFIX of a longer real word --
+# e.g. "stagecoach", "staged rollback", "End of PipelineExtra: ..." -- from
+# being misidentified as a boundary and having its whole line deleted.
 _PIPELINE_BOUNDARY_RE = re.compile(
-    r"\[Pipeline\]\s*(?://\s*\w+|End of Pipeline|\{|\}|stage).*?(?:\r?\n|$)",
+    r"^(?:\[[0-9T:.\-]+Z\]\s*)?\[Pipeline\]\s*(?://\s*\w+\b|End of Pipeline\b|\{|\}|stage\b)[^\r\n]*(?:\r?\n|$)",
     re.MULTILINE,
 )
 _BLANK_RUN_RE = re.compile(r"(?:\r?\n){3,}")
 
 
-def _strip_pipeline_annotations(text: str) -> str:
-    """Remove Jenkins pipeline flow annotations and step boundary markers."""
+def _strip_pipeline_annotations(text: str, *, window: int = _PRESTRIP_WINDOW) -> str:
+    """Remove Jenkins pipeline flow annotations and step boundary markers.
+
+    Bounds its own input to the last `window` chars before running the
+    (attacker-influenceable-input-facing) regexes, so the safety bound lives
+    with the regexes it protects instead of being the caller's responsibility
+    to remember and re-derive -- see the module-level _PRESTRIP_WINDOW
+    comment for the invariant this depends on.
+    """
     if not text:
         return text
-    text = _PIPELINE_ANNOTATION_RE.sub("", text)
+    if len(text) > window:
+        text = text[-window:]
+    text = _PIPELINE_ANNOTATION_RE.sub(_annotation_replace, text)
     text = _PIPELINE_BOUNDARY_RE.sub("", text)
     text = _BLANK_RUN_RE.sub("\n\n", text)
     return text.strip()
@@ -365,8 +542,31 @@ class JenkinsAdapter:
                 count_failures=False,
             )
             if tail_resp and tail_resp.status_code == 200:
-                text = _strip_pipeline_annotations(tail_resp.text)
-                console_tail = text[-5000:] if len(text) > 5000 else text
+                # `.text` would decode the FULL response body up front --
+                # synchronous cost that scales with the true (potentially
+                # multi-MB, attacker-influenceable) log size, on the Brain's
+                # shared asyncio event loop, before a single byte of it is
+                # ever used. Jenkins console logs can be arbitrarily large;
+                # since only the tail ends up in console_tail, slice the raw
+                # BYTES down to a generous pre-decode window first and decode
+                # only that -- decode cost is now bounded regardless of
+                # actual log size. A slice boundary can land mid-codepoint;
+                # errors="replace" swaps at most one leading char for U+FFFD.
+                # Accepted bound: _DECODE_WINDOW_BYTES (80k bytes) can still
+                # straddle a secret keyword -- closing that requires fetching
+                # unbounded logs (DoS risk), so it is left as documented.
+                raw_bytes = tail_resp.content
+                if len(raw_bytes) > _DECODE_WINDOW_BYTES:
+                    raw_bytes = raw_bytes[-_DECODE_WINDOW_BYTES:]
+                try:
+                    raw = raw_bytes.decode(tail_resp.encoding or "utf-8", errors="replace")
+                except LookupError:
+                    # httpx-derived charset name (e.g. from a malformed/unusual
+                    # Content-Type header) is not a codec Python recognizes.
+                    # This is a best-effort log-tail fetch -- fall back to utf-8
+                    # rather than letting an uncaught LookupError escape this path.
+                    raw = raw_bytes.decode("utf-8", errors="replace")
+                console_tail = raw
 
         return BuildDetails(
             job_name=job,
