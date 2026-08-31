@@ -41,17 +41,50 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Pre-strip window sizing (see _strip_pipeline_annotations): _MAX_BLOB_LEN is
+# a hard cap on how long a single `ha:////` match can be, chosen so that
+# _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW. That inequality is
+# the actual safety invariant -- it guarantees that any blob whose position
+# could possibly matter (i.e. one that ends close enough to the end of the
+# fetched log to threaten the final _CONSOLE_TAIL_SIZE-char output) is
+# *provably* short enough to have its `ha:////` header fall inside the
+# window too, so it is always fully recognized and stripped rather than
+# truncated into a headerless, unmatchable leftover. Before this bound
+# existed, that guarantee was just an unverified comment ("4x margin, more
+# than enough") resting on an unbounded regex -- see
+# TestT22StripPipelineAnnotations::test_console_tail_blob_straddling_prestrip_window_start_is_recognized
+# in tests/test_jenkins_observer.py for the regression coverage. A real blob
+# longer than _MAX_BLOB_LEN (not expected in practice -- Jenkins durable-task
+# blobs are a serialized exception, typically well under 1KB) simply isn't
+# matched at all and passes through as noise, the same documented,
+# accepted trade-off as the F4 secret-abutment case below.
+_PRESTRIP_WINDOW = 20000
+_CONSOLE_TAIL_SIZE = 5000
+_MAX_BLOB_LEN = 8192
+assert _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW, (
+    "_MAX_BLOB_LEN grew without a matching _PRESTRIP_WINDOW increase -- "
+    "the window-start truncation guarantee no longer holds"
+)
+# Byte-level (not char-level) pre-decode window for get_build_details' console-log
+# fetch -- generous 4x-per-char headroom over _PRESTRIP_WINDOW so a UTF-8 log with
+# multi-byte characters throughout still has at least _PRESTRIP_WINDOW *characters*
+# available after decoding. _strip_pipeline_annotations applies the authoritative,
+# smaller char-based bound afterward regardless.
+_DECODE_WINDOW_BYTES = _PRESTRIP_WINDOW * 4
+
 # The `ha:////` durable-task blob body is base64 ([A-Za-z0-9+/]) with optional
-# `=`/`==` padding at the very end only. A single optional ANSI wrapper (not a
-# `*` quantifier -- an unbounded repeated-quantifier around a literal that then
-# fails to match is quadratic on long ANSI-only runs, see get_build_details'
-# pre-strip window comment) plus a right-delimiter lookahead (whitespace, ESC,
-# another `ha:////`, or end-of-string) bound the match to its own blob: it can
-# never consume into adjacent real text (e.g. a "password:..." key that
-# happens to abut the blob) or swallow a second, immediately-adjacent blob
-# with no separator between them.
+# `=`/`==` padding at the very end only, bounded to at most _MAX_BLOB_LEN
+# chars (see above). A single optional ANSI wrapper (not a `*` quantifier --
+# an unbounded repeated-quantifier around a literal that then fails to match
+# is quadratic on long ANSI-only runs, see get_build_details' pre-strip
+# window comment) plus a right-delimiter lookahead (whitespace, ESC, another
+# `ha:////`, or end-of-string) bound the match to its own blob: it can never
+# consume into adjacent real text (e.g. a "password:..." key that happens to
+# abut the blob) or swallow a second, immediately-adjacent blob with no
+# separator between them.
 _PIPELINE_ANNOTATION_RE = re.compile(
-    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]+={0,2}(?:\x1b\[[0-9;]*m)?(?=[\s\x1b]|ha:////|$)",
+    r"(?:\x1b\[[0-9;]*m)?ha:////[A-Za-z0-9+/]{1," + str(_MAX_BLOB_LEN) + r"}={0,2}"
+    r"(?:\x1b\[[0-9;]*m)?(?=[\s\x1b]|ha:////|$)",
 )
 # Real Jenkins `[Pipeline]` step-boundary markers are always full-line in
 # console output (verified against production Jenkins logs). Anchoring to
@@ -61,18 +94,33 @@ _PIPELINE_ANNOTATION_RE = re.compile(
 # never mistaken for a boundary and the whole line is preserved untouched. A
 # genuine line-start marker with trailing same-line text is still fully
 # consumed -- real Jenkins never emits real content on the same line as one
-# of these markers, so this is an accepted, documented assumption.
+# of these markers, so this is an accepted, documented assumption. The
+# trailing `\b` after the `\w+`/`stage`/`Pipeline` alternatives (but not
+# after the bare `{`/`}` literals, which aren't word characters and would
+# wrongly reject a legitimate marker immediately followed by a newline)
+# stops a marker substring that is merely a PREFIX of a longer real word --
+# e.g. "stagecoach", "staged rollback", "End of PipelineExtra: ..." -- from
+# being misidentified as a boundary and having its whole line deleted.
 _PIPELINE_BOUNDARY_RE = re.compile(
-    r"^(?:\[[0-9T:.\-]+Z\]\s*)?\[Pipeline\]\s*(?://\s*\w+|End of Pipeline|\{|\}|stage)[^\r\n]*(?:\r?\n|$)",
+    r"^(?:\[[0-9T:.\-]+Z\]\s*)?\[Pipeline\]\s*(?://\s*\w+\b|End of Pipeline\b|\{|\}|stage\b)[^\r\n]*(?:\r?\n|$)",
     re.MULTILINE,
 )
 _BLANK_RUN_RE = re.compile(r"(?:\r?\n){3,}")
 
 
-def _strip_pipeline_annotations(text: str) -> str:
-    """Remove Jenkins pipeline flow annotations and step boundary markers."""
+def _strip_pipeline_annotations(text: str, *, window: int = _PRESTRIP_WINDOW) -> str:
+    """Remove Jenkins pipeline flow annotations and step boundary markers.
+
+    Bounds its own input to the last `window` chars before running the
+    (attacker-influenceable-input-facing) regexes, so the safety bound lives
+    with the regexes it protects instead of being the caller's responsibility
+    to remember and re-derive -- see the module-level _PRESTRIP_WINDOW
+    comment for the invariant this depends on.
+    """
     if not text:
         return text
+    if len(text) > window:
+        text = text[-window:]
     text = _PIPELINE_ANNOTATION_RE.sub("", text)
     text = _PIPELINE_BOUNDARY_RE.sub("", text)
     text = _BLANK_RUN_RE.sub("\n\n", text)
@@ -384,19 +432,24 @@ class JenkinsAdapter:
                 count_failures=False,
             )
             if tail_resp and tail_resp.status_code == 200:
-                # Bound the strip's input to the last 20000 chars -- 4x the
-                # final 5000-char output window, more than enough margin for
-                # any single ConsoleNote blob or [Pipeline] marker to be
-                # fully contained within the pre-strip window even if it
-                # starts just before the final 5000 chars. Jenkins console
-                # logs are attacker-influenceable (pipeline authors control
-                # their own output); without this bound, strip runs on the
-                # FULL response body on every call, regardless of actual log
-                # size, on the Brain's shared asyncio event loop.
-                raw = tail_resp.text
-                window = raw[-20000:] if len(raw) > 20000 else raw
-                text = _strip_pipeline_annotations(window)
-                console_tail = text[-5000:] if len(text) > 5000 else text
+                # `.text` would decode the FULL response body up front --
+                # synchronous cost that scales with the true (potentially
+                # multi-MB, attacker-influenceable) log size, on the Brain's
+                # shared asyncio event loop, before a single byte of it is
+                # ever used. Jenkins console logs can be arbitrarily large;
+                # since only the tail ends up in console_tail, slice the raw
+                # BYTES down to a generous pre-decode window first and decode
+                # only that -- decode cost is now bounded regardless of
+                # actual log size. A slice boundary can land mid-codepoint;
+                # errors="replace" swaps at most one leading char for U+FFFD,
+                # which is discarded anyway once _strip_pipeline_annotations
+                # applies its own (smaller, char-based) _PRESTRIP_WINDOW bound.
+                raw_bytes = tail_resp.content
+                if len(raw_bytes) > _DECODE_WINDOW_BYTES:
+                    raw_bytes = raw_bytes[-_DECODE_WINDOW_BYTES:]
+                raw = raw_bytes.decode(tail_resp.encoding or "utf-8", errors="replace")
+                text = _strip_pipeline_annotations(raw)
+                console_tail = text[-_CONSOLE_TAIL_SIZE:] if len(text) > _CONSOLE_TAIL_SIZE else text
 
         return BuildDetails(
             job_name=job,

@@ -1905,7 +1905,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             }
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = "...console output..."
+            tail_resp.content = b"...console output..."
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -1933,7 +1934,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             api_resp.json.return_value = {"result": "SUCCESS", "url": "", "actions": []}
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = ""
+            tail_resp.content = b""
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -2038,7 +2040,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = "...console output..."
+            tail_resp.content = b"...console output..."
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -2087,7 +2090,8 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
             tail_resp = MagicMock()
             tail_resp.status_code = 200
-            tail_resp.text = raw
+            tail_resp.content = raw.encode()
+            tail_resp.encoding = "utf-8"
 
             mock_client = AsyncMock()
             mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
@@ -2099,6 +2103,73 @@ class TestJenkinsAdapterGetBuildDetailsTransport:
             assert details is not None
             assert "ha:" not in details.console_tail
             assert ":////" not in details.console_tail
+            assert "real failure output line" in details.console_tail
+
+    async def test_console_tail_max_length_blob_at_window_start_boundary_is_recognized(self):
+        """HIGH regression: the blob regex used to have no length bound (a
+        plain `+`), so the safety of the 20000-char pre-strip window rested
+        entirely on an unverified comment ("4x margin, more than enough")
+        about how long a real blob could be -- nothing in the code actually
+        enforced it. The regex is now bounded to `_MAX_BLOB_LEN`, chosen so
+        `_MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW`. That
+        inequality is what this test guards: it constructs the worst case the
+        invariant must cover -- a maximum-length blob positioned as close as
+        the fixture can get to the final output slice -- and asserts the
+        `ha:////` header is still comfortably inside the pre-strip window and
+        gets fully recognized/stripped, rather than being silently truncated
+        into an unmatchable leftover. If `_MAX_BLOB_LEN` is ever raised
+        without a matching `_PRESTRIP_WINDOW` increase, the module-level
+        assert in jenkins.py fails fast; this test additionally proves the
+        end-to-end behavior the invariant is meant to guarantee.
+
+        Distinct from test_console_tail_blob_straddling_naive_slice_boundary_is_fully_stripped
+        above (F7), which exercises the final 5000-char OUTPUT slice -- this
+        test exercises the 20000-char WINDOW-START cutoff instead."""
+        from src.adapters.jenkins import _CONSOLE_TAIL_SIZE, _MAX_BLOB_LEN, _PRESTRIP_WINDOW
+
+        assert _MAX_BLOB_LEN + _CONSOLE_TAIL_SIZE <= _PRESTRIP_WINDOW, (
+            "invariant broken: _MAX_BLOB_LEN grew without a matching "
+            "_PRESTRIP_WINDOW increase -- the fixture below no longer "
+            "exercises the worst case this test is meant to guard"
+        )
+
+        with patch.dict("os.environ", _env_vars()):
+            adapter = _make_test_adapter()
+
+            blob = "ha:////" + "B" * _MAX_BLOB_LEN + "=="
+            marker = "\nreal failure output line\n"
+            # Trailer is exactly _CONSOLE_TAIL_SIZE chars, with the blob
+            # ending right where the final output slice begins -- the
+            # closest a max-length blob can get to console_tail while still
+            # needing its header to be as far as possible from the end.
+            trailer = ("T" * (_CONSOLE_TAIL_SIZE - len(marker))) + marker
+            filler = "F" * 50000  # simulates the rest of a much larger real log
+            raw = filler + blob + trailer
+
+            header_distance_from_end = len(blob) + len(trailer)
+            assert header_distance_from_end < _PRESTRIP_WINDOW, (
+                "fixture no longer positions the blob header inside the "
+                "pre-strip window -- adjust padding"
+            )
+
+            api_resp = MagicMock()
+            api_resp.status_code = 200
+            api_resp.json.return_value = {"result": "FAILURE", "url": "", "actions": []}
+            tail_resp = MagicMock()
+            tail_resp.status_code = 200
+            tail_resp.content = raw.encode()
+            tail_resp.encoding = "utf-8"
+
+            mock_client = AsyncMock()
+            mock_client.request = AsyncMock(side_effect=[api_resp, tail_resp])
+
+            with patch.object(adapter, "_get_client", new_callable=AsyncMock) as mock_get_client:
+                mock_get_client.return_value = mock_client
+                details = await adapter.get_build_details("gating-job", 100)
+
+            assert details is not None
+            assert "ha:" not in details.console_tail
+            assert "B" not in details.console_tail
             assert "real failure output line" in details.console_tail
 
 
@@ -2632,10 +2703,16 @@ class TestT22StripPipelineAnnotations:
         still catching a reintroduced quadratic regression by a wide margin.
         No ha:////  or [Pipeline] marker is present, so the payload passes
         through unchanged (modulo the trailing .strip()) -- this test is
-        purely a timing guard, not a content-stripping assertion."""
+        purely a timing guard, not a content-stripping assertion.
+
+        Explicit `window=len(payload)` opts this call out of the default
+        _PRESTRIP_WINDOW truncation (added when the window-bound moved inside
+        this function) so all 50000 reps are still actually exercised by the
+        regex engine -- the real production call site (get_build_details)
+        never sees a payload this large without truncating it first anyway."""
         payload = "\x1b[8m" * 50000
         start = time.perf_counter()
-        result = _strip_pipeline_annotations(payload)
+        result = _strip_pipeline_annotations(payload, window=len(payload))
         elapsed = time.perf_counter() - start
         assert elapsed < 2.0, f"took {elapsed:.2f}s -- possible quadratic regression"
         assert result == payload
