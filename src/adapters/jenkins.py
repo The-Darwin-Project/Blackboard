@@ -20,6 +20,8 @@
 #    HTTP call per view, not a fan-out. _record_success/_record_failure called directly.
 # 8. [Design]: No category awareness (smoke/gating/etc.). The adapter polls ALL configured
 #    patterns uniformly. Classification is the Brain's/LLM's job, not the observer's.
+# 9. [Pattern]: Pipeline noise stripping (`_strip_pipeline_annotations`) happens in the Adapter
+#    BEFORE slice to prevent split base64 blobs from leaking to LLM/UI.
 """
 Jenkins CI platform adapter -- poll jobs, inspect job run state, get build details, restart.
 
@@ -32,10 +34,30 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+import re
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_PIPELINE_ANNOTATION_RE = re.compile(
+    r"(?:\x1b\[[0-9;]*m)*ha:////[A-Za-z0-9+/=]+(?:\x1b\[[0-9;]*m)*",
+)
+_PIPELINE_BOUNDARY_RE = re.compile(
+    r"\[Pipeline\]\s*(?://\s*\w+|End of Pipeline|\{|\}|stage).*?(?:\r?\n|$)",
+    re.MULTILINE,
+)
+_BLANK_RUN_RE = re.compile(r"(?:\r?\n){3,}")
+
+
+def _strip_pipeline_annotations(text: str) -> str:
+    """Remove Jenkins pipeline flow annotations and step boundary markers."""
+    if not text:
+        return text
+    text = _PIPELINE_ANNOTATION_RE.sub("", text)
+    text = _PIPELINE_BOUNDARY_RE.sub("", text)
+    text = _BLANK_RUN_RE.sub("\n\n", text)
+    return text.strip()
 
 
 @dataclass
@@ -343,7 +365,7 @@ class JenkinsAdapter:
                 count_failures=False,
             )
             if tail_resp and tail_resp.status_code == 200:
-                text = tail_resp.text
+                text = _strip_pipeline_annotations(tail_resp.text)
                 console_tail = text[-5000:] if len(text) > 5000 else text
 
         return BuildDetails(
