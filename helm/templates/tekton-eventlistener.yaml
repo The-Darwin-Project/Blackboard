@@ -30,7 +30,7 @@ spec:
     - apiVersion: tekton.dev/v1
       kind: TaskRun
       metadata:
-        generateName: darwin-oncall-
+        generateName: darwin-oncall-$(tt.params.event_id)-
         namespace: {{ .Release.Namespace }}
         labels:
           {{- include "darwin.ephemeralLabels" . | nindent 10 }}
