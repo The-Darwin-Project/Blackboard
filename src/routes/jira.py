@@ -16,6 +16,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..dependencies import get_blackboard
+from ..utils.adf import adf_to_markdown
 from ..state.blackboard import BlackboardState
 from ..agents.headhunter_jira import HeadhunterJira
 
@@ -77,39 +78,32 @@ async def list_missions():
 
     results = []
     for issue in data.get("issues", []):
-        fields = issue.get("fields", {})
-        status_name = fields.get("status", {}).get("name", "")
-        comments = fields.get("comment", {}).get("comments", [])
+        try:
+            fields = issue.get("fields", {})
+            status_name = fields.get("status", {}).get("name", "")
+            comments = fields.get("comment", {}).get("comments", [])
 
-        darwin_comments = [c for c in comments if c.get("author", {}).get("accountId") == bot_account_id] if bot_account_id else []
-        latest_analysis = darwin_comments[-1].get("body", "") if darwin_comments else None
+            darwin_comments = [c for c in comments if c.get("author", {}).get("accountId") == bot_account_id] if bot_account_id else []
+            latest_analysis = darwin_comments[-1].get("body", "") if darwin_comments else None
 
-        # Convert Atlassian Document Format to plain text if needed
-        if latest_analysis and isinstance(latest_analysis, dict):
-            latest_analysis = _adf_to_text(latest_analysis)
+            # Convert Atlassian Document Format to plain text if needed
+            if latest_analysis and isinstance(latest_analysis, dict):
+                latest_analysis = adf_to_markdown(latest_analysis)
 
-        results.append({
-            "key": issue["key"],
-            "summary": fields.get("summary", ""),
-            "status": status_name,
-            "priority": fields.get("priority", {}).get("name", "Medium"),
-            "labels": fields.get("labels", []),
-            "phase": _infer_phase(status_name, bool(darwin_comments)),
-            "issue_url": f"{base_url}/browse/{issue['key']}",
-            "analysis": latest_analysis,
-        })
+            results.append({
+                "key": issue["key"],
+                "summary": fields.get("summary", ""),
+                "status": status_name,
+                "priority": fields.get("priority", {}).get("name", "Medium"),
+                "labels": fields.get("labels", []),
+                "phase": _infer_phase(status_name, bool(darwin_comments)),
+                "issue_url": f"{base_url}/browse/{issue['key']}",
+                "analysis": latest_analysis,
+            })
+        except Exception:
+            logger.exception("Failed to process Jira issue %s", issue.get("key", "<unknown>"))
 
     return results
-
-
-def _adf_to_text(adf: dict) -> str:
-    """Recursively extract text from Atlassian Document Format."""
-    if adf.get("type") == "text":
-        return adf.get("text", "")
-    parts = []
-    for node in adf.get("content", []):
-        parts.append(_adf_to_text(node))
-    return "\n".join(p for p in parts if p)
 
 
 @router.post("/missions/{key}/approve")
