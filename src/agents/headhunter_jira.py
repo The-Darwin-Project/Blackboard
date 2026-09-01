@@ -22,6 +22,8 @@
 #     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
 # 14. [Constraint]: Skill URL 10KB cap -- len(content) > 10240 → cache BUSINESS_ANALYST_SYSTEM_PROMPT
 #     + return None (caller falls back to BUSINESS_ANALYST_SYSTEM_PROMPT, symmetric with GitHub adapter).
+# 15. [Pattern]: Jira ADF descriptions/comments render via shared utils.adf.adf_to_markdown()
+#     to avoid raw json.dumps() payloads in LLM context.
 """
 Headhunter Jira: polls Jira issues assigned to bot with a label filter.
 
@@ -39,6 +41,8 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
+
+from ..utils.adf import adf_to_markdown
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -179,7 +183,7 @@ def format_jira_for_llm(issue: dict) -> str:
     desc = fields.get("description", "")
     if desc:
         if isinstance(desc, dict):
-            desc = json.dumps(desc, indent=2)
+            desc = adf_to_markdown(desc)
         parts.append(f"\n## Description\n\n{desc}")
 
     comments = fields.get("comment", {}).get("comments", [])
@@ -189,7 +193,7 @@ def format_jira_for_llm(issue: dict) -> str:
             author = c.get("author", {}).get("displayName", "Unknown")
             body = c.get("body", "")
             if isinstance(body, dict):
-                body = json.dumps(body, indent=2)
+                body = adf_to_markdown(body)
             parts.append(f"\n**{author}:**\n{body}")
 
     links = fields.get("issuelinks", [])

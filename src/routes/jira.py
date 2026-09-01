@@ -16,6 +16,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..dependencies import get_blackboard
+from ..utils.adf import adf_to_markdown
 from ..state.blackboard import BlackboardState
 from ..agents.headhunter_jira import HeadhunterJira
 
@@ -86,7 +87,7 @@ async def list_missions():
 
         # Convert Atlassian Document Format to plain text if needed
         if latest_analysis and isinstance(latest_analysis, dict):
-            latest_analysis = _adf_to_text(latest_analysis)
+            latest_analysis = adf_to_markdown(latest_analysis)
 
         results.append({
             "key": issue["key"],
@@ -100,16 +101,6 @@ async def list_missions():
         })
 
     return results
-
-
-def _adf_to_text(adf: dict) -> str:
-    """Recursively extract text from Atlassian Document Format."""
-    if adf.get("type") == "text":
-        return adf.get("text", "")
-    parts = []
-    for node in adf.get("content", []):
-        parts.append(_adf_to_text(node))
-    return "\n".join(p for p in parts if p)
 
 
 @router.post("/missions/{key}/approve")

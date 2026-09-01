@@ -3,7 +3,8 @@
 # 1. [Pattern]: Hexagonal adapter -- httpx-based Jira REST API client. No domain logic.
 # 2. [Constraint]: Auth via Basic (email:token). All org-specific values from env vars with empty defaults.
 # 3. [Pattern]: list_incidents() uses 120s in-memory TTL cache to collapse concurrent reads.
-# 4. [Pattern]: _adf_to_text is local (do NOT import from routes -- hexagonal boundary).
+# 4. [Pattern]: _adf_to_text delegates to shared src.utils.adf.adf_to_markdown
+#    (shared utils layer is allowed; still do NOT import from routes -- hexagonal boundary).
 # 5. [Constraint]: create_incident uses marklassian for Markdown→ADF conversion.
 # 6. [Pattern]: Platform stored as Jira label; extracted on read via VALID_PLATFORMS intersection.
 """
@@ -22,19 +23,16 @@ import time
 import httpx
 import marklassian
 
+from ..utils.adf import adf_to_markdown
+
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 120
 
 
 def _adf_to_text(adf: dict) -> str:
-    """Recursively extract text from Atlassian Document Format."""
-    if adf.get("type") == "text":
-        return adf.get("text", "")
-    parts = []
-    for node in adf.get("content", []):
-        parts.append(_adf_to_text(node))
-    return "\n".join(p for p in parts if p)
+    """Recursively extract text from Atlassian Document Format via shared converter."""
+    return adf_to_markdown(adf)
 
 
 class JiraIncidentAdapter:
