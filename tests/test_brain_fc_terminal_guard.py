@@ -153,6 +153,11 @@ def _turns_by_action(brain: Brain, action: str) -> list:
     return turns
 
 
+def _tool_names_from_last_generate_stream(brain: Brain) -> set[str]:
+    tools = brain._adapter.generate_stream.call_args.kwargs["tools"]
+    return {tool["name"] for tool in tools}
+
+
 class TestNonTerminalFCDowngradedToThoughts:
     """Non-terminal FC (e.g. classify_event): pre-FC text must become brain.thoughts, not brain.response."""
 
@@ -246,6 +251,79 @@ class TestTerminalFCStillEmitsResponse:
         brain._emit_executive_pulse.assert_awaited_once_with(
             "evt-cc105cc5", [("tool:brain_response", "tool")]
         )
+
+
+class TestIntermediateToolRailway:
+    @pytest.mark.asyncio
+    async def test_process_with_llm_passes_defer_event_in_intermediate_toolset(self):
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        event = _make_event(source="aligner")
+        brain._extract_context_flags = AsyncMock(return_value={
+            "is_intermediate": True,
+            "brain_has_classified": True,
+            "event_domain": "complicated",
+        })
+
+        await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        assert "defer_event" in _tool_names_from_last_generate_stream(brain)
+
+    @pytest.mark.asyncio
+    async def test_process_with_llm_intermediate_empty_toolset_fallback_includes_defer(self):
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        event = _make_event(source="aligner")
+        brain._extract_context_flags = AsyncMock(return_value={
+            "is_intermediate": True,
+            "brain_has_classified": True,
+            "event_domain": "complicated",
+        })
+
+        with _gate_patch([]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        assert _tool_names_from_last_generate_stream(brain) == {"wait_for_agent", "defer_event"}
+
+    @pytest.mark.asyncio
+    async def test_process_with_llm_empty_toolset_fallback_respects_hard_strip_defer(self):
+        """M4: the empty-toolset recovery fallback must honor HARD_STRIP_DEFER's
+        jarvis/triage policy via the shared predicate, not unconditionally
+        re-inject defer_event. Real build_gate_context runs here (not patched)
+        so the jarvis-source policy is genuinely exercised."""
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        event = _make_event(source="jarvis")
+        brain._extract_context_flags = AsyncMock(return_value={
+            "is_intermediate": True,
+            "brain_has_classified": True,
+            "event_domain": "complicated",
+        })
+
+        with _gate_patch([]):
+            await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        assert _tool_names_from_last_generate_stream(brain) == {"wait_for_agent"}
+
+    @pytest.mark.asyncio
+    async def test_intermediate_tool_leak_guard_uses_shared_constant(self):
+        """M3: the post-gate leak-detector's allow-set must be the same
+        INTERMEDIATE_TOOLS object tool_gates.py exports -- guards against the
+        three call sites (here, _tools_intermediate, empty-toolset fallback)
+        drifting apart via hand-duplicated literals."""
+        from src.agents.tool_gates import INTERMEDIATE_TOOLS
+
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        event = _make_event(source="aligner")
+        brain._extract_context_flags = AsyncMock(return_value={
+            "is_intermediate": True,
+            "brain_has_classified": True,
+            "event_domain": "complicated",
+        })
+        leaked_tool = "select_agent"
+        assert leaked_tool not in INTERMEDIATE_TOOLS
+
+        with _gate_patch(list(INTERMEDIATE_TOOLS) + [leaked_tool]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        assert _tool_names_from_last_generate_stream(brain) == set(INTERMEDIATE_TOOLS)
 
 
 class TestDoubleMessageRegression:

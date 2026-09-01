@@ -1495,7 +1495,12 @@ class Brain:
             )
 
         # === Tool gate evaluation (all gating logic lives in tool_gates.py) ===
-        from .tool_gates import evaluate_gates, build_gate_context
+        from .tool_gates import (
+            INTERMEDIATE_TOOLS,
+            build_gate_context,
+            evaluate_gates,
+            is_defer_event_available,
+        )
 
         brain_phase = _resolve_phase(event.brain_phase)
         gate_ctx = build_gate_context(
@@ -1515,10 +1520,14 @@ class Brain:
                 f"(phase={brain_phase}, source={event.source})"
             )
             if context_flags.get("is_intermediate"):
-                active_tools = [
-                    t for t in BRAIN_TOOL_SCHEMAS
-                    if t["name"] in {"wait_for_agent"}
-                ]
+                # defer_event availability mirrors evaluate_gates()'s own centralized
+                # WAIT_LOOP escape-valve invariant (via is_defer_event_available) rather
+                # than an unconditional include -- this recovery path must not grant an
+                # escape tool that the gate pipeline itself would deny.
+                fallback_names = {"wait_for_agent"}
+                if is_defer_event_available(gate_ctx):
+                    fallback_names.add("defer_event")
+                active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in fallback_names]
             else:
                 active_tools = [
                     t for t in BRAIN_TOOL_SCHEMAS
@@ -1555,11 +1564,10 @@ class Brain:
 
         # Fail-closed invariant: intermediate events MUST only have communication tools
         if context_flags.get("is_intermediate"):
-            allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
             final_names = {t["name"] for t in active_tools}
-            if not final_names <= allowed:
-                leaked = final_names - allowed
-                active_tools = [t for t in active_tools if t["name"] in allowed]
+            if not final_names <= INTERMEDIATE_TOOLS:
+                leaked = final_names - INTERMEDIATE_TOOLS
+                active_tools = [t for t in active_tools if t["name"] in INTERMEDIATE_TOOLS]
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
 
         terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
@@ -2280,16 +2288,6 @@ class Brain:
         flags["is_defer_wakeup"] = consecutive_defers > 0
         flags["consecutive_defers"] = consecutive_defers
 
-        consecutive_waits = 0
-        for t in reversed(event.conversation):
-            if t.actor == "brain" and t.action == "wait" and t.waitingFor == "agent":
-                consecutive_waits += 1
-            elif t.actor == "brain" and t.action in ("think", "thoughts", "intermediate", "response", "tool_result"):
-                continue
-            else:
-                break
-        flags["consecutive_agent_waits"] = consecutive_waits
-
         from ..models import EventEvidence
         evidence = event.event.evidence
         if isinstance(evidence, EventEvidence):
@@ -2507,18 +2505,6 @@ class Brain:
                 f"**DEFER WAKE-UP ({consecutive}x):** You deferred because: {last_reason}\n"
                 f"{elapsed_str}\n"
                 f"That was {consecutive} defer(s) ago. What changed since then?"
-            )
-
-        if context_flags and context_flags.get("consecutive_agent_waits", 0) >= 2:
-            waits = context_flags["consecutive_agent_waits"]
-            resolved_contents.append(
-                f"**WAIT LOOP DETECTED ({waits}x consecutive wait_for_agent):** "
-                f"No agent has responded since your last {waits} waits. "
-                f"The agent may have finished but returned an unclear result. "
-                f"Use message_agent or ask_agent_for_state to check on the agent's status, "
-                f"or use get_plan_progress to check the plan, "
-                f"or close_event if the task appears complete, "
-                f"or wait_for_user to ask the user what to do."
             )
 
         lesson_block = self._format_recall_block(event)
