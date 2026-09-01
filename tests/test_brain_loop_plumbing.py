@@ -845,6 +845,112 @@ Leaf retrigger accepted by Jenkins.
 
 
 # =========================================================================
+# QE acceptance test (PR #225 Option 2 fix): the cross-wrapper retrigger
+# deadlock must not reproduce end-to-end across brain.py AND
+# handlers_integration.py together, under real Redis NX/EX exclusivity
+# semantics (not an always-succeeds AsyncMock).
+# =========================================================================
+class TestJenkinsRetriggerDeadlockAcceptanceQE:
+    """Independent QE verification, separate from the developer's t15 unit
+    tests. Uses a minimal fake Redis that actually implements SET NX/EX
+    exclusivity, then exercises the real two-function interaction: the
+    agent-reported signal consumer (`Brain._consume_jenkins_retrigger_signal`)
+    followed by FRIDAY's own wrapper-retrigger tool
+    (`handle_retrigger_jenkins_build`) -- proving wrapper-b's cooldown key is
+    genuinely acquirable, not just absent from a mock's call-arg list."""
+
+    class _FakeRedis:
+        """Real SET NX/EX semantics; ignores expiry (unit-test timescale)."""
+
+        def __init__(self):
+            self._store: dict[str, str] = {}
+
+        async def set(self, key, value, nx=False, ex=None):
+            if nx and key in self._store:
+                return False
+            self._store[key] = value
+            return True
+
+        async def get(self, key):
+            return self._store.get(key)
+
+    @staticmethod
+    def _make_retrigger_ctx(fake_redis, failed_jobs):
+        """Minimal ToolContext mock for handle_retrigger_jenkins_build, wired
+        to the same fake Redis instance used by the brain-side consumer."""
+        ctx = AsyncMock()
+        ctx.next_turn_number = AsyncMock(return_value=1)
+        ctx.append_and_broadcast = AsyncMock(return_value=1)
+        ctx.emit_pulse = AsyncMock()
+        ctx.get_slack_channel = MagicMock(return_value=None)
+        ctx.get_agent_instance = MagicMock(return_value=None)  # no Jenkins adapter needed
+
+        event_doc = MagicMock()
+        event_input = MagicMock()
+        evidence = MagicMock()
+        evidence.ci_context = {"failed_jobs": failed_jobs}
+        event_input.evidence = evidence
+        event_doc.event = event_input
+
+        bb = AsyncMock()
+        bb.get_event = AsyncMock(return_value=event_doc)
+        bb.redis = fake_redis
+        ctx.get_blackboard = MagicMock(return_value=bb)
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_deadlock_repro_wrapper_b_not_blocked_after_leaf_retrigger_under_wrapper_a(self):
+        """Repro: wrapper-a and wrapper-b both failing. An agent retriggers a
+        leaf owned by wrapper-a and reports it via `jenkins_retrigger` with
+        `wrapper_job: wrapper-a`. Assert only wrapper-a's cooldown key is set,
+        and that FRIDAY's wrapper-retrigger tool can still acquire wrapper-b's
+        cooldown key afterward (i.e. wrapper-b is not cross-cooled/deadlocked)."""
+        from src.agents.handlers_integration import handle_retrigger_jenkins_build
+
+        fake_redis = self._FakeRedis()
+        failed_jobs = [
+            {"job_name": "wrapper-a", "job_metadata": {"type": "wrapper"}, "build_number": 100},
+            {"job_name": "wrapper-b", "job_metadata": {"type": "wrapper"}, "build_number": 200},
+        ]
+
+        # Step 1: agent-side signal consumption (brain.py), real fake Redis.
+        brain = TestAgentReportedJenkinsRetrigger._make_brain(
+            ci_context={"failed_jobs": failed_jobs}
+        )
+        brain.blackboard.redis = fake_redis
+        result = """---
+reasoning: Retriggered leaf owned by wrapper-a for transient Electron crash
+assessment: Defer for the leaf duration and re-check
+jenkins_retrigger:
+  leaf_job: leaf-under-wrapper-a
+  wrapper_job: wrapper-a
+  build_number: 551
+---
+Leaf retrigger accepted by Jenkins.
+"""
+        await TestAgentReportedJenkinsRetrigger._run_result(brain, "sysadmin", result)
+
+        assert await fake_redis.get(jenkins_retrigger_cooldown_key("wrapper-a")) == "evt-ci"
+        assert await fake_redis.get(jenkins_retrigger_cooldown_key("wrapper-b")) is None
+
+        # Step 2: FRIDAY's own wrapper-retrigger fallback for the UNRELATED
+        # sibling wrapper-b must not be blocked by step 1.
+        ctx_b = self._make_retrigger_ctx(fake_redis, failed_jobs)
+        await handle_retrigger_jenkins_build(ctx_b, "evt-ci", {"job_name": "wrapper-b"}, None)
+        turn_b = ctx_b.append_and_broadcast.call_args[0][1]
+        assert "already retriggered" not in turn_b.thoughts
+        assert "cooldown window" not in turn_b.thoughts
+
+        # Sanity check: the FakeRedis NX simulation is real, so re-retriggering
+        # wrapper-a (already cooled by step 1) IS correctly blocked -- proving
+        # the wrapper-b assertion above isn't vacuously true.
+        ctx_a = self._make_retrigger_ctx(fake_redis, failed_jobs)
+        await handle_retrigger_jenkins_build(ctx_a, "evt-ci", {"job_name": "wrapper-a"}, None)
+        turn_a = ctx_a.append_and_broadcast.call_args[0][1]
+        assert "already retriggered within the cooldown window" in turn_a.thoughts
+
+
+# =========================================================================
 # QE regression (PR #192 HIGH finding follow-up): _agent_error_streak
 # circuit-breaker/backoff transitions in _run_agent_task's error gate.
 # =========================================================================
