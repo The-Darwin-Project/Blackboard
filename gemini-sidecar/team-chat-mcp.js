@@ -19,7 +19,7 @@ const SIDECAR_PORT = parseInt(process.env.SIDECAR_PORT) || 9090;
 const PEER_PORT = parseInt(process.env.PEER_PORT) || 0;
 const IS_TEAM = ROLE === 'developer' || ROLE === 'qe';
 const CAN_RETRIGGER_JENKINS = ROLE === 'sysadmin' || ROLE === 'developer';
-const JENKINS_RETRIGGER_CLAUSE = '\\njenkins_retrigger: (optional — include when you retriggered a Jenkins leaf job)\\n  leaf_job: <exact-jenkins-leaf-job-name>\\n  build_number: <build-number-returned-by-jenkins>';
+const JENKINS_RETRIGGER_CLAUSE = '\\njenkins_retrigger: (optional — include when you retriggered a Jenkins leaf job)\\n  leaf_job: <exact-jenkins-leaf-job-name>\\n  wrapper_job: <exact-jenkins-wrapper-job-name-that-owns-this-leaf>\\n  build_number: <build-number-returned-by-jenkins>';
 const SEND_RESULTS_CONTENT_DESC = `Final report with YAML frontmatter: ---\\nreasoning: "root cause"\\nassessment: "your judgment on the situation and what should happen next"${CAN_RETRIGGER_JENKINS ? JENKINS_RETRIGGER_CLAUSE : ''}\\n---\\n<diagnostic body>`;
 
 const ALL_TOOLS = [

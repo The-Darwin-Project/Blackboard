@@ -261,6 +261,14 @@ describe('Jenkins MCP call-site contracts', () => {
     assert.match(body, /team_send_results[\s\S]*?description:\s*SEND_RESULTS_CONTENT_DESC/);
   });
 
+  it('T-comms-4: JENKINS_RETRIGGER_CLAUSE includes wrapper_job (drives the cooldown consumed by brain.py)', () => {
+    const body = fs.readFileSync(TEAM_CHAT_PATH, 'utf8');
+    const clauseMatch = body.match(/JENKINS_RETRIGGER_CLAUSE\s*=\s*'([^']*)'/);
+    assert.ok(clauseMatch, 'JENKINS_RETRIGGER_CLAUSE must be defined as a single-quoted string');
+    assert.match(clauseMatch[1], /wrapper_job:\s*<exact-jenkins-wrapper-job-name-that-owns-this-leaf>/,
+      'clause must advertise wrapper_job — brain.py::_consume_jenkins_retrigger_signal early-returns without it');
+  });
+
   it('T-comms-3: team_send_results description excludes jenkins_retrigger for non-sysadmin/developer', () => {
     const body = fs.readFileSync(TEAM_CHAT_PATH, 'utf8');
     assert.match(body, /CAN_RETRIGGER_JENKINS\s*=\s*ROLE\s*===\s*'sysadmin'\s*\|\|\s*ROLE\s*===\s*'developer'/);
