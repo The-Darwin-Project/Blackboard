@@ -3806,11 +3806,21 @@ class Brain:
 
         When a SysAdmin/Developer agent reports a leaf-level Jenkins retrigger via
         the `jenkins_retrigger` team_send_results frontmatter field, SET the
-        WRAPPER cooldown key(s) that `handle_retrigger_jenkins_build` consults --
+        WRAPPER cooldown key that `handle_retrigger_jenkins_build` consults --
         not a leaf key, which that handler never checks (it is IDOR-scoped to
         `ci_context.failed_jobs`, which contains wrapper jobs). Without this,
         FRIDAY could wrapper-retrigger the same transient failure an agent
         already reconciled at the leaf level.
+
+        The signal must explicitly name the wrapper via `wrapper_job` -- the
+        data model has no leaf-to-wrapper mapping to recover it from, so only
+        the reporting agent (which acted on that specific failure) knows the
+        correct parent. Cool ONLY that one wrapper, never every wrapper in
+        `ci_context.failed_jobs` -- blanket-cooling unrelated wrappers would
+        block FRIDAY from legitimately wrapper-retriggering an unrelated
+        failure, recreating a deadlock. Older/malformed signals that omit
+        `wrapper_job` degrade safely to "no wrapper cooled" (no cooldown is
+        set) rather than cooling the wrong wrapper.
 
         Structured-signal-only by design: free-text job/build mentions in
         investigation reports must NOT trip this (that would block FRIDAY's own
@@ -3827,28 +3837,17 @@ class Brain:
             return
         if not (isinstance(jr, dict) and jr.get("build_number")):
             return
+        wrapper_job = jr.get("wrapper_job")
+        if not wrapper_job:
+            return
         try:
             bb = self.blackboard
-            # Re-fetch: the reverse-WS `event_doc`/`evt` captured earlier in this
-            # task can be stale by the time the agent result arrives.
-            event_doc = await bb.get_event(event_id)
-            ci_context = None
-            if event_doc and event_doc.event and event_doc.event.evidence:
-                ci_context = getattr(event_doc.event.evidence, "ci_context", None)
-            failed_jobs = ((ci_context or {}).get("failed_jobs") or [])
-            for job in failed_jobs:
-                job_name = job.get("job_name")
-                if not job_name:
-                    continue
-                job_metadata = job.get("job_metadata") or {}
-                if job_metadata.get("type") != "wrapper":
-                    continue
-                await bb.redis.set(
-                    jenkins_retrigger_cooldown_key(job_name),
-                    event_id,
-                    nx=True,
-                    ex=_JENKINS_RETRIGGER_COOLDOWN,
-                )
+            await bb.redis.set(
+                jenkins_retrigger_cooldown_key(wrapper_job),
+                event_id,
+                nx=True,
+                ex=_JENKINS_RETRIGGER_COOLDOWN,
+            )
         except Exception as exc:
             logger.warning(
                 "Jenkins retrigger cooldown SET failed for event %s (agent=%s): %s",

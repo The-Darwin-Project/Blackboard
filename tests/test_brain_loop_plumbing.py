@@ -643,6 +643,7 @@ reasoning: Retriggered leaf job for transient Electron crash
 assessment: Defer for the leaf duration and re-check
 jenkins_retrigger:
   leaf_job: test-kubevirt-console-leaf
+  wrapper_job: test-kubevirt-console-wrapper
   build_number: 551
 ---
 Leaf retrigger accepted by Jenkins.
@@ -653,19 +654,19 @@ Leaf retrigger accepted by Jenkins.
         return {
             "failed_jobs": [
                 {
-                    "job_name": "wrapper-name",
+                    "job_name": "test-kubevirt-console-wrapper",
                     "job_metadata": {"type": "wrapper"},
                 },
             ],
         }
 
     @pytest.mark.asyncio
-    async def test_t15_sysadmin_retrigger_sets_wrapper_cooldowns(self):
+    async def test_t15_sysadmin_retrigger_sets_wrapper_cooldown(self):
         brain = self._make_brain(ci_context=self._ci_context())
         await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
 
         brain.blackboard.redis.set.assert_called_once_with(
-            jenkins_retrigger_cooldown_key("wrapper-name"),
+            jenkins_retrigger_cooldown_key("test-kubevirt-console-wrapper"),
             "evt-ci",
             nx=True,
             ex=_JENKINS_RETRIGGER_COOLDOWN,
@@ -694,6 +695,7 @@ reasoning: Retrigger attempted for transient Electron crash
 assessment: Defer if a real retrigger occurred
 jenkins_retrigger:
   leaf_job: test-kubevirt-console-leaf
+  wrapper_job: test-kubevirt-console-wrapper
 ---
 Leaf retrigger details incomplete.
 """
@@ -702,12 +704,12 @@ Leaf retrigger details incomplete.
         brain.blackboard.redis.set.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_t15d_developer_retrigger_also_sets_wrapper_cooldowns(self):
+    async def test_t15d_developer_retrigger_also_sets_wrapper_cooldown(self):
         brain = self._make_brain(ci_context=self._ci_context())
         await self._run_result(brain, "developer", self._valid_retrigger_result())
 
         brain.blackboard.redis.set.assert_called_once_with(
-            jenkins_retrigger_cooldown_key("wrapper-name"),
+            jenkins_retrigger_cooldown_key("test-kubevirt-console-wrapper"),
             "evt-ci",
             nx=True,
             ex=_JENKINS_RETRIGGER_COOLDOWN,
@@ -716,86 +718,112 @@ Leaf retrigger details incomplete.
         assert _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY not in called_keys
 
     @pytest.mark.asyncio
-    async def test_t15e_empty_failed_jobs_noop(self):
-        brain = self._make_brain(ci_context={"failed_jobs": []})
-        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+    async def test_t15e_missing_wrapper_job_noop(self):
+        """Older/malformed signals that omit `wrapper_job` degrade to "no wrapper
+        cooled" -- never fall back to cooling every wrapper in failed_jobs."""
+        brain = self._make_brain(ci_context=self._ci_context())
+        result = """---
+reasoning: Retriggered leaf job for transient Electron crash
+assessment: Defer for the leaf duration and re-check
+jenkins_retrigger:
+  leaf_job: test-kubevirt-console-leaf
+  build_number: 551
+---
+Leaf retrigger accepted by Jenkins.
+"""
+        await self._run_result(brain, "sysadmin", result)
 
         brain.blackboard.redis.set.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_t15f_multiple_wrapper_entries_set_both_cooldowns(self):
+    async def test_t15f_only_reported_wrapper_cooled_not_sibling_wrapper(self):
+        """Deadlock-prevention acceptance test (Option 2): an event with two
+        unrelated failing wrappers where only one owns the retriggered leaf
+        must cool ONLY that wrapper. The sibling wrapper's key must stay
+        unset so FRIDAY can still legitimately wrapper-retrigger it."""
         brain = self._make_brain(ci_context={
             "failed_jobs": [
                 {"job_name": "wrapper-a", "job_metadata": {"type": "wrapper"}},
                 {"job_name": "wrapper-b", "job_metadata": {"type": "wrapper"}},
             ],
         })
-        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+        result = """---
+reasoning: Retriggered leaf owned by wrapper-a for transient Electron crash
+assessment: Defer for the leaf duration and re-check
+jenkins_retrigger:
+  leaf_job: leaf-under-wrapper-a
+  wrapper_job: wrapper-a
+  build_number: 551
+---
+Leaf retrigger accepted by Jenkins.
+"""
+        await self._run_result(brain, "sysadmin", result)
 
-        brain.blackboard.redis.set.assert_has_awaits([
-            call(
-                jenkins_retrigger_cooldown_key("wrapper-a"),
-                "evt-ci",
-                nx=True,
-                ex=_JENKINS_RETRIGGER_COOLDOWN,
-            ),
-            call(
-                jenkins_retrigger_cooldown_key("wrapper-b"),
-                "evt-ci",
-                nx=True,
-                ex=_JENKINS_RETRIGGER_COOLDOWN,
-            ),
-        ])
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-a"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
         called_keys = [args[0] for args, _kwargs in brain.blackboard.redis.set.await_args_list]
+        assert jenkins_retrigger_cooldown_key("wrapper-b") not in called_keys
         assert _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY not in called_keys
 
     @pytest.mark.asyncio
-    async def test_t15g_non_wrapper_entry_skipped(self):
+    async def test_t15g_blank_wrapper_job_skipped(self):
+        brain = self._make_brain(ci_context=self._ci_context())
+        result = """---
+reasoning: Retriggered leaf job for transient Electron crash
+assessment: Defer for the leaf duration and re-check
+jenkins_retrigger:
+  leaf_job: test-kubevirt-console-leaf
+  wrapper_job: ""
+  build_number: 551
+---
+Leaf retrigger accepted by Jenkins.
+"""
+        await self._run_result(brain, "sysadmin", result)
+
+        brain.blackboard.redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_t15h_wrapper_job_absent_from_failed_jobs_still_cooled(self):
+        """The reported wrapper_job is trusted directly -- it is never
+        cross-checked against ci_context.failed_jobs (no data-model excavation
+        needed for Option 2)."""
         brain = self._make_brain(ci_context={
             "failed_jobs": [
-                {"job_name": "leaf-x", "job_metadata": {"type": "leaf"}},
-                {"job_name": "wrapper-y", "job_metadata": {"type": "wrapper"}},
+                {"job_name": "some-other-wrapper", "job_metadata": {"type": "wrapper"}},
             ],
         })
         await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
 
         brain.blackboard.redis.set.assert_called_once_with(
-            jenkins_retrigger_cooldown_key("wrapper-y"),
+            jenkins_retrigger_cooldown_key("test-kubevirt-console-wrapper"),
             "evt-ci",
             nx=True,
             ex=_JENKINS_RETRIGGER_COOLDOWN,
         )
 
     @pytest.mark.asyncio
-    async def test_t15h_blank_or_missing_job_name_skipped(self):
-        brain = self._make_brain(ci_context={
-            "failed_jobs": [
-                {"job_metadata": {"type": "wrapper"}},
-                {"job_name": "", "job_metadata": {"type": "wrapper"}},
-                {"job_name": "wrapper-z", "job_metadata": {"type": "wrapper"}},
-            ],
-        })
-        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+    async def test_t15i_consume_signal_does_not_refetch_event(self):
+        """Regression: the old implementation re-fetched the event to read
+        ci_context.failed_jobs before looping over wrappers. Option 2 cools
+        directly off the reported wrapper_job, so no event re-fetch is
+        needed at all."""
+        brain = self._make_brain()
+        fm = {
+            "jenkins_retrigger": {
+                "leaf_job": "test-kubevirt-console-leaf",
+                "wrapper_job": "test-kubevirt-console-wrapper",
+                "build_number": 551,
+            }
+        }
+        await brain._consume_jenkins_retrigger_signal("evt-ci", "sysadmin", fm)
 
+        brain.blackboard.get_event.assert_not_awaited()
         brain.blackboard.redis.set.assert_called_once_with(
-            jenkins_retrigger_cooldown_key("wrapper-z"),
-            "evt-ci",
-            nx=True,
-            ex=_JENKINS_RETRIGGER_COOLDOWN,
-        )
-
-    @pytest.mark.asyncio
-    async def test_t15i_job_metadata_none_does_not_abort_loop(self):
-        brain = self._make_brain(ci_context={
-            "failed_jobs": [
-                {"job_name": "wrapper-none", "job_metadata": None},
-                {"job_name": "wrapper-ok", "job_metadata": {"type": "wrapper"}},
-            ],
-        })
-        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
-
-        brain.blackboard.redis.set.assert_called_once_with(
-            jenkins_retrigger_cooldown_key("wrapper-ok"),
+            jenkins_retrigger_cooldown_key("test-kubevirt-console-wrapper"),
             "evt-ci",
             nx=True,
             ex=_JENKINS_RETRIGGER_COOLDOWN,
@@ -803,11 +831,7 @@ Leaf retrigger details incomplete.
 
     @pytest.mark.asyncio
     async def test_t15j_nonfatal_redis_exception_still_writes_terminal_turn(self):
-        brain = self._make_brain(ci_context={
-            "failed_jobs": [
-                {"job_name": "wrapper-a", "job_metadata": {"type": "wrapper"}},
-            ],
-        })
+        brain = self._make_brain(ci_context=self._ci_context())
         brain.blackboard.redis.set.side_effect = RuntimeError("redis down")
         await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
 
