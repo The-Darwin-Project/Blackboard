@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -627,6 +628,35 @@ class TestT14SkillContent:
         body_lower = skill_body.lower()
         assert "hour" in body_lower or "6" in skill_body or "9" in skill_body, \
             "Skill must mention job duration (6-9 hours)"
+
+    def test_retry_section_mentions_wrapper_cost(self, skill_body):
+        section_match = re.search(
+            r"##\s*Retry Before Investigation(.*?)(?=\n##\s|\Z)",
+            skill_body,
+            re.DOTALL,
+        )
+        assert section_match, "Retry Before Investigation section not found"
+        section = section_match.group(1).lower()
+        assert "wrapper" in section, \
+            "Retry Before Investigation must preserve wrapper cost/topology guidance"
+
+    def test_confirmed_transient_retrigger_present(self, skill_body):
+        section_match = re.search(
+            r"##\s*Retry Before Investigation(.*?)(?=\n##\s|\Z)",
+            skill_body,
+            re.DOTALL,
+        )
+        assert section_match, "Retry Before Investigation section not found"
+        section = section_match.group(1).lower()
+        assert "investigat" in section
+        assert "confirmed" in section
+        assert "transient" in section
+        assert "retrigger" in section or "retry" in section
+
+    def test_deadlock_phrases_removed(self, skill_body):
+        body_lower = skill_body.lower()
+        assert "rarely justifies" not in body_lower
+        assert "single flaky lane" not in body_lower
 
 
 # =========================================================================

@@ -70,6 +70,31 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
 
+## Jenkins CI Retrigger
+
+You may retrigger a Jenkins CI job when FRIDAY dispatches you with a specific
+leaf job name and the investigation evidence confirms the root cause is
+transient infrastructure -- not a code defect, test regression, or persistent
+failure signature. One retrigger per leaf job per investigation.
+
+Do not retrigger wrapper jobs -- wrapper-level retrigger is FRIDAY's own tool,
+scoped to jobs in the event's failed-jobs context.
+
+Report every leaf retrigger on your **final** `team_send_results` using the
+structured `jenkins_retrigger` frontmatter field, alongside `reasoning`:
+
+```yaml
+---
+reasoning: Retriggered leaf job for transient Electron crash
+jenkins_retrigger:
+  leaf_job: <exact-jenkins-leaf-job-name>
+  build_number: <build-number-returned-by-jenkins>
+---
+```
+
+Include this field so FRIDAY knows a retrigger already happened. Without it,
+she may duplicate the retrigger at the wrapper level.
+
 ## Automatic Blackboard Updates
 
 The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.

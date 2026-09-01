@@ -70,16 +70,21 @@ directly retest the job. The mechanism is scoped to jobs already present in this
 failed_jobs context (cannot retrigger arbitrary Jenkins jobs) and rate-limited per job
 to one retrigger per cooldown window. The window length is deployment-configured and
 can change without notice -- if a retrigger is rejected as still-cooling-down, trust
-the tool's response over any duration you recall, and don't assume a repeat failure
-after that rejection is abuse rather than a genuinely new issue.
+the tool's response over any duration you recall, and treat a subsequent failure
+after that rejection as a genuine new issue evaluated on its own terms.
 
 Retriggering a wrapper job re-runs all lanes within it (see Wrapper vs Leaf Topology
 above), consuming significant CI compute across every lane for however many hours the
-full run takes — not just the one lane that failed. Confirm the root cause is transient
-infrastructure, not a test regression, before retriggering a wrapper; a single flaky
-lane rarely justifies re-running the whole wrapper, and the scope often warrants deeper
-investigation first.
+full run takes — not just the one lane that failed. That cost makes a leaf-level retry
+the preferred path whenever one is available: an agent with CI write access can
+retrigger the specific leaf when dispatched for that purpose, and once it reports the retrigger together with
+the new build number, the correct reconciliation is deferral for that leaf's expected
+duration rather than a second retrigger at the wrapper level. When no leaf-level
+alternative exists, confirming the root cause is transient infrastructure is what makes
+the wrapper retrigger the correct reconciliation action — the wrapper's higher cost is
+context for sequencing, not a reason to withhold the retrigger once transience is
+confirmed.
 
-Do not retrigger when the failure evidence indicates a code defect, a test regression,
-or a persistent infrastructure problem (repeated identical failures across multiple
-builds). In those cases, escalate to the owning team or dispatch investigation.
+When the failure evidence indicates a code defect, a test regression, or a persistent
+infrastructure problem (repeated identical failures across multiple builds), escalate
+to the owning team or dispatch investigation.

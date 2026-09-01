@@ -14,7 +14,7 @@ Tests:
 - Guard 1 precedence over Guard 7 (T-7)
 """
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -23,6 +23,11 @@ from src.agents.brain import (
     _BrainToolContext,
     MAX_AGENT_ERROR_STREAK,
     AGENT_ERROR_BACKOFF_SECONDS,
+)
+from src.agents.handlers_integration import (
+    _JENKINS_RETRIGGER_COOLDOWN,
+    _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY,
+    jenkins_retrigger_cooldown_key,
 )
 from src.agents.handlers_state import handle_wait_for_agent
 from src.models import (
@@ -42,9 +47,14 @@ def _make_event(
     service: str = "test-svc",
     conversation: list | None = None,
     brain_phase: str | None = "triage",
+    ci_context: dict | None = None,
 ) -> EventDocument:
     evidence = EventEvidence(
-        display_text="test", source_type=source, domain="complicated", severity="info",
+        display_text="test",
+        source_type=source,
+        domain="complicated",
+        severity="info",
+        ci_context=ci_context,
     )
     event_input = EventInput(
         reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z",
@@ -570,6 +580,243 @@ class TestErrorResultTurnType:
         )
 
         # stamp_event IS called on success
+        brain.blackboard.stamp_event.assert_called_once()
+
+
+# =========================================================================
+# T-15 series: agent-reported Jenkins leaf retrigger sets wrapper cooldowns
+# =========================================================================
+class TestAgentReportedJenkinsRetrigger:
+    @staticmethod
+    def _make_brain(ci_context: dict | None = None) -> Brain:
+        bb = AsyncMock()
+        bb.get_event = AsyncMock(return_value=_make_event(
+            event_id="evt-ci",
+            source="aligner",
+            ci_context=ci_context,
+            conversation=[],
+        ))
+        bb.stamp_event = AsyncMock()
+        bb.mark_turn_status = AsyncMock()
+        bb.get_service = AsyncMock(return_value=None)
+        bb.redis = MagicMock()
+        bb.redis.set = AsyncMock(return_value=True)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._ws_mode = "reverse"
+        brain._append_and_broadcast = AsyncMock(return_value=5)
+        brain._broadcast = AsyncMock()
+        brain._broadcast_turn = AsyncMock()
+        brain._broadcast_status_update = AsyncMock()
+        brain._next_turn_number = AsyncMock(return_value=2)
+        brain._is_event_closed = AsyncMock(return_value=False)
+        brain._emit_executive_pulse = AsyncMock()
+        brain.write_event_to_volume = AsyncMock()
+        brain._scheduler = MagicMock()
+        brain._scheduler.enqueue = MagicMock()
+        brain._dispatch_semaphore = None
+        brain._ephemeral_provisioner = None
+        return brain
+
+    @staticmethod
+    async def _run_result(brain: Brain, agent_name: str, result_str: str) -> None:
+        mock_registry = AsyncMock()
+        mock_registry.get_available = AsyncMock(return_value=None)
+        mock_bridge = MagicMock()
+        with (
+            patch("src.dependencies.get_registry_and_bridge", return_value=(mock_registry, mock_bridge)),
+            patch("src.agents.brain.dispatch_to_agent", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            mock_dispatch.return_value = (result_str, "session-123")
+            await brain._run_agent_task(
+                event_id="evt-ci",
+                agent_name=agent_name,
+                agent=None,
+                task="Investigate and report",
+                event_md_path="/tmp/evt.md",
+            )
+
+    @staticmethod
+    def _valid_retrigger_result() -> str:
+        return """---
+reasoning: Retriggered leaf job for transient Electron crash
+assessment: Defer for the leaf duration and re-check
+jenkins_retrigger:
+  leaf_job: test-kubevirt-console-leaf
+  build_number: 551
+---
+Leaf retrigger accepted by Jenkins.
+"""
+
+    @staticmethod
+    def _ci_context() -> dict:
+        return {
+            "failed_jobs": [
+                {
+                    "job_name": "wrapper-name",
+                    "job_metadata": {"type": "wrapper"},
+                },
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_t15_sysadmin_retrigger_sets_wrapper_cooldowns(self):
+        brain = self._make_brain(ci_context=self._ci_context())
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-name"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
+        called_keys = [args[0] for args, _kwargs in brain.blackboard.redis.set.await_args_list]
+        assert _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY not in called_keys
+
+    @pytest.mark.asyncio
+    async def test_t15b_explorer_report_does_not_set_cooldown(self):
+        brain = self._make_brain(ci_context=self._ci_context())
+        result = """---
+reasoning: Investigated transient-looking failure
+assessment: Evidence suggests a leaf retry could help
+---
+Leaf job test-kubevirt-console-leaf is flaky; last build was #551.
+"""
+        await self._run_result(brain, "explorer", result)
+
+        brain.blackboard.redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_t15c_malformed_retrigger_missing_build_number_noop(self):
+        brain = self._make_brain(ci_context=self._ci_context())
+        result = """---
+reasoning: Retrigger attempted for transient Electron crash
+assessment: Defer if a real retrigger occurred
+jenkins_retrigger:
+  leaf_job: test-kubevirt-console-leaf
+---
+Leaf retrigger details incomplete.
+"""
+        await self._run_result(brain, "sysadmin", result)
+
+        brain.blackboard.redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_t15d_developer_retrigger_also_sets_wrapper_cooldowns(self):
+        brain = self._make_brain(ci_context=self._ci_context())
+        await self._run_result(brain, "developer", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-name"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
+        called_keys = [args[0] for args, _kwargs in brain.blackboard.redis.set.await_args_list]
+        assert _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY not in called_keys
+
+    @pytest.mark.asyncio
+    async def test_t15e_empty_failed_jobs_noop(self):
+        brain = self._make_brain(ci_context={"failed_jobs": []})
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_t15f_multiple_wrapper_entries_set_both_cooldowns(self):
+        brain = self._make_brain(ci_context={
+            "failed_jobs": [
+                {"job_name": "wrapper-a", "job_metadata": {"type": "wrapper"}},
+                {"job_name": "wrapper-b", "job_metadata": {"type": "wrapper"}},
+            ],
+        })
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_has_awaits([
+            call(
+                jenkins_retrigger_cooldown_key("wrapper-a"),
+                "evt-ci",
+                nx=True,
+                ex=_JENKINS_RETRIGGER_COOLDOWN,
+            ),
+            call(
+                jenkins_retrigger_cooldown_key("wrapper-b"),
+                "evt-ci",
+                nx=True,
+                ex=_JENKINS_RETRIGGER_COOLDOWN,
+            ),
+        ])
+        called_keys = [args[0] for args, _kwargs in brain.blackboard.redis.set.await_args_list]
+        assert _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY not in called_keys
+
+    @pytest.mark.asyncio
+    async def test_t15g_non_wrapper_entry_skipped(self):
+        brain = self._make_brain(ci_context={
+            "failed_jobs": [
+                {"job_name": "leaf-x", "job_metadata": {"type": "leaf"}},
+                {"job_name": "wrapper-y", "job_metadata": {"type": "wrapper"}},
+            ],
+        })
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-y"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t15h_blank_or_missing_job_name_skipped(self):
+        brain = self._make_brain(ci_context={
+            "failed_jobs": [
+                {"job_metadata": {"type": "wrapper"}},
+                {"job_name": "", "job_metadata": {"type": "wrapper"}},
+                {"job_name": "wrapper-z", "job_metadata": {"type": "wrapper"}},
+            ],
+        })
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-z"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t15i_job_metadata_none_does_not_abort_loop(self):
+        brain = self._make_brain(ci_context={
+            "failed_jobs": [
+                {"job_name": "wrapper-none", "job_metadata": None},
+                {"job_name": "wrapper-ok", "job_metadata": {"type": "wrapper"}},
+            ],
+        })
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        brain.blackboard.redis.set.assert_called_once_with(
+            jenkins_retrigger_cooldown_key("wrapper-ok"),
+            "evt-ci",
+            nx=True,
+            ex=_JENKINS_RETRIGGER_COOLDOWN,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t15j_nonfatal_redis_exception_still_writes_terminal_turn(self):
+        brain = self._make_brain(ci_context={
+            "failed_jobs": [
+                {"job_name": "wrapper-a", "job_metadata": {"type": "wrapper"}},
+            ],
+        })
+        brain.blackboard.redis.set.side_effect = RuntimeError("redis down")
+        await self._run_result(brain, "sysadmin", self._valid_retrigger_result())
+
+        written_turns = [
+            call.args[1] for call in brain._append_and_broadcast.call_args_list
+            if hasattr(call.args[1], "action")
+        ]
+        execute_turns = [t for t in written_turns if t.action == "execute"]
+        assert len(execute_turns) == 1
         brain.blackboard.stamp_event.assert_called_once()
 
 

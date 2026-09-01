@@ -26,6 +26,8 @@ const {
   setupRegistryCredentials,
   setupRemoteK8sMCPs,
   GITLAB_HOST,
+  hasJenkinsCredentials,
+  setupJenkinsMCP,
 } = require('./credentials');
 const state = require('./state');
 const { DEFAULT_WORK_DIR } = require('./config');
@@ -99,6 +101,10 @@ function setupWSServer(wss) {
 
         // Configure ArgoCD MCP server (session API -> JWT per-task)
         await setupArgoCDMCP();
+
+        if (hasJenkinsCredentials() && ['sysadmin', 'developer'].includes(role)) {
+          await setupJenkinsMCP();
+        }
 
         // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
         await setupCLILogins();

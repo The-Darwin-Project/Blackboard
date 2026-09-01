@@ -1165,6 +1165,11 @@ _JENKINS_WRAPPER_RETRIGGER_LOCK_KEY = "darwin:jenkins:retrigger:wrapper:global"
 _NOOP_COOLDOWN_MARKER = ":observed-running"
 
 
+def jenkins_retrigger_cooldown_key(job_name: str) -> str:
+    """Canonical Redis key for a per-job Jenkins retrigger cooldown."""
+    return f"darwin:jenkins:retrigger:{job_name}"
+
+
 async def handle_retrigger_jenkins_build(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -1194,7 +1199,7 @@ async def handle_retrigger_jenkins_build(
                     f"Available: {available}. Retrigger rejected (scope check)."
                 )
             else:
-                cooldown_key = f"darwin:jenkins:retrigger:{job_name}"
+                cooldown_key = jenkins_retrigger_cooldown_key(job_name)
                 acquired = await bb.redis.set(
                     cooldown_key, event_id, nx=True, ex=_JENKINS_RETRIGGER_COOLDOWN
                 )

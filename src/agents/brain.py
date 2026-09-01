@@ -286,6 +286,18 @@ import src.agents.handlers_integration  # noqa: F401
 import src.agents.handlers_state  # noqa: F401
 import src.agents.handlers_dispatch  # noqa: F401
 
+# Named (non-side-effect) import: cooldown/lock constants consumed directly by
+# _consume_jenkins_retrigger_signal(). The `# noqa: F401` imports above only
+# register HANDLER_REGISTRY entries -- they do not bind these names.
+from src.agents.handlers_integration import (
+    _JENKINS_RETRIGGER_COOLDOWN,
+    jenkins_retrigger_cooldown_key,
+)
+
+# Actors permitted to emit a `jenkins_retrigger` team_send_results signal.
+# Mirrors dispatch.py's lowercase agent-name dictionary (`AGENT_VOLUME_PATHS`).
+_JENKINS_RETRIGGER_ACTORS = frozenset({"sysadmin", "developer"})
+
 # =============================================================================
 # Brain System Prompt - THIS IS THE DECISION ENGINE
 # =============================================================================
@@ -3789,6 +3801,60 @@ class Brain:
         )
         await self._reenqueue_if_open(event_id)
 
+    async def _consume_jenkins_retrigger_signal(self, event_id: str, agent_name: str, fm: dict) -> None:
+        """Structural double-retrigger guard (Step 4b of ci-gating-retrigger plan).
+
+        When a SysAdmin/Developer agent reports a leaf-level Jenkins retrigger via
+        the `jenkins_retrigger` team_send_results frontmatter field, SET the
+        WRAPPER cooldown key(s) that `handle_retrigger_jenkins_build` consults --
+        not a leaf key, which that handler never checks (it is IDOR-scoped to
+        `ci_context.failed_jobs`, which contains wrapper jobs). Without this,
+        FRIDAY could wrapper-retrigger the same transient failure an agent
+        already reconciled at the leaf level.
+
+        Structured-signal-only by design: free-text job/build mentions in
+        investigation reports must NOT trip this (that would block FRIDAY's own
+        wrapper fallback for the full cooldown window on an investigation, not an
+        actual retrigger -- recreating the original deadlock). The `build_number`
+        presence guard hardens against malformed/empty signals consuming a
+        cooldown window for nothing.
+
+        Informational side-effect only -- never raises. A Redis blip here must
+        never abort the agent result turn (the primary operation above it).
+        """
+        jr = fm.get("jenkins_retrigger")
+        if agent_name not in _JENKINS_RETRIGGER_ACTORS:
+            return
+        if not (isinstance(jr, dict) and jr.get("build_number")):
+            return
+        try:
+            bb = self.blackboard
+            # Re-fetch: the reverse-WS `event_doc`/`evt` captured earlier in this
+            # task can be stale by the time the agent result arrives.
+            event_doc = await bb.get_event(event_id)
+            ci_context = None
+            if event_doc and event_doc.event and event_doc.event.evidence:
+                ci_context = getattr(event_doc.event.evidence, "ci_context", None)
+            failed_jobs = ((ci_context or {}).get("failed_jobs") or [])
+            for job in failed_jobs:
+                job_name = job.get("job_name")
+                if not job_name:
+                    continue
+                job_metadata = job.get("job_metadata") or {}
+                if job_metadata.get("type") != "wrapper":
+                    continue
+                await bb.redis.set(
+                    jenkins_retrigger_cooldown_key(job_name),
+                    event_id,
+                    nx=True,
+                    ex=_JENKINS_RETRIGGER_COOLDOWN,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Jenkins retrigger cooldown SET failed for event %s (agent=%s): %s",
+                event_id, agent_name, exc,
+            )
+
     async def _run_agent_task(
         self,
         event_id: str,
@@ -4269,6 +4335,12 @@ class Brain:
                 assessment = fm.get("assessment")
                 if assessment and not isinstance(assessment, str):
                     assessment = str(assessment)
+                # CRITICAL: consume jenkins_retrigger BEFORE the `if not reasoning`
+                # wipe below. A missing `reasoning` field (test fixtures may omit
+                # it; MCP production usage always includes it) would otherwise
+                # discard the entire `fm` dict, including jenkins_retrigger.
+                if fm.get("jenkins_retrigger") is not None:
+                    await self._consume_jenkins_retrigger_signal(event_id, agent_name, fm)
                 if not reasoning:
                     body, plan_steps, fm = None, None, {}
                     reasoning = None

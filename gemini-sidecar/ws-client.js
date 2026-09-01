@@ -20,6 +20,7 @@ const {
   hasGitHubCredentials, discoverAndGenerateTokens, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
   setupArgoCDMCP, setupCLILogins, setupRemoteK8sMCPs, setupRegistryCredentials, GITLAB_HOST,
+  hasJenkinsCredentials, setupJenkinsMCP,
 } = require('./credentials');
 const state = require('./state');
 const {
@@ -210,6 +211,9 @@ async function handleTask(ws, msg) {
   }
   await setupArgoCDMCP();
   sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'ArgoCD MCP configured' });
+  if (hasJenkinsCredentials() && ['sysadmin', 'developer'].includes(role)) {
+    await setupJenkinsMCP();
+  }
   await setupCLILogins();
   setupRemoteK8sMCPs();
   setupRegistryCredentials();

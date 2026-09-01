@@ -119,6 +119,23 @@ RUN npm install -g kubernetes-mcp-server@latest && \
     ln -sf "$(npm prefix -g)/bin/kubernetes-mcp-server" /usr/local/bin/kubernetes-mcp-server && \
     kubernetes-mcp-server --help 2>&1 | head -1 || echo "kubernetes-mcp-server installed"
 
+# Jenkins MCP server (CI job retrigger + status for SysAdmin/Developer sidecars)
+RUN npm install -g @kud/mcp-jenkins@latest && \
+    ln -sf "$(npm prefix -g)/bin/mcp-jenkins" /usr/local/bin/mcp-jenkins && \
+    mcp-jenkins --help 2>&1 | head -1 || echo "mcp-jenkins installed"
+
+# Verify @kud/mcp-jenkins@latest still honors the env/tool-name contract this
+# sidecar depends on (MCP_JENKINS_ALLOW_TOOLS + the 3 allowed tool names). This
+# check MUST hard-fail the build -- a soft `|| echo` here would let an upstream
+# contract change ship silently unverified.
+RUN JENKINS_MCP_DIST="$(npm prefix -g)/lib/node_modules/@kud/mcp-jenkins/dist" && \
+    grep -rq "ALLOW_TOOLS" "$JENKINS_MCP_DIST" && \
+    grep -rq "jenkins_trigger_build" "$JENKINS_MCP_DIST" && \
+    grep -rq "jenkins_get_build_status" "$JENKINS_MCP_DIST" && \
+    grep -rq "jenkins_get_recent_builds" "$JENKINS_MCP_DIST" && \
+    echo "mcp-jenkins contract verified" || \
+    (echo "FATAL: @kud/mcp-jenkins@latest no longer matches expected ALLOW_TOOLS/tool-name contract — build must not proceed" && exit 1)
+
 # Playwright MCP server (headless browser automation via accessibility snapshots)
 # Agents can navigate, click, fill forms, take screenshots, monitor network -- no vision model needed
 # PLAYWRIGHT_BROWSERS_PATH: shared location so chromium installed by root is found by non-root USER 1001

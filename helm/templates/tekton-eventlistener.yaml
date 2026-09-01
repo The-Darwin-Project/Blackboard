@@ -125,6 +125,12 @@ spec:
                 - name: KARGO_INSECURE
                   value: "true"
                 {{- end }}
+                {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                - name: JENKINS_URL
+                  value: "{{ .Values.jenkinsObserver.jenkins.url }}"
+                - name: JENKINS_INSECURE_TLS
+                  value: "{{ .Values.jenkinsObserver.jenkins.insecureTls }}"
+                {{- end }}
                 {{- include "darwin.skillsCatalogEnv" . | nindent 16 }}
               computeResources:
                 requests:
@@ -157,6 +163,15 @@ spec:
                 {{- if .Values.registry.enabled }}
                 - name: registry-secret
                   mountPath: /secrets/registry
+                  readOnly: true
+                {{- end }}
+                {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                # Mounted for ALL ephemeral roles (shared TaskRun step) -- only
+                # sysadmin/developer actually register the MCP (credentials.js
+                # role gate). Explorer/SecurityAnalyst/CodeReviewer get the
+                # files on disk but never call setupJenkinsMCP().
+                - name: jenkins-secret
+                  mountPath: /secrets/jenkins
                   readOnly: true
                 {{- end }}
                 {{- if (.Values.github.existingSecret | trim) }}
@@ -201,6 +216,11 @@ spec:
             - name: kargo-secret
               secret:
                 secretName: {{ .Values.kargo.existingSecret | default (printf "%s-kargo" .Release.Name) }}
+            {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: jenkins-secret
+              secret:
+                secretName: {{ .Values.jenkinsObserver.jenkins.existingSecret | trim | quote }}
             {{- end }}
             {{- if .Values.registry.enabled }}
             - name: registry-secret

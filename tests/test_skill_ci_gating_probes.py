@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 SKILLS_DIR = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
+REPO_ROOT = Path(__file__).parent.parent
 
 # ---------------------------------------------------------------------------
 # Known FRIDAY tool names (from frontmatter `tools:` across all skills).
@@ -74,6 +75,16 @@ def _read_skill_frontmatter(rel_path: str) -> dict:
     return {}
 
 
+def _extract_h2_section(text: str, heading: str) -> str:
+    match = re.search(
+        rf"##\s*{re.escape(heading)}(.*?)(?=\n##\s|\Z)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    assert match, f"Section not found: {heading}"
+    return match.group(1)
+
+
 # =========================================================================
 # T-14: aligner_ci_gating.md probes — still pass after WHY/WHAT rewrite
 # =========================================================================
@@ -123,13 +134,110 @@ class TestT14AfterRewrite:
         """Locks the Fix-1 rewrite: the Retry Before Investigation section must
         distinguish leaf-restart cheapness from wrapper-restart cost, not just
         assert cheapness unconditionally."""
-        section_match = re.search(
-            r"##\s*Retry Before Investigation(.*?)(?=\n##\s|\Z)", skill_body, re.DOTALL
-        )
-        assert section_match, "Retry Before Investigation section not found"
-        section = section_match.group(1)
+        section = _extract_h2_section(skill_body, "Retry Before Investigation")
         assert "wrapper" in section.lower(), \
             "Retry Before Investigation section must mention 'wrapper' cost distinction"
+
+    def test_confirmed_transient_retrigger_present(self, skill_body):
+        section = _extract_h2_section(skill_body, "Retry Before Investigation").lower()
+        assert "investigat" in section
+        assert "confirmed" in section
+        assert "transient" in section
+        assert "retrigger" in section or "retry" in section
+
+    def test_retry_section_keeps_lexical_anchors(self, skill_body):
+        section = _extract_h2_section(skill_body, "Retry Before Investigation").lower()
+        has_restart = "restart" in section or "retry" in section
+        assert has_restart and "before" in section and "escalat" in section and "hour" in section
+
+    def test_deadlock_phrases_removed_from_aligner_skill(self, skill_body):
+        body_lower = skill_body.lower()
+        assert "rarely justifies" not in body_lower
+        assert "single flaky lane" not in body_lower
+
+
+class TestCiGatingRetriggerSkillContracts:
+    @pytest.fixture(scope="class")
+    def aligner_text(self):
+        return (SKILLS_DIR / "source" / "aligner_ci_gating.md").read_text()
+
+    @pytest.fixture(scope="class")
+    def env_text(self):
+        path = SKILLS_DIR / "gated" / "ci-gating-environment.md"
+        assert path.exists(), "gated/ci-gating-environment.md must exist"
+        return path.read_text()
+
+    @pytest.fixture(scope="class")
+    def env_body(self, env_text):
+        return _strip_frontmatter(env_text)
+
+    def test_t3_agent_leaf_retrigger_and_deferral(self, env_body):
+        section = _extract_h2_section(env_body, "Retriggering Transient Failures").lower()
+        assert "agent" in section
+        assert "leaf" in section or "lane" in section
+        assert "retrigger" in section
+        assert "defer" in section
+
+    def test_t4_no_literal_tool_name_in_retrigger_bodies(self, aligner_text, env_body):
+        assert "retrigger_jenkins_build" not in _strip_frontmatter(aligner_text)
+        assert "retrigger_jenkins_build" not in env_body
+
+    def test_t5_build_number_deferral_contract_present(self, env_body):
+        section = _extract_h2_section(env_body, "Retriggering Transient Failures").lower()
+        assert "build number" in section
+        assert "defer" in section
+        assert "duration" in section
+
+    def test_t2_wrapper_cost_advisory_present(self, env_body):
+        section = _extract_h2_section(env_body, "Retriggering Transient Failures").lower()
+        assert "wrapper" in section
+        assert any(term in section for term in ("cost", "higher-cost", "all lanes"))
+
+    def test_deadlock_phrases_removed_from_environment_skill(self, env_body):
+        body_lower = env_body.lower()
+        assert "rarely justifies" not in body_lower
+        assert "single flaky lane" not in body_lower
+
+    def test_t2b_agent_retrigger_deferral_in_post_agent_skill(self):
+        body = _read_skill_body("post-agent/agent-recommendations.md").lower()
+        assert "agent" in body
+        assert "retrigger" in body
+        assert "defer" in body
+
+    def test_t4a_coordination_mentions_sysadmin_leaf_path(self):
+        body = _read_skill_body("dispatch/coordination-triage.md").lower()
+        assert "sysadmin" in body
+        assert "leaf" in body
+        assert "retrigger" in body
+        assert "brain-native" in body or "native" in body
+
+    def test_t_comms_1_darwin_comms_mentions_jenkins_retrigger(self):
+        skill = (REPO_ROOT / "gemini-sidecar" / "skills" / "darwin-comms" / "SKILL.md").read_text()
+        assert "jenkins_retrigger" in skill
+
+    def test_t_comms_3_sysadmin_rule_has_yaml_contract(self):
+        rule = (REPO_ROOT / "gemini-sidecar" / "rules" / "sysadmin.md").read_text()
+        assert "jenkins_retrigger" in rule
+        assert "leaf_job" in rule
+        assert "build_number" in rule
+
+    def test_dual_source_jenkins_retrigger_rules_are_synced(self):
+        sidecar_sysadmin = REPO_ROOT / "gemini-sidecar" / "rules" / "sysadmin.md"
+        helm_sysadmin = REPO_ROOT / "helm" / "files" / "sysadmin.md"
+        sidecar_developer = REPO_ROOT / "gemini-sidecar" / "rules" / "developer.md"
+        helm_developer = REPO_ROOT / "helm" / "files" / "developer.md"
+
+        assert sidecar_sysadmin.read_bytes() == helm_sysadmin.read_bytes(), (
+            "gemini-sidecar/rules/sysadmin.md and helm/files/sysadmin.md have drifted"
+        )
+        assert sidecar_developer.read_bytes() == helm_developer.read_bytes(), (
+            "gemini-sidecar/rules/developer.md and helm/files/developer.md have drifted"
+        )
+
+        developer_text = sidecar_developer.read_text()
+        assert "jenkins_retrigger" in developer_text
+        assert "leaf_job" in developer_text
+        assert "build_number" in developer_text
 
 
 # =========================================================================

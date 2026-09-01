@@ -18,6 +18,7 @@ const { startWSClient } = require('./ws-client');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
   setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
+  hasJenkinsCredentials, setupJenkinsMCP,
 } = require('./credentials');
 
 initializeCLISettings();
@@ -71,6 +72,18 @@ server.listen(PORT, '0.0.0.0', () => {
   setupArgoCDMCP().catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup ArgoCD MCP setup failed: ${err.message}`);
   });
+
+  // Local sidecars only — AGENT_ROLE is set at container level (never empty for local).
+  // Ephemeral pods have AGENT_ROLE="" at boot (role arrives per-task via WS message).
+  // This gate intentionally no-ops for ephemeral — ws-client.js/ws-server.js per-task gates cover them.
+  // Uses .catch() pattern (not await) — server.listen callback is not async.
+  const agentRole = process.env.AGENT_ROLE || '';
+  if (agentRole && hasJenkinsCredentials() && ['sysadmin', 'developer'].includes(agentRole)) {
+    setupJenkinsMCP().catch((err) => {
+      console.log(`[${new Date().toISOString()}] Startup Jenkins MCP setup failed: ${err.message}`);
+    });
+  }
+
   setupCLILogins().catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup CLI login failed: ${err.message}`);
   });
