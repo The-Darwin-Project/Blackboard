@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+
 
 def _make_event_stub(
     source: str = "chat",
@@ -58,6 +60,23 @@ def _make_brain_stub(resolved_pairs, kargo_paths=None, kargo_bodies=None):
         _get_graph_recall=AsyncMock(return_value=None),
     )
     return brain
+
+
+def _make_event_doc(conversation: list[ConversationTurn]) -> EventDocument:
+    evidence = EventEvidence(
+        display_text="test",
+        source_type="chat",
+        domain="complicated",
+        severity="info",
+    )
+    return EventDocument(
+        id="evt-test",
+        source="chat",
+        service="test-svc",
+        brain_phase="dispatch",
+        event=EventInput(reason="test", evidence=evidence),
+        conversation=conversation,
+    )
 
 
 class TestWrappingFormat:
@@ -136,16 +155,14 @@ class TestWrappingFormat:
         brain = _make_brain_stub(pairs)
 
         event = _make_event_stub()
-        context_flags = {"consecutive_agent_waits": 3}
 
         from src.agents.brain import Brain
         prompt = await Brain._build_system_prompt(
-            brain, event, ["triage"], context_flags=context_flags
+            brain, event, ["triage"], context_flags={}
         )
 
         assert "\n\n---\n\n" in prompt
         assert '<rule id="always/identity.md">' in prompt
-        assert "WAIT LOOP DETECTED" in prompt
 
     @pytest.mark.asyncio
     async def test_semantic_tag_type_selection(self):
@@ -171,6 +188,35 @@ class TestWrappingFormat:
         assert '</context>' in prompt
         assert '<skill id="dispatch/exec.md">' in prompt
         assert '<skill id="triage/assess.md">' in prompt
+
+
+class TestExtractContextFlags:
+    @pytest.mark.asyncio
+    async def test_no_dead_wait_loop_counter_in_flags(self):
+        """H2 regression: the `consecutive_agent_waits` counter and its dormant/
+        now-contradictory "WAIT LOOP DETECTED" SI block were deleted --
+        count_agent_waits_in_dispatch_epoch() (tool_gates.py) + the evidence-field
+        nudge + the WAIT_LOOP gate fully supersede this mechanism. Guard against
+        reintroduction of the flag."""
+        blackboard = AsyncMock()
+        blackboard.get_active_events = AsyncMock(return_value=[])
+        blackboard.get_recent_closed_for_service = AsyncMock(return_value=[])
+        brain = SimpleNamespace(
+            blackboard=blackboard,
+            _waiting_for_user={},
+            _check_graph_edges=AsyncMock(return_value=False),
+        )
+        conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait", waitingFor="agent:developer"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", thoughts="still waiting"),
+            ConversationTurn(turn=3, actor="brain", action="wait", waitingFor="agent:developer"),
+        ]
+        event = _make_event_doc(conversation)
+
+        from src.agents.brain import Brain
+        flags = await Brain._extract_context_flags(brain, event, is_intermediate=True)
+
+        assert "consecutive_agent_waits" not in flags
 
 
 class TestFailClosed:

@@ -67,10 +67,12 @@ def _make_turn(
     status: str = "evaluated",
     thoughts: str = "test",
     timestamp: float | None = None,
+    waitingFor: str | None = None,
 ) -> ConversationTurn:
     return ConversationTurn(
         turn=turn, actor=actor, action=action, status=status,
         thoughts=thoughts, timestamp=timestamp or time.time(),
+        waitingFor=waitingFor,
     )
 
 
@@ -291,12 +293,17 @@ class TestHandlerPostYieldRace:
     """Post-yield validation in handle_wait_for_agent detects task completion race."""
 
     @staticmethod
-    def _make_handler_brain() -> Brain:
+    def _make_handler_brain(event: EventDocument | None = None) -> Brain:
         bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=event or _make_event())
         brain = Brain(blackboard=bb, agents={})
         brain._append_and_broadcast = AsyncMock(return_value=5)
         brain._broadcast_turn = AsyncMock()
         return brain
+
+    @staticmethod
+    def _latest_wait_turn(brain: Brain) -> ConversationTurn:
+        return brain._append_and_broadcast.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_handler_post_yield_clears_when_task_gone(self):
@@ -331,6 +338,87 @@ class TestHandlerPostYieldRace:
         agent_name, wait_turn = brain._waiting_for_agent["evt-test"]
         assert agent_name == "sysadmin"
         assert wait_turn == 5  # returned by _append_and_broadcast mock
+
+    @pytest.mark.asyncio
+    async def test_handler_adds_nudge_evidence_after_two_prior_epoch_waits(self):
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route"),
+            _make_turn(turn=2, actor="brain", action="wait", waitingFor="agent:sysadmin"),
+            _make_turn(turn=3, actor="brain", action="wait", waitingFor="agent:sysadmin"),
+        ])
+        brain = self._make_handler_brain(event=event)
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        turn = self._latest_wait_turn(brain)
+        assert "Wait #" in turn.evidence
+
+    @pytest.mark.asyncio
+    async def test_handler_first_wait_has_no_nudge_evidence(self):
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route"),
+        ])
+        brain = self._make_handler_brain(event=event)
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        turn = self._latest_wait_turn(brain)
+        assert turn.evidence is None
+
+    @pytest.mark.asyncio
+    async def test_handler_keeps_summary_in_thoughts_and_puts_nudge_in_evidence(self):
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route"),
+            _make_turn(turn=2, actor="brain", action="wait", waitingFor="agent:sysadmin"),
+            _make_turn(turn=3, actor="brain", action="wait", waitingFor="agent:sysadmin"),
+        ])
+        brain = self._make_handler_brain(event=event)
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "doing X"}, None)
+
+        turn = self._latest_wait_turn(brain)
+        assert turn.thoughts == "doing X"
+        assert "Wait #" in turn.evidence
+
+    @pytest.mark.asyncio
+    async def test_handler_second_wait_still_has_no_nudge_evidence(self):
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route"),
+            _make_turn(turn=2, actor="brain", action="wait", waitingFor="agent:sysadmin"),
+        ])
+        brain = self._make_handler_brain(event=event)
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        turn = self._latest_wait_turn(brain)
+        assert turn.evidence is None
+
+    @pytest.mark.asyncio
+    async def test_handler_writes_wait_turn_when_get_event_raises(self):
+        """H1: a Redis blip on the nudge-count read must not abort the critical
+        wait-turn write -- degrade to epoch_waits=0 and proceed unconditionally."""
+        brain = self._make_handler_brain()
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+        brain._active_tasks["evt-test"] = MagicMock(done=MagicMock(return_value=False))
+        brain.blackboard.get_event = AsyncMock(side_effect=RuntimeError("redis blip"))
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        brain._append_and_broadcast.assert_awaited_once()
+        turn = self._latest_wait_turn(brain)
+        assert turn.action == "wait"
+        assert turn.waitingFor == "agent:sysadmin"
+        assert turn.evidence is None
+        assert "evt-test" in brain._waiting_for_agent
 
 
 # =========================================================================

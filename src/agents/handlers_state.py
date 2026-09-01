@@ -8,6 +8,8 @@
 # 6. [Gotcha]: close_event delegates to ctx.close_and_broadcast() which stays on Brain.
 # 7. [Pattern]: close_event has pessimistic re-check — re-fetches event from Redis, calls
 #    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
+# 8. [Pattern]: wait_for_agent shares count_agent_waits_in_dispatch_epoch() (from tool_gates.py)
+#    with the WAIT_LOOP gate -- single source of truth for epoch-scoped wait counting.
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
-from .tool_gates import has_unevaluated_close_blocker
+from .tool_gates import count_agent_waits_in_dispatch_epoch, has_unevaluated_close_blocker
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -153,11 +155,41 @@ async def handle_wait_for_agent(
         return False
     agent_name = ctx.get_active_agent_for_event(event_id) or "unknown"
     summary = args.get("summary", "")
+    bb = ctx.get_blackboard()
+    # Best-effort read purely to compute the nudge count -- a Redis blip here
+    # must not abort the wait-turn write below, which is the critical operation.
+    epoch_waits = 0
+    try:
+        event = await bb.get_event(event_id)
+    except Exception as e:
+        logger.warning(
+            "wait_for_agent: get_event failed for %s while computing nudge count "
+            "(degrading to epoch_waits=0, wait-turn write proceeds unconditionally): %s",
+            event_id, e,
+        )
+        event = None
+    if event:
+        # Epoch-scoped total-wait count (since last brain.route turn) -- immune
+        # to JARVIS/dispatcher turns between waits, unlike a "consecutive" count.
+        # See count_agent_waits_in_dispatch_epoch() in tool_gates.py for the
+        # shared helper also used by the WAIT_LOOP emergency-flange gate.
+        epoch_waits = count_agent_waits_in_dispatch_epoch(event.conversation)
+    nudge_evidence = None
+    if epoch_waits >= 2:
+        nudge_evidence = (
+            f"Wait #{epoch_waits + 1} in this dispatch epoch — the agent has not "
+            f"completed after {epoch_waits} prior waits. If the agent appears stuck "
+            f"or disconnected, deferring frees this event slot."
+        )
     turn = ConversationTurn(
         turn=0,  # placeholder — overwritten atomically by append_turn
         actor="brain",
         action="wait",
-        thoughts=summary,
+        thoughts=summary or f"Waiting for {agent_name} to complete...",
+        # evidence IS included in LLM replay for brain.wait turns (context_parts.py) --
+        # that's the point, it's how this nudge reaches the LLM. It is NOT rendered to
+        # users via Slack, which reads `thoughts`, not `evidence`.
+        evidence=nudge_evidence,
         waitingFor=f"agent:{agent_name}",
     )
     assigned = await ctx.append_and_broadcast(event_id, turn)

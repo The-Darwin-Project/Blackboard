@@ -71,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_28_gates(self):
-        assert len(GATE_REGISTRY) == 28
+    def test_registry_has_29_gates(self):
+        assert len(GATE_REGISTRY) == 29
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -83,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentyfour_strip_mode_gates(self):
+    def test_twentyfive_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 24
+        assert len(strip_gates) == 25
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +111,16 @@ class TestDeferWakeIter0:
 
 
 class TestIntermediate:
+    def test_tools_include_defer_event(self):
+        from src.agents.tool_gates import _tools_intermediate
+        assert "defer_event" in _tools_intermediate(_ctx())
+
+    def test_tools_match_shared_constant(self):
+        """M3: _tools_intermediate() must derive from the shared INTERMEDIATE_TOOLS
+        constant -- not a hand-duplicated literal that can drift."""
+        from src.agents.tool_gates import INTERMEDIATE_TOOLS, _tools_intermediate
+        assert _tools_intermediate(_ctx()) == set(INTERMEDIATE_TOOLS)
+
     def test_strips_to_communication_only(self):
         turns = [_turn("jarvis", "message")]
         ctx = _ctx(
@@ -119,7 +129,7 @@ class TestIntermediate:
         )
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert names == {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+        assert names == {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis", "defer_event"}
 
     def test_diagnosis(self):
         ctx = _ctx(context_flags={"is_intermediate": True, "brain_has_classified": True})
@@ -785,7 +795,238 @@ class TestAllowModeIntersection:
         })
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"} & names
+        assert {
+            "reply_to_agent", "message_agent", "wait_for_agent", "defer_event",
+        } <= names
+
+
+# ---------------------------------------------------------------------------
+# Wait-loop railway tests
+# ---------------------------------------------------------------------------
+
+class TestWaitLoopRailway:
+    def test_defer_wake_iter0_strips_defer_even_when_intermediate(self):
+        ctx = _ctx(
+            is_defer_wake=True,
+            iteration=0,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" not in _names(result)
+
+    def test_count_agent_waits_in_dispatch_epoch_resets_after_route(self):
+        from src.agents.tool_gates import count_agent_waits_in_dispatch_epoch
+        conversation = [
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "route"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+        ]
+        assert count_agent_waits_in_dispatch_epoch(conversation) == 1
+
+    def test_count_agent_waits_ignores_non_string_waiting_for(self):
+        """L6: non-string waitingFor must not raise AttributeError (fail-soft)."""
+        from src.agents.tool_gates import count_agent_waits_in_dispatch_epoch
+        conversation = [
+            _turn("brain", "wait", waitingFor=None),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+        ]
+        assert count_agent_waits_in_dispatch_epoch(conversation) == 1
+
+    def test_wait_loop_predicate_inactive_at_three(self):
+        from src.agents.tool_gates import _pred_wait_loop
+        ctx = _ctx(conversation=[
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+        ])
+        assert _pred_wait_loop(ctx) is False
+
+    def test_wait_loop_predicate_fires_at_four(self):
+        from src.agents.tool_gates import _pred_wait_loop
+        ctx = _ctx(conversation=[
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+            _turn("brain", "wait", waitingFor="agent:developer"),
+        ])
+        assert _pred_wait_loop(ctx) is True
+
+    def test_wait_loop_gate_strips_wait_but_keeps_defer(self):
+        ctx = _ctx(
+            conversation=[
+                _turn("brain", "wait", waitingFor="agent:developer"),
+                _turn("brain", "wait", waitingFor="agent:developer"),
+                _turn("brain", "wait", waitingFor="agent:developer"),
+                _turn("brain", "wait", waitingFor="agent:developer"),
+            ],
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "defer_event" in names
+        assert "wait_for_agent" not in names
+
+    def test_wait_loop_preserves_defer_for_jarvis_source(self):
+        """H3: WAIT_LOOP + HARD_STRIP_DEFER must not jointly strip both escape
+        tools for jarvis-sourced events at 4+ epoch waits."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            event_source="jarvis",
+            conversation=four_waits,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "defer_event" in names
+        assert "wait_for_agent" not in names
+
+    def test_wait_loop_preserves_defer_for_triage_phase(self):
+        """H3: same escape-preservation invariant for brain_phase='triage'."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            brain_phase="triage",
+            conversation=four_waits,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "defer_event" in names
+        assert "wait_for_agent" not in names
+
+    def test_hard_strip_defer_still_applies_without_wait_loop(self):
+        """Regression guard: the WAIT_LOOP escape exception must not weaken
+        HARD_STRIP_DEFER's normal jarvis/triage policy when wait_loop hasn't fired."""
+        ctx = _ctx(event_source="jarvis", conversation=[])
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" not in _names(result)
+
+    def test_is_defer_event_available_matches_gate_behavior(self):
+        """M4: brain.py's empty-toolset fallback reuses this predicate directly --
+        verify it agrees with the gate's own strip decision in both directions."""
+        from src.agents.tool_gates import is_defer_event_available
+
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        escape_ctx = _ctx(event_source="jarvis", conversation=four_waits)
+        assert is_defer_event_available(escape_ctx) is True
+
+        normal_ctx = _ctx(event_source="jarvis", conversation=[])
+        assert is_defer_event_available(normal_ctx) is False
+
+        unaffected_ctx = _ctx(event_source="aligner", brain_phase="dispatch", conversation=[])
+        assert is_defer_event_available(unaffected_ctx) is True
+
+    def test_wait_loop_preserves_defer_against_defer_wake_iter0_jarvis(self):
+        """The WAIT_LOOP escape valve must also survive DEFER_WAKE_ITER0 --
+        a gate entirely independent of HARD_STRIP_DEFER that also strips
+        defer_event. Reproduces: 4+ epoch waits, defer-wake iteration 0,
+        intermediate event, jarvis source."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            event_source="jarvis",
+            conversation=four_waits,
+            is_defer_wake=True,
+            iteration=0,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" in _names(result)
+
+    def test_wait_loop_preserves_defer_against_defer_wake_iter0_triage(self):
+        """Same combination for brain_phase='triage'."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            brain_phase="triage",
+            conversation=four_waits,
+            is_defer_wake=True,
+            iteration=0,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" in _names(result)
+
+    def test_wait_loop_preserves_defer_against_defer_wake_iter0_generic_source(self):
+        """Proves the gap is NOT source/phase-gated: a plain aligner source in
+        dispatch phase (neither jarvis nor triage) still hits DEFER_WAKE_ITER0
+        independently of HARD_STRIP_DEFER, and the escape valve must still hold."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            event_source="aligner",
+            brain_phase="dispatch",
+            conversation=four_waits,
+            is_defer_wake=True,
+            iteration=0,
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" in _names(result)
+
+    def test_defer_wake_iter0_still_strips_without_wait_loop(self):
+        """Regression guard: without _pred_wait_loop being true, DEFER_WAKE_ITER0
+        must still normally strip defer_event -- no weakening of the
+        instant-redefer-loop prevention this gate exists for."""
+        ctx = _ctx(is_defer_wake=True, iteration=0, conversation=[])
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" not in _names(result)
+
+    def test_wait_loop_preserves_defer_against_pre_classification_exclusion(self):
+        """A different exclusion mechanism entirely: PRE_CLASSIFICATION is an
+        allow-mode gate whose allow-set omits defer_event. Proves the
+        centralized invariant covers allow-mode exclusion too, not just
+        strip-mode gates."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            conversation=four_waits,
+            context_flags={"brain_has_classified": False},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" in _names(result)
+
+    def test_wait_loop_preserves_defer_against_domain_casual_exclusion(self):
+        """Same invariant coverage for DOMAIN_CASUAL, the other allow-mode
+        gate whose allow-set omits defer_event."""
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(
+            event_source="chat",
+            conversation=four_waits,
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "defer_event" in _names(result)
+
+    def test_hard_strip_defer_predicate_no_longer_checks_wait_loop(self):
+        """HARD_STRIP_DEFER's predicate no longer special-cases WAIT_LOOP --
+        the escape valve is now the centralized post-loop invariant in
+        evaluate_gates(), so the raw predicate fires unconditionally for
+        jarvis/triage regardless of wait-loop state."""
+        from src.agents.tool_gates import _pred_hard_strip_defer
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        ctx = _ctx(event_source="jarvis", conversation=four_waits)
+        assert _pred_hard_strip_defer(ctx) is True
+
+    def test_is_defer_event_available_agrees_with_evaluate_gates_for_defer_wake_iter0(self):
+        """Proves is_defer_event_available() and evaluate_gates() cannot drift
+        apart for the exact V1 combination, across three source/phase
+        variants (jarvis, triage, plain aligner/dispatch)."""
+        from src.agents.tool_gates import is_defer_event_available
+        four_waits = [_turn("brain", "wait", waitingFor="agent:developer") for _ in range(4)]
+        variants = [
+            {"event_source": "jarvis", "brain_phase": "dispatch"},
+            {"event_source": "aligner", "brain_phase": "triage"},
+            {"event_source": "aligner", "brain_phase": "dispatch"},
+        ]
+        for variant in variants:
+            ctx = _ctx(
+                conversation=four_waits,
+                is_defer_wake=True,
+                iteration=0,
+                context_flags={"is_intermediate": True, "brain_has_classified": True},
+                **variant,
+            )
+            gate_result = "defer_event" in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+            assert gate_result is True, f"evaluate_gates disagrees for {variant}"
+            assert is_defer_event_available(ctx) is True, f"is_defer_event_available disagrees for {variant}"
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,15 @@
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 # 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
 #    user.message turns exist. Prevents closing over unread interventions.
+# 10. [Pattern]: INTERMEDIATE_TOOLS and is_defer_event_available() are exported so brain.py's
+#     empty-toolset fallback and post-gate leak-detector reuse this module's policy instead
+#     of hand-duplicating literals that can drift.
+# 11. [Pattern]: evaluate_gates() enforces a structural WAIT_LOOP escape-valve
+#     invariant AFTER the gate loop -- defer_event is force-restored if any
+#     gate combination stripped it while 4+ epoch waits are recorded.
+#     is_defer_event_available() mirrors this via _single_tool_survives_gates()
+#     so the two functions cannot drift apart, regardless of which gate(s)
+#     stripped defer_event (now or in the future).
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -218,6 +227,36 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
     return False
 
 
+def count_agent_waits_in_dispatch_epoch(conversation: list) -> int:
+    """Count brain.wait turns with waitingFor starting with "agent:" since the
+    last brain.route turn (current dispatch epoch, NOT a lifetime total).
+
+    Scans backward, stops at the most recent brain.route turn. If no route
+    turn exists, counts all matching turns -- fail-soft default for malformed
+    or legacy histories. Epoch-scoping prevents cross-agent false positives:
+    3 waits for agent A, agent A succeeds, agent B dispatched (brain.route) ->
+    count resets to 0 for agent B's waits.
+
+    Shared by handle_wait_for_agent (nudge evidence) and _pred_wait_loop
+    (emergency flange) -- single source of truth for epoch-scoped wait
+    counting. Handles both dict and object turns, mirroring
+    has_unevaluated_close_blocker above.
+    """
+    count = 0
+    for t in reversed(conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        waiting = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+        if actor == "brain" and action == "route":
+            break
+        if (
+            actor == "brain" and action == "wait"
+            and isinstance(waiting, str) and waiting.startswith("agent:")
+        ):
+            count += 1
+    return count
+
+
 def _pred_unevaluated_close(ctx: GateContext) -> bool:
     """Block close_event when unevaluated jarvis.message or user.message turns exist.
 
@@ -249,6 +288,12 @@ def _pred_silent_park(ctx: GateContext) -> bool:
 
 _OBS_PLATEAU_RE = re.compile(r"Recorded observation '(.+?)' = (.+?) \(point #")
 _OBS_PLATEAU_THRESHOLD = 3
+# Emergency flange (#201): blocks the 5th wait_for_agent attempt after 4 are
+# recorded in the current dispatch epoch. The gate evaluates the persisted
+# conversation -- the current call has not been appended yet -- so a
+# threshold of 4 means "4 waits already happened, block the next (5th) one".
+_WAIT_LOOP_THRESHOLD = 4
+_WAIT_LOOP_ESCAPE_TOOL = "defer_event"
 _OBS_DECISION_TOOLS = frozenset({
     "defer_event", "close_event", "select_agent", "set_phase",
     "classify_event", "report_incident", "refresh_gitlab_context",
@@ -287,8 +332,68 @@ def _pred_obs_plateau(ctx: GateContext) -> bool:
     return False
 
 
+def _pred_wait_loop(ctx: GateContext) -> bool:
+    """True when 4+ agent waits are recorded in the current dispatch epoch.
+
+    Emergency flange, not the steering mechanism -- the railway (fixed
+    counter, open defer_event track, embedded nudge) is the primary
+    self-correction path. This gate only fires if the railway is ignored.
+    """
+    return count_agent_waits_in_dispatch_epoch(ctx.conversation) >= _WAIT_LOOP_THRESHOLD
+
+
 def _pred_hard_strip_defer(ctx: GateContext) -> bool:
+    """True when defer_event should be stripped for triage-phase or
+    jarvis-sourced events.
+
+    The WAIT_LOOP emergency-flange escape valve is enforced centrally by
+    evaluate_gates() after the full gate pipeline runs (and mirrored by
+    is_defer_event_available() via _single_tool_survives_gates()), so this
+    predicate expresses only the base policy and no longer special-cases
+    WAIT_LOOP itself.
+    """
     return ctx.brain_phase == "triage" or ctx.event_source == "jarvis"
+
+
+def _single_tool_survives_gates(tool_name: str, ctx: GateContext) -> bool:
+    """Whether `tool_name` would remain in evaluate_gates()'s output for this
+    context -- an order-independent projection of the full gate pipeline
+    onto one tool.
+
+    A gate can only ever remove tool_name from the active set (strip mode:
+    subtraction; allow mode: intersection), never re-add it, so whether
+    tool_name survives the full sequential pipeline depends only on whether
+    ANY firing gate excludes it -- not on gate order. This lets each gate's
+    predicate be skipped entirely when tools_affected(ctx) shows it cannot
+    possibly exclude tool_name, so callers with a minimal or partially
+    populated GateContext never trip predicates that inspect unrelated
+    fields (e.g. READ_STICKY's numeric comparison on ctx.unread_notes).
+    """
+    for gate in GATE_REGISTRY:
+        affected = gate.tools_affected(ctx)
+        excludes_if_fires = (
+            tool_name not in affected if gate.mode == "allow" else tool_name in affected
+        )
+        if not excludes_if_fires:
+            continue
+        if gate.predicate(ctx):
+            return False
+    return True
+
+
+def is_defer_event_available(ctx: GateContext) -> bool:
+    """Whether defer_event would remain available after full gate evaluation.
+
+    Single source of truth reused by brain.py's empty-toolset recovery
+    fallback. Mirrors evaluate_gates()'s exact two-part rule for this one
+    tool: per-gate exclusion via _single_tool_survives_gates(), then the
+    same WAIT_LOOP escape-valve invariant evaluate_gates() applies
+    post-loop -- so the two functions cannot silently diverge as gates are
+    added to or changed in GATE_REGISTRY.
+    """
+    if _pred_wait_loop(ctx):
+        return True
+    return _single_tool_survives_gates(_WAIT_LOOP_ESCAPE_TOOL, ctx)
 
 
 def _pred_hard_strip_wait_user(ctx: GateContext) -> bool:
@@ -311,8 +416,16 @@ def _tools_defer_event(_ctx: GateContext) -> set[str]:
     return {"defer_event"}
 
 
+# Single source of truth for the INTERMEDIATE allow-set -- brain.py imports
+# this directly (empty-toolset fallback, post-gate leak-detector) instead of
+# hand-duplicating the literal, so the three sites cannot drift apart.
+INTERMEDIATE_TOOLS: frozenset[str] = frozenset({
+    "reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis", "defer_event",
+})
+
+
 def _tools_intermediate(_ctx: GateContext) -> set[str]:
-    return {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+    return set(INTERMEDIATE_TOOLS)
 
 
 def _tools_escalate(_ctx: GateContext) -> set[str]:
@@ -333,6 +446,15 @@ def _tools_observation(_ctx: GateContext) -> set[str]:
 
 def _tools_obs_plateau(_ctx: GateContext) -> set[str]:
     return {"record_observation"}
+
+
+def _tools_wait_loop(_ctx: GateContext) -> set[str]:
+    """Strips ONLY wait_for_agent -- defer_event is deliberately left alone.
+
+    This is the entire point of the railway design: the emergency flange
+    never removes the escape route (#201).
+    """
+    return {"wait_for_agent"}
 
 
 def _tools_jira_comment(_ctx: GateContext) -> set[str]:
@@ -396,7 +518,7 @@ def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
         "select_agent", "classify_event", "lookup_service", "lookup_journal",
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
-        "respond_to_jarvis", "wait_for_jarvis",
+        "respond_to_jarvis", "wait_for_jarvis", "defer_event",
     }
 
 
@@ -471,6 +593,14 @@ def _msg_obs_plateau(tool: str, _ctx: GateContext) -> str:
         f"[GATE] {tool} blocked. Same observation recorded {_OBS_PLATEAU_THRESHOLD} times "
         "consecutively without a decision. Evaluate the evidence: defer if waiting, "
         "close if resolved, or dispatch if action is needed."
+    )
+
+
+def _msg_wait_loop(tool: str, ctx: GateContext) -> str:
+    count = count_agent_waits_in_dispatch_epoch(ctx.conversation)
+    return (
+        f"[GATE] {tool} blocked. {count} waits in this dispatch epoch with no "
+        f"agent completion. Defer with a calibrated timeout."
     )
 
 
@@ -637,6 +767,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_obs_plateau,
         message=_msg_obs_plateau,
         hint="record a different metric, or transition to a decision tool.",
+    ),
+    GateDefinition(
+        gate_id="WAIT_LOOP",
+        mode="strip",
+        predicate=_pred_wait_loop,
+        tools_affected=_tools_wait_loop,
+        message=_msg_wait_loop,
+        hint="defer_event remains available -- use it to free this event slot.",
     ),
     GateDefinition(
         gate_id="PHASE_JIRA_COMMENT",
@@ -809,8 +947,18 @@ def evaluate_gates(
     """Apply all gates in precedence order, return filtered active_tools list.
 
     Replaces the inline stripping logic formerly in brain.py L886-1041.
+
+    After the gate loop, enforces the WAIT_LOOP emergency-flange invariant:
+    once 4+ epoch waits are recorded, defer_event must survive as the escape
+    valve regardless of which gate(s) stripped it -- HARD_STRIP_DEFER,
+    DEFER_WAKE_ITER0, an allow-mode gate whose allow-set omits it (e.g.
+    PRE_CLASSIFICATION, DOMAIN_CASUAL), or any future gate. A full
+    communication lockout is a worse outcome than an out-of-policy defer in
+    this narrow emergency case. Only restores defer_event if it was a
+    legitimate candidate tool in the input schema to begin with.
     """
-    active_names: set[str] = {t["name"] for t in all_tools}
+    candidate_names: set[str] = {t["name"] for t in all_tools}
+    active_names: set[str] = set(candidate_names)
 
     for gate in GATE_REGISTRY:
         if not gate.predicate(ctx):
@@ -822,6 +970,13 @@ def evaluate_gates(
             active_names &= affected
         else:
             active_names -= affected
+
+    if (
+        _WAIT_LOOP_ESCAPE_TOOL in candidate_names
+        and _WAIT_LOOP_ESCAPE_TOOL not in active_names
+        and _pred_wait_loop(ctx)
+    ):
+        active_names.add(_WAIT_LOOP_ESCAPE_TOOL)
 
     return [t for t in all_tools if t["name"] in active_names]
 
