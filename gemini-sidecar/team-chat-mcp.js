@@ -3,6 +3,8 @@
 // 1. [Pattern]: MCP stdio server -- JSON-RPC 2.0 over stdin/stdout. Console.error for all logging (stdout reserved).
 // 2. [Constraint]: No SDK. readline + process.stdout.write + http.request only. Zero npm deps.
 // 3. [Pattern]: Role-filtered tools via AGENT_ROLE env. dev/qe get all 6, architect/sysadmin get 3.
+//    team_send_results content description is role-conditional: jenkins_retrigger clause
+//    included only for sysadmin/developer (CAN_RETRIGGER_JENKINS gate).
 // 4. [Pattern]: tools/list queries GET /current-mode; tools with notInModes omit when task mode matches (railway for message mode).
 // 5. [Pattern]: handleToolCall logs WARN if team_send_results/team_huddle runs while /current-mode is message (observability; call still proceeds).
 // 6. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
@@ -16,10 +18,13 @@ const ROLE = process.env.AGENT_ROLE || '';
 const SIDECAR_PORT = parseInt(process.env.SIDECAR_PORT) || 9090;
 const PEER_PORT = parseInt(process.env.PEER_PORT) || 0;
 const IS_TEAM = ROLE === 'developer' || ROLE === 'qe';
+const CAN_RETRIGGER_JENKINS = ROLE === 'sysadmin' || ROLE === 'developer';
+const JENKINS_RETRIGGER_CLAUSE = '\\njenkins_retrigger: (optional — include when you retriggered a Jenkins leaf job)\\n  leaf_job: <exact-jenkins-leaf-job-name>\\n  wrapper_job: <exact-jenkins-wrapper-job-name-that-owns-this-leaf>\\n  build_number: <build-number-returned-by-jenkins>';
+const SEND_RESULTS_CONTENT_DESC = `Final report with YAML frontmatter: ---\\nreasoning: "root cause"\\nassessment: "your judgment on the situation and what should happen next"${CAN_RETRIGGER_JENKINS ? JENKINS_RETRIGGER_CLAUSE : ''}\\n---\\n<diagnostic body>`;
 
 const ALL_TOOLS = [
   { name: 'team_send_message', description: 'Send a progress update to FRIDAY (shown in event chat, does NOT overwrite deliverable)', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Status update text' } }, required: ['message'] } },
-  { name: 'team_send_results', description: 'Deliver your final report/findings to FRIDAY (overwrites previous deliverable). Frontmatter must include reasoning (root cause) and assessment (your professional judgment on what happens next — FRIDAY weighs this against institutional memory).', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report with YAML frontmatter: ---\\nreasoning: "root cause"\\nassessment: "your judgment on the situation and what should happen next"\\n---\\n<diagnostic body>' } }, required: ['content'] }, notInModes: ['message'] },
+  { name: 'team_send_results', description: 'Deliver your final report/findings to FRIDAY (overwrites previous deliverable). Frontmatter must include reasoning (root cause) and assessment (your professional judgment on what happens next — FRIDAY weighs this against institutional memory).', inputSchema: { type: 'object', properties: { content: { type: 'string', description: SEND_RESULTS_CONTENT_DESC } }, required: ['content'] }, notInModes: ['message'] },
   { name: 'team_check_messages', description: 'Check your inbox for pending messages from FRIDAY. Returns and clears the queue.', inputSchema: { type: 'object', properties: {} } },
   { name: 'team_huddle', description: 'Send a message to FRIDAY and BLOCK until FRIDAY replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for FRIDAY' } }, required: ['message'] }, teamOnly: true, notInModes: ['message'] },
   { name: 'team_send_to_teammate', description: 'Send a direct message to your dev/QE teammate via their sidecar. Message is stored in their teammate queue.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Message for teammate' } }, required: ['message'] }, teamOnly: true },

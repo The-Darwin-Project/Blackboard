@@ -91,7 +91,7 @@ BLOCK_PATTERN+='|\|\s*(sudo\s+)?(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\
 BLOCK_PATTERN+='|\bnpm\s+publish\b'
 
 # Credential file paths — block read access to sensitive token stores
-CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.netrc)'
+CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.netrc|/secrets/)'
 BLOCK_PATTERN+="|${CRED_READ_PATTERN}"
 
 # Case-insensitive check for the main denylist

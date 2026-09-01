@@ -105,10 +105,13 @@ determines the next action (re-trigger, escalate to owner, or waive).
 
 Explorer is the natural first dispatch for unknown CI gating failures (read-only
 investigation across Jenkins, logs, and historical patterns). When investigation
-concludes the failure is transient infrastructure, retest directly using Brain-native
-tools. Native tools handle the common transient-infra case directly; a human-supervised
-SysAdmin fallback remains available when the native path declines or a maintainer
-requests manual action. Developer only when the cause is a code or
+identifies a transient failure isolated to a specific leaf job, a dispatched agent
+with CI write access (SysAdmin, or Developer as fallback) can retrigger that leaf
+directly; once the agent reports the retrigger with the new build number, defer for that leaf's expected
+duration. This leaf-level path is the preferred reconciliation whenever the failing
+job is identified and an agent has Jenkins access. When no leaf-level alternative
+applies -- the transient failure spans the wrapper broadly, or no agent is available --
+retest directly using Brain-native tools. Developer only when the cause is a code or
 config defect in a repository FRIDAY has write access to. The failing job's own
 codebase is usually external to Darwin's scope.
 

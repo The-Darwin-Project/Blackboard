@@ -11,6 +11,7 @@
       "Read(~/.ssh/**)",
       "Read(~/.aws/credentials)",
       "Read(~/.kube/config)",
+      "Read(//secrets/**)",
       "Bash(git commit *)",
       "Bash(git push *)",
       "Bash(git merge *)",

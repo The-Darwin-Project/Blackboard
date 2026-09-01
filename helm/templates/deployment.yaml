@@ -1122,6 +1122,12 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: JENKINS_URL
+              value: "{{ .Values.jenkinsObserver.jenkins.url }}"
+            - name: JENKINS_INSECURE_TLS
+              value: "{{ .Values.jenkinsObserver.jenkins.insecureTls }}"
+            {{- end }}
             {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
@@ -1165,6 +1171,11 @@ spec:
             {{- if .Values.gitlab.enabled }}
             - name: gitlab-token-secret
               mountPath: /secrets/gitlab
+              readOnly: true
+            {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: jenkins-secret
+              mountPath: /secrets/jenkins
               readOnly: true
             {{- end }}
             {{- if .Values.registry.enabled }}
@@ -1216,6 +1227,9 @@ spec:
         # NOTE: Developer intentionally omits ArgoCD/Kargo env vars and
         # secret mounts. Developer is code-only (git clone/commit/push).
         # Architect and SysAdmin handle infra CLI access (argocd, kargo).
+        # EXCEPTION: Jenkins is mounted here too -- retriggering a CI job runs
+        # an existing pipeline, it does not modify pipeline config, so it does
+        # not fall under the "infra CLI access" restriction above.
         # =================================================================
         {{- if .Values.sidecars.developer.enabled }}
         - name: developer-sidecar
@@ -1286,6 +1300,12 @@ spec:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
             {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: JENKINS_URL
+              value: "{{ .Values.jenkinsObserver.jenkins.url }}"
+            - name: JENKINS_INSECURE_TLS
+              value: "{{ .Values.jenkinsObserver.jenkins.insecureTls }}"
+            {{- end }}
             {{- include "darwin.skillsCatalogEnv" . | nindent 12 }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
@@ -1319,6 +1339,11 @@ spec:
             {{- if .Values.gitlab.enabled }}
             - name: gitlab-token-secret
               mountPath: /secrets/gitlab
+              readOnly: true
+            {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: jenkins-secret
+              mountPath: /secrets/jenkins
               readOnly: true
             {{- end }}
             {{- if .Values.registry.enabled }}
@@ -1591,6 +1616,14 @@ spec:
         - name: gitlab-token-secret
           secret:
             secretName: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+        {{- end }}
+        {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+        # Reused from jenkinsObserver.jenkins (see helm/values.yaml comment) --
+        # mounted into sysadmin-sidecar + developer-sidecar for CI leaf-job
+        # retrigger via @kud/mcp-jenkins. Same Secret, two consumers.
+        - name: jenkins-secret
+          secret:
+            secretName: {{ .Values.jenkinsObserver.jenkins.existingSecret | trim | quote }}
         {{- end }}
         {{- if .Values.registry.enabled }}
         - name: registry-secret

@@ -566,6 +566,15 @@ jenkinsObserver:
   recencyHours: "72" # hours -- stale SUCCESS jobs dropped (FAILURE always kept)
   maintainers: "" # CSV of maintainer emails for escalation -- set in GitOps overlay
   jenkins:
+    # NOTE: existingSecret/url/insecureTls are also reused (unchanged, no new
+    # values added) to mount Jenkins credentials into the SysAdmin/Developer
+    # sidecar containers (deployment.yaml) and the shared ephemeral TaskRun
+    # agent step (tekton-eventlistener.yaml) for CI leaf-job retrigger via
+    # @kud/mcp-jenkins. This intentionally couples the Observer's Jenkins
+    # account to the sidecars' retrigger token -- same Secret, two consumers.
+    # Rotating/revoking it affects both. Accepted trade-off: a dedicated
+    # least-privilege retrigger-only token was considered and declined (see
+    # plan risk table D-2) since this reuses the Observer's existing account.
     existingSecret: "" # K8s Secret with keys: username, api-token
     url: ""
     insecureTls: false # Set true only for self-signed/internal Jenkins with no valid cert chain.

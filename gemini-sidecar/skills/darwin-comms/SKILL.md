@@ -51,6 +51,22 @@ FRIDAY uses your last `team_send_results` call as your final deliverable.
 - `steps` (optional): remediation proposals for FRIDAY to evaluate. FRIDAY decides
   whether to dispatch, approve, or escalate based on the source mutation approval gate.
   Each step needs `id`, `agent`, `summary`. Omit if no further action needed.
+- `jenkins_retrigger` (optional, sysadmin/developer only): include when you retriggered
+  a Jenkins leaf job. This is how FRIDAY reconciles her own wrapper-level retrigger
+  fallback with a retrigger you already performed at the leaf level -- without it, she
+  has no signal that anything was retriggered. Always include `wrapper_job` -- the
+  parent wrapper that owns the leaf you retriggered -- so FRIDAY cools only that one
+  wrapper's cooldown instead of every wrapper in the event.
+
+  ```yaml
+  ---
+  reasoning: Retriggered leaf job for transient Electron crash
+  jenkins_retrigger:
+    leaf_job: <exact-jenkins-leaf-job-name>
+    wrapper_job: <exact-jenkins-wrapper-job-name-that-owns-this-leaf>
+    build_number: <build-number-returned-by-jenkins>
+  ---
+  ```
 
 ### Evidence Quality
 

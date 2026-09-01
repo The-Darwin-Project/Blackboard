@@ -13,6 +13,10 @@
 // 7. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true.
 // 8. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig
 //    and registers kubernetes-mcp-server (--read-only --toolsets core,config,tekton).
+// 9. [Pattern]: Jenkins uses static user/api-token auth (GitLab PAT pattern). hasJenkinsCredentials()/
+//    setupJenkinsMCP() are role-gated at the CALL SITE (server.js/ws-server.js/ws-client.js), not here --
+//    the Secret is mounted for every ephemeral role, only sysadmin/developer register the MCP.
+//    TLS insecure flag is scoped to mcpConfig.env only (no direct HTTPS fetch() from this sidecar to Jenkins).
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -802,6 +806,84 @@ function setupRegistryCredentials() {
   }
 }
 
+// --- Jenkins ---
+const JENKINS_SECRETS_PATH = '/secrets/jenkins';
+const JENKINS_USERNAME_PATH = `${JENKINS_SECRETS_PATH}/username`;
+const JENKINS_API_TOKEN_PATH = `${JENKINS_SECRETS_PATH}/api-token`;
+
+/**
+ * Check if Jenkins credentials are mounted. The Secret is mounted for every
+ * ephemeral role (shared TriggerTemplate), but only SysAdmin/Developer call
+ * setupJenkinsMCP() -- see the per-file role gate at each call site.
+ */
+function hasJenkinsCredentials() {
+  return fs.existsSync(JENKINS_USERNAME_PATH) && fs.existsSync(JENKINS_API_TOKEN_PATH) && !!process.env.JENKINS_URL;
+}
+
+/**
+ * Configure the Jenkins MCP server (@kud/mcp-jenkins) for Gemini CLI and Claude Code.
+ * Static user/API-token auth, same shape as GitLab's PAT (no session exchange).
+ * MCP_JENKINS_ALLOW_TOOLS restricts the exposed tool surface to retrigger +
+ * read-only status tools -- it scopes which TOOLS are exposed, not which JOBS
+ * a retrigger can target; job-level scoping is enforced by agent rules (prose).
+ */
+async function setupJenkinsMCP() {
+  if (!hasJenkinsCredentials()) return;
+
+  let username, apiToken;
+  try {
+    username = fs.readFileSync(JENKINS_USERNAME_PATH, 'utf8').trim();
+    apiToken = fs.readFileSync(JENKINS_API_TOKEN_PATH, 'utf8').trim();
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Jenkins credential read failed: ${err.message}`);
+    return;
+  }
+  // Strict equality: the string "false" is truthy in JS, so a naive
+  // `if (process.env.JENKINS_INSECURE_TLS)` would treat "false" as enabled.
+  const insecureTls = process.env.JENKINS_INSECURE_TLS === 'true';
+
+  const mcpConfig = {
+    command: resolveCommand('mcp-jenkins'),
+    args: [],
+    env: {
+      MCP_JENKINS_URL: process.env.JENKINS_URL,
+      MCP_JENKINS_USER: username,
+      MCP_JENKINS_API_TOKEN: apiToken,
+      MCP_JENKINS_ALLOW_TOOLS: 'jenkins_trigger_build,jenkins_get_build_status,jenkins_get_recent_builds',
+    },
+  };
+
+  if (insecureTls) {
+    // Scoped to the MCP child process env only, not global process.env --
+    // unlike ArgoCD, this sidecar makes no direct HTTPS fetch() of its own to
+    // Jenkins, so there is nothing else that needs the global override.
+    mcpConfig.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  }
+
+  const geminiSettingsDir = `${process.env.HOME}/.gemini`;
+  const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
+  try {
+    fs.mkdirSync(geminiSettingsDir, { recursive: true });
+    let settings = {};
+    if (fs.existsSync(geminiSettingsPath)) {
+      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
+    }
+    settings.mcpServers = settings.mcpServers || {};
+    settings.mcpServers.Jenkins = mcpConfig;
+    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+    console.log(`[${new Date().toISOString()}] Jenkins MCP configured for Gemini CLI`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Jenkins MCP config (Gemini) failed: ${err.message}`);
+  }
+
+  try {
+    writeClaudeMcpServer('Jenkins', mcpConfig);
+    console.log(`[${new Date().toISOString()}] Jenkins MCP configured for Claude Code`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Jenkins MCP config (Claude) failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   hasGitHubCredentials,
   generateInstallationToken,
@@ -818,6 +900,8 @@ module.exports = {
   getRemoteClustersMeta,
   setupRegistryCredentials,
   hasRegistryCredentials,
+  hasJenkinsCredentials,
+  setupJenkinsMCP,
   GITLAB_HOST,
   CLI_LOGIN_INTERVAL_MS,
 };

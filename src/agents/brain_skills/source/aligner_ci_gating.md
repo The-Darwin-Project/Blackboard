@@ -49,14 +49,15 @@ failure signature). The asymmetry — restart is cheap, investigation is expensi
 is what justifies trying restart/retry first for a leaf, not a blanket rule that
 every failure gets retried.
 
-That cheapness does not carry over to a wrapper (see Wrapper vs Leaf Topology
-above): retriggering a wrapper re-runs every lane inside it, not just the one that
-failed, so the cost scales with the whole remaining run rather than one job.
-Restarting a wrapper before investigation is only the higher-expected-value move
-when the evidence points to transient infrastructure affecting the run broadly —
-not when a single lane inside it looks flaky. A wrapper restart on thin evidence
-trades a cheap leaf-level retry's economics for an expensive one; escalate or
-investigate the failing lane first when that confidence is missing.
+Wrapper restart economics differ (see Wrapper vs Leaf Topology above): a wrapper
+restart re-runs every lane inside it, not just the one that failed, so its cost
+scales with the whole remaining run rather than one job. That cost is advisory
+context for sequencing, not a gate on the action itself — once investigation
+has confirmed the failure is transient infrastructure, a wrapper restart is the correct
+reconciliation move whenever no cheaper leaf-level retry path is available for that
+job, even when the transient signal traces to a single lane inside the wrapper. The
+cost asymmetry argues for preferring the leaf-level path when one exists; it does
+not argue for withholding the wrapper restart when the leaf path doesn't exist.
 
 A restart's outcome only becomes evidence once the job has had time to run; wrapper and
 tier jobs run for multiple hours, so checking results immediately after a restart

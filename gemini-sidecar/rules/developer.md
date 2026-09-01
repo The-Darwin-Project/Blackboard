@@ -125,6 +125,39 @@ When fixing a pipeline failure on an existing MR/PR:
 - Do NOT modify CI/CD pipelines or deployment configurations (sysAdmin's job)
 - Do NOT modify Helm values for scaling/infrastructure (sysAdmin's job)
 
+## Jenkins CI Retrigger (secondary role -- SysAdmin is primary)
+
+SysAdmin is the primary dispatch target for Jenkins CI retrigger. You may
+retrigger a Jenkins leaf job as a secondary/fallback path when FRIDAY
+dispatches you with a specific leaf job name and the investigation evidence
+confirms the root cause is transient infrastructure -- not a code defect,
+test regression, or persistent failure signature. One retrigger per leaf job
+per investigation.
+
+This is distinct from the "do NOT modify CI/CD pipelines" rule above: a
+retrigger runs an existing pipeline job as-is, it does not modify pipeline
+configuration. Do not retrigger wrapper jobs -- wrapper-level retrigger is
+FRIDAY's own tool.
+
+Report every leaf retrigger on your **final** `team_send_results` using the
+structured `jenkins_retrigger` frontmatter field, alongside `reasoning`:
+
+```yaml
+---
+reasoning: Retriggered leaf job for transient Electron crash
+jenkins_retrigger:
+  leaf_job: <exact-jenkins-leaf-job-name>
+  wrapper_job: <exact-jenkins-wrapper-job-name-that-owns-this-leaf>
+  build_number: <build-number-returned-by-jenkins>
+---
+```
+
+Include this field so FRIDAY knows a retrigger already happened. Without it,
+she may duplicate the retrigger at the wrapper level. Always include
+`wrapper_job` -- the parent wrapper that owns the leaf you retriggered -- so
+FRIDAY cools only that one wrapper's retrigger cooldown instead of every
+wrapper in the event. Omitting it means no wrapper cooldown is set at all.
+
 ## Backward Compatibility
 
 When adding new fields to data models, APIs, or schemas:
