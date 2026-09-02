@@ -1297,11 +1297,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "retrigger_jenkins_build",
         "description": (
-            "Retrigger a failed Jenkins CI gating build. Use only after investigation "
+            "Retrigger a failed Jenkins CI gating WRAPPER job -- re-runs every lane "
+            "inside it, not just the one that failed. Use only after investigation "
             "concludes the failure is transient infrastructure (network, mirror, quota), "
-            "not a test or product regression. Scoped to jobs already failed in this "
-            "event's CI context. One retrigger per job per cooldown window. "
-            "Wrapper jobs re-run all lanes."
+            "not a test or product regression. A specific failing leaf job can be "
+            "retriggered more cheaply and precisely by an agent with Jenkins access "
+            "(sysadmin/developer) instead of re-running the whole wrapper. Scoped to "
+            "jobs already failed in this event's CI context. One retrigger per job "
+            "per cooldown window."
         ),
         "input_schema": {
             "type": "object",
