@@ -10,6 +10,11 @@
 #    enum-validates them (_validate_triage_entry), but this module embeds them into
 #    the Brain/FRIDAY prompt directly -- _safe_prompt_field() is defense in depth
 #    against any other/future producer of ci_context that skips that validation.
+# 6. [Constraint]: ci_context.analysis (narrative summary/probable_cause/signals/
+#    suggested_next_step/confidence) is likewise LLM-generated untrusted text,
+#    already capped+redacted by jenkins_observer.py::_validate_analysis. Still run
+#    it through _safe_prompt_field() here (strips newlines/control chars) before
+#    embedding in the Brain/FRIDAY prompt -- same defense-in-depth as #5.
 """Source-aware event header builder for Brain triage prompts."""
 from __future__ import annotations
 
@@ -205,6 +210,23 @@ def _build_subject_block(
             if emails:
                 safe_emails = ", ".join(_safe_prompt_field(e, max_len=200) for e in emails)
                 lines.append(f"  Maintainer Emails: {safe_emails}")
+        analysis = cc.get("analysis")
+        if analysis:
+            lines.append("  Failure Analysis:")
+            lines.append(f"    Summary: {_safe_prompt_field(analysis.get('summary', ''), max_len=500)}")
+            lines.append(
+                f"    Probable Cause: {_safe_prompt_field(analysis.get('probable_cause', ''), max_len=1000)}"
+            )
+            lines.append(
+                f"    Suggested Next Step: "
+                f"{_safe_prompt_field(analysis.get('suggested_next_step', ''), max_len=300)}"
+            )
+            lines.append(f"    Confidence: {_safe_prompt_field(analysis.get('confidence', ''), max_len=10)}")
+            signals = analysis.get("signals") or []
+            if signals:
+                lines.append("    Signals:")
+                for s in signals[:10]:
+                    lines.append(f"      - {_safe_prompt_field(s, max_len=200)}")
 
     elif ev and ev.github_context:
         gc = ev.github_context

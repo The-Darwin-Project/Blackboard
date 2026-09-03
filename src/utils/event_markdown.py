@@ -4,6 +4,9 @@
 # 2. [Pattern]: Extracted from Brain._event_to_markdown (staticmethod). Called by brain.py,
 #    blackboard.py, routes/queue.py, routes/events.py.
 # 3. [Constraint]: Only depends on src/models (EventDocument, EventEvidence) + stdlib.
+# 4. [Pattern]: ci_context (and its optional "analysis" narrative sub-object, see
+#    models.CIAnalysis) is a free-form dict already sanitized/capped upstream by
+#    jenkins_observer.py -- render with .get() defaults only, never assume keys exist.
 """Event-to-Markdown converter for Darwin event documents."""
 from __future__ import annotations
 
@@ -123,6 +126,36 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
             body = issue_ctx.get("body", "")
             if body:
                 lines.append(f"- **Body (truncated):** {body[:300]}")
+        if evidence.ci_context:
+            cc = evidence.ci_context
+            lines.append("")
+            lines.append("## CI Gating Analysis")
+            lines.append(f"- **CNV Version:** {cc.get('cnv_version', '')}")
+            lines.append(f"- **Jenkins:** {cc.get('jenkins_url', '')}")
+            for j in (cc.get("failed_jobs") or [])[:10]:
+                lines.append(
+                    f"- **Failed:** {j.get('job_name', '')} #{j.get('build_number', '?')} [{j.get('result', '?')}]"
+                )
+            for j in (cc.get("missing_jobs") or [])[:10]:
+                lines.append(f"- **Missing:** {j.get('job_name', '')}")
+            an = cc.get("analysis")
+            if an:
+                lines.append("")
+                lines.append("### Failure Analysis")
+                lines.append(f"- **Summary:** {an.get('summary', '')}")
+                lines.append(f"- **Probable Cause:** {an.get('probable_cause', '')}")
+                lines.append(f"- **Suggested Next Step:** {an.get('suggested_next_step', '')}")
+                lines.append(f"- **Confidence:** {an.get('confidence', '')}")
+                for s in (an.get("signals") or [])[:10]:
+                    lines.append(f"  - {s}")
+            for t in (cc.get("llm_triage") or [])[:5]:
+                lines.append(
+                    f"- **Triage:** {t.get('job_name', '')} → {t.get('classification', '')} "
+                    f"({t.get('confidence', '')}) · {t.get('recommended_action', '')}"
+                )
+            maintainer = cc.get("maintainer") or {}
+            if maintainer.get("emails"):
+                lines.append(f"- **Maintainer Emails:** {', '.join(maintainer['emails'])}")
     else:
         lines.append(f"- **Evidence:** {evidence}")
     lines.append(f"- **Time:** {event.event.timeDate}")

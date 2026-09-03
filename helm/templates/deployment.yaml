@@ -517,6 +517,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.recencyHours }}"
             - name: JENKINS_OBSERVER_MAINTAINERS
               value: "{{ .Values.jenkinsObserver.maintainers }}"
+            - name: JENKINS_OBSERVER_ANALYSIS_ENABLED
+              value: "{{ .Values.jenkinsObserver.analysisEnabled }}"
             {{- if .Values.jenkinsObserver.jenkins }}
             - name: JENKINS_URL
               value: "{{ .Values.jenkinsObserver.jenkins.url }}"

@@ -188,3 +188,100 @@ def test_service_metadata_defaults_to_unknown():
     assert "**Health:** unknown" in md
     assert "**Sync:** unknown" in md
     assert "**App:** ?" in md
+
+
+# ---------------------------------------------------------------------------
+# ci_context / CI Gating Analysis rendering (Phase 1 verbose evidence)
+# ---------------------------------------------------------------------------
+
+def _make_ci_gating_event(ci_context):
+    evidence = EventEvidence(
+        display_text="CNV 4.23: 1 failed CI gating job(s)",
+        source_type="aligner",
+        severity="warning",
+        domain_confidence="default",
+        ci_context=ci_context,
+    )
+    return EventDocument(
+        source="aligner", service="verify-cnv-4.23.z-build-tier1|4.23",
+        subject_type="ci_gating",
+        event=EventInput(reason="CI gating failure", evidence=evidence),
+    )
+
+
+def test_no_ci_context_renders_no_ci_gating_section():
+    """Zero-state: evidence.ci_context is None -> no '## CI Gating Analysis' block."""
+    ev = _make_typed_event(source="aligner", service="darwin-store")
+    md = Brain._event_to_markdown(ev)
+    assert "## CI Gating Analysis" not in md
+
+
+def test_ci_context_renders_failed_and_missing_jobs():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [{"job_name": "verify-cnv-4.23.z-build-tier1", "build_number": 42, "result": "FAILURE"}],
+        "missing_jobs": [{"job_name": "verify-cnv-4.23.z-build-tier2"}],
+        "llm_triage": [],
+    })
+    md = Brain._event_to_markdown(event)
+    assert "## CI Gating Analysis" in md
+    assert "- **CNV Version:** 4.23" in md
+    assert "- **Jenkins:** https://jenkins.example.com" in md
+    assert "- **Failed:** verify-cnv-4.23.z-build-tier1 #42 [FAILURE]" in md
+    assert "- **Missing:** verify-cnv-4.23.z-build-tier2" in md
+
+
+def test_ci_context_without_analysis_omits_failure_analysis_section():
+    """No 'analysis' key in ci_context (old events, or analysis disabled) -> no
+    '### Failure Analysis' sub-section, but the rest of the block still renders."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+    })
+    md = Brain._event_to_markdown(event)
+    assert "## CI Gating Analysis" in md
+    assert "### Failure Analysis" not in md
+
+
+def test_ci_context_analysis_renders_narrative_fields():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "analysis": {
+            "summary": "Tier1 network suite failed due to a flaky NIC driver.",
+            "probable_cause": "Known infra flake on worker node pool.",
+            "suggested_next_step": "Restart the job.",
+            "signals": ["dial tcp: connection refused"],
+            "confidence": 0.8,
+        },
+    })
+    md = Brain._event_to_markdown(event)
+    assert "### Failure Analysis" in md
+    assert "- **Summary:** Tier1 network suite failed due to a flaky NIC driver." in md
+    assert "- **Probable Cause:** Known infra flake on worker node pool." in md
+    assert "- **Suggested Next Step:** Restart the job." in md
+    assert "- **Confidence:** 0.8" in md
+    assert "  - dial tcp: connection refused" in md
+
+
+def test_ci_context_renders_triage_and_maintainer():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [
+            {"job_name": "tier1", "classification": "infrastructure", "confidence": 0.9, "recommended_action": "restart"},
+        ],
+        "maintainer": {"source": "static", "emails": ["alice@example.com"]},
+    })
+    md = Brain._event_to_markdown(event)
+    assert "- **Triage:** tier1 → infrastructure (0.9) · restart" in md
+    assert "- **Maintainer Emails:** alice@example.com" in md

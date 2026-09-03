@@ -3203,3 +3203,243 @@ class TestT22StripPipelineAnnotations:
         assert "B" * 10 not in result
         assert marker in result
 
+
+
+# =========================================================================
+# Phase 1: narrative analysis -- parser fallback + validator bounds
+# =========================================================================
+
+class TestParseTriageResponseFormats:
+    """_parse_triage_response must accept both the legacy bare-array shape
+    and the new {"triage": [...], "analysis": {...}} object shape."""
+
+    def _make_observer(self):
+        from src.agents.jenkins_observer import JenkinsObserver
+        bb = _mock_blackboard()
+        with patch.dict("os.environ", _env_vars()):
+            return JenkinsObserver(blackboard=bb)
+
+    def test_legacy_bare_array_back_compat(self):
+        """Old prompt-version shape: a bare JSON array -> triage entries, analysis=None."""
+        obs = self._make_observer()
+        text = json.dumps([_make_triage_response()])
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is None
+
+    def test_new_object_shape_with_analysis(self):
+        """New shape: {"triage": [...], "analysis": {...}} -> both populated."""
+        obs = self._make_observer()
+        payload = {
+            "triage": [_make_triage_response()],
+            "analysis": {
+                "summary": "Tier1 network suite failed due to a flaky NIC driver.",
+                "probable_cause": "Known infra flake on worker node pool.",
+                "suggested_next_step": "Restart the job.",
+                "signals": ["dial tcp: connection refused"],
+                "confidence": 0.8,
+            },
+        }
+        text = json.dumps(payload)
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is not None
+        assert analysis["summary"] == "Tier1 network suite failed due to a flaky NIC driver."
+        assert analysis["confidence"] == 0.8
+
+    def test_object_shape_missing_analysis_key(self):
+        """New shape with only "triage" (no "analysis" key) -> analysis=None."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [_make_triage_response()]})
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is None
+
+    def test_markdown_fence_stripped_for_object_shape(self):
+        """Tolerant of ```json ... ``` fences, same as the legacy array path."""
+        obs = self._make_observer()
+        payload = {"triage": [], "analysis": {"summary": "ok", "confidence": 0.5}}
+        text = "```json\n" + json.dumps(payload) + "\n```"
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert triage == []
+        assert analysis is not None
+        assert analysis["summary"] == "ok"
+
+    def test_malformed_json_returns_empty(self):
+        obs = self._make_observer()
+        triage, analysis = obs._parse_triage_response("not json at all")
+        assert triage == []
+        assert analysis is None
+
+    def test_unexpected_top_level_type_returns_empty(self):
+        """Neither list nor dict (e.g. a bare string/number) -> ([], None)."""
+        obs = self._make_observer()
+        triage, analysis = obs._parse_triage_response(json.dumps("just a string"))
+        assert triage == []
+        assert analysis is None
+
+
+class TestValidateAnalysisBounds:
+    """_validate_analysis enforces redaction, length/list caps, confidence
+    clamping, and drops unknown keys via the typed CIAnalysis model."""
+
+    def test_non_dict_returns_none(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis(None) is None
+        assert _validate_analysis("not a dict") is None
+        assert _validate_analysis([1, 2, 3]) is None
+
+    def test_happy_path_round_trips_through_ciAnalysis(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        obj = {
+            "summary": "Build failed on tier1 network suite.",
+            "probable_cause": "Flaky NIC driver on worker pool.",
+            "suggested_next_step": "Restart the job.",
+            "signals": ["dial tcp: connection refused", "context deadline exceeded"],
+            "confidence": 0.73,
+        }
+        result = _validate_analysis(obj)
+        assert result["summary"] == obj["summary"]
+        assert result["probable_cause"] == obj["probable_cause"]
+        assert result["suggested_next_step"] == obj["suggested_next_step"]
+        assert result["signals"] == obj["signals"]
+        assert result["confidence"] == 0.73
+
+    def test_missing_fields_default_safely(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({})
+        assert result["summary"] == ""
+        assert result["probable_cause"] == ""
+        assert result["suggested_next_step"] == ""
+        assert result["signals"] == []
+        assert result["confidence"] == 0.0
+
+    def test_confidence_clamped_to_unit_interval(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": 5.0})["confidence"] == 1.0
+        assert _validate_analysis({"confidence": -3.0})["confidence"] == 0.0
+
+    def test_confidence_non_numeric_defaults_to_zero(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": "not-a-number"})["confidence"] == 0.0
+
+    def test_summary_capped_at_500(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "x" * 1000})
+        assert len(result["summary"]) == 500
+
+    def test_probable_cause_capped_at_1000(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "x" * 2000})
+        assert len(result["probable_cause"]) == 1000
+
+    def test_suggested_next_step_capped_at_300(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"suggested_next_step": "x" * 500})
+        assert len(result["suggested_next_step"]) == 300
+
+    def test_signals_capped_at_10_entries(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": [f"signal-{i}" for i in range(25)]})
+        assert len(result["signals"]) == 10
+
+    def test_each_signal_capped_at_200_chars(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["x" * 500]})
+        assert len(result["signals"][0]) == 200
+
+    def test_signals_non_list_ignored(self):
+        """A non-list "signals" value must not raise -- defaults to empty."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": "not-a-list"})
+        assert result["signals"] == []
+
+    def test_unknown_keys_dropped(self):
+        """Extra/unexpected keys must not survive (typed CIAnalysis contract)."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "ok", "sneaky_extra_field": "should not appear"})
+        assert "sneaky_extra_field" not in result
+
+    def test_secrets_redacted_from_summary(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "Auth failed: password=hunter2"})
+        assert "hunter2" not in result["summary"]
+        assert "***REDACTED***" in result["summary"]
+
+    def test_pii_redacted_from_probable_cause(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "Reported by alice@example.com"})
+        assert "alice@example.com" not in result["probable_cause"]
+        assert "[redacted-email]" in result["probable_cause"]
+
+    def test_secrets_redacted_from_signals(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["token: 'abc123'"]})
+        assert "abc123" not in result["signals"][0]
+
+    def test_fence_break_sanitized(self):
+        """Triple backticks in narrative text must not break the outer skill prompt fence."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "```\nrm -rf /\n```"})
+        assert "```" not in result["summary"]
+
+
+class TestTriageAndBuildEvidenceAnalysisIntegration:
+    """_triage_and_build_evidence wires the parsed+validated analysis into
+    ci_context and display_text, gated by JENKINS_OBSERVER_ANALYSIS_ENABLED."""
+
+    async def _run(self, *, analysis_enabled="true"):
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED=analysis_enabled)
+        with patch.dict("os.environ", env):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            bb = _mock_blackboard()
+            obs = JenkinsObserver(blackboard=bb)
+
+            payload = {
+                "triage": [_make_triage_response()],
+                "analysis": {
+                    "summary": "Tier1 network suite failed due to a flaky NIC driver.",
+                    "probable_cause": "Known infra flake on worker node pool.",
+                    "suggested_next_step": "Restart the job.",
+                    "signals": ["dial tcp: connection refused"],
+                    "confidence": 0.8,
+                },
+            }
+            mock_response = MagicMock()
+            mock_response.text = json.dumps(payload)
+            mock_llm = AsyncMock()
+            mock_llm.generate = AsyncMock(return_value=mock_response)
+            obs._get_llm_adapter = AsyncMock(return_value=mock_llm)
+
+            obs._adapter = AsyncMock()
+            obs._adapter.get_build_details = AsyncMock(return_value=None)
+            obs._skills_si = "test system instruction"
+
+            signals = [("verify-cnv-4.23.z-build-tier1",
+                        _make_meta(result="FAILURE", view="Gating Wrappers"))]
+            return await obs._triage_and_build_evidence(signals)
+
+    async def test_analysis_embedded_when_enabled(self):
+        result = await self._run(analysis_enabled="true")
+        assert result.ci_context.get("analysis") is not None
+        assert result.ci_context["analysis"]["summary"] == (
+            "Tier1 network suite failed due to a flaky NIC driver."
+        )
+        assert "Tier1 network suite failed" in result.display_text
+
+    async def test_analysis_omitted_when_disabled(self):
+        """Kill-switch: JENKINS_OBSERVER_ANALYSIS_ENABLED=false -> no analysis
+        in ci_context and display_text stays at the terse pre-Phase-1 form,
+        even though the LLM response included one."""
+        result = await self._run(analysis_enabled="false")
+        assert "analysis" not in result.ci_context
+        assert "Tier1 network suite failed" not in result.display_text
