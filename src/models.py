@@ -235,6 +235,23 @@ class EventMetrics(BaseModel):
     replicas: str = "unknown"
 
 
+class CIAnalysis(BaseModel):
+    """Validated narrative failure analysis for a ci_gating event.
+
+    LLM-derived and untrusted (built from attacker-influenceable Jenkins console
+    logs) -- caps + redaction are applied upstream by
+    jenkins_observer.py::_validate_analysis before construction. Stored on
+    EventEvidence.ci_context["analysis"] via .model_dump() (ci_context itself
+    stays a free-form dict so this model is a validation contract, not a wire
+    schema change).
+    """
+    summary: str = ""
+    probable_cause: str = ""
+    suggested_next_step: str = ""
+    signals: list[str] = []
+    confidence: float = 0.0
+
+
 class EventEvidence(BaseModel):
     """Structured evidence for event ticket cards and multi-source rendering."""
     display_text: str = Field(..., description="Human-readable evidence string")
@@ -262,7 +279,9 @@ class EventEvidence(BaseModel):
     )
     argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key (namespace/name) for evidence-based icon resolution")
     ci_context: Optional[dict] = Field(
-        None, description="CI gating context: cnv_version, jenkins_url, failed_jobs, missing_jobs, llm_triage, maintainer"
+        None, description="CI gating context: cnv_version, jenkins_url, failed_jobs, missing_jobs, llm_triage, "
+        "maintainer, analysis (CIAnalysis.model_dump() -- narrative summary/probable_cause/suggested_next_step/"
+        "signals/confidence, see jenkins_observer.py::_validate_analysis)"
     )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")

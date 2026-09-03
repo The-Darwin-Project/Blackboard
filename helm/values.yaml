@@ -184,7 +184,7 @@ gcp:
     jenkinsObserver:
       model: "gemini-3.5-flash-lite" # CI gating triage (lightweight, fast)
       temperature: "0.3"
-      maxOutputTokens: "4096"
+      maxOutputTokens: "6144" # Raised from 4096 for Phase 1 narrative analysis (summary/probable_cause/signals/suggested_next_step) alongside per-job triage.
   tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
@@ -565,6 +565,7 @@ jenkinsObserver:
   views: "" # CSV of Jenkins view names to scan (e.g., "Gating Wrappers")
   recencyHours: "72" # hours -- stale SUCCESS jobs dropped (FAILURE always kept)
   maintainers: "" # CSV of maintainer emails for escalation -- set in GitOps overlay
+  analysisEnabled: true # Narrative failure analysis (summary/probable_cause/signals/suggested_next_step/confidence) alongside per-job triage. Read once at pod startup -- flipping requires `helm upgrade` + a pod restart to take effect, NOT an instant kill-switch. Accepts true/1/yes (case-insensitive). BLAST RADIUS: deployment.yaml uses replicaCount=1 with strategy.type=Recreate (Qdrant WAL needs exclusive PVC access), and this single pod also runs Brain + every other observer -- so the restart required to flip this flag is a full application outage, not a quick bounce of an isolated component. Mid-incident, disabling this is a bigger hammer than it looks; weigh that against leaving it on.
   jenkins:
     # NOTE: existingSecret/url/insecureTls are also reused (unchanged, no new
     # values added) to mount Jenkins credentials into the SysAdmin/Developer

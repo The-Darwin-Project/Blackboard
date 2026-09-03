@@ -23,7 +23,8 @@
 #     credentials and ci_context is served by GET /queue/{event_id} with no dedicated auth.
 # 13. [Constraint]: LLM triage output (from _parse_triage_response) must be passed through
 #     _validate_triage_entry() -- it is untrusted (LLM-generated from an attacker-influenceable
-#     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py.
+#     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py. job_name
+#     is newline-stripped here but deliberately left HTML-unescaped -- see rule #17.
 # 14. [Constraint]: console_tail must be passed through _prepare_console_tail() which owns
 #     the security-invariant order: redact -> strip pipeline noise -> slice -> sanitize.
 #     _strip_pipeline_annotations is defined in the adapter (wire-format knowledge) but
@@ -33,6 +34,23 @@
 #     must not be staged as a failure signal.
 # 16. [Pattern]: Maintainer escalation list from JENKINS_OBSERVER_MAINTAINERS env CSV,
 #     injected into ci_context.maintainer matching Headhunter's static-source shape.
+# 17. [Constraint]: LLM narrative analysis (from _parse_triage_response) must be passed
+#     through _validate_analysis() -- same untrusted-output threat model as
+#     _validate_triage_entry (constraint #13): redact_pii -> _redact_secrets_in_text ->
+#     _sanitize_console_tail -> strip newlines, then hard length/list caps, before it can
+#     reach ci_context["analysis"]. Deliberately NOT html.escape()'d here: this same text
+#     also flows unescaped into non-HTML sinks (EventEvidence.display_text, Slack,
+#     llm/prompt.py's second-hop prompt) -- escaping it here would double-encode/garble
+#     those. event_markdown.py's rehype-raw markdown sink is the one consumer that needs
+#     HTML entities, so IT owns the html.escape() call, applied uniformly to every
+#     externally/LLM-derived field at render time (see event_markdown.py rule #4).
+# 18. [Pattern]: Narrative analysis is feature-flagged via JENKINS_OBSERVER_ANALYSIS_ENABLED
+#     (default true, accepts "true"/"1"/"yes" case-insensitive). The flag is read once at
+#     JenkinsObserver.__init__ -- flipping it requires `helm upgrade` + pod restart, it is
+#     NOT an instant kill-switch. When disabled, _build_triage_prompt() omits the narrative
+#     instructions entirely (no request, no extra output tokens), and any analysis lives
+#     inside the existing triage try/except -- any failure logs and falls back to the terse
+#     (pre-Phase-1) evidence, never blocks event creation.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -44,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -56,8 +75,9 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 from ..adapters.jenkins import _strip_pipeline_annotations
-from ..models import EventEvidence
+from ..models import CIAnalysis, EventEvidence
 from ..skills_catalog import download_skill_md
+from ..utils.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +227,33 @@ def _parse_job_metadata(params: dict) -> dict:
     return result
 
 
+def _clamp_confidence(value: object, default: float = 0.0) -> float:
+    """Coerce untrusted confidence input to a float in [0, 1], defaulting to
+    `default` on non-numeric input.
+
+    NaN is explicitly rejected: `float("NaN")` parses successfully (valid JSON
+    number literal), and NaN compares False to every bound, so an unguarded
+    `max(0.0, min(1.0, nan))` silently promotes it to 1.0 -- the opposite of
+    the intended fail-safe default. Shared by _validate_triage_entry and
+    _validate_analysis (same duplicated clamp logic, same untrusted input).
+    """
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(confidence):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
+def _strip_newlines(text: str) -> str:
+    """Collapse newlines to spaces. Applied to every free-text field that can reach
+    event_markdown.py's line-oriented markdown sink -- html.escape() (applied at that
+    render boundary) does not touch '\\n'/'\\r', so an unstripped multi-line value could
+    otherwise forge markdown structure (e.g. fake '#' headers) with no '<'/'>' needed."""
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _validate_triage_entry(entry: object) -> Optional[dict]:
     """Validate + normalize one LLM triage entry before it can reach ci_context and,
     downstream, the Brain/FRIDAY triage prompt (build_event_header in llm/prompt.py).
@@ -215,7 +262,9 @@ def _validate_triage_entry(entry: object) -> Optional[dict]:
     confidence is clamped to a float in [0, 1], so no attacker-controlled free text
     (e.g. injected via a Jenkins console log) survives into the second-hop prompt.
     Unrecognized/extra fields (failed_leaves, owner, component, ...) are dropped since
-    nothing downstream consumes them.
+    nothing downstream consumes them. job_name is free text: newline-stripped here (see
+    _strip_newlines) and length-capped, but deliberately left HTML-unescaped -- see
+    rule #17 above.
     """
     if not isinstance(entry, dict):
         return None
@@ -224,22 +273,99 @@ def _validate_triage_entry(entry: object) -> Optional[dict]:
     if classification not in _VALID_TRIAGE_CLASSIFICATIONS:
         classification = "unknown"
 
-    try:
-        confidence = float(entry.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = _clamp_confidence(entry.get("confidence", 0.0))
 
     recommended_action = str(entry.get("recommended_action", "")).strip().lower()
     if recommended_action not in _VALID_TRIAGE_ACTIONS:
         recommended_action = "investigate"
 
+    job_name = _strip_newlines(str(entry.get("job_name", "")))[:200]
+
     return {
-        "job_name": str(entry.get("job_name", ""))[:200],
+        "job_name": job_name,
         "classification": classification,
         "confidence": confidence,
         "recommended_action": recommended_action,
     }
+
+
+_ANALYSIS_SUMMARY_MAX = 500
+_ANALYSIS_PROBABLE_CAUSE_MAX = 1000
+_ANALYSIS_NEXT_STEP_MAX = 300
+_ANALYSIS_SIGNALS_MAX = 10
+_ANALYSIS_SIGNAL_MAX = 200
+_ANALYSIS_SUMMARY_DISPLAY_MAX = 160
+
+
+def _sanitize_analysis_text(value: object, max_len: int) -> str:
+    """Untrusted-LLM-narrative text pipeline: redact PII -> redact secrets ->
+    sanitize (fence-break guard) -> strip newlines -> cap length. Mirrors the
+    order used for console_tail in _prepare_console_tail (security invariant:
+    redact before any truncation so a straddling secret can't survive a cut).
+
+    Newline-stripping runs last, before the length cap, so a multi-line LLM
+    narrative can't forge markdown structure (fake headers/list items) once this
+    text reaches event_markdown.py. Deliberately does NOT html.escape() -- this
+    text also flows unescaped into non-HTML sinks (EventEvidence.display_text,
+    Slack, llm/prompt.py's second-hop prompt); html-escaping it here would
+    double-encode/garble those. event_markdown.py owns the html.escape() call for
+    its rehype-raw markdown sink (see event_markdown.py rule #4) -- this pipeline
+    only needs to guarantee clean, single-line, secret-free text reaches it.
+    """
+    text = str(value) if value is not None else ""
+    text = redact_pii(text)
+    text = _redact_secrets_in_text(text)
+    text = _sanitize_console_tail(text)
+    text = _strip_newlines(text)
+    return text[:max_len]
+
+
+def _validate_analysis(obj: object) -> Optional[dict]:
+    """Validate + normalize the LLM's narrative analysis object before it can
+    reach ci_context["analysis"] and, downstream, the Brain/FRIDAY prompt.
+
+    Same untrusted-output threat model as _validate_triage_entry (the narrative
+    derives from attacker-influenceable Jenkins console logs): every string
+    field is redacted, HTML-escaped, and capped; confidence is clamped to
+    [0, 1]; signals are capped in count and per-item length; unknown keys are
+    dropped by constructing through the typed CIAnalysis model.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    summary = _sanitize_analysis_text(obj.get("summary", ""), _ANALYSIS_SUMMARY_MAX)
+    probable_cause = _sanitize_analysis_text(obj.get("probable_cause", ""), _ANALYSIS_PROBABLE_CAUSE_MAX)
+    suggested_next_step = _sanitize_analysis_text(obj.get("suggested_next_step", ""), _ANALYSIS_NEXT_STEP_MAX)
+
+    raw_signals = obj.get("signals", [])
+    signals: list[str] = []
+    if isinstance(raw_signals, list):
+        for s in raw_signals[:_ANALYSIS_SIGNALS_MAX]:
+            cleaned = _sanitize_analysis_text(s, _ANALYSIS_SIGNAL_MAX)
+            if cleaned:
+                signals.append(cleaned)
+
+    confidence = _clamp_confidence(obj.get("confidence", 0.0))
+
+    analysis = CIAnalysis(
+        summary=summary,
+        probable_cause=probable_cause,
+        suggested_next_step=suggested_next_step,
+        signals=signals,
+        confidence=confidence,
+    )
+    return analysis.model_dump()
+
+
+_TRUTHY_ENV_VALUES = ("true", "1", "yes")
+
+
+def _env_flag(name: str, default: str = "true") -> bool:
+    """Parse a boolean-ish env var, accepting common truthy spellings
+    ('true', '1', 'yes', case-insensitive). A strict `== "true"` comparison
+    silently treats GitOps-overlay-common spellings like "1"/"yes"/"TRUE" as
+    disabled -- an untested footgun for kill-switch-style flags."""
+    return os.getenv(name, default).strip().lower() in _TRUTHY_ENV_VALUES
 
 
 class JenkinsObserver:
@@ -266,6 +392,11 @@ class JenkinsObserver:
             v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
         self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
+        self._analysis_enabled = _env_flag("JENKINS_OBSERVER_ANALYSIS_ENABLED")
+        logger.info(
+            "JenkinsObserver: narrative analysis %s (JENKINS_OBSERVER_ANALYSIS_ENABLED)",
+            "enabled" if self._analysis_enabled else "disabled",
+        )
 
         self._view_unhealthy: dict[str, bool] = {}
 
@@ -758,11 +889,14 @@ class JenkinsObserver:
                         job_entry["parameters"] = cleaned_params
                 failed_jobs.append(job_entry)
 
-        # LLM triage
+        # LLM triage (+ narrative analysis, when enabled)
         llm_triage = []
+        analysis: Optional[dict] = None
         try:
             adapter = await self._get_llm_adapter()
-            prompt = self._build_triage_prompt(failed_jobs, missing_jobs, version)
+            prompt = self._build_triage_prompt(
+                failed_jobs, missing_jobs, version, include_analysis=self._analysis_enabled
+            )
             response = await adapter.generate(
                 system_prompt=self._skills_si,
                 contents=prompt,
@@ -772,7 +906,19 @@ class JenkinsObserver:
             from .llm import record_token_usage
             record_token_usage("jenkins_observer", response.usage if response else None)
             if response and response.text:
-                llm_triage = self._parse_triage_response(response.text)
+                llm_triage, parsed_analysis = self._parse_triage_response(response.text)
+                if self._analysis_enabled:
+                    if parsed_analysis:
+                        analysis = parsed_analysis
+                    else:
+                        logger.info(
+                            "JenkinsObserver: narrative analysis enabled but none produced "
+                            "this cycle (LLM omitted the 'analysis' key, or the response was "
+                            "not parseable JSON -- see any accompanying warning above), "
+                            "falling back to terse evidence"
+                        )
+            elif self._analysis_enabled:
+                logger.info("JenkinsObserver: LLM triage returned no response text, no analysis this cycle")
         except Exception as e:
             logger.warning("JenkinsObserver: LLM triage failed (%s), continuing without", e)
 
@@ -787,6 +933,8 @@ class JenkinsObserver:
             "llm_triage": llm_triage,
             "maintainer": {"source": "static", "emails": maintainer_emails},
         }
+        if analysis and analysis.get("summary"):
+            ci_context["analysis"] = analysis
 
         display_parts = []
         if failed_jobs:
@@ -794,6 +942,8 @@ class JenkinsObserver:
         if missing_jobs:
             display_parts.append(f"{len(missing_jobs)} missing job(s)")
         display_text = f"CNV {version}: {', '.join(display_parts)}" if display_parts else f"CNV {version}: CI gating issue"
+        if analysis and analysis.get("summary"):
+            display_text = f"{display_text} — {analysis['summary'][:_ANALYSIS_SUMMARY_DISPLAY_MAX]}"
 
         return EventEvidence(
             display_text=display_text,
@@ -805,9 +955,20 @@ class JenkinsObserver:
         )
 
     def _build_triage_prompt(
-        self, failed_jobs: list[dict], missing_jobs: list[dict], version: str
+        self,
+        failed_jobs: list[dict],
+        missing_jobs: list[dict],
+        version: str,
+        *,
+        include_analysis: bool = True,
     ) -> str:
-        """Build a triage prompt for Flash Lite."""
+        """Build a triage prompt for Flash Lite.
+
+        include_analysis gates the narrative-analysis instructions/JSON-schema
+        below JENKINS_OBSERVER_ANALYSIS_ENABLED: when the kill switch is off,
+        the LLM is never asked to produce the narrative, so no extra output
+        tokens are spent generating text that would just be discarded.
+        """
         lines = [f"CNV version: {version}", ""]
         lines.append("Prior: UNSTABLE results are likely test/product failures. FAILURE results are likely infra/pipeline failures.")
         lines.append("")
@@ -823,14 +984,46 @@ class JenkinsObserver:
                 lines.append(f"- {j['job_name']}")
         lines.append("\nFor each job, classify as: infrastructure, test, or product failure.")
         lines.append("Recommend: restart, investigate, or escalate.")
-        lines.append("Return JSON array: [{\"job_name\": ..., \"classification\": ..., \"confidence\": 0.0-1.0, \"recommended_action\": ..., \"failed_leaves\": [...], \"owner\": ..., \"component\": ...}]")
+        if not include_analysis:
+            lines.append(
+                "\nReturn a single JSON object: {\"triage\": [{\"job_name\": ..., \"classification\": ..., "
+                "\"confidence\": 0.0-1.0, \"recommended_action\": ..., \"failed_leaves\": [...], \"owner\": ..., "
+                "\"component\": ...}]}"
+            )
+            return "\n".join(lines)
+        lines.append(
+            "\nAlso provide a top-level narrative analysis of the overall failure, in addition "
+            "to the per-job triage array:"
+        )
+        lines.append("- summary: 1-2 sentence plain-English summary of what went wrong")
+        lines.append("- probable_cause: your best-guess root cause given the evidence above")
+        lines.append("- signals: short quoted snippets of log evidence that support probable_cause")
+        lines.append("- suggested_next_step: the single most useful next action for a human/agent to take")
+        lines.append("- confidence: 0.0-1.0 confidence in probable_cause")
+        lines.append(
+            "\nReturn a single JSON object: {\"triage\": [{\"job_name\": ..., \"classification\": ..., "
+            "\"confidence\": 0.0-1.0, \"recommended_action\": ..., \"failed_leaves\": [...], \"owner\": ..., "
+            "\"component\": ...}], \"analysis\": {\"summary\": ..., \"probable_cause\": ..., "
+            "\"signals\": [...], \"suggested_next_step\": ..., \"confidence\": 0.0-1.0}}"
+        )
         return "\n".join(lines)
 
-    def _parse_triage_response(self, text: str) -> list[dict]:
+    def _parse_triage_response(self, text: str) -> tuple[list[dict], Optional[dict]]:
         """Parse LLM triage JSON response. Tolerant of markdown fences.
 
-        Each entry is validated/normalized by _validate_triage_entry() -- see that
-        function's docstring for why (prompt-injection guard on the LLM's own output).
+        Accepts both the legacy bare-array shape (back-compat: a prior prompt
+        version, or a model that ignores the new instruction) and the current
+        {"triage": [...], "analysis": {...}} object shape. Returns
+        (triage_entries, analysis) -- analysis is None for the bare-array shape
+        or when the object omits/mis-shapes the "analysis" key. Both of those
+        "no analysis" causes, plus a JSON-decode failure, are logged here (never
+        the raw LLM text -- it hasn't been through the redact/secret-scrub
+        pipeline yet) so operators can tell "LLM omitted it" apart from
+        "response was malformed" instead of both collapsing into a silent None.
+
+        Each triage entry is validated/normalized by _validate_triage_entry(),
+        and analysis by _validate_analysis() -- both untrusted (LLM-generated
+        from an attacker-influenceable Jenkins console log).
         """
         text = text.strip()
         if text.startswith("```"):
@@ -838,9 +1031,27 @@ class JenkinsObserver:
             text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
             result = json.loads(text)
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(result, list):
-            return []
-        validated = (_validate_triage_entry(entry) for entry in result[:10])
-        return [entry for entry in validated if entry is not None]
+        except json.JSONDecodeError as e:
+            logger.warning("JenkinsObserver: triage response was not valid JSON (%s), dropping triage+analysis", e)
+            return [], None
+
+        if isinstance(result, list):
+            validated = (_validate_triage_entry(entry) for entry in result[:10])
+            return [entry for entry in validated if entry is not None], None
+
+        if isinstance(result, dict):
+            raw_triage = result.get("triage", [])
+            triage = []
+            if isinstance(raw_triage, list):
+                validated = (_validate_triage_entry(entry) for entry in raw_triage[:10])
+                triage = [entry for entry in validated if entry is not None]
+            raw_analysis = result.get("analysis")
+            analysis = _validate_analysis(raw_analysis)
+            if raw_analysis is not None and analysis is None:
+                logger.warning(
+                    "JenkinsObserver: LLM response included an 'analysis' key that failed "
+                    "validation (mis-shaped), dropping narrative"
+                )
+            return triage, analysis
+
+        return [], None

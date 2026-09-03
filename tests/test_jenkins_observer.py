@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -3203,3 +3204,464 @@ class TestT22StripPipelineAnnotations:
         assert "B" * 10 not in result
         assert marker in result
 
+
+
+# =========================================================================
+# Phase 1: narrative analysis -- parser fallback + validator bounds
+# =========================================================================
+
+class TestParseTriageResponseFormats:
+    """_parse_triage_response must accept both the legacy bare-array shape
+    and the new {"triage": [...], "analysis": {...}} object shape."""
+
+    def _make_observer(self):
+        from src.agents.jenkins_observer import JenkinsObserver
+        bb = _mock_blackboard()
+        with patch.dict("os.environ", _env_vars()):
+            return JenkinsObserver(blackboard=bb)
+
+    def test_legacy_bare_array_back_compat(self):
+        """Old prompt-version shape: a bare JSON array -> triage entries, analysis=None."""
+        obs = self._make_observer()
+        text = json.dumps([_make_triage_response()])
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is None
+
+    def test_new_object_shape_with_analysis(self):
+        """New shape: {"triage": [...], "analysis": {...}} -> both populated."""
+        obs = self._make_observer()
+        payload = {
+            "triage": [_make_triage_response()],
+            "analysis": {
+                "summary": "Tier1 network suite failed due to a flaky NIC driver.",
+                "probable_cause": "Known infra flake on worker node pool.",
+                "suggested_next_step": "Restart the job.",
+                "signals": ["dial tcp: connection refused"],
+                "confidence": 0.8,
+            },
+        }
+        text = json.dumps(payload)
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is not None
+        assert analysis["summary"] == "Tier1 network suite failed due to a flaky NIC driver."
+        assert analysis["confidence"] == 0.8
+
+    def test_object_shape_missing_analysis_key(self):
+        """New shape with only "triage" (no "analysis" key) -> analysis=None."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [_make_triage_response()]})
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert len(triage) == 1
+        assert analysis is None
+
+    def test_markdown_fence_stripped_for_object_shape(self):
+        """Tolerant of ```json ... ``` fences, same as the legacy array path."""
+        obs = self._make_observer()
+        payload = {"triage": [], "analysis": {"summary": "ok", "confidence": 0.5}}
+        text = "```json\n" + json.dumps(payload) + "\n```"
+
+        triage, analysis = obs._parse_triage_response(text)
+
+        assert triage == []
+        assert analysis is not None
+        assert analysis["summary"] == "ok"
+
+    def test_malformed_json_returns_empty(self):
+        obs = self._make_observer()
+        triage, analysis = obs._parse_triage_response("not json at all")
+        assert triage == []
+        assert analysis is None
+
+    def test_malformed_json_logs_warning(self, caplog):
+        """PR #228 codereview MEDIUM finding (observability gap): a JSON-decode
+        failure must be distinguishable in logs from "LLM legitimately omitted
+        the analysis key" -- both used to collapse into a silent None."""
+        obs = self._make_observer()
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            obs._parse_triage_response("not json at all")
+        assert any("not valid JSON" in r.message for r in caplog.records)
+
+    def test_mis_shaped_analysis_logs_warning(self, caplog):
+        """PR #228 codereview MEDIUM finding (observability gap): an "analysis"
+        key that is present but fails validation (e.g. wrong type) must log a
+        warning distinct from the "key omitted entirely" case."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [], "analysis": "not-a-dict"})
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            triage, analysis = obs._parse_triage_response(text)
+        assert analysis is None
+        assert any("failed validation" in r.message for r in caplog.records)
+
+    def test_missing_analysis_key_does_not_log_warning(self, caplog):
+        """Omitting "analysis" entirely (e.g. kill switch disabled the request)
+        is a normal, expected shape -- it must not log at WARNING level."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [_make_triage_response()]})
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            obs._parse_triage_response(text)
+        assert not any("failed validation" in r.message for r in caplog.records)
+
+    def test_unexpected_top_level_type_returns_empty(self):
+        """Neither list nor dict (e.g. a bare string/number) -> ([], None)."""
+        obs = self._make_observer()
+        triage, analysis = obs._parse_triage_response(json.dumps("just a string"))
+        assert triage == []
+        assert analysis is None
+
+    def test_triage_job_name_newlines_stripped(self):
+        """PR #228 codereview MEDIUM finding: job_name is free text rendered
+        into event_markdown.py's line-oriented markdown sink -- an embedded
+        newline could forge markdown structure the same way an un-stripped
+        analysis narrative could (see TestValidateAnalysisBounds)."""
+        obs = self._make_observer()
+        entry = _make_triage_response()
+        entry["job_name"] = "tier1\n# Fake Header"
+        text = json.dumps([entry])
+
+        triage, _ = obs._parse_triage_response(text)
+
+        assert "\n" not in triage[0]["job_name"]
+        assert triage[0]["job_name"] == "tier1 # Fake Header"
+
+
+class TestValidateAnalysisBounds:
+    """_validate_analysis enforces redaction, length/list caps, confidence
+    clamping, and drops unknown keys via the typed CIAnalysis model."""
+
+    def test_non_dict_returns_none(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis(None) is None
+        assert _validate_analysis("not a dict") is None
+        assert _validate_analysis([1, 2, 3]) is None
+
+    def test_happy_path_round_trips_through_ciAnalysis(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        obj = {
+            "summary": "Build failed on tier1 network suite.",
+            "probable_cause": "Flaky NIC driver on worker pool.",
+            "suggested_next_step": "Restart the job.",
+            "signals": ["dial tcp: connection refused", "context deadline exceeded"],
+            "confidence": 0.73,
+        }
+        result = _validate_analysis(obj)
+        assert result["summary"] == obj["summary"]
+        assert result["probable_cause"] == obj["probable_cause"]
+        assert result["suggested_next_step"] == obj["suggested_next_step"]
+        assert result["signals"] == obj["signals"]
+        assert result["confidence"] == 0.73
+
+    def test_missing_fields_default_safely(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({})
+        assert result["summary"] == ""
+        assert result["probable_cause"] == ""
+        assert result["suggested_next_step"] == ""
+        assert result["signals"] == []
+        assert result["confidence"] == 0.0
+
+    def test_confidence_clamped_to_unit_interval(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": 5.0})["confidence"] == 1.0
+        assert _validate_analysis({"confidence": -3.0})["confidence"] == 0.0
+
+    def test_confidence_non_numeric_defaults_to_zero(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": "not-a-number"})["confidence"] == 0.0
+
+    def test_confidence_nan_defaults_to_zero(self):
+        """PR #228 codereview MEDIUM finding: float("NaN") parses successfully
+        (valid JSON number literal) and NaN compares False to every bound, so an
+        unguarded max(0.0, min(1.0, nan)) silently promotes it to 1.0 -- the
+        opposite of the intended fail-safe default. Covers both the JSON-string
+        spelling an LLM/attacker could emit and the native float("nan")."""
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": "NaN"})["confidence"] == 0.0
+        assert _validate_analysis({"confidence": float("nan")})["confidence"] == 0.0
+
+    def test_confidence_infinity_still_clamps(self):
+        """+/-inf are legitimate floats (unlike NaN) and must still clamp normally."""
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": float("inf")})["confidence"] == 1.0
+        assert _validate_analysis({"confidence": float("-inf")})["confidence"] == 0.0
+
+    def test_summary_capped_at_500(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "x" * 1000})
+        assert len(result["summary"]) == 500
+
+    def test_probable_cause_capped_at_1000(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "x" * 2000})
+        assert len(result["probable_cause"]) == 1000
+
+    def test_suggested_next_step_capped_at_300(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"suggested_next_step": "x" * 500})
+        assert len(result["suggested_next_step"]) == 300
+
+    def test_signals_capped_at_10_entries(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": [f"signal-{i}" for i in range(25)]})
+        assert len(result["signals"]) == 10
+
+    def test_each_signal_capped_at_200_chars(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["x" * 500]})
+        assert len(result["signals"][0]) == 200
+
+    def test_signals_non_list_ignored(self):
+        """A non-list "signals" value must not raise -- defaults to empty."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": "not-a-list"})
+        assert result["signals"] == []
+
+    def test_unknown_keys_dropped(self):
+        """Extra/unexpected keys must not survive (typed CIAnalysis contract)."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "ok", "sneaky_extra_field": "should not appear"})
+        assert "sneaky_extra_field" not in result
+
+    def test_secrets_redacted_from_summary(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "Auth failed: password=hunter2"})
+        assert "hunter2" not in result["summary"]
+        assert "***REDACTED***" in result["summary"]
+
+    def test_pii_redacted_from_probable_cause(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "Reported by alice@example.com"})
+        assert "alice@example.com" not in result["probable_cause"]
+        assert "[redacted-email]" in result["probable_cause"]
+
+    def test_secrets_redacted_from_signals(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["token: 'abc123'"]})
+        assert "abc123" not in result["signals"][0]
+
+    def test_fence_break_sanitized(self):
+        """Triple backticks in narrative text must not break the outer skill prompt fence."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "```\nrm -rf /\n```"})
+        assert "```" not in result["summary"]
+
+    def test_html_not_escaped_in_summary_producer_side(self):
+        """PR #228 codereview HIGH finding (stored XSS) + follow-up HIGH finding
+        (double-escape into non-HTML sinks): _validate_analysis must NOT
+        html-escape -- this text also flows unescaped into EventEvidence.display_text,
+        Slack, and llm/prompt.py's second-hop prompt, and escaping it here made those
+        sinks show garbled literal '&amp;lt;...' entities. The one sink that renders
+        this as HTML (event_markdown.py's rehype-raw markdown, see
+        tests/test_event_markdown.py) owns the html.escape() call instead, applied
+        uniformly at render time -- see that module's rule #4."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "<img src=x onerror=alert(1)>"})
+        assert result["summary"] == "<img src=x onerror=alert(1)>"
+
+    def test_html_not_escaped_in_probable_cause(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "<script>alert(document.cookie)</script>"})
+        assert result["probable_cause"] == "<script>alert(document.cookie)</script>"
+
+    def test_html_not_escaped_in_suggested_next_step(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"suggested_next_step": "<a href=javascript:alert(1)>click</a>"})
+        assert result["suggested_next_step"] == "<a href=javascript:alert(1)>click</a>"
+
+    def test_html_not_escaped_in_signals(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["<img src=x onerror=alert(1)>"]})
+        assert result["signals"][0] == "<img src=x onerror=alert(1)>"
+
+    def test_raw_text_capped_at_max_length_unescaped(self):
+        """Length cap applies to the raw (unescaped) text -- there is no escaping
+        step here anymore to worry about truncating mid-entity; that risk now
+        lives solely at the event_markdown.py render boundary (see
+        tests/test_event_markdown.py::test_escaping_survives_length_cap_boundary)."""
+        from src.agents.jenkins_observer import _validate_analysis, _ANALYSIS_SUMMARY_MAX
+        result = _validate_analysis({"summary": "<" * (_ANALYSIS_SUMMARY_MAX + 50)})
+        assert len(result["summary"]) == _ANALYSIS_SUMMARY_MAX
+        assert result["summary"] == "<" * _ANALYSIS_SUMMARY_MAX
+
+    def test_newlines_stripped_from_summary(self):
+        """PR #228 codereview MEDIUM finding: a multi-line LLM narrative could
+        forge markdown structure (fake '#' headers/list items) once rendered by
+        event_markdown.py, since html.escape() never touches '\\n'/'\\r'.
+        Newlines must be stripped upstream instead."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "line one\n# Fake Header\r\nline two"})
+        assert "\n" not in result["summary"]
+        assert "\r" not in result["summary"]
+        assert result["summary"] == "line one # Fake Header line two"
+
+
+class TestClampConfidence:
+    """_clamp_confidence is the shared helper behind both _validate_triage_entry
+    and _validate_analysis's confidence clamping (PR #228 codereview MEDIUM
+    finding: the two call sites had identical, independently-fixable logic)."""
+
+    def test_clamps_to_unit_interval(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence(5.0) == 1.0
+        assert _clamp_confidence(-3.0) == 0.0
+        assert _clamp_confidence(0.42) == 0.42
+
+    def test_nan_defaults_safely(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence(float("nan")) == 0.0
+        assert _clamp_confidence("NaN") == 0.0
+
+    def test_non_numeric_defaults_safely(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence("not-a-number") == 0.0
+        assert _clamp_confidence(None) == 0.0
+
+    def test_used_by_validate_triage_entry(self):
+        """Ensures _validate_triage_entry was actually wired to the shared
+        helper, not just independently patched to skip NaN the same way."""
+        from src.agents.jenkins_observer import _validate_triage_entry
+        entry = {
+            "job_name": "tier1",
+            "classification": "infrastructure",
+            "confidence": "NaN",
+            "recommended_action": "restart",
+        }
+        assert _validate_triage_entry(entry)["confidence"] == 0.0
+
+
+class TestTriageAndBuildEvidenceAnalysisIntegration:
+    """_triage_and_build_evidence wires the parsed+validated analysis into
+    ci_context and display_text, gated by JENKINS_OBSERVER_ANALYSIS_ENABLED."""
+
+    async def _run(self, *, analysis_enabled="true"):
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED=analysis_enabled)
+        with patch.dict("os.environ", env):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            bb = _mock_blackboard()
+            obs = JenkinsObserver(blackboard=bb)
+
+            payload = {
+                "triage": [_make_triage_response()],
+                "analysis": {
+                    "summary": "Tier1 network suite failed due to a flaky NIC driver.",
+                    "probable_cause": "Known infra flake on worker node pool.",
+                    "suggested_next_step": "Restart the job.",
+                    "signals": ["dial tcp: connection refused"],
+                    "confidence": 0.8,
+                },
+            }
+            mock_response = MagicMock()
+            mock_response.text = json.dumps(payload)
+            mock_llm = AsyncMock()
+            mock_llm.generate = AsyncMock(return_value=mock_response)
+            obs._get_llm_adapter = AsyncMock(return_value=mock_llm)
+
+            obs._adapter = AsyncMock()
+            obs._adapter.get_build_details = AsyncMock(return_value=None)
+            obs._skills_si = "test system instruction"
+
+            signals = [("verify-cnv-4.23.z-build-tier1",
+                        _make_meta(result="FAILURE", view="Gating Wrappers"))]
+            return await obs._triage_and_build_evidence(signals)
+
+    async def test_analysis_embedded_when_enabled(self):
+        result = await self._run(analysis_enabled="true")
+        assert result.ci_context.get("analysis") is not None
+        assert result.ci_context["analysis"]["summary"] == (
+            "Tier1 network suite failed due to a flaky NIC driver."
+        )
+        assert "Tier1 network suite failed" in result.display_text
+
+    async def test_display_text_not_html_escaped(self):
+        """PR #228 codereview HIGH finding (double-escape/garbling): display_text
+        is consumed raw by non-HTML sinks (Slack, llm/prompt.py's second-hop
+        prompt) -- it must carry the clean narrative text, not HTML entities.
+        The html.escape() call for the markdown sink lives solely in
+        event_markdown.py at render time (see tests/test_event_markdown.py)."""
+        result = await self._run(analysis_enabled="true")
+        assert "&amp;" not in result.display_text
+        assert "&lt;" not in result.display_text
+        assert result.ci_context["analysis"]["summary"] == (
+            "Tier1 network suite failed due to a flaky NIC driver."
+        )
+
+    async def test_analysis_omitted_when_disabled(self):
+        """Kill-switch: JENKINS_OBSERVER_ANALYSIS_ENABLED=false -> no analysis
+        in ci_context and display_text stays at the terse pre-Phase-1 form,
+        even though the LLM response included one."""
+        result = await self._run(analysis_enabled="false")
+        assert "analysis" not in result.ci_context
+        assert "Tier1 network suite failed" not in result.display_text
+
+    async def test_prompt_omits_narrative_request_when_disabled(self):
+        """PR #228 codereview MEDIUM finding: the kill switch must stop the LLM
+        narrative *request* (and its token cost), not just discard the result
+        after the fact -- disabling it during an incident should actually
+        reduce token spend/injection surface, not just suppress display."""
+        await self._run(analysis_enabled="false")
+        # _run wires obs._get_llm_adapter -> mock_llm; inspect the prompt passed
+        # to generate() via the mock captured on the instance's adapter call.
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED="false")
+        with patch.dict("os.environ", env):
+            obs = JenkinsObserver(blackboard=_mock_blackboard())
+            prompt = obs._build_triage_prompt([], [], "4.23", include_analysis=obs._analysis_enabled)
+            assert "narrative analysis" not in prompt.lower()
+            assert '"analysis"' not in prompt
+
+    async def test_prompt_includes_narrative_request_when_enabled(self):
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED="true")
+        with patch.dict("os.environ", env):
+            obs = JenkinsObserver(blackboard=_mock_blackboard())
+            prompt = obs._build_triage_prompt([], [], "4.23", include_analysis=obs._analysis_enabled)
+            assert "narrative analysis" in prompt.lower()
+            assert '"analysis"' in prompt
+
+
+class TestEnvFlag:
+    """_env_flag backs JENKINS_OBSERVER_ANALYSIS_ENABLED (and is the fix for the
+    PR #228 codereview MEDIUM finding: a strict `.lower() == "true"` comparison
+    silently treats common GitOps-overlay truthy spellings -- "1", "yes",
+    "TRUE" -- as disabled)."""
+
+    def test_accepts_true_spellings_case_insensitive(self):
+        from src.agents.jenkins_observer import _env_flag
+        for value in ("true", "True", "TRUE", "1", "yes", "YES", "Yes"):
+            with patch.dict("os.environ", {"TEST_FLAG": value}):
+                assert _env_flag("TEST_FLAG") is True, f"{value!r} should be truthy"
+
+    def test_rejects_false_spellings(self):
+        from src.agents.jenkins_observer import _env_flag
+        for value in ("false", "False", "0", "no", ""):
+            with patch.dict("os.environ", {"TEST_FLAG": value}):
+                assert _env_flag("TEST_FLAG") is False, f"{value!r} should be falsy"
+
+    def test_default_used_when_unset(self):
+        from src.agents.jenkins_observer import _env_flag
+        with patch.dict("os.environ", {}, clear=False):
+            import os as _os
+            _os.environ.pop("UNSET_FLAG", None)
+            assert _env_flag("UNSET_FLAG", default="true") is True
+            assert _env_flag("UNSET_FLAG", default="false") is False
+
+    def test_jenkins_observer_analysis_enabled_accepts_alternate_truthy_spellings(self):
+        """End-to-end: JenkinsObserver.__init__ wires JENKINS_OBSERVER_ANALYSIS_ENABLED
+        through _env_flag, not a bare `.lower() == "true"` comparison."""
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        for value in ("1", "yes", "TRUE"):
+            env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED=value)
+            with patch.dict("os.environ", env):
+                obs = JenkinsObserver(blackboard=_mock_blackboard())
+                assert obs._analysis_enabled is True, f"{value!r} should enable analysis"
