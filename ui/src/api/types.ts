@@ -205,6 +205,16 @@ export interface CiContext {
     confidence?: number;
     recommended_action?: string;
   }>;
+  /** Narrative failure analysis (backend: models.CIAnalysis), rendered server-side
+   * into the markdown event report -- no dedicated UI consumer yet, tracked here so
+   * the backend schema doesn't drift untracked from frontend typings. */
+  analysis?: {
+    summary?: string;
+    probable_cause?: string;
+    suggested_next_step?: string;
+    signals?: string[];
+    confidence?: number;
+  };
   [key: string]: unknown;
 }
 

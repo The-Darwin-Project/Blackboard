@@ -3,16 +3,20 @@
 # 1. [Constraint]: No imports from src/agents/ or src/state/ -- standalone utility.
 # 2. [Pattern]: Extracted from Brain._event_to_markdown (staticmethod). Called by brain.py,
 #    blackboard.py, routes/queue.py, routes/events.py.
-# 3. [Constraint]: Only depends on src/models (EventDocument, EventEvidence) + stdlib.
+# 3. [Constraint]: Only depends on src/models (EventDocument, EventEvidence, CIAnalysis) + stdlib.
 # 4. [Pattern]: ci_context (and its optional "analysis" narrative sub-object, see
-#    models.CIAnalysis) is a free-form dict already sanitized/capped upstream by
-#    jenkins_observer.py -- render with .get() defaults only, never assume keys exist.
+#    models.CIAnalysis) is a free-form dict already sanitized/capped/HTML-escaped upstream
+#    by jenkins_observer.py -- render with .get() defaults for ci_context itself, but
+#    reconstruct "analysis" through CIAnalysis(**an) rather than raw dict.get() field-name
+#    literals, so a future CIAnalysis field rename fails loudly here instead of silently
+#    rendering a stale/empty section. Gate rendering on analysis_obj.summary (not dict
+#    truthiness) -- a validated-but-blank analysis dict is still a non-empty dict.
 """Event-to-Markdown converter for Darwin event documents."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ..models import EventDocument, EventEvidence
+from ..models import CIAnalysis, EventDocument, EventEvidence
 
 _MD_SUBJECT_LABEL = {
     "kargo_stage": "Stage",
@@ -139,14 +143,20 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
             for j in (cc.get("missing_jobs") or [])[:10]:
                 lines.append(f"- **Missing:** {j.get('job_name', '')}")
             an = cc.get("analysis")
-            if an:
+            analysis_obj = None
+            if isinstance(an, dict):
+                try:
+                    analysis_obj = CIAnalysis(**an)
+                except (TypeError, ValueError):
+                    analysis_obj = None
+            if analysis_obj and analysis_obj.summary:
                 lines.append("")
                 lines.append("### Failure Analysis")
-                lines.append(f"- **Summary:** {an.get('summary', '')}")
-                lines.append(f"- **Probable Cause:** {an.get('probable_cause', '')}")
-                lines.append(f"- **Suggested Next Step:** {an.get('suggested_next_step', '')}")
-                lines.append(f"- **Confidence:** {an.get('confidence', '')}")
-                for s in (an.get("signals") or [])[:10]:
+                lines.append(f"- **Summary:** {analysis_obj.summary}")
+                lines.append(f"- **Probable Cause:** {analysis_obj.probable_cause}")
+                lines.append(f"- **Suggested Next Step:** {analysis_obj.suggested_next_step}")
+                lines.append(f"- **Confidence:** {analysis_obj.confidence}")
+                for s in analysis_obj.signals[:10]:
                     lines.append(f"  - {s}")
             for t in (cc.get("llm_triage") or [])[:5]:
                 lines.append(

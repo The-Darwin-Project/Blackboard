@@ -565,7 +565,7 @@ jenkinsObserver:
   views: "" # CSV of Jenkins view names to scan (e.g., "Gating Wrappers")
   recencyHours: "72" # hours -- stale SUCCESS jobs dropped (FAILURE always kept)
   maintainers: "" # CSV of maintainer emails for escalation -- set in GitOps overlay
-  analysisEnabled: true # Narrative failure analysis (summary/probable_cause/signals/suggested_next_step/confidence) alongside per-job triage. Instant kill-switch, no redeploy needed to flip -- just this value.
+  analysisEnabled: true # Narrative failure analysis (summary/probable_cause/signals/suggested_next_step/confidence) alongside per-job triage. Read once at pod startup -- flipping requires `helm upgrade` + a pod restart to take effect, NOT an instant kill-switch. Accepts true/1/yes (case-insensitive).
   jenkins:
     # NOTE: existingSecret/url/insecureTls are also reused (unchanged, no new
     # values added) to mount Jenkins credentials into the SysAdmin/Developer

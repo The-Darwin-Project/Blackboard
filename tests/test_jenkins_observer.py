@@ -3331,6 +3331,22 @@ class TestValidateAnalysisBounds:
         from src.agents.jenkins_observer import _validate_analysis
         assert _validate_analysis({"confidence": "not-a-number"})["confidence"] == 0.0
 
+    def test_confidence_nan_defaults_to_zero(self):
+        """PR #228 codereview MEDIUM finding: float("NaN") parses successfully
+        (valid JSON number literal) and NaN compares False to every bound, so an
+        unguarded max(0.0, min(1.0, nan)) silently promotes it to 1.0 -- the
+        opposite of the intended fail-safe default. Covers both the JSON-string
+        spelling an LLM/attacker could emit and the native float("nan")."""
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": "NaN"})["confidence"] == 0.0
+        assert _validate_analysis({"confidence": float("nan")})["confidence"] == 0.0
+
+    def test_confidence_infinity_still_clamps(self):
+        """+/-inf are legitimate floats (unlike NaN) and must still clamp normally."""
+        from src.agents.jenkins_observer import _validate_analysis
+        assert _validate_analysis({"confidence": float("inf")})["confidence"] == 1.0
+        assert _validate_analysis({"confidence": float("-inf")})["confidence"] == 0.0
+
     def test_summary_capped_at_500(self):
         from src.agents.jenkins_observer import _validate_analysis
         result = _validate_analysis({"summary": "x" * 1000})
@@ -3391,6 +3407,78 @@ class TestValidateAnalysisBounds:
         result = _validate_analysis({"summary": "```\nrm -rf /\n```"})
         assert "```" not in result["summary"]
 
+    def test_html_escaped_in_summary(self):
+        """PR #228 codereview HIGH finding (stored XSS): the LLM narrative is
+        rendered into markdown that the UI renders via rehype-raw with no
+        separate sanitizer. An attacker-controlled Jenkins console log echoed
+        into summary/probable_cause/suggested_next_step/signals by the LLM must
+        not survive as live HTML."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "<img src=x onerror=alert(1)>"})
+        assert "<img" not in result["summary"]
+        assert "&lt;img" in result["summary"]
+
+    def test_html_escaped_in_probable_cause(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"probable_cause": "<script>alert(document.cookie)</script>"})
+        assert "<script>" not in result["probable_cause"]
+        assert "&lt;script&gt;" in result["probable_cause"]
+
+    def test_html_escaped_in_suggested_next_step(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"suggested_next_step": "<a href=javascript:alert(1)>click</a>"})
+        assert "<a href" not in result["suggested_next_step"]
+        assert "&lt;a href" in result["suggested_next_step"]
+
+    def test_html_escaped_in_signals(self):
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"signals": ["<img src=x onerror=alert(1)>"]})
+        assert "<img" not in result["signals"][0]
+        assert "&lt;img" in result["signals"][0]
+
+    def test_html_entities_escaped_before_length_cap(self):
+        """Escaping must happen before truncation -- otherwise a payload placed
+        right at the cap boundary could have its escape sequence sliced in half,
+        re-exposing a raw '<' or '&' at the tail of the capped string."""
+        from src.agents.jenkins_observer import _validate_analysis, _ANALYSIS_SUMMARY_MAX
+        result = _validate_analysis({"summary": "<" * (_ANALYSIS_SUMMARY_MAX + 50)})
+        assert len(result["summary"]) == _ANALYSIS_SUMMARY_MAX
+        assert "<" not in result["summary"]
+
+
+class TestClampConfidence:
+    """_clamp_confidence is the shared helper behind both _validate_triage_entry
+    and _validate_analysis's confidence clamping (PR #228 codereview MEDIUM
+    finding: the two call sites had identical, independently-fixable logic)."""
+
+    def test_clamps_to_unit_interval(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence(5.0) == 1.0
+        assert _clamp_confidence(-3.0) == 0.0
+        assert _clamp_confidence(0.42) == 0.42
+
+    def test_nan_defaults_safely(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence(float("nan")) == 0.0
+        assert _clamp_confidence("NaN") == 0.0
+
+    def test_non_numeric_defaults_safely(self):
+        from src.agents.jenkins_observer import _clamp_confidence
+        assert _clamp_confidence("not-a-number") == 0.0
+        assert _clamp_confidence(None) == 0.0
+
+    def test_used_by_validate_triage_entry(self):
+        """Ensures _validate_triage_entry was actually wired to the shared
+        helper, not just independently patched to skip NaN the same way."""
+        from src.agents.jenkins_observer import _validate_triage_entry
+        entry = {
+            "job_name": "tier1",
+            "classification": "infrastructure",
+            "confidence": "NaN",
+            "recommended_action": "restart",
+        }
+        assert _validate_triage_entry(entry)["confidence"] == 0.0
+
 
 class TestTriageAndBuildEvidenceAnalysisIntegration:
     """_triage_and_build_evidence wires the parsed+validated analysis into
@@ -3443,3 +3531,68 @@ class TestTriageAndBuildEvidenceAnalysisIntegration:
         result = await self._run(analysis_enabled="false")
         assert "analysis" not in result.ci_context
         assert "Tier1 network suite failed" not in result.display_text
+
+    async def test_prompt_omits_narrative_request_when_disabled(self):
+        """PR #228 codereview MEDIUM finding: the kill switch must stop the LLM
+        narrative *request* (and its token cost), not just discard the result
+        after the fact -- disabling it during an incident should actually
+        reduce token spend/injection surface, not just suppress display."""
+        await self._run(analysis_enabled="false")
+        # _run wires obs._get_llm_adapter -> mock_llm; inspect the prompt passed
+        # to generate() via the mock captured on the instance's adapter call.
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED="false")
+        with patch.dict("os.environ", env):
+            obs = JenkinsObserver(blackboard=_mock_blackboard())
+            prompt = obs._build_triage_prompt([], [], "4.23", include_analysis=obs._analysis_enabled)
+            assert "narrative analysis" not in prompt.lower()
+            assert '"analysis"' not in prompt
+
+    async def test_prompt_includes_narrative_request_when_enabled(self):
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED="true")
+        with patch.dict("os.environ", env):
+            obs = JenkinsObserver(blackboard=_mock_blackboard())
+            prompt = obs._build_triage_prompt([], [], "4.23", include_analysis=obs._analysis_enabled)
+            assert "narrative analysis" in prompt.lower()
+            assert '"analysis"' in prompt
+
+
+class TestEnvFlag:
+    """_env_flag backs JENKINS_OBSERVER_ANALYSIS_ENABLED (and is the fix for the
+    PR #228 codereview MEDIUM finding: a strict `.lower() == "true"` comparison
+    silently treats common GitOps-overlay truthy spellings -- "1", "yes",
+    "TRUE" -- as disabled)."""
+
+    def test_accepts_true_spellings_case_insensitive(self):
+        from src.agents.jenkins_observer import _env_flag
+        for value in ("true", "True", "TRUE", "1", "yes", "YES", "Yes"):
+            with patch.dict("os.environ", {"TEST_FLAG": value}):
+                assert _env_flag("TEST_FLAG") is True, f"{value!r} should be truthy"
+
+    def test_rejects_false_spellings(self):
+        from src.agents.jenkins_observer import _env_flag
+        for value in ("false", "False", "0", "no", ""):
+            with patch.dict("os.environ", {"TEST_FLAG": value}):
+                assert _env_flag("TEST_FLAG") is False, f"{value!r} should be falsy"
+
+    def test_default_used_when_unset(self):
+        from src.agents.jenkins_observer import _env_flag
+        with patch.dict("os.environ", {}, clear=False):
+            import os as _os
+            _os.environ.pop("UNSET_FLAG", None)
+            assert _env_flag("UNSET_FLAG", default="true") is True
+            assert _env_flag("UNSET_FLAG", default="false") is False
+
+    def test_jenkins_observer_analysis_enabled_accepts_alternate_truthy_spellings(self):
+        """End-to-end: JenkinsObserver.__init__ wires JENKINS_OBSERVER_ANALYSIS_ENABLED
+        through _env_flag, not a bare `.lower() == "true"` comparison."""
+        from src.agents.jenkins_observer import JenkinsObserver
+
+        for value in ("1", "yes", "TRUE"):
+            env = _env_vars(JENKINS_OBSERVER_ANALYSIS_ENABLED=value)
+            with patch.dict("os.environ", env):
+                obs = JenkinsObserver(blackboard=_mock_blackboard())
+                assert obs._analysis_enabled is True, f"{value!r} should enable analysis"

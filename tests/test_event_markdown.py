@@ -271,6 +271,45 @@ def test_ci_context_analysis_renders_narrative_fields():
     assert "  - dial tcp: connection refused" in md
 
 
+def test_ci_context_analysis_empty_dict_omits_failure_analysis_section():
+    """PR #228 codereview MEDIUM finding: a validated-but-blank analysis dict
+    (all fields default/empty) is still a non-empty, truthy dict -- rendering
+    must gate on a populated field (summary), not dict truthiness, or the event
+    report shows an empty '### Failure Analysis' sub-section."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "analysis": {
+            "summary": "",
+            "probable_cause": "",
+            "suggested_next_step": "",
+            "signals": [],
+            "confidence": 0.0,
+        },
+    })
+    md = Brain._event_to_markdown(event)
+    assert "### Failure Analysis" not in md
+
+
+def test_ci_context_analysis_malformed_does_not_raise():
+    """A malformed ci_context.analysis must degrade safely instead of raising
+    out of markdown rendering (e.g. a legacy record or a future producer that
+    skips jenkins_observer.py::_validate_analysis)."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "analysis": "not a dict",
+    })
+    md = Brain._event_to_markdown(event)
+    assert "### Failure Analysis" not in md
+
+
 def test_ci_context_renders_triage_and_maintainer():
     event = _make_ci_gating_event({
         "cnv_version": "4.23",

@@ -36,11 +36,17 @@
 # 17. [Constraint]: LLM narrative analysis (from _parse_triage_response) must be passed
 #     through _validate_analysis() -- same untrusted-output threat model as
 #     _validate_triage_entry (constraint #13): redact_pii -> _redact_secrets_in_text ->
-#     _sanitize_console_tail per string field, then hard length/list caps, before it can
-#     reach ci_context["analysis"] and, downstream, llm/prompt.py's second-hop prompt.
+#     _sanitize_console_tail -> html.escape() per string field, then hard length/list caps,
+#     before it can reach ci_context["analysis"] and, downstream, llm/prompt.py's second-hop
+#     prompt and event_markdown.py's rehype-raw markdown sink (html.escape is the XSS guard
+#     for the latter -- that sink has no separate sanitizer).
 # 18. [Pattern]: Narrative analysis is feature-flagged via JENKINS_OBSERVER_ANALYSIS_ENABLED
-#     (default true) and lives inside the existing triage try/except -- any failure logs
-#     and falls back to the terse (pre-Phase-1) evidence, never blocks event creation.
+#     (default true, accepts "true"/"1"/"yes" case-insensitive). The flag is read once at
+#     JenkinsObserver.__init__ -- flipping it requires `helm upgrade` + pod restart, it is
+#     NOT an instant kill-switch. When disabled, _build_triage_prompt() omits the narrative
+#     instructions entirely (no request, no extra output tokens), and any analysis lives
+#     inside the existing triage try/except -- any failure logs and falls back to the terse
+#     (pre-Phase-1) evidence, never blocks event creation.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -50,8 +56,10 @@ creates events with source="aligner" + subject_type="ci_gating" for FRIDAY.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -216,6 +224,25 @@ def _parse_job_metadata(params: dict) -> dict:
     return result
 
 
+def _clamp_confidence(value: object, default: float = 0.0) -> float:
+    """Coerce untrusted confidence input to a float in [0, 1], defaulting to
+    `default` on non-numeric input.
+
+    NaN is explicitly rejected: `float("NaN")` parses successfully (valid JSON
+    number literal), and NaN compares False to every bound, so an unguarded
+    `max(0.0, min(1.0, nan))` silently promotes it to 1.0 -- the opposite of
+    the intended fail-safe default. Shared by _validate_triage_entry and
+    _validate_analysis (same duplicated clamp logic, same untrusted input).
+    """
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(confidence):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
 def _validate_triage_entry(entry: object) -> Optional[dict]:
     """Validate + normalize one LLM triage entry before it can reach ci_context and,
     downstream, the Brain/FRIDAY triage prompt (build_event_header in llm/prompt.py).
@@ -233,11 +260,7 @@ def _validate_triage_entry(entry: object) -> Optional[dict]:
     if classification not in _VALID_TRIAGE_CLASSIFICATIONS:
         classification = "unknown"
 
-    try:
-        confidence = float(entry.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = _clamp_confidence(entry.get("confidence", 0.0))
 
     recommended_action = str(entry.get("recommended_action", "")).strip().lower()
     if recommended_action not in _VALID_TRIAGE_ACTIONS:
@@ -256,17 +279,26 @@ _ANALYSIS_PROBABLE_CAUSE_MAX = 1000
 _ANALYSIS_NEXT_STEP_MAX = 300
 _ANALYSIS_SIGNALS_MAX = 10
 _ANALYSIS_SIGNAL_MAX = 200
+_ANALYSIS_SUMMARY_DISPLAY_MAX = 160
 
 
-def _clean_analysis_text(value: object, max_len: int) -> str:
+def _sanitize_analysis_text(value: object, max_len: int) -> str:
     """Untrusted-LLM-narrative text pipeline: redact PII -> redact secrets ->
-    sanitize (fence-break guard) -> cap length. Mirrors the order used for
-    console_tail in _prepare_console_tail (security invariant: redact before
-    any truncation so a straddling secret can't survive a cut)."""
+    sanitize (fence-break guard) -> escape HTML -> cap length. Mirrors the
+    order used for console_tail in _prepare_console_tail (security invariant:
+    redact before any truncation so a straddling secret can't survive a cut).
+
+    html.escape() runs last, before the length cap, because this text (unlike
+    console_tail) is rendered into markdown via event_markdown.py, which the UI
+    renders with rehype-raw and no separate sanitizer -- an unescaped
+    `<img onerror=...>`-style payload echoed by the LLM from attacker-controlled
+    Jenkins console logs would otherwise execute as live DOM (stored XSS).
+    """
     text = str(value) if value is not None else ""
     text = redact_pii(text)
     text = _redact_secrets_in_text(text)
     text = _sanitize_console_tail(text)
+    text = html.escape(text)
     return text[:max_len]
 
 
@@ -276,30 +308,26 @@ def _validate_analysis(obj: object) -> Optional[dict]:
 
     Same untrusted-output threat model as _validate_triage_entry (the narrative
     derives from attacker-influenceable Jenkins console logs): every string
-    field is redacted and capped, confidence is clamped to [0, 1], signals are
-    capped in count and per-item length, and unknown keys are dropped by
-    constructing through the typed CIAnalysis model.
+    field is redacted, HTML-escaped, and capped; confidence is clamped to
+    [0, 1]; signals are capped in count and per-item length; unknown keys are
+    dropped by constructing through the typed CIAnalysis model.
     """
     if not isinstance(obj, dict):
         return None
 
-    summary = _clean_analysis_text(obj.get("summary", ""), _ANALYSIS_SUMMARY_MAX)
-    probable_cause = _clean_analysis_text(obj.get("probable_cause", ""), _ANALYSIS_PROBABLE_CAUSE_MAX)
-    suggested_next_step = _clean_analysis_text(obj.get("suggested_next_step", ""), _ANALYSIS_NEXT_STEP_MAX)
+    summary = _sanitize_analysis_text(obj.get("summary", ""), _ANALYSIS_SUMMARY_MAX)
+    probable_cause = _sanitize_analysis_text(obj.get("probable_cause", ""), _ANALYSIS_PROBABLE_CAUSE_MAX)
+    suggested_next_step = _sanitize_analysis_text(obj.get("suggested_next_step", ""), _ANALYSIS_NEXT_STEP_MAX)
 
     raw_signals = obj.get("signals", [])
     signals: list[str] = []
     if isinstance(raw_signals, list):
         for s in raw_signals[:_ANALYSIS_SIGNALS_MAX]:
-            cleaned = _clean_analysis_text(s, _ANALYSIS_SIGNAL_MAX)
+            cleaned = _sanitize_analysis_text(s, _ANALYSIS_SIGNAL_MAX)
             if cleaned:
                 signals.append(cleaned)
 
-    try:
-        confidence = float(obj.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = _clamp_confidence(obj.get("confidence", 0.0))
 
     analysis = CIAnalysis(
         summary=summary,
@@ -309,6 +337,17 @@ def _validate_analysis(obj: object) -> Optional[dict]:
         confidence=confidence,
     )
     return analysis.model_dump()
+
+
+_TRUTHY_ENV_VALUES = ("true", "1", "yes")
+
+
+def _env_flag(name: str, default: str = "true") -> bool:
+    """Parse a boolean-ish env var, accepting common truthy spellings
+    ('true', '1', 'yes', case-insensitive). A strict `== "true"` comparison
+    silently treats GitOps-overlay-common spellings like "1"/"yes"/"TRUE" as
+    disabled -- an untested footgun for kill-switch-style flags."""
+    return os.getenv(name, default).strip().lower() in _TRUTHY_ENV_VALUES
 
 
 class JenkinsObserver:
@@ -335,7 +374,7 @@ class JenkinsObserver:
             v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
         self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
-        self._analysis_enabled = os.getenv("JENKINS_OBSERVER_ANALYSIS_ENABLED", "true").lower() == "true"
+        self._analysis_enabled = _env_flag("JENKINS_OBSERVER_ANALYSIS_ENABLED")
 
         self._view_unhealthy: dict[str, bool] = {}
 
@@ -833,7 +872,9 @@ class JenkinsObserver:
         analysis: Optional[dict] = None
         try:
             adapter = await self._get_llm_adapter()
-            prompt = self._build_triage_prompt(failed_jobs, missing_jobs, version)
+            prompt = self._build_triage_prompt(
+                failed_jobs, missing_jobs, version, include_analysis=self._analysis_enabled
+            )
             response = await adapter.generate(
                 system_prompt=self._skills_si,
                 contents=prompt,
@@ -860,7 +901,7 @@ class JenkinsObserver:
             "llm_triage": llm_triage,
             "maintainer": {"source": "static", "emails": maintainer_emails},
         }
-        if analysis is not None:
+        if analysis and analysis.get("summary"):
             ci_context["analysis"] = analysis
 
         display_parts = []
@@ -870,7 +911,7 @@ class JenkinsObserver:
             display_parts.append(f"{len(missing_jobs)} missing job(s)")
         display_text = f"CNV {version}: {', '.join(display_parts)}" if display_parts else f"CNV {version}: CI gating issue"
         if analysis and analysis.get("summary"):
-            display_text = f"{display_text} — {analysis['summary'][:160]}"
+            display_text = f"{display_text} — {analysis['summary'][:_ANALYSIS_SUMMARY_DISPLAY_MAX]}"
 
         return EventEvidence(
             display_text=display_text,
@@ -882,9 +923,20 @@ class JenkinsObserver:
         )
 
     def _build_triage_prompt(
-        self, failed_jobs: list[dict], missing_jobs: list[dict], version: str
+        self,
+        failed_jobs: list[dict],
+        missing_jobs: list[dict],
+        version: str,
+        *,
+        include_analysis: bool = True,
     ) -> str:
-        """Build a triage prompt for Flash Lite."""
+        """Build a triage prompt for Flash Lite.
+
+        include_analysis gates the narrative-analysis instructions/JSON-schema
+        below JENKINS_OBSERVER_ANALYSIS_ENABLED: when the kill switch is off,
+        the LLM is never asked to produce the narrative, so no extra output
+        tokens are spent generating text that would just be discarded.
+        """
         lines = [f"CNV version: {version}", ""]
         lines.append("Prior: UNSTABLE results are likely test/product failures. FAILURE results are likely infra/pipeline failures.")
         lines.append("")
@@ -900,6 +952,13 @@ class JenkinsObserver:
                 lines.append(f"- {j['job_name']}")
         lines.append("\nFor each job, classify as: infrastructure, test, or product failure.")
         lines.append("Recommend: restart, investigate, or escalate.")
+        if not include_analysis:
+            lines.append(
+                "\nReturn a single JSON object: {\"triage\": [{\"job_name\": ..., \"classification\": ..., "
+                "\"confidence\": 0.0-1.0, \"recommended_action\": ..., \"failed_leaves\": [...], \"owner\": ..., "
+                "\"component\": ...}]}"
+            )
+            return "\n".join(lines)
         lines.append(
             "\nAlso provide a top-level narrative analysis of the overall failure, in addition "
             "to the per-job triage array:"
