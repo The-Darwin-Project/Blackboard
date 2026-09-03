@@ -323,4 +323,197 @@ def test_ci_context_renders_triage_and_maintainer():
     })
     md = Brain._event_to_markdown(event)
     assert "- **Triage:** tier1 → infrastructure (0.9) · restart" in md
-    assert "- **Maintainer Emails:** alice@example.com" in md
+
+
+# ---------------------------------------------------------------------------
+# Stored-XSS regression (PR #228 codereview HIGH finding): the UI renders this
+# markdown with rehype-raw and no separate sanitizer, so every externally/
+# LLM-derived value interpolated by event_to_markdown must come out
+# HTML-escaped, regardless of which ci_context sub-field it came from.
+# ---------------------------------------------------------------------------
+
+_XSS_PAYLOAD = "<script>alert(document.cookie)</script>"
+_AMP_PAYLOAD = "Tom & Jerry <b>bold</b>"
+
+
+def test_xss_escaped_in_failed_job_name_and_result():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [{"job_name": _XSS_PAYLOAD, "build_number": 1, "result": _XSS_PAYLOAD}],
+        "missing_jobs": [],
+        "llm_triage": [],
+    })
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;alert(document.cookie)&lt;/script&gt;" in md
+
+
+def test_xss_escaped_in_missing_job_name():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [{"job_name": _XSS_PAYLOAD}],
+        "llm_triage": [],
+    })
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+
+
+def test_xss_escaped_in_llm_triage_job_name():
+    """This is the exact HIGH finding: llm_triage[].job_name reaches this sink
+    with only a length cap (_validate_triage_entry), never html.escape()'d by
+    the producer -- event_markdown.py must escape it at render time instead."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [
+            {"job_name": _XSS_PAYLOAD, "classification": "infrastructure",
+             "confidence": 0.9, "recommended_action": "restart"},
+        ],
+    })
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+
+
+def test_xss_escaped_in_maintainer_emails():
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "maintainer": {"source": "static", "emails": [_XSS_PAYLOAD]},
+    })
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+
+
+def test_xss_escaped_in_analysis_narrative_fields():
+    """The LLM narrative is deliberately unescaped by jenkins_observer.py (see
+    that module's rule #17) -- event_markdown.py is the sole escape point."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "analysis": {
+            "summary": _XSS_PAYLOAD,
+            "probable_cause": _AMP_PAYLOAD,
+            "suggested_next_step": _XSS_PAYLOAD,
+            "signals": [_XSS_PAYLOAD],
+            "confidence": 0.5,
+        },
+    })
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "<b>bold</b>" not in md
+    assert "&lt;script&gt;" in md
+    assert "Tom &amp; Jerry &lt;b&gt;bold&lt;/b&gt;" in md
+
+
+def test_xss_escaped_in_evidence_display_text():
+    evidence = EventEvidence(
+        display_text=_XSS_PAYLOAD,
+        source_type="aligner",
+        severity="warning",
+        domain_confidence="default",
+    )
+    event = EventDocument(
+        source="aligner", service="darwin-store",
+        event=EventInput(reason="test", evidence=evidence),
+    )
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+
+
+def test_xss_escaped_in_gitlab_context():
+    ev = _make_typed_event(
+        source="headhunter", service="component",
+        gitlab_context={
+            "project_path": "org/repo",
+            "mr_iid": 1,
+            "mr_title": _XSS_PAYLOAD,
+            "author": _AMP_PAYLOAD,
+            "maintainer": {"source": "static", "emails": [_XSS_PAYLOAD]},
+        },
+    )
+    md = Brain._event_to_markdown(ev)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+    assert "Tom &amp; Jerry" in md
+
+
+def test_xss_escaped_in_github_context():
+    evidence = EventEvidence(
+        display_text="pr evidence",
+        source_type="headhunter",
+        severity="warning",
+        domain_confidence="default",
+        github_context={
+            "owner": "org", "repo": "repo", "pr_number": 1,
+            "pr_title": _XSS_PAYLOAD,
+            "author": _AMP_PAYLOAD,
+            "maintainer": {"source": "static", "emails": [_XSS_PAYLOAD]},
+        },
+    )
+    event = EventDocument(
+        source="headhunter", service="component",
+        event=EventInput(reason="test", evidence=evidence),
+    )
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+    assert "Tom &amp; Jerry" in md
+
+
+def test_xss_escaped_in_github_issue_context():
+    evidence = EventEvidence(
+        display_text="issue evidence",
+        source_type="headhunter",
+        severity="warning",
+        domain_confidence="default",
+        github_issue_context={
+            "owner": "org", "repo": "repo", "issue_number": 1,
+            "title": _XSS_PAYLOAD,
+            "labels": [_XSS_PAYLOAD],
+            "assignees": [_AMP_PAYLOAD],
+            "body": _XSS_PAYLOAD,
+        },
+    )
+    event = EventDocument(
+        source="headhunter", service="component",
+        event=EventInput(reason="test", evidence=evidence),
+    )
+    md = Brain._event_to_markdown(event)
+    assert _XSS_PAYLOAD not in md
+    assert "&lt;script&gt;" in md
+
+
+def test_ampersand_and_angle_brackets_escaped_without_double_encoding():
+    """Sanity check on _esc() itself via the render path: plain '&'/'<'/'>'
+    round-trip to exactly one layer of HTML entities, not zero and not two."""
+    event = _make_ci_gating_event({
+        "cnv_version": "4.23",
+        "jenkins_url": "https://jenkins.example.com",
+        "failed_jobs": [],
+        "missing_jobs": [],
+        "llm_triage": [],
+        "analysis": {
+            "summary": "A & B < C > D",
+            "probable_cause": "", "suggested_next_step": "", "signals": [],
+            "confidence": 0.1,
+        },
+    })
+    md = Brain._event_to_markdown(event)
+    assert "- **Summary:** A &amp; B &lt; C &gt; D" in md
+    assert "&amp;amp;" not in md
+    assert "&amp;lt;" not in md

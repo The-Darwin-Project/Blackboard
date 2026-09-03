@@ -23,7 +23,8 @@
 #     credentials and ci_context is served by GET /queue/{event_id} with no dedicated auth.
 # 13. [Constraint]: LLM triage output (from _parse_triage_response) must be passed through
 #     _validate_triage_entry() -- it is untrusted (LLM-generated from an attacker-influenceable
-#     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py.
+#     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py. job_name
+#     is newline-stripped here but deliberately left HTML-unescaped -- see rule #17.
 # 14. [Constraint]: console_tail must be passed through _prepare_console_tail() which owns
 #     the security-invariant order: redact -> strip pipeline noise -> slice -> sanitize.
 #     _strip_pipeline_annotations is defined in the adapter (wire-format knowledge) but
@@ -36,10 +37,13 @@
 # 17. [Constraint]: LLM narrative analysis (from _parse_triage_response) must be passed
 #     through _validate_analysis() -- same untrusted-output threat model as
 #     _validate_triage_entry (constraint #13): redact_pii -> _redact_secrets_in_text ->
-#     _sanitize_console_tail -> html.escape() per string field, then hard length/list caps,
-#     before it can reach ci_context["analysis"] and, downstream, llm/prompt.py's second-hop
-#     prompt and event_markdown.py's rehype-raw markdown sink (html.escape is the XSS guard
-#     for the latter -- that sink has no separate sanitizer).
+#     _sanitize_console_tail -> strip newlines, then hard length/list caps, before it can
+#     reach ci_context["analysis"]. Deliberately NOT html.escape()'d here: this same text
+#     also flows unescaped into non-HTML sinks (EventEvidence.display_text, Slack,
+#     llm/prompt.py's second-hop prompt) -- escaping it here would double-encode/garble
+#     those. event_markdown.py's rehype-raw markdown sink is the one consumer that needs
+#     HTML entities, so IT owns the html.escape() call, applied uniformly to every
+#     externally/LLM-derived field at render time (see event_markdown.py rule #4).
 # 18. [Pattern]: Narrative analysis is feature-flagged via JENKINS_OBSERVER_ANALYSIS_ENABLED
 #     (default true, accepts "true"/"1"/"yes" case-insensitive). The flag is read once at
 #     JenkinsObserver.__init__ -- flipping it requires `helm upgrade` + pod restart, it is
@@ -56,7 +60,6 @@ creates events with source="aligner" + subject_type="ci_gating" for FRIDAY.
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import logging
 import math
@@ -243,6 +246,14 @@ def _clamp_confidence(value: object, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
+def _strip_newlines(text: str) -> str:
+    """Collapse newlines to spaces. Applied to every free-text field that can reach
+    event_markdown.py's line-oriented markdown sink -- html.escape() (applied at that
+    render boundary) does not touch '\\n'/'\\r', so an unstripped multi-line value could
+    otherwise forge markdown structure (e.g. fake '#' headers) with no '<'/'>' needed."""
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 def _validate_triage_entry(entry: object) -> Optional[dict]:
     """Validate + normalize one LLM triage entry before it can reach ci_context and,
     downstream, the Brain/FRIDAY triage prompt (build_event_header in llm/prompt.py).
@@ -251,7 +262,9 @@ def _validate_triage_entry(entry: object) -> Optional[dict]:
     confidence is clamped to a float in [0, 1], so no attacker-controlled free text
     (e.g. injected via a Jenkins console log) survives into the second-hop prompt.
     Unrecognized/extra fields (failed_leaves, owner, component, ...) are dropped since
-    nothing downstream consumes them.
+    nothing downstream consumes them. job_name is free text: newline-stripped here (see
+    _strip_newlines) and length-capped, but deliberately left HTML-unescaped -- see
+    rule #17 above.
     """
     if not isinstance(entry, dict):
         return None
@@ -266,8 +279,10 @@ def _validate_triage_entry(entry: object) -> Optional[dict]:
     if recommended_action not in _VALID_TRIAGE_ACTIONS:
         recommended_action = "investigate"
 
+    job_name = _strip_newlines(str(entry.get("job_name", "")))[:200]
+
     return {
-        "job_name": str(entry.get("job_name", ""))[:200],
+        "job_name": job_name,
         "classification": classification,
         "confidence": confidence,
         "recommended_action": recommended_action,
@@ -284,21 +299,24 @@ _ANALYSIS_SUMMARY_DISPLAY_MAX = 160
 
 def _sanitize_analysis_text(value: object, max_len: int) -> str:
     """Untrusted-LLM-narrative text pipeline: redact PII -> redact secrets ->
-    sanitize (fence-break guard) -> escape HTML -> cap length. Mirrors the
+    sanitize (fence-break guard) -> strip newlines -> cap length. Mirrors the
     order used for console_tail in _prepare_console_tail (security invariant:
     redact before any truncation so a straddling secret can't survive a cut).
 
-    html.escape() runs last, before the length cap, because this text (unlike
-    console_tail) is rendered into markdown via event_markdown.py, which the UI
-    renders with rehype-raw and no separate sanitizer -- an unescaped
-    `<img onerror=...>`-style payload echoed by the LLM from attacker-controlled
-    Jenkins console logs would otherwise execute as live DOM (stored XSS).
+    Newline-stripping runs last, before the length cap, so a multi-line LLM
+    narrative can't forge markdown structure (fake headers/list items) once this
+    text reaches event_markdown.py. Deliberately does NOT html.escape() -- this
+    text also flows unescaped into non-HTML sinks (EventEvidence.display_text,
+    Slack, llm/prompt.py's second-hop prompt); html-escaping it here would
+    double-encode/garble those. event_markdown.py owns the html.escape() call for
+    its rehype-raw markdown sink (see event_markdown.py rule #4) -- this pipeline
+    only needs to guarantee clean, single-line, secret-free text reaches it.
     """
     text = str(value) if value is not None else ""
     text = redact_pii(text)
     text = _redact_secrets_in_text(text)
     text = _sanitize_console_tail(text)
-    text = html.escape(text)
+    text = _strip_newlines(text)
     return text[:max_len]
 
 
@@ -375,6 +393,10 @@ class JenkinsObserver:
         ]
         self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
         self._analysis_enabled = _env_flag("JENKINS_OBSERVER_ANALYSIS_ENABLED")
+        logger.info(
+            "JenkinsObserver: narrative analysis %s (JENKINS_OBSERVER_ANALYSIS_ENABLED)",
+            "enabled" if self._analysis_enabled else "disabled",
+        )
 
         self._view_unhealthy: dict[str, bool] = {}
 
@@ -886,7 +908,17 @@ class JenkinsObserver:
             if response and response.text:
                 llm_triage, parsed_analysis = self._parse_triage_response(response.text)
                 if self._analysis_enabled:
-                    analysis = parsed_analysis
+                    if parsed_analysis:
+                        analysis = parsed_analysis
+                    else:
+                        logger.info(
+                            "JenkinsObserver: narrative analysis enabled but none produced "
+                            "this cycle (LLM omitted the 'analysis' key, or the response was "
+                            "not parseable JSON -- see any accompanying warning above), "
+                            "falling back to terse evidence"
+                        )
+            elif self._analysis_enabled:
+                logger.info("JenkinsObserver: LLM triage returned no response text, no analysis this cycle")
         except Exception as e:
             logger.warning("JenkinsObserver: LLM triage failed (%s), continuing without", e)
 
@@ -983,7 +1015,11 @@ class JenkinsObserver:
         version, or a model that ignores the new instruction) and the current
         {"triage": [...], "analysis": {...}} object shape. Returns
         (triage_entries, analysis) -- analysis is None for the bare-array shape
-        or when the object omits/mis-shapes the "analysis" key.
+        or when the object omits/mis-shapes the "analysis" key. Both of those
+        "no analysis" causes, plus a JSON-decode failure, are logged here (never
+        the raw LLM text -- it hasn't been through the redact/secret-scrub
+        pipeline yet) so operators can tell "LLM omitted it" apart from
+        "response was malformed" instead of both collapsing into a silent None.
 
         Each triage entry is validated/normalized by _validate_triage_entry(),
         and analysis by _validate_analysis() -- both untrusted (LLM-generated
@@ -995,7 +1031,8 @@ class JenkinsObserver:
             text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
             result = json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning("JenkinsObserver: triage response was not valid JSON (%s), dropping triage+analysis", e)
             return [], None
 
         if isinstance(result, list):
@@ -1008,7 +1045,13 @@ class JenkinsObserver:
             if isinstance(raw_triage, list):
                 validated = (_validate_triage_entry(entry) for entry in raw_triage[:10])
                 triage = [entry for entry in validated if entry is not None]
-            analysis = _validate_analysis(result.get("analysis"))
+            raw_analysis = result.get("analysis")
+            analysis = _validate_analysis(raw_analysis)
+            if raw_analysis is not None and analysis is None:
+                logger.warning(
+                    "JenkinsObserver: LLM response included an 'analysis' key that failed "
+                    "validation (mis-shaped), dropping narrative"
+                )
             return triage, analysis
 
         return [], None

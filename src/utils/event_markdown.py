@@ -4,16 +4,28 @@
 # 2. [Pattern]: Extracted from Brain._event_to_markdown (staticmethod). Called by brain.py,
 #    blackboard.py, routes/queue.py, routes/events.py.
 # 3. [Constraint]: Only depends on src/models (EventDocument, EventEvidence, CIAnalysis) + stdlib.
-# 4. [Pattern]: ci_context (and its optional "analysis" narrative sub-object, see
-#    models.CIAnalysis) is a free-form dict already sanitized/capped/HTML-escaped upstream
-#    by jenkins_observer.py -- render with .get() defaults for ci_context itself, but
-#    reconstruct "analysis" through CIAnalysis(**an) rather than raw dict.get() field-name
-#    literals, so a future CIAnalysis field rename fails loudly here instead of silently
-#    rendering a stale/empty section. Gate rendering on analysis_obj.summary (not dict
-#    truthiness) -- a validated-but-blank analysis dict is still a non-empty dict.
+# 4. [Constraint]: THIS MODULE IS THE HTML-ESCAPE BOUNDARY. The UI renders this markdown
+#    with rehype-raw and no separate sanitizer, so every value sourced from an external
+#    system (GitLab/GitHub/Kargo webhook payloads, Jenkins job data, LLM-generated
+#    triage/analysis narrative) MUST be passed through _esc() at the point it is
+#    interpolated into `lines`, uniformly, regardless of what the producer already did to
+#    it. Producers (e.g. jenkins_observer.py) intentionally do NOT html-escape these
+#    fields -- that text also flows unescaped into non-HTML sinks (EventEvidence.display_text,
+#    Slack, the Brain/FRIDAY prompt) and escaping it at the producer double-encodes/garbles
+#    those sinks. Do not remove _esc() calls to "avoid double escaping" -- there is exactly
+#    one escape, and it lives here.
+# 5. [Pattern]: ci_context (and its optional "analysis" narrative sub-object, see
+#    models.CIAnalysis) is a free-form dict, redacted/capped/newline-stripped upstream by
+#    jenkins_observer.py but NOT html-escaped there -- render with .get() defaults for
+#    ci_context itself, but reconstruct "analysis" through CIAnalysis(**an) rather than raw
+#    dict.get() field-name literals, so a future CIAnalysis field rename fails loudly here
+#    instead of silently rendering a stale/empty section. Gate rendering on
+#    analysis_obj.summary (not dict truthiness) -- a validated-but-blank analysis dict is
+#    still a non-empty dict.
 """Event-to-Markdown converter for Darwin event documents."""
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 from ..models import CIAnalysis, EventDocument, EventEvidence
@@ -25,6 +37,19 @@ _MD_SUBJECT_LABEL = {
     "github_issue": "GitHub Issue",
     "ci_gating": "CI Gating",
 }
+
+
+def _esc(value: object) -> str:
+    """HTML-escape a single externally/LLM-derived value at the markdown render
+    boundary (see @ai-rules #4 above). The sole escape point for this module."""
+    if value is None:
+        return ""
+    return html.escape(str(value))
+
+
+def _esc_join(values, sep: str = ", ") -> str:
+    """Escape each item then join -- avoids escaping the separator itself."""
+    return sep.join(_esc(v) for v in values)
 
 
 def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:
@@ -48,100 +73,101 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
         f"- **Reason:** {event.event.reason}",
     ]
     if isinstance(evidence, EventEvidence):
-        lines.append(f"- **Evidence:** {evidence.display_text}")
+        lines.append(f"- **Evidence:** {_esc(evidence.display_text)}")
         lines.append(f"- **Domain:** {evidence.brain_domain or evidence.domain}")
         lines.append(f"- **Severity:** {evidence.brain_severity or evidence.severity}")
         if evidence.gitlab_context:
             gl = evidence.gitlab_context
             lines.append(f"")
             lines.append(f"## GitLab Context")
-            lines.append(f"- **Project ID:** {gl.get('project_id', '')}")
-            lines.append(f"- **Project Path:** {gl.get('project_path', '')}")
-            lines.append(f"- **MR IID:** !{gl.get('mr_iid', '')}")
-            lines.append(f"- **MR Title:** {gl.get('mr_title', '')}")
-            lines.append(f"- **MR URL:** {gl.get('target_url', '')}")
-            lines.append(f"- **Action:** {gl.get('action_name', '')}")
-            lines.append(f"- **Pipeline:** {gl.get('pipeline_status', 'unknown')}")
+            lines.append(f"- **Project ID:** {_esc(gl.get('project_id', ''))}")
+            lines.append(f"- **Project Path:** {_esc(gl.get('project_path', ''))}")
+            lines.append(f"- **MR IID:** !{_esc(gl.get('mr_iid', ''))}")
+            lines.append(f"- **MR Title:** {_esc(gl.get('mr_title', ''))}")
+            lines.append(f"- **MR URL:** {_esc(gl.get('target_url', ''))}")
+            lines.append(f"- **Action:** {_esc(gl.get('action_name', ''))}")
+            lines.append(f"- **Pipeline:** {_esc(gl.get('pipeline_status', 'unknown'))}")
             if gl.get("pipeline_id"):
-                lines.append(f"- **Pipeline ID:** {gl['pipeline_id']}")
-            lines.append(f"- **Merge Status:** {gl.get('merge_status', '')}")
-            lines.append(f"- **Source Branch:** {gl.get('source_branch', '')}")
-            lines.append(f"- **Target Branch:** {gl.get('target_branch', '')}")
-            lines.append(f"- **Author:** {gl.get('author', '')}")
+                lines.append(f"- **Pipeline ID:** {_esc(gl['pipeline_id'])}")
+            lines.append(f"- **Merge Status:** {_esc(gl.get('merge_status', ''))}")
+            lines.append(f"- **Source Branch:** {_esc(gl.get('source_branch', ''))}")
+            lines.append(f"- **Target Branch:** {_esc(gl.get('target_branch', ''))}")
+            lines.append(f"- **Author:** {_esc(gl.get('author', ''))}")
             maintainer = gl.get("maintainer", {})
             if maintainer:
                 emails = maintainer.get("emails", [])
-                lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
-                lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
+                lines.append(f"- **Maintainer Emails:** {_esc_join(emails) if emails else 'none'}")
+                lines.append(f"- **Maintainer Source:** {_esc(maintainer.get('source', ''))}")
         if evidence.kargo_context:
             kc = evidence.kargo_context
             lines.append("")
             lines.append("## Kargo Context")
-            lines.append(f"- **Project:** {kc.get('project', '')}")
-            lines.append(f"- **Stage:** {kc.get('stage', '')}")
-            lines.append(f"- **Promotion:** {kc.get('promotion', '')}")
-            lines.append(f"- **Freight:** {(kc.get('freight') or '')[:12]}...")
-            lines.append(f"- **Phase:** {kc.get('phase', '')}")
-            lines.append(f"- **Failed Step:** {kc.get('failed_step', 'N/A')}")
-            lines.append(f"- **Error:** {kc.get('message', '')}")
+            lines.append(f"- **Project:** {_esc(kc.get('project', ''))}")
+            lines.append(f"- **Stage:** {_esc(kc.get('stage', ''))}")
+            lines.append(f"- **Promotion:** {_esc(kc.get('promotion', ''))}")
+            lines.append(f"- **Freight:** {_esc((kc.get('freight') or '')[:12])}...")
+            lines.append(f"- **Phase:** {_esc(kc.get('phase', ''))}")
+            lines.append(f"- **Failed Step:** {_esc(kc.get('failed_step', 'N/A'))}")
+            lines.append(f"- **Error:** {_esc(kc.get('message', ''))}")
             if kc.get("mr_url"):
-                lines.append(f"- **MR URL:** {kc['mr_url']}")
-            lines.append(f"- **Started:** {kc.get('started_at', '')}")
-            lines.append(f"- **Finished:** {kc.get('finished_at', '')}")
+                lines.append(f"- **MR URL:** {_esc(kc['mr_url'])}")
+            lines.append(f"- **Started:** {_esc(kc.get('started_at', ''))}")
+            lines.append(f"- **Finished:** {_esc(kc.get('finished_at', ''))}")
         if evidence.github_context:
             gc = evidence.github_context
             lines.append("")
             lines.append("## GitHub Context")
-            lines.append(f"- **Repo:** {gc.get('owner', '')}/{gc.get('repo', '')}")
-            lines.append(f"- **PR:** #{gc.get('pr_number', '')} - {gc.get('pr_title', '')}")
-            lines.append(f"- **PR URL:** {gc.get('pr_url', '')}")
-            lines.append(f"- **Action:** {gc.get('action', '')}")
-            lines.append(f"- **Checks:** {gc.get('check_status', 'unknown')}")
-            lines.append(f"- **State:** {gc.get('pr_state', '')}")
+            lines.append(f"- **Repo:** {_esc(gc.get('owner', ''))}/{_esc(gc.get('repo', ''))}")
+            lines.append(f"- **PR:** #{_esc(gc.get('pr_number', ''))} - {_esc(gc.get('pr_title', ''))}")
+            lines.append(f"- **PR URL:** {_esc(gc.get('pr_url', ''))}")
+            lines.append(f"- **Action:** {_esc(gc.get('action', ''))}")
+            lines.append(f"- **Checks:** {_esc(gc.get('check_status', 'unknown'))}")
+            lines.append(f"- **State:** {_esc(gc.get('pr_state', ''))}")
             if gc.get("head_branch"):
-                lines.append(f"- **Head Branch:** {gc['head_branch']}")
+                lines.append(f"- **Head Branch:** {_esc(gc['head_branch'])}")
             if gc.get("base_branch"):
-                lines.append(f"- **Base Branch:** {gc['base_branch']}")
-            lines.append(f"- **Author:** {gc.get('author', '')}")
+                lines.append(f"- **Base Branch:** {_esc(gc['base_branch'])}")
+            lines.append(f"- **Author:** {_esc(gc.get('author', ''))}")
             if gc.get("head_sha"):
-                lines.append(f"- **Head SHA:** {gc['head_sha'][:12]}")
+                lines.append(f"- **Head SHA:** {_esc(gc['head_sha'][:12])}")
             if gc.get("check_run_url"):
-                lines.append(f"- **Check Run:** {gc['check_run_url']}")
+                lines.append(f"- **Check Run:** {_esc(gc['check_run_url'])}")
             maintainer = gc.get("maintainer", {})
             if maintainer:
                 emails = maintainer.get("emails", [])
-                lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
-                lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
+                lines.append(f"- **Maintainer Emails:** {_esc_join(emails) if emails else 'none'}")
+                lines.append(f"- **Maintainer Source:** {_esc(maintainer.get('source', ''))}")
         issue_ctx = getattr(evidence, "github_issue_context", None)
         if issue_ctx:
             lines.append("")
             lines.append("## GitHub Issue Context")
-            lines.append(f"- **Repo:** {issue_ctx.get('owner', '')}/{issue_ctx.get('repo', '')}")
-            lines.append(f"- **Issue:** #{issue_ctx.get('issue_number', '')} - {issue_ctx.get('title', '')}")
-            lines.append(f"- **URL:** {issue_ctx.get('html_url', '')}")
-            lines.append(f"- **State:** {issue_ctx.get('state', 'open')}")
-            lines.append(f"- **Author:** {issue_ctx.get('author', '')}")
+            lines.append(f"- **Repo:** {_esc(issue_ctx.get('owner', ''))}/{_esc(issue_ctx.get('repo', ''))}")
+            lines.append(f"- **Issue:** #{_esc(issue_ctx.get('issue_number', ''))} - {_esc(issue_ctx.get('title', ''))}")
+            lines.append(f"- **URL:** {_esc(issue_ctx.get('html_url', ''))}")
+            lines.append(f"- **State:** {_esc(issue_ctx.get('state', 'open'))}")
+            lines.append(f"- **Author:** {_esc(issue_ctx.get('author', ''))}")
             if issue_ctx.get("assignees"):
-                lines.append(f"- **Assignees:** {', '.join(issue_ctx['assignees'])}")
+                lines.append(f"- **Assignees:** {_esc_join(issue_ctx['assignees'])}")
             if issue_ctx.get("labels"):
-                lines.append(f"- **Labels:** {', '.join(issue_ctx['labels'])}")
+                lines.append(f"- **Labels:** {_esc_join(issue_ctx['labels'])}")
             if issue_ctx.get("skill_label"):
-                lines.append(f"- **Skill:** {issue_ctx['skill_label']}")
+                lines.append(f"- **Skill:** {_esc(issue_ctx['skill_label'])}")
             body = issue_ctx.get("body", "")
             if body:
-                lines.append(f"- **Body (truncated):** {body[:300]}")
+                lines.append(f"- **Body (truncated):** {_esc(body[:300])}")
         if evidence.ci_context:
             cc = evidence.ci_context
             lines.append("")
             lines.append("## CI Gating Analysis")
-            lines.append(f"- **CNV Version:** {cc.get('cnv_version', '')}")
-            lines.append(f"- **Jenkins:** {cc.get('jenkins_url', '')}")
+            lines.append(f"- **CNV Version:** {_esc(cc.get('cnv_version', ''))}")
+            lines.append(f"- **Jenkins:** {_esc(cc.get('jenkins_url', ''))}")
             for j in (cc.get("failed_jobs") or [])[:10]:
                 lines.append(
-                    f"- **Failed:** {j.get('job_name', '')} #{j.get('build_number', '?')} [{j.get('result', '?')}]"
+                    f"- **Failed:** {_esc(j.get('job_name', ''))} #{_esc(j.get('build_number', '?'))} "
+                    f"[{_esc(j.get('result', '?'))}]"
                 )
             for j in (cc.get("missing_jobs") or [])[:10]:
-                lines.append(f"- **Missing:** {j.get('job_name', '')}")
+                lines.append(f"- **Missing:** {_esc(j.get('job_name', ''))}")
             an = cc.get("analysis")
             analysis_obj = None
             if isinstance(an, dict):
@@ -152,20 +178,20 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
             if analysis_obj and analysis_obj.summary:
                 lines.append("")
                 lines.append("### Failure Analysis")
-                lines.append(f"- **Summary:** {analysis_obj.summary}")
-                lines.append(f"- **Probable Cause:** {analysis_obj.probable_cause}")
-                lines.append(f"- **Suggested Next Step:** {analysis_obj.suggested_next_step}")
+                lines.append(f"- **Summary:** {_esc(analysis_obj.summary)}")
+                lines.append(f"- **Probable Cause:** {_esc(analysis_obj.probable_cause)}")
+                lines.append(f"- **Suggested Next Step:** {_esc(analysis_obj.suggested_next_step)}")
                 lines.append(f"- **Confidence:** {analysis_obj.confidence}")
                 for s in analysis_obj.signals[:10]:
-                    lines.append(f"  - {s}")
+                    lines.append(f"  - {_esc(s)}")
             for t in (cc.get("llm_triage") or [])[:5]:
                 lines.append(
-                    f"- **Triage:** {t.get('job_name', '')} → {t.get('classification', '')} "
-                    f"({t.get('confidence', '')}) · {t.get('recommended_action', '')}"
+                    f"- **Triage:** {_esc(t.get('job_name', ''))} → {_esc(t.get('classification', ''))} "
+                    f"({_esc(t.get('confidence', ''))}) · {_esc(t.get('recommended_action', ''))}"
                 )
             maintainer = cc.get("maintainer") or {}
             if maintainer.get("emails"):
-                lines.append(f"- **Maintainer Emails:** {', '.join(maintainer['emails'])}")
+                lines.append(f"- **Maintainer Emails:** {_esc_join(maintainer['emails'])}")
     else:
         lines.append(f"- **Evidence:** {evidence}")
     lines.append(f"- **Time:** {event.event.timeDate}")

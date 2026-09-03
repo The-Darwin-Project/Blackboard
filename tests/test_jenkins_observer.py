@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -3279,12 +3280,56 @@ class TestParseTriageResponseFormats:
         assert triage == []
         assert analysis is None
 
+    def test_malformed_json_logs_warning(self, caplog):
+        """PR #228 codereview MEDIUM finding (observability gap): a JSON-decode
+        failure must be distinguishable in logs from "LLM legitimately omitted
+        the analysis key" -- both used to collapse into a silent None."""
+        obs = self._make_observer()
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            obs._parse_triage_response("not json at all")
+        assert any("not valid JSON" in r.message for r in caplog.records)
+
+    def test_mis_shaped_analysis_logs_warning(self, caplog):
+        """PR #228 codereview MEDIUM finding (observability gap): an "analysis"
+        key that is present but fails validation (e.g. wrong type) must log a
+        warning distinct from the "key omitted entirely" case."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [], "analysis": "not-a-dict"})
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            triage, analysis = obs._parse_triage_response(text)
+        assert analysis is None
+        assert any("failed validation" in r.message for r in caplog.records)
+
+    def test_missing_analysis_key_does_not_log_warning(self, caplog):
+        """Omitting "analysis" entirely (e.g. kill switch disabled the request)
+        is a normal, expected shape -- it must not log at WARNING level."""
+        obs = self._make_observer()
+        text = json.dumps({"triage": [_make_triage_response()]})
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            obs._parse_triage_response(text)
+        assert not any("failed validation" in r.message for r in caplog.records)
+
     def test_unexpected_top_level_type_returns_empty(self):
         """Neither list nor dict (e.g. a bare string/number) -> ([], None)."""
         obs = self._make_observer()
         triage, analysis = obs._parse_triage_response(json.dumps("just a string"))
         assert triage == []
         assert analysis is None
+
+    def test_triage_job_name_newlines_stripped(self):
+        """PR #228 codereview MEDIUM finding: job_name is free text rendered
+        into event_markdown.py's line-oriented markdown sink -- an embedded
+        newline could forge markdown structure the same way an un-stripped
+        analysis narrative could (see TestValidateAnalysisBounds)."""
+        obs = self._make_observer()
+        entry = _make_triage_response()
+        entry["job_name"] = "tier1\n# Fake Header"
+        text = json.dumps([entry])
+
+        triage, _ = obs._parse_triage_response(text)
+
+        assert "\n" not in triage[0]["job_name"]
+        assert triage[0]["job_name"] == "tier1 # Fake Header"
 
 
 class TestValidateAnalysisBounds:
@@ -3407,43 +3452,54 @@ class TestValidateAnalysisBounds:
         result = _validate_analysis({"summary": "```\nrm -rf /\n```"})
         assert "```" not in result["summary"]
 
-    def test_html_escaped_in_summary(self):
-        """PR #228 codereview HIGH finding (stored XSS): the LLM narrative is
-        rendered into markdown that the UI renders via rehype-raw with no
-        separate sanitizer. An attacker-controlled Jenkins console log echoed
-        into summary/probable_cause/suggested_next_step/signals by the LLM must
-        not survive as live HTML."""
+    def test_html_not_escaped_in_summary_producer_side(self):
+        """PR #228 codereview HIGH finding (stored XSS) + follow-up HIGH finding
+        (double-escape into non-HTML sinks): _validate_analysis must NOT
+        html-escape -- this text also flows unescaped into EventEvidence.display_text,
+        Slack, and llm/prompt.py's second-hop prompt, and escaping it here made those
+        sinks show garbled literal '&amp;lt;...' entities. The one sink that renders
+        this as HTML (event_markdown.py's rehype-raw markdown, see
+        tests/test_event_markdown.py) owns the html.escape() call instead, applied
+        uniformly at render time -- see that module's rule #4."""
         from src.agents.jenkins_observer import _validate_analysis
         result = _validate_analysis({"summary": "<img src=x onerror=alert(1)>"})
-        assert "<img" not in result["summary"]
-        assert "&lt;img" in result["summary"]
+        assert result["summary"] == "<img src=x onerror=alert(1)>"
 
-    def test_html_escaped_in_probable_cause(self):
+    def test_html_not_escaped_in_probable_cause(self):
         from src.agents.jenkins_observer import _validate_analysis
         result = _validate_analysis({"probable_cause": "<script>alert(document.cookie)</script>"})
-        assert "<script>" not in result["probable_cause"]
-        assert "&lt;script&gt;" in result["probable_cause"]
+        assert result["probable_cause"] == "<script>alert(document.cookie)</script>"
 
-    def test_html_escaped_in_suggested_next_step(self):
+    def test_html_not_escaped_in_suggested_next_step(self):
         from src.agents.jenkins_observer import _validate_analysis
         result = _validate_analysis({"suggested_next_step": "<a href=javascript:alert(1)>click</a>"})
-        assert "<a href" not in result["suggested_next_step"]
-        assert "&lt;a href" in result["suggested_next_step"]
+        assert result["suggested_next_step"] == "<a href=javascript:alert(1)>click</a>"
 
-    def test_html_escaped_in_signals(self):
+    def test_html_not_escaped_in_signals(self):
         from src.agents.jenkins_observer import _validate_analysis
         result = _validate_analysis({"signals": ["<img src=x onerror=alert(1)>"]})
-        assert "<img" not in result["signals"][0]
-        assert "&lt;img" in result["signals"][0]
+        assert result["signals"][0] == "<img src=x onerror=alert(1)>"
 
-    def test_html_entities_escaped_before_length_cap(self):
-        """Escaping must happen before truncation -- otherwise a payload placed
-        right at the cap boundary could have its escape sequence sliced in half,
-        re-exposing a raw '<' or '&' at the tail of the capped string."""
+    def test_raw_text_capped_at_max_length_unescaped(self):
+        """Length cap applies to the raw (unescaped) text -- there is no escaping
+        step here anymore to worry about truncating mid-entity; that risk now
+        lives solely at the event_markdown.py render boundary (see
+        tests/test_event_markdown.py::test_escaping_survives_length_cap_boundary)."""
         from src.agents.jenkins_observer import _validate_analysis, _ANALYSIS_SUMMARY_MAX
         result = _validate_analysis({"summary": "<" * (_ANALYSIS_SUMMARY_MAX + 50)})
         assert len(result["summary"]) == _ANALYSIS_SUMMARY_MAX
-        assert "<" not in result["summary"]
+        assert result["summary"] == "<" * _ANALYSIS_SUMMARY_MAX
+
+    def test_newlines_stripped_from_summary(self):
+        """PR #228 codereview MEDIUM finding: a multi-line LLM narrative could
+        forge markdown structure (fake '#' headers/list items) once rendered by
+        event_markdown.py, since html.escape() never touches '\\n'/'\\r'.
+        Newlines must be stripped upstream instead."""
+        from src.agents.jenkins_observer import _validate_analysis
+        result = _validate_analysis({"summary": "line one\n# Fake Header\r\nline two"})
+        assert "\n" not in result["summary"]
+        assert "\r" not in result["summary"]
+        assert result["summary"] == "line one # Fake Header line two"
 
 
 class TestClampConfidence:
@@ -3523,6 +3579,19 @@ class TestTriageAndBuildEvidenceAnalysisIntegration:
             "Tier1 network suite failed due to a flaky NIC driver."
         )
         assert "Tier1 network suite failed" in result.display_text
+
+    async def test_display_text_not_html_escaped(self):
+        """PR #228 codereview HIGH finding (double-escape/garbling): display_text
+        is consumed raw by non-HTML sinks (Slack, llm/prompt.py's second-hop
+        prompt) -- it must carry the clean narrative text, not HTML entities.
+        The html.escape() call for the markdown sink lives solely in
+        event_markdown.py at render time (see tests/test_event_markdown.py)."""
+        result = await self._run(analysis_enabled="true")
+        assert "&amp;" not in result.display_text
+        assert "&lt;" not in result.display_text
+        assert result.ci_context["analysis"]["summary"] == (
+            "Tier1 network suite failed due to a flaky NIC driver."
+        )
 
     async def test_analysis_omitted_when_disabled(self):
         """Kill-switch: JENKINS_OBSERVER_ANALYSIS_ENABLED=false -> no analysis
