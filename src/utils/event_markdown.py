@@ -13,7 +13,13 @@
 #    fields -- that text also flows unescaped into non-HTML sinks (EventEvidence.display_text,
 #    Slack, the Brain/FRIDAY prompt) and escaping it at the producer double-encodes/garbles
 #    those sinks. Do not remove _esc() calls to "avoid double escaping" -- there is exactly
-#    one escape, and it lives here.
+#    one escape, and it lives here. This includes the Conversation section: turn.thoughts/
+#    result/evidence/plan/selectedAgents/waitingFor routinely carry tool_result/evidence
+#    payloads quoting external-system text (Jenkins logs, PR/issue bodies, LLM narrative)
+#    and render through the same rehype-raw sink as the context blocks above -- they are
+#    NOT a special case just because they come from ConversationTurn instead of
+#    EventEvidence. turn.actor/action/turn/timestamp are excluded: those are internal,
+#    dispatcher-assigned values from a fixed vocabulary, never free text.
 # 5. [Pattern]: ci_context (and its optional "analysis" narrative sub-object, see
 #    models.CIAnalysis) is a free-form dict, redacted/capped/newline-stripped upstream by
 #    jenkins_observer.py but NOT html-escaped there -- render with .get() defaults for
@@ -238,41 +244,41 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
         prev_ts = turn.timestamp
         if turn.actor == "user" and turn.source == "automated":
             if turn.thoughts:
-                lines.append(f"**System Nudge:** {turn.thoughts}")
+                lines.append(f"**System Nudge:** {_esc(turn.thoughts)}")
         elif turn.actor == "user" or turn.action == "message":
             user_text = turn.thoughts or turn.result or ""
             if user_text:
-                lines.append(f"**Message:** {user_text}")
+                lines.append(f"**Message:** {_esc(user_text)}")
         elif turn.action == "respond_jarvis":
             if turn.thoughts:
-                lines.append(f"**Message to JARVIS:** {turn.thoughts}")
+                lines.append(f"**Message to JARVIS:** {_esc(turn.thoughts)}")
         elif turn.action in ("think", "thoughts", "intermediate"):
             if turn.thoughts:
-                lines.append(f"**Internal:** {turn.thoughts}")
+                lines.append(f"**Internal:** {_esc(turn.thoughts)}")
         elif turn.action == "response":
             if turn.thoughts:
-                lines.append(f"**FRIDAY:** {turn.thoughts}")
+                lines.append(f"**FRIDAY:** {_esc(turn.thoughts)}")
         elif turn.action == "tool_result":
             evidence_text = turn.result or turn.thoughts or ""
             if evidence_text:
-                lines.append(f"**Evidence:** {evidence_text}")
+                lines.append(f"**Evidence:** {_esc(evidence_text)}")
         else:
             if turn.thoughts:
-                lines.append(f"**Thoughts:** {turn.thoughts}")
+                lines.append(f"**Thoughts:** {_esc(turn.thoughts)}")
             if turn.result:
-                lines.append(f"**Result:** {turn.result}")
+                lines.append(f"**Result:** {_esc(turn.result)}")
         if turn.plan:
-            lines.append(f"**Plan:**\n{turn.plan}")
+            lines.append(f"**Plan:**\n{_esc(turn.plan)}")
         if turn.evidence:
-            lines.append(f"**Evidence:** {turn.evidence}")
+            lines.append(f"**Evidence:** {_esc(turn.evidence)}")
         if turn.selectedAgents:
-            lines.append(f"**Selected Agents:** {', '.join(turn.selectedAgents)}")
+            lines.append(f"**Selected Agents:** {_esc_join(turn.selectedAgents)}")
         if turn.executed is not None:
             lines.append(f"**Executed:** {turn.executed}")
         if turn.pendingApproval:
             lines.append(f"**Pending Approval:** YES")
         if turn.waitingFor:
-            lines.append(f"**Waiting For:** {turn.waitingFor}")
+            lines.append(f"**Waiting For:** {_esc(turn.waitingFor)}")
         lines.append("")
 
     return "\n".join(lines)

@@ -517,3 +517,93 @@ def test_ampersand_and_angle_brackets_escaped_without_double_encoding():
     assert "- **Summary:** A &amp; B &lt; C &gt; D" in md
     assert "&amp;amp;" not in md
     assert "&amp;lt;" not in md
+
+
+# ---------------------------------------------------------------------------
+# Stored-XSS regression, conversation-turn fields (ai-review follow-up HIGH):
+# turn.thoughts/result/evidence/plan/selectedAgents/waitingFor render through
+# the same rehype-raw sink as the context blocks above (see event_markdown.py
+# rule #4) but were missed by the first escaping pass -- these payloads
+# routinely arrive via tool_result/evidence turns quoting Jenkins logs, PR/
+# issue bodies, or LLM narrative text.
+# ---------------------------------------------------------------------------
+
+def test_xss_escaped_in_user_message():
+    turn = _make_turn(actor="user", action="message", thoughts=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**Message:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_system_nudge():
+    turn = _make_turn(actor="user", action="message", source="automated", thoughts=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**System Nudge:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_message_to_jarvis():
+    turn = _make_turn(actor="brain", action="respond_jarvis", thoughts=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**Message to JARVIS:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_internal_thoughts():
+    turn = _make_turn(actor="brain", action="think", thoughts=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**Internal:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_friday_response():
+    turn = _make_turn(actor="brain", action="response", thoughts=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**FRIDAY:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_tool_result_evidence():
+    """This is the exact scenario the ai-review bot flagged: tool_result turns
+    routinely embed raw external-system text (Jenkins logs, PR bodies, LLM
+    narrative) verbatim into `result`."""
+    turn = _make_turn(actor="brain", action="tool_result", result=_XSS_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "**Evidence:** &lt;script&gt;" in md
+
+
+def test_xss_escaped_in_generic_thoughts_and_result():
+    turn = _make_turn(actor="developer", action="execute", thoughts=_XSS_PAYLOAD, result=_AMP_PAYLOAD)
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "<b>bold</b>" not in md
+    assert "**Thoughts:** &lt;script&gt;" in md
+    assert "**Result:** Tom &amp; Jerry &lt;b&gt;bold&lt;/b&gt;" in md
+
+
+def test_xss_escaped_in_plan_evidence_agents_and_waiting_for():
+    turn = _make_turn(
+        actor="brain",
+        action="route",
+        plan=_XSS_PAYLOAD,
+        evidence=_AMP_PAYLOAD,
+        selectedAgents=[_XSS_PAYLOAD],
+        waitingFor=_XSS_PAYLOAD,
+    )
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert _XSS_PAYLOAD not in md
+    assert "<b>bold</b>" not in md
+    assert "**Plan:**\n&lt;script&gt;" in md
+    assert "**Evidence:** Tom &amp; Jerry &lt;b&gt;bold&lt;/b&gt;" in md
+    assert "**Selected Agents:** &lt;script&gt;" in md
+    assert "**Waiting For:** &lt;script&gt;" in md
+
+
+def test_plan_multiline_markdown_structure_survives_escaping():
+    """Escaping must not mangle intentional multi-line plan formatting -- html.escape()
+    only touches '&'/'<'/'>'/quotes, never newlines or '#', so a plan's markdown
+    headers/lists still render as intended once escaped."""
+    turn = _make_turn(actor="brain", action="route", plan="## Step 1\n- Do something\n- Then this")
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert "**Plan:**\n## Step 1\n- Do something\n- Then this" in md
