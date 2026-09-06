@@ -23,6 +23,10 @@
 # 16. [Pattern]: Issue queue mirrors PR queue (Phase A promote FIFO, Phase B queue-on-close)
 #     but is purely additive — _queue_issue adds darwin-queued without removing darwin-work,
 #     since _poll_issues filters server-side on labels=darwin-work.
+# 17. [Pattern]: _raise_if_systemic_failure() escalates a fully-failed 2+ item drain-loop
+#     batch (Phase A/B, PR and Issue) so it propagates to Headhunter.run()'s circuit breaker
+#     instead of the cycle "succeeding" silently and resetting github_failures. A single
+#     failing item (the poison-pill case) never triggers this — that must stay isolated.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -65,6 +69,27 @@ _XML_CLOSE_TAG = re.compile(r"</(?:description|job_log|comments|mention_request|
 def _sanitize_xml_fence(text: str) -> str:
     """Strip XML closing tags that could break prompt fencing."""
     return _XML_CLOSE_TAG.sub("", text) if text else text
+
+
+_SYSTEMIC_FAILURE_MIN_BATCH = 2
+
+
+def _raise_if_systemic_failure(phase: str, attempted: int, failed: int) -> None:
+    """Escalate a fully-failed multi-item batch instead of silently swallowing it.
+
+    Per-item try/except exists so one poison-pill item (attempted=1, failed=1)
+    can't block the rest of a batch or trip the circuit breaker -- that must stay
+    silent (WARNING only). But when 2+ items were attempted and every single one
+    failed, N independent bad items is a far less likely explanation than a
+    systemic cause (installation token expiry, downstream Blackboard outage) that
+    will keep failing every item on every future cycle too. Raising here lets the
+    caller's existing circuit breaker (github_failures in Headhunter.run) see it
+    instead of the cycle silently "succeeding" and resetting the failure count.
+    """
+    if attempted >= _SYSTEMIC_FAILURE_MIN_BATCH and failed == attempted:
+        raise RuntimeError(
+            f"GitHub {phase}: all {attempted} item(s) failed -- treating as systemic failure"
+        )
 
 
 class Headhunter:
@@ -393,7 +418,13 @@ class Headhunter:
             logger.debug("Headhunter flow gate closed -- queuing new PRs, observing queued state")
             # Queue all new items so they get the darwin-queued label
             for i, pr in enumerate(new_items, start=len(queued_items) + 1):
-                await self._github._queue_pr(pr, i)
+                try:
+                    await self._github._queue_pr(pr, i)
+                except Exception as e:
+                    logger.warning(
+                        f"GitHub queue PR failed for "
+                        f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
+                    )
             # Expose all queued items for /headhunter/pending observability
             newly_queued = [{**pr, "queued": True} for pr in new_items]
             self._github._last_queued_prs = queued_items + newly_queued
@@ -409,9 +440,12 @@ class Headhunter:
 
         # Phase A: Promote oldest queued PRs first (FIFO)
         remaining_queued = list(queued_items)
+        attempted_a = 0
+        failed_a = 0
         for pr in queued_items:
             if not await self.check_flow_gate():
                 break
+            attempted_a += 1
             try:
                 context = await self._github.fetch_context(pr)
                 plan_text = await self.analyze_and_plan(context, si)
@@ -420,17 +454,24 @@ class Headhunter:
                 # and been skipped, so the promoted item is not necessarily index 0.
                 remaining_queued = [q for q in remaining_queued if q is not pr]
             except Exception as e:
+                failed_a += 1
                 logger.warning(
                     f"GitHub queued PR processing failed for "
                     f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
                 )
                 continue
+        # A fully-failed multi-item batch is more likely systemic (auth/outage)
+        # than N coincidental poison pills -- escalate past the circuit breaker.
+        _raise_if_systemic_failure("PR Phase A (queued promote)", attempted_a, failed_a)
 
         # Phase B: Process new darwin-review PRs.
         # gate_closed flag avoids per-item Redis gate re-check once closure is confirmed.
         gate_closed = False
         newly_queued_in_phase_b = 0
+        attempted_b = 0
+        failed_b = 0
         for pr in new_items:
+            attempted_b += 1
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 position = len(remaining_queued) + 1
@@ -439,6 +480,7 @@ class Headhunter:
                     remaining_queued.append({**pr, "queued": True})
                     newly_queued_in_phase_b += 1
                 except Exception as e:
+                    failed_b += 1
                     logger.warning(
                         f"GitHub queue PR failed for "
                         f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
@@ -449,11 +491,13 @@ class Headhunter:
                 plan_text = await self.analyze_and_plan(context, si)
                 await self._github.create_platform_event(pr, plan_text, context)
             except Exception as e:
+                failed_b += 1
                 logger.warning(
                     f"GitHub PR processing failed for "
                     f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
                 )
                 continue
+        _raise_if_systemic_failure("PR Phase B (new items)", attempted_b, failed_b)
 
         # Expose remaining queued for /headhunter/pending REST endpoint
         self._github._last_queued_prs = remaining_queued
@@ -518,9 +562,12 @@ class Headhunter:
 
         # Phase A: Promote oldest queued Issues first (FIFO)
         remaining_queued = list(queued_items)
+        attempted_a = 0
+        failed_a = 0
         for issue in queued_items:
             if not await self.check_flow_gate():
                 break
+            attempted_a += 1
             try:
                 # Load label-specific SI then triage via LLM (same path as PR triage).
                 # skill_warning is non-None when skill URL exceeded 10KB cap.
@@ -532,16 +579,25 @@ class Headhunter:
                 # and been skipped, so the promoted item is not necessarily index 0.
                 remaining_queued = [q for q in remaining_queued if q is not issue]
             except Exception as e:
+                failed_a += 1
                 logger.warning(
                     f"GitHub queued issue processing failed for "
                     f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                 )
                 continue
+        # A fully-failed multi-item batch is more likely systemic (auth/outage)
+        # than N coincidental poison pills -- escalate so it's visible, even though
+        # the Phase C caller intentionally swallows it (issue failures must not
+        # trip the shared PR/Issue GitHub circuit breaker -- see issue #230).
+        _raise_if_systemic_failure("Issue Phase A (queued promote)", attempted_a, failed_a)
 
         # Phase B: Process new issues (darwin-work label, not yet queued).
         gate_closed = False
         newly_queued_in_phase_b = 0
+        attempted_b = 0
+        failed_b = 0
         for issue in new_items:
+            attempted_b += 1
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 position = len(remaining_queued) + 1
@@ -550,6 +606,7 @@ class Headhunter:
                     remaining_queued.append({**issue, "queued": True})
                     newly_queued_in_phase_b += 1
                 except Exception as e:
+                    failed_b += 1
                     logger.warning(
                         f"GitHub queue issue failed for "
                         f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
@@ -562,11 +619,13 @@ class Headhunter:
                     issue = {**issue, "_skill_size_warning": skill_warning}
                 await self._github.create_issue_event(issue, plan_text)
             except Exception as e:
+                failed_b += 1
                 logger.warning(
                     f"GitHub issue processing failed for "
                     f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                 )
                 continue
+        _raise_if_systemic_failure("Issue Phase B (new items)", attempted_b, failed_b)
 
         # Expose remaining queued for /headhunter/pending REST endpoint
         self._github._last_queued_issues = remaining_queued
