@@ -154,7 +154,7 @@ const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
 
 export default function SourceIcon({ source, subjectType, evidence, size = 16 }: SourceIconProps) {
   let resolvedSource = source.toLowerCase();
-  if (resolvedSource === 'headhunter' && evidence?.github_context) {
+  if (resolvedSource === 'headhunter' && (evidence?.github_context || evidence?.github_issue_context)) {
     resolvedSource = 'github';
   }
   // Evidence-based ArgoCD icon: aligner events with argocd_app context

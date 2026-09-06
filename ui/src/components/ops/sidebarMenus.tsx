@@ -41,10 +41,11 @@ export function eventMenuItems(
   const ev = evt.evidence as Record<string, unknown> | undefined;
   const gc = ev?.gitlab_context as Record<string, unknown> | undefined;
   const ghc = ev?.github_context as Record<string, unknown> | undefined;
+  const ghic = ev?.github_issue_context as Record<string, unknown> | undefined;
   const mrUrl = evt.source === 'headhunter'
-    ? (gc?.target_url as string || ghc?.pr_url as string || ev?.target_url as string || null)
+    ? (gc?.target_url as string || ghc?.pr_url as string || ghic?.html_url as string || ev?.target_url as string || null)
     : null;
-  const mrLabel = ghc?.pr_url ? 'Open PR in GitHub' : 'Open MR in GitLab';
+  const mrLabel = ghic?.html_url ? 'Open Issue in GitHub' : ghc?.pr_url ? 'Open PR in GitHub' : 'Open MR in GitLab';
 
   return [
     { id: 'chat', label: 'Open Chat', icon: <MessageSquare size={18} />, color: '#3b82f6', onClick: () => selectEvent(evt.id) },
