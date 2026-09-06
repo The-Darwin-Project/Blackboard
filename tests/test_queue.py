@@ -8,11 +8,16 @@
 #    (get_active_events_with_status + get_event) since the route calls get_blackboard() itself
 #    inside a try/except rather than via Depends() -- GitLab side must still be mocked (empty
 #    todos) since the active-event lookup runs after it in the same handler (#233).
+# 6. [Pattern]: Per-item get_event() fetch uses asyncio.gather(return_exceptions=True) (#233
+#    review, HIGH fix) -- isolation/None-race/no-context/mixed-source/sort tests set
+#    get_active_events_with_status() to a multi-id dict and use an AsyncMock side_effect
+#    keyed by event_id on get_event() to control each id's outcome independently.
 """Route-level tests for queue API."""
 from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -395,3 +400,189 @@ async def test_headhunter_pending_omits_closed_github_event():
     data = resp.json()
     assert all(item.get("action") != "active" for item in data)
     assert data == []
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_isolates_get_event_failure_per_item():
+    """One malformed/broken active-event record must not drop other active GitHub items
+    (#233 review, HIGH). get_event() raises for one id, succeeds for another in the same
+    status_map -- asyncio.gather(return_exceptions=True) must isolate the failure."""
+    good_event = _make_headhunter_event(
+        "evt-good0001",
+        github_context={
+            "owner": "The-Darwin-Project",
+            "repo": "Blackboard",
+            "pr_number": 233,
+            "pr_title": "Surviving PR",
+            "author": "octocat",
+            "pr_url": "https://github.com/The-Darwin-Project/Blackboard/pull/233",
+        },
+    )
+
+    async def fake_get_event(eid):
+        if eid == "evt-broken01":
+            raise ValueError("boom: malformed evidence")
+        return good_event
+
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(
+        return_value={"evt-broken01": "active", "evt-good0001": "active"}
+    )
+    mock_bb.get_event = AsyncMock(side_effect=fake_get_event)
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    active_items = [item for item in data if item.get("action") == "active"]
+    assert len(active_items) == 1
+    assert active_items[0]["pr_number"] == 233
+    assert active_items[0]["pr_title"] == "Surviving PR"
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_filters_non_headhunter_active_events():
+    """A non-headhunter active event alongside a headhunter one: only the headhunter one
+    surfaces -- proves the source filter discriminates rather than just never encountering
+    a non-headhunter event (#233 review, MEDIUM test-coverage gap #1)."""
+    hh_event = _make_headhunter_event(
+        "evt-hh000001",
+        github_context={
+            "owner": "The-Darwin-Project",
+            "repo": "Blackboard",
+            "pr_number": 233,
+            "pr_title": "Active PR",
+            "author": "octocat",
+            "pr_url": "https://github.com/The-Darwin-Project/Blackboard/pull/233",
+        },
+    )
+    chat_event = _make_event_document("evt-chat00001")
+
+    events_by_id = {"evt-hh000001": hh_event, "evt-chat00001": chat_event}
+
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(
+        return_value={"evt-hh000001": "active", "evt-chat00001": "active"}
+    )
+    mock_bb.get_event = AsyncMock(side_effect=lambda eid: events_by_id[eid])
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["pr_number"] == 233
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_skips_headhunter_event_without_github_context():
+    """A headhunter active event with neither github_context nor github_issue_context set
+    is silently skipped, not appended as a malformed row (#233 review, MEDIUM test-coverage
+    gap #2)."""
+    event = _make_headhunter_event("evt-nogh00001")  # both contexts default to None
+
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-nogh00001": "active"})
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_handles_get_event_none_delete_race():
+    """get_event() returning None for an id still present in status_map (event deleted
+    between the two Blackboard reads) must not crash the endpoint (#233 review, MEDIUM
+    test-coverage gap #3 -- exercises the `if not event` guard)."""
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-deleted0001": "active"})
+    mock_bb.get_event = AsyncMock(return_value=None)
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_sorts_all_platforms_by_created_at():
+    """Final result.sort() interleaves GitLab todos, GitHub queued-cache PRs, and
+    Blackboard-active GitHub events chronologically by created_at, not grouped by source
+    (#233 review, MEDIUM test-coverage gap #4)."""
+    gitlab_todo = _make_todo(todo_id=1, mr_iid=1, mr_state="opened", action_name="review_requested")
+    gitlab_todo["created_at"] = "2026-01-01T00:00:00Z"
+
+    mock_resp = MagicMock()
+    mock_resp.is_success = True
+    mock_resp.json.return_value = [gitlab_todo]
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_auth = MagicMock()
+    mock_auth.get_token.return_value = "fake-token"
+
+    queued_pr = {
+        "number": 99,
+        "title": "Queued PR",
+        "owner": "The-Darwin-Project",
+        "repo": "Blackboard",
+        "user": "queued-author",
+        "created_at": "2026-01-03T00:00:00Z",
+        "html_url": "https://github.com/The-Darwin-Project/Blackboard/pull/99",
+    }
+    fake_headhunter_agent = SimpleNamespace(_github=SimpleNamespace(queued_prs=[queued_pr]))
+    mock_brain = MagicMock()
+    mock_brain.agents = {"_headhunter": fake_headhunter_agent}
+
+    active_event = _make_headhunter_event(
+        "evt-sort0001",
+        github_context={
+            "owner": "The-Darwin-Project",
+            "repo": "Blackboard",
+            "pr_number": 233,
+            "pr_title": "Active PR",
+            "author": "active-author",
+            "pr_url": "https://github.com/The-Darwin-Project/Blackboard/pull/233",
+            "created_at": "2026-01-02T00:00:00Z",
+        },
+    )
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-sort0001": "active"})
+    mock_bb.get_event = AsyncMock(return_value=active_event)
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        with patch.dict(
+            os.environ,
+            {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
+            clear=False,
+        ):
+            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
+                with patch("httpx.AsyncClient", return_value=mock_client):
+                    from src import dependencies
+                    from src.main import app
+
+                    original_bb = dependencies._blackboard
+                    original_brain = dependencies._brain
+                    dependencies._blackboard = mock_bb
+                    dependencies._brain = mock_brain
+                    try:
+                        transport = ASGITransport(app=app)
+                        async with AsyncClient(transport=transport, base_url="http://test") as client:
+                            resp = await client.get("/queue/headhunter/pending")
+                    finally:
+                        dependencies._blackboard = original_bb
+                        dependencies._brain = original_brain
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [item["platform"] for item in data] == ["gitlab", "github", "github"]
+    assert [item.get("action") for item in data] == ["review_requested", "active", "queued"]
+    assert data[1]["pr_title"] == "Active PR"
+    assert data[2]["pr_title"] == "Queued PR"
