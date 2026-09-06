@@ -602,28 +602,12 @@ def _make_ctx() -> MagicMock:
 
 class TestCommentJiraIssueSelfCommentWarning:
     @pytest.mark.asyncio
-    async def test_self_mention_appends_warning(self, monkeypatch):
-        """T-5: comment text containing the bot's own account ID gets a self-mention warning appended."""
-        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
-        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
-        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
-        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
-        ctx = _make_ctx()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_resp)
-            mock_client_cls.return_value.__aenter__.return_value = mock_client
-            await handle_comment_jira_issue(
-                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "cc bot-acct-123 please look"}, None,
-            )
-        turn = ctx.append_and_broadcast.call_args[0][1]
-        assert "Warning: this comment was posted as the bot's own Jira account." in turn.thoughts
-
-    @pytest.mark.asyncio
-    async def test_normal_comment_has_no_warning(self, monkeypatch):
-        """T-6: a normal comment (no self-mention) does not get the warning appended."""
+    async def test_warning_appended_on_successful_post_regardless_of_content(self, monkeypatch):
+        """Every comment posted through this handler is authored by the bot's own Jira
+        account (fixed jira_email/jira_token), so headhunter_jira.py's anti-loop guard
+        unconditionally skips it for re-analysis triggering -- regardless of what the
+        comment text says. A prior substring check on comment_text was a flawed proxy
+        for this; the note must appear on every successful POST instead."""
         monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
         monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
         monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
@@ -639,12 +623,34 @@ class TestCommentJiraIssueSelfCommentWarning:
                 ctx, "evt-1", {"issue_key": "CNV-1", "comment": "Looks good to me"}, None,
             )
         turn = ctx.append_and_broadcast.call_args[0][1]
-        assert "Warning: this comment was posted as the bot's own Jira account." not in turn.thoughts
+        assert "Note: this comment was posted as the bot's own Jira account." in turn.thoughts
 
     @pytest.mark.asyncio
-    async def test_self_mention_no_warning_when_post_fails(self, monkeypatch):
-        """QE regression: a self-mention warning must never be appended on a failed POST
-        (Pre-Flight Round 1, Auditor A, HIGH finding #1 -- guards against a misleading warning
+    async def test_no_warning_when_bot_account_id_not_configured(self, monkeypatch):
+        """When HEADHUNTER_JIRA_BOT_ACCOUNT_ID isn't set, Headhunter Jira's anti-loop guard
+        isn't in play for this deployment, so skip the note rather than reference a feature
+        that isn't configured."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.delenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", raising=False)
+        ctx = _make_ctx()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await handle_comment_jira_issue(
+                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "Looks good to me"}, None,
+            )
+        turn = ctx.append_and_broadcast.call_args[0][1]
+        assert "Note: this comment was posted as the bot's own Jira account." not in turn.thoughts
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_post_fails(self, monkeypatch):
+        """QE regression: the note must never be appended on a failed POST
+        (Pre-Flight Round 1, Auditor A, HIGH finding #1 -- guards against a misleading note
         on an unrelated failure)."""
         monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
         monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
@@ -661,7 +667,7 @@ class TestCommentJiraIssueSelfCommentWarning:
                 ctx, "evt-1", {"issue_key": "CNV-1", "comment": "cc bot-acct-123 please look"}, None,
             )
         turn = ctx.append_and_broadcast.call_args[0][1]
-        assert "Warning: this comment was posted as the bot's own Jira account." not in turn.thoughts
+        assert "Note: this comment was posted as the bot's own Jira account." not in turn.thoughts
         assert "Failed to comment" in turn.thoughts
 
 

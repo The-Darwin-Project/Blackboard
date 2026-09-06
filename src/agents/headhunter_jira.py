@@ -16,9 +16,14 @@
 # 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
 #     _get_issue_state/_set_issue_state are the canonical accessors.
 # 11. [Pattern]: _get_active_jira_keys() mirrors GitLab headhunter's _get_active_mr_keys() for dedup.
-# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing comments
-#     AND immediately checks has_reeval_signal in the same poll cycle (does not wait for the next cycle).
-#     Capped at 10 comment checks per cycle to avoid Jira rate limits. Assumes single in-process daemon
+# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing
+#     comments via a local scan of the issue's already-fetched comment list -- makes zero Jira API
+#     calls. The 10-per-cycle cap on cold_start_checks bounds ONLY that local scan; it does NOT cap
+#     has_reeval_signal()'s live get_watchers() API call, which the cold-start branch also triggers
+#     in the same poll cycle (does not wait for the next cycle) and which runs UNCAPPED, once per
+#     Planning issue, for every issue already tracked in Redis from a prior cycle ("analyzed" phase).
+#     [Gotcha]: has_reeval_signal() is wrapped in try/except for per-issue failure isolation -- one
+#     Jira API error must not abort the rest of the Phase 1 loop. Assumes single in-process daemon
 #     loop invocation -- no concurrent poll_and_process() calls for the same instance.
 # 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool), not text parsing.
 #     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
@@ -758,16 +763,27 @@ class HeadhunterJira:
                         await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
                     continue
 
+            # Deliberately not `elif` off the `if state is None:` block above: cold-start
+            # recovery there can populate `state` in this same iteration (anchoring to an
+            # existing bot comment), and we want to fall through to this reeval check in the
+            # same cycle rather than waiting for the next poll. An `elif` here would silently
+            # reintroduce the one-cycle-delay bug this fix resolves.
             if state and state.get("phase") == "analyzed":
                 last_cid = state.get("last_comment_id", "")
-                if last_cid and await self.has_reeval_signal(issue, last_cid):
-                    logger.info(f"Jira reeval signal detected for {key} after comment {last_cid}")
-                    result = await self.analyze_and_comment(issue)
-                    if result:
-                        comment_id, _analysis = result
-                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
-                else:
-                    logger.debug(f"Jira reeval check for {key}: no signal (anchor={last_cid})")
+                if last_cid:
+                    try:
+                        reeval_signal = await self.has_reeval_signal(issue, last_cid)
+                    except Exception as e:
+                        logger.warning(f"Jira reeval check failed for {key}: {e}")
+                        continue
+                    if reeval_signal:
+                        logger.info(f"Jira reeval signal detected for {key} after comment {last_cid}")
+                        result = await self.analyze_and_comment(issue)
+                        if result:
+                            comment_id, _analysis = result
+                            await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+                    else:
+                        logger.debug(f"Jira reeval check for {key}: no signal (anchor={last_cid})")
 
         # Phase 2: Create events for To Do issues (gated by global WIP cap)
         if not await self.check_flow_gate():
