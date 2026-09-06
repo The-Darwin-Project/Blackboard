@@ -107,9 +107,15 @@ Explorer is the natural first dispatch for unknown CI gating failures (read-only
 investigation across Jenkins, logs, and historical patterns). When investigation
 identifies a transient failure isolated to a specific leaf job, a dispatched agent
 with CI write access (SysAdmin, or Developer as fallback) can retrigger that leaf
-directly; once the agent reports the retrigger with the new build number, defer for that leaf's expected
-duration. This leaf-level path is the preferred reconciliation whenever the failing
-job is identified and an agent has Jenkins access. When no leaf-level alternative
+directly -- include the failing build's parameters (cluster name, branch, config) in the
+dispatch instruction, since leaf jobs are frequently parameterized and a parameterless
+retrigger is silently rejected by Jenkins rather than erroring visibly. Retrigger
+promptly once the leaf failure is confirmed: the wrapper's shared test infrastructure
+is commonly torn down once the wrapper itself completes, closing the retrigger window
+even when the leaf job's own parameters are correct. Once the agent reports the
+retrigger with the new build number, defer for that leaf's expected duration. This
+leaf-level path is the preferred reconciliation whenever the failing job is identified
+and an agent has Jenkins access. When no leaf-level alternative
 applies -- the transient failure spans the wrapper broadly, or no agent is available --
 retest directly using Brain-native tools. Developer only when the cause is a code or
 config defect in a repository FRIDAY has write access to. The failing job's own
