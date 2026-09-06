@@ -19,6 +19,15 @@
 #     le=200 on all three -- never raise this to unbounded. q/scope/channel/service filters are
 #     partly Qdrant-indexed (scope/service) and partly post-fetch on the current page only
 #     (channel has no payload index; q is a page-local substring match everywhere).
+# 13. [Pattern]: GET /headhunter/pending merges Blackboard-active GitHub PR/Issue events
+#     (action=new/active/deferred, mirroring get_active_events_with_status()) after the
+#     queued_prs cache items (action="queued") -- Blackboard is the source of truth for
+#     "still being worked on" since queued_prs/queued_issues only hold WIP-cap-blocked
+#     items and drop the entry the instant an event is created (#233). Per-item fetch via
+#     asyncio.gather(return_exceptions=True) -- one malformed/legacy event record must not
+#     drop every other active GitHub item for the poll. _github_active_item() is the shared
+#     PR/Issue row builder (field names differ: pr_number/pr_title/pr_url vs issue_number/
+#     title/html_url).
 """
 Conversation Queue API - Event document management.
 
@@ -67,6 +76,36 @@ def _serialize_evidence(event: EventDocument) -> dict:
         "source_type": event.source,
         "domain": "complicated",
         "severity": "warning",
+    }
+
+
+def _github_active_item(
+    ctx: dict,
+    *,
+    number_key: str,
+    title_key: str,
+    url_key: str,
+    action: str,
+    fallback_created_at: str,
+) -> dict:
+    """Build a /headhunter/pending row for a Blackboard-sourced active GitHub PR/Issue event.
+
+    number_key/title_key/url_key account for the field-name differences between
+    github_context (PR: pr_number/pr_title/pr_url) and github_issue_context
+    (Issue: issue_number/title/html_url) -- the two evidence shapes are mutually
+    exclusive per EventEvidence's model validator (#233).
+    """
+    return {
+        "platform": "github",
+        "pr_number": ctx.get(number_key),
+        "pr_title": ctx.get(title_key, ""),
+        "project_path": f"{ctx.get('owner', '')}/{ctx.get('repo', '')}",
+        "author": ctx.get("author", ""),
+        "created_at": ctx.get("created_at") or fallback_created_at,
+        "target_url": ctx.get(url_key, ""),
+        "queue_position": None,
+        "action": action,
+        "priority": 0,
     }
 
 
@@ -1128,6 +1167,53 @@ async def headhunter_pending_todos():
                 })
     except Exception as e:
         logger.warning(f"GitHub queued PR lookup skipped: {e}")
+
+    # Append active GitHub PR/Issue events from the Blackboard (source of truth for
+    # "Darwin is working on this" -- these items are no longer in the queued_prs/
+    # queued_issues caches once an event exists, so they'd otherwise vanish from the
+    # widget for the entire active-processing lifecycle; see issue #233).
+    try:
+        blackboard = await get_blackboard()
+        status_map = await blackboard.get_active_events_with_status()
+    except Exception as e:
+        logger.warning(f"GitHub active-event lookup skipped: {e}")
+        status_map = {}
+
+    if status_map:
+        eids = list(status_map)
+        # Concurrent fetch, not N sequential round-trips -- status_map spans every
+        # active event system-wide (aligner/jarvis/etc., not just headhunter's) and
+        # this endpoint is polled every 30s. return_exceptions isolates one malformed
+        # record (e.g. a pydantic.ValidationError inside get_event()) so it can't
+        # silently drop every other active GitHub item for the poll (#233 review, HIGH).
+        fetched = await asyncio.gather(
+            *(blackboard.get_event(eid) for eid in eids),
+            return_exceptions=True,
+        )
+        for eid, fetched_event in zip(eids, fetched):
+            if isinstance(fetched_event, Exception):
+                logger.warning(f"Skipping active event {eid} (fetch/parse failed): {fetched_event}")
+                continue
+            event = fetched_event
+            if not event or event.source != "headhunter":
+                continue
+            evidence = event.event.evidence if event.event else None
+            gh_ctx = getattr(evidence, "github_context", None) if evidence else None
+            gh_issue_ctx = getattr(evidence, "github_issue_context", None) if evidence else None
+            # Map the actual status (new/active/deferred) to the action field instead
+            # of hardcoding "active" -- a queued-but-unpicked or paused event shouldn't
+            # render identically to one actually being worked (#233 review, MEDIUM).
+            action = status_map.get(eid, "active")
+            if gh_ctx:
+                result.append(_github_active_item(
+                    gh_ctx, number_key="pr_number", title_key="pr_title", url_key="pr_url",
+                    action=action, fallback_created_at=event.event.timeDate,
+                ))
+            elif gh_issue_ctx:
+                result.append(_github_active_item(
+                    gh_issue_ctx, number_key="issue_number", title_key="title", url_key="html_url",
+                    action=action, fallback_created_at=event.event.timeDate,
+                ))
 
     # Sort after GitHub items are appended so FIFO ordering spans both platforms
     result.sort(key=lambda t: t.get("created_at", ""))
