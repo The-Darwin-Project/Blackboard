@@ -714,3 +714,47 @@ class TestMultiCycleReeval:
             state = await jira_head._get_issue_state("CNV-85192")
             assert state["phase"] == "analyzed"
             assert state["last_comment_id"] == "c99"
+
+
+# =========================================================================
+# QE Regression: Phase 1 Failure Isolation (code-review HIGH/MEDIUM fix, commit 52e78bc0)
+# =========================================================================
+
+class TestPhase1ReevalFailureIsolation:
+    @pytest.mark.asyncio
+    async def test_reeval_exception_on_one_issue_does_not_abort_poll_cycle(self, jira_head, stub_blackboard, caplog):
+        """The newly-reachable has_reeval_signal() call in Phase 1 is now try/except-wrapped
+        per issue. A Jira API failure on one Planning issue must be isolated -- logged and
+        skipped via `continue` -- rather than propagating out of poll_and_process() and
+        aborting analysis for every other issue in the same cycle."""
+        failing_issue = _make_issue(key="CNV-1")
+        healthy_issue = _make_issue(key="CNV-2")
+        await jira_head._set_issue_state("CNV-1", {"phase": "analyzed", "last_comment_id": "c1"})
+        await jira_head._set_issue_state("CNV-2", {"phase": "analyzed", "last_comment_id": "c2"})
+
+        async def _reeval_side_effect(issue, last_cid):
+            if issue["key"] == "CNV-1":
+                raise RuntimeError("Jira API 503")
+            return True
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[failing_issue, healthy_issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "has_reeval_signal", new_callable=AsyncMock, side_effect=_reeval_side_effect),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("c3", "analysis")) as mock_analyze,
+        ):
+            await jira_head.poll_and_process()
+
+        # The failure on CNV-1 must not prevent CNV-2 from being processed in the same cycle.
+        mock_analyze.assert_called_once_with(healthy_issue)
+        assert "Jira reeval check failed for CNV-1" in caplog.text
+
+        # CNV-1's state must be left untouched by the failed check (no bogus state transition).
+        failed_state = await jira_head._get_issue_state("CNV-1")
+        assert failed_state["phase"] == "analyzed"
+        assert failed_state["last_comment_id"] == "c1"
+
+        # CNV-2 must have advanced normally past the reeval signal.
+        healthy_state = await jira_head._get_issue_state("CNV-2")
+        assert healthy_state["phase"] == "analyzed"
+        assert healthy_state["last_comment_id"] == "c3"
