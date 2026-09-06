@@ -19,6 +19,10 @@
 #     le=200 on all three -- never raise this to unbounded. q/scope/channel/service filters are
 #     partly Qdrant-indexed (scope/service) and partly post-fetch on the current page only
 #     (channel has no payload index; q is a page-local substring match everywhere).
+# 13. [Pattern]: GET /headhunter/pending merges Blackboard-active GitHub PR/Issue events
+#     (action="active") after the queued_prs cache items (action="queued") -- Blackboard is
+#     the source of truth for "still being worked on" since queued_prs/queued_issues only
+#     hold WIP-cap-blocked items and drop the entry the instant an event is created (#233).
 """
 Conversation Queue API - Event document management.
 
@@ -1128,6 +1132,49 @@ async def headhunter_pending_todos():
                 })
     except Exception as e:
         logger.warning(f"GitHub queued PR lookup skipped: {e}")
+
+    # Append active GitHub PR/Issue events from the Blackboard (source of truth for
+    # "Darwin is working on this" -- these items are no longer in the queued_prs/
+    # queued_issues caches once an event exists, so they'd otherwise vanish from the
+    # widget for the entire active-processing lifecycle; see issue #233).
+    try:
+        blackboard = await get_blackboard()
+        status_map = await blackboard.get_active_events_with_status()
+        for eid in status_map:
+            event = await blackboard.get_event(eid)
+            if not event or event.source != "headhunter":
+                continue
+            evidence = event.event.evidence if event.event else None
+            gh_ctx = getattr(evidence, "github_context", None) if evidence else None
+            gh_issue_ctx = getattr(evidence, "github_issue_context", None) if evidence else None
+            if gh_ctx:
+                result.append({
+                    "platform": "github",
+                    "pr_number": gh_ctx.get("pr_number"),
+                    "pr_title": gh_ctx.get("pr_title", ""),
+                    "project_path": f"{gh_ctx.get('owner', '')}/{gh_ctx.get('repo', '')}",
+                    "author": gh_ctx.get("author", ""),
+                    "created_at": event.event.timeDate,
+                    "target_url": gh_ctx.get("pr_url", ""),
+                    "queue_position": None,
+                    "action": "active",
+                    "priority": 0,
+                })
+            elif gh_issue_ctx:
+                result.append({
+                    "platform": "github",
+                    "pr_number": gh_issue_ctx.get("issue_number"),
+                    "pr_title": gh_issue_ctx.get("title", ""),
+                    "project_path": f"{gh_issue_ctx.get('owner', '')}/{gh_issue_ctx.get('repo', '')}",
+                    "author": gh_issue_ctx.get("author", ""),
+                    "created_at": gh_issue_ctx.get("created_at") or event.event.timeDate,
+                    "target_url": gh_issue_ctx.get("html_url", ""),
+                    "queue_position": None,
+                    "action": "active",
+                    "priority": 0,
+                })
+    except Exception as e:
+        logger.warning(f"GitHub active-event lookup skipped: {e}")
 
     # Sort after GitHub items are appended so FIFO ordering spans both platforms
     result.sort(key=lambda t: t.get("created_at", ""))
