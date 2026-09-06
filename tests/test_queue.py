@@ -4,6 +4,10 @@
 # 2. [Pattern]: ASGITransport + httpx.AsyncClient for in-process GET tests.
 # 3. [Constraint]: Queue headhunter route tests mock GitLab via src.routes.queue.httpx.AsyncClient.
 # 4. [Pattern]: Queue active/closed tests mock blackboard.get_active_events + get_event to verify response shape.
+# 5. [Pattern]: /headhunter/pending active-GitHub coverage mocks dependencies._blackboard directly
+#    (get_active_events_with_status + get_event) since the route calls get_blackboard() itself
+#    inside a try/except rather than via Depends() -- GitLab side must still be mocked (empty
+#    todos) since the active-event lookup runs after it in the same handler (#233).
 """Route-level tests for queue API."""
 from __future__ import annotations
 
@@ -247,3 +251,147 @@ async def test_reject_enqueues_when_not_parked():
     assert resp.status_code == 200
     mock_brain.resume_if_parked.assert_awaited_once_with("evt-notparked2")
     mock_brain.enqueue_for_processing.assert_called_once_with("evt-notparked2")
+
+
+def _make_headhunter_event(
+    event_id: str,
+    *,
+    github_context: dict | None = None,
+    github_issue_context: dict | None = None,
+):
+    """Build a headhunter-sourced EventDocument with GitHub PR or Issue evidence (#233)."""
+    from src.models import EventDocument, EventEvidence, EventInput
+    return EventDocument(
+        id=event_id,
+        source="headhunter",
+        service="github",
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(
+                display_text="test",
+                source_type="headhunter",
+                domain="complicated",
+                severity="info",
+                github_context=github_context,
+                github_issue_context=github_issue_context,
+            ),
+        ),
+    )
+
+
+async def _get_headhunter_pending(mock_bb):
+    """GET /queue/headhunter/pending with GitLab mocked to return no todos and
+    dependencies._blackboard swapped for mock_bb (route calls get_blackboard() itself)."""
+    mock_resp = MagicMock()
+    mock_resp.is_success = True
+    mock_resp.json.return_value = []
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_auth = MagicMock()
+    mock_auth.get_token.return_value = "fake-token"
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        with patch.dict(
+            os.environ,
+            {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
+            clear=False,
+        ):
+            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
+                with patch("httpx.AsyncClient", return_value=mock_client):
+                    from src import dependencies
+                    from src.main import app
+
+                    original_bb = dependencies._blackboard
+                    dependencies._blackboard = mock_bb
+                    try:
+                        transport = ASGITransport(app=app)
+                        async with AsyncClient(transport=transport, base_url="http://test") as client:
+                            return await client.get("/queue/headhunter/pending")
+                    finally:
+                        dependencies._blackboard = original_bb
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_includes_active_github_pr_event():
+    """Active headhunter event with github_context (PR) surfaces with action='active' (#233)."""
+    event = _make_headhunter_event(
+        "evt-pr000001",
+        github_context={
+            "owner": "The-Darwin-Project",
+            "repo": "Blackboard",
+            "pr_number": 233,
+            "pr_title": "Fix pending widget",
+            "author": "octocat",
+            "pr_url": "https://github.com/The-Darwin-Project/Blackboard/pull/233",
+        },
+    )
+
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-pr000001": "active"})
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    active_items = [item for item in data if item.get("action") == "active"]
+    assert len(active_items) == 1
+    item = active_items[0]
+    assert item["platform"] == "github"
+    assert item["pr_number"] == 233
+    assert item["project_path"] == "The-Darwin-Project/Blackboard"
+    assert item["target_url"] == "https://github.com/The-Darwin-Project/Blackboard/pull/233"
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_includes_active_github_issue_event():
+    """Active headhunter event with github_issue_context (Issue) surfaces with action='active' (#233)."""
+    event = _make_headhunter_event(
+        "evt-issue0001",
+        github_issue_context={
+            "owner": "The-Darwin-Project",
+            "repo": "Blackboard",
+            "issue_number": 233,
+            "title": "Headhunter pending widget drops active GitHub work",
+            "author": "octocat",
+            "html_url": "https://github.com/The-Darwin-Project/Blackboard/issues/233",
+            "created_at": "2026-09-01T00:00:00Z",
+        },
+    )
+
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-issue0001": "active"})
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    active_items = [item for item in data if item.get("action") == "active"]
+    assert len(active_items) == 1
+    item = active_items[0]
+    assert item["platform"] == "github"
+    assert item["pr_number"] == 233  # issue_number reuses the pr_number field slot
+    assert item["project_path"] == "The-Darwin-Project/Blackboard"
+    assert item["target_url"] == "https://github.com/The-Darwin-Project/Blackboard/issues/233"
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_omits_closed_github_event():
+    """An event no longer in the active set (closed) does not appear in /headhunter/pending (#233)."""
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+    mock_bb.get_event = AsyncMock(side_effect=AssertionError("get_event should not be called with no active events"))
+
+    resp = await _get_headhunter_pending(mock_bb)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert all(item.get("action") != "active" for item in data)
+    assert data == []
