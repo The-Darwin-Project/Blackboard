@@ -416,7 +416,9 @@ class Headhunter:
                 context = await self._github.fetch_context(pr)
                 plan_text = await self.analyze_and_plan(context, si)
                 await self._github.create_platform_event(pr, plan_text, context)
-                remaining_queued.pop(0)
+                # Remove by identity, not position -- a prior item may have failed
+                # and been skipped, so the promoted item is not necessarily index 0.
+                remaining_queued = [q for q in remaining_queued if q is not pr]
             except Exception as e:
                 logger.warning(
                     f"GitHub queued PR processing failed for "
@@ -524,10 +526,11 @@ class Headhunter:
                 # skill_warning is non-None when skill URL exceeded 10KB cap.
                 si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
                 plan_text = await self.analyze_and_plan(issue, si)
-                if skill_warning:
-                    issue = {**issue, "_skill_size_warning": skill_warning}
-                await self._github.create_issue_event(issue, plan_text)
-                remaining_queued.pop(0)
+                event_issue = {**issue, "_skill_size_warning": skill_warning} if skill_warning else issue
+                await self._github.create_issue_event(event_issue, plan_text)
+                # Remove by identity, not position -- a prior item may have failed
+                # and been skipped, so the promoted item is not necessarily index 0.
+                remaining_queued = [q for q in remaining_queued if q is not issue]
             except Exception as e:
                 logger.warning(
                     f"GitHub queued issue processing failed for "
