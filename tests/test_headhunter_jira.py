@@ -4,6 +4,8 @@
 # 2. [Pattern]: StubBlackboard with create_event + mock redis for state verification.
 # 3. [Pattern]: Each test creates a HeadhunterJira with monkeypatched env vars.
 # 4. [Pattern]: Redis mock uses dict-backed get/set/delete for deterministic testing.
+# 5. [Gotcha]: poll_and_process's cold-start path falls through to has_reeval_signal in the same
+#    cycle, which calls get_watchers for real -- mock get_watchers in any Planning/cold-start test.
 """Unit tests for HeadhunterJira polling head."""
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.agents.handlers_integration import handle_comment_jira_issue
 from src.agents.headhunter_jira import HeadhunterJira, _walk_adf_mentions, format_jira_for_llm
 
 
@@ -395,6 +398,28 @@ class TestActiveJiraKeys:
 class TestColdStartRecovery:
     @pytest.mark.asyncio
     async def test_reconstructs_from_bot_comment(self, jira_head, stub_blackboard):
+        """T-1: cold-start with a pending human reeval mention after the anchor triggers analysis."""
+        issue = _make_issue(status="Planning")
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c10", "bot-acct-123"),
+            _make_adf_comment("c11", "watcher-1", mentions=["bot-acct-123"]),
+        ]
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("c99", "analysis")) as mock_analyze,
+        ):
+            await jira_head.poll_and_process()
+            mock_analyze.assert_called_once()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state is not None
+            assert state["phase"] == "analyzed"
+            assert state["last_comment_id"] == "c99"
+
+    @pytest.mark.asyncio
+    async def test_cold_start_no_reeval_signal_skips_analysis(self, jira_head, stub_blackboard):
+        """T-2: cold-start where the bot comment is the last comment (no pending signal) skips analysis."""
         issue = _make_issue(status="Planning")
         issue["fields"]["comment"]["comments"] = [
             _make_adf_comment("c10", "bot-acct-123"),
@@ -402,6 +427,7 @@ class TestColdStartRecovery:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
             patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock) as mock_analyze,
         ):
             await jira_head.poll_and_process()
@@ -410,6 +436,26 @@ class TestColdStartRecovery:
             assert state is not None
             assert state["phase"] == "analyzed"
             assert state["last_comment_id"] == "c10"
+
+    @pytest.mark.asyncio
+    async def test_cold_start_bot_self_comment_does_not_trigger_reeval(self, jira_head, stub_blackboard):
+        """T-3: a bot-authored comment after the anchor (e.g. FRIDAY's comment_jira_issue) does not trigger reeval."""
+        issue = _make_issue(status="Planning")
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c10", "bot-acct-123"),
+            _make_adf_comment("c11", "bot-acct-123"),
+        ]
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock) as mock_analyze,
+        ):
+            await jira_head.poll_and_process()
+            mock_analyze.assert_not_called()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state is not None
+            assert state["last_comment_id"] == "c11"
 
     @pytest.mark.asyncio
     async def test_skips_cold_start_when_redis_populated(self, jira_head, stub_blackboard):
@@ -423,6 +469,53 @@ class TestColdStartRecovery:
         ):
             await jira_head.poll_and_process()
             mock_analyze.assert_not_called()
+
+
+# =========================================================================
+# has_reeval_signal Logging
+# =========================================================================
+
+class TestHasReevalSignalLogging:
+    @pytest.mark.asyncio
+    async def test_logs_true_when_signal_found(self, jira_head, caplog):
+        """T-4: has_reeval_signal logs at INFO when a watcher mention is found."""
+        issue = _make_issue()
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c1", "bot-acct-123"),
+            _make_adf_comment("c2", "watcher-1", mentions=["bot-acct-123"]),
+        ]
+        with patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}):
+            with caplog.at_level("INFO", logger="src.agents.headhunter_jira"):
+                result = await jira_head.has_reeval_signal(issue, "c1")
+        assert result is True
+        assert any("True" in r.message and "CNV-85192" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_logs_false_when_no_comments_after_anchor(self, jira_head, caplog):
+        """T-4: has_reeval_signal logs at INFO when there is no signal (no comments after anchor)."""
+        issue = _make_issue()
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c1", "bot-acct-123"),
+        ]
+        with patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}):
+            with caplog.at_level("INFO", logger="src.agents.headhunter_jira"):
+                result = await jira_head.has_reeval_signal(issue, "c1")
+        assert result is False
+        assert any("False" in r.message and "no comments after anchor" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_logs_false_when_no_watcher_mentions(self, jira_head, caplog):
+        """T-4: has_reeval_signal logs at INFO when comments exist after anchor but no watcher mentions the bot."""
+        issue = _make_issue()
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c1", "bot-acct-123"),
+            _make_adf_comment("c2", "random-user", mentions=["bot-acct-123"]),
+        ]
+        with patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}):
+            with caplog.at_level("INFO", logger="src.agents.headhunter_jira"):
+                result = await jira_head.has_reeval_signal(issue, "c1")
+        assert result is False
+        assert any("False" in r.message and "no watcher mentions" in r.message for r in caplog.records)
 
 
 # =========================================================================
@@ -493,3 +586,175 @@ class TestMissionLabelThreading:
         jira = HeadhunterJira(stub_blackboard)
         issue = {"fields": {"labels": ["darwin", "some_other_label"]}}
         assert jira._resolve_mission_label(issue) == "some_other_label"
+
+
+# =========================================================================
+# comment_jira_issue Self-Comment Warning
+# =========================================================================
+
+def _make_ctx() -> MagicMock:
+    """Build a minimal ToolContext mock matching the Protocol in tool_router.py."""
+    ctx = MagicMock()
+    ctx.next_turn_number = AsyncMock(return_value=1)
+    ctx.append_and_broadcast = AsyncMock(return_value=1)
+    return ctx
+
+
+class TestCommentJiraIssueSelfCommentWarning:
+    @pytest.mark.asyncio
+    async def test_warning_appended_on_successful_post_regardless_of_content(self, monkeypatch):
+        """Every comment posted through this handler is authored by the bot's own Jira
+        account (fixed jira_email/jira_token), so headhunter_jira.py's anti-loop guard
+        unconditionally skips it for re-analysis triggering -- regardless of what the
+        comment text says. A prior substring check on comment_text was a flawed proxy
+        for this; the note must appear on every successful POST instead."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        ctx = _make_ctx()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await handle_comment_jira_issue(
+                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "Looks good to me"}, None,
+            )
+        turn = ctx.append_and_broadcast.call_args[0][1]
+        assert "Note: this comment was posted as the bot's own Jira account." in turn.thoughts
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_bot_account_id_not_configured(self, monkeypatch):
+        """When HEADHUNTER_JIRA_BOT_ACCOUNT_ID isn't set, Headhunter Jira's anti-loop guard
+        isn't in play for this deployment, so skip the note rather than reference a feature
+        that isn't configured."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.delenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", raising=False)
+        ctx = _make_ctx()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await handle_comment_jira_issue(
+                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "Looks good to me"}, None,
+            )
+        turn = ctx.append_and_broadcast.call_args[0][1]
+        assert "Note: this comment was posted as the bot's own Jira account." not in turn.thoughts
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_post_fails(self, monkeypatch):
+        """QE regression: the note must never be appended on a failed POST
+        (Pre-Flight Round 1, Auditor A, HIGH finding #1 -- guards against a misleading note
+        on an unrelated failure)."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        ctx = _make_ctx()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await handle_comment_jira_issue(
+                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "cc bot-acct-123 please look"}, None,
+            )
+        turn = ctx.append_and_broadcast.call_args[0][1]
+        assert "Note: this comment was posted as the bot's own Jira account." not in turn.thoughts
+        assert "Failed to comment" in turn.thoughts
+
+
+# =========================================================================
+# QE Regression: Multi-Cycle Reeval (VMER-1655 production scenario)
+# =========================================================================
+
+class TestMultiCycleReeval:
+    @pytest.mark.asyncio
+    async def test_reeval_detected_in_later_cycle_after_cold_start_anchor(self, jira_head, stub_blackboard):
+        """QE regression for the original VMER-1655 bug: cold-start anchors to the bot's last
+        comment on cycle 1 (no signal yet -- correctly no analysis). A human watcher mention
+        then arrives before cycle 2. Before the fix, the anchor+continue path meant this signal
+        could never be observed because has_reeval_signal always compares against the same
+        anchor with no newer comments recorded elsewhere; this test proves cross-cycle state
+        continuity now works end-to-end via two real poll_and_process() calls, not a single
+        mocked cycle."""
+        issue = _make_issue()
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c10", "bot-acct-123"),
+        ]
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock) as mock_analyze,
+        ):
+            # Cycle 1: pod just restarted, Redis empty, bot comment is last -- anchor only.
+            await jira_head.poll_and_process()
+            mock_analyze.assert_not_called()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state["phase"] == "analyzed"
+            assert state["last_comment_id"] == "c10"
+
+            # A human watcher mentions the bot between cycles.
+            issue["fields"]["comment"]["comments"].append(
+                _make_adf_comment("c11", "watcher-1", mentions=["bot-acct-123"])
+            )
+            mock_analyze.return_value = ("c99", "analysis")
+
+            # Cycle 2: must detect the signal against the anchor persisted in cycle 1.
+            await jira_head.poll_and_process()
+            mock_analyze.assert_called_once()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state["phase"] == "analyzed"
+            assert state["last_comment_id"] == "c99"
+
+
+# =========================================================================
+# QE Regression: Phase 1 Failure Isolation (code-review HIGH/MEDIUM fix, commit 52e78bc0)
+# =========================================================================
+
+class TestPhase1ReevalFailureIsolation:
+    @pytest.mark.asyncio
+    async def test_reeval_exception_on_one_issue_does_not_abort_poll_cycle(self, jira_head, stub_blackboard, caplog):
+        """The newly-reachable has_reeval_signal() call in Phase 1 is now try/except-wrapped
+        per issue. A Jira API failure on one Planning issue must be isolated -- logged and
+        skipped via `continue` -- rather than propagating out of poll_and_process() and
+        aborting analysis for every other issue in the same cycle."""
+        failing_issue = _make_issue(key="CNV-1")
+        healthy_issue = _make_issue(key="CNV-2")
+        await jira_head._set_issue_state("CNV-1", {"phase": "analyzed", "last_comment_id": "c1"})
+        await jira_head._set_issue_state("CNV-2", {"phase": "analyzed", "last_comment_id": "c2"})
+
+        async def _reeval_side_effect(issue, last_cid):
+            if issue["key"] == "CNV-1":
+                raise RuntimeError("Jira API 503")
+            return True
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[failing_issue, healthy_issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "has_reeval_signal", new_callable=AsyncMock, side_effect=_reeval_side_effect),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("c3", "analysis")) as mock_analyze,
+        ):
+            await jira_head.poll_and_process()
+
+        # The failure on CNV-1 must not prevent CNV-2 from being processed in the same cycle.
+        mock_analyze.assert_called_once_with(healthy_issue)
+        assert "Jira reeval check failed for CNV-1" in caplog.text
+
+        # CNV-1's state must be left untouched by the failed check (no bogus state transition).
+        failed_state = await jira_head._get_issue_state("CNV-1")
+        assert failed_state["phase"] == "analyzed"
+        assert failed_state["last_comment_id"] == "c1"
+
+        # CNV-2 must have advanced normally past the reeval signal.
+        healthy_state = await jira_head._get_issue_state("CNV-2")
+        assert healthy_state["phase"] == "analyzed"
+        assert healthy_state["last_comment_id"] == "c3"

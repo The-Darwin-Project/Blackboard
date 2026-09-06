@@ -291,6 +291,19 @@ async def handle_comment_jira_issue(
                 )
             if resp.status_code < 300:
                 result_text = f"Comment posted to {issue_key}. Jira communication complete -- proceed with next action."
+                # Unconditional on content: every comment posted through this handler is authored
+                # by the bot's own Jira account (fixed jira_email/jira_token), so the anti-loop
+                # guard in headhunter_jira.py ALWAYS skips it for re-analysis triggering --
+                # regardless of what the text says. A substring/mention check on comment_text
+                # can't change that, so gate only on whether the bot-account feature is configured.
+                if os.getenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", ""):
+                    result_text += (
+                        " Note: this comment was posted as the bot's own Jira account."
+                        " The Headhunter Jira daemon ignores bot-authored comments for"
+                        " re-analysis triggering. If you intended to request re-analysis,"
+                        " a human watcher must @mention the bot from their own Jira account."
+                    )
+                    logger.info(f"comment_jira_issue: comment posted to {issue_key} as bot account (bot-authored comments do not trigger reeval)")
             else:
                 result_text = f"Failed to comment on {issue_key}: {resp.status_code}"
         except Exception as e:
