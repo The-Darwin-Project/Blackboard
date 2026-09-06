@@ -24,9 +24,14 @@
 #     but is purely additive — _queue_issue adds darwin-queued without removing darwin-work,
 #     since _poll_issues filters server-side on labels=darwin-work.
 # 17. [Pattern]: _raise_if_systemic_failure() escalates a fully-failed 2+ item drain-loop
-#     batch (Phase A/B, PR and Issue) so it propagates to Headhunter.run()'s circuit breaker
-#     instead of the cycle "succeeding" silently and resetting github_failures. A single
-#     failing item (the poison-pill case) never triggers this — that must stay isolated.
+#     batch (Phase A/B, PR and Issue) instead of the cycle "succeeding" silently and
+#     resetting github_failures. PR-side Phase A/B escalation propagates all the way to
+#     Headhunter.run()'s circuit breaker (github_failures). Issue-side Phase A/B escalation
+#     is caught and logged as a WARNING by its caller (_github_poll_and_process's wrapper
+#     around _github_poll_issues) — it does NOT reach the circuit breaker, since issue
+#     failures must not trip the shared PR/Issue GitHub circuit breaker (see issue #230).
+#     A single failing item (the poison-pill case) never triggers this — that must stay
+#     isolated regardless of phase.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -201,12 +206,12 @@ class Headhunter:
         parts = [
             f"Action: {context.get('action_name', 'unknown')}",
             f"MR: {context.get('mr_title') or context.get('pr_title') or 'unknown'}",
-            f"State: {context.get('mr_state', context.get('pr_state', 'unknown'))} | "
-            f"Merge status: {context.get('merge_status', context.get('mergeable', 'unknown'))}",
-            f"Branch: {context.get('source_branch', context.get('head_branch', '?'))} -> "
-            f"{context.get('target_branch', context.get('base_branch', '?'))}",
+            f"State: {context.get('mr_state') or context.get('pr_state') or 'unknown'} | "
+            f"Merge status: {context.get('merge_status') or context.get('mergeable') or 'unknown'}",
+            f"Branch: {context.get('source_branch') or context.get('head_branch') or '?'} -> "
+            f"{context.get('target_branch') or context.get('base_branch') or '?'}",
             f"Author: {context.get('author', 'unknown')}",
-            f"Pipeline: {context.get('pipeline_status', context.get('check_status', 'unknown'))}",
+            f"Pipeline: {context.get('pipeline_status') or context.get('check_status') or 'unknown'}",
         ]
         if context.get("pipeline_id"):
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
@@ -460,6 +465,12 @@ class Headhunter:
                     f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
                 )
                 continue
+        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
+        # reflect current queue state even when Phase A hits a systemic failure and
+        # raises past this point. Otherwise the cache stays stale-empty (reset at
+        # cycle top) for the outage window this feature exists to surface.
+        self._github._last_queued_prs = remaining_queued
+        self._github_queued = len(remaining_queued)
         # A fully-failed multi-item batch is more likely systemic (auth/outage)
         # than N coincidental poison pills -- escalate past the circuit breaker.
         _raise_if_systemic_failure("PR Phase A (queued promote)", attempted_a, failed_a)
@@ -497,11 +508,14 @@ class Headhunter:
                     f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
                 )
                 continue
-        _raise_if_systemic_failure("PR Phase B (new items)", attempted_b, failed_b)
-
-        # Expose remaining queued for /headhunter/pending REST endpoint
+        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
+        # reflect current queue state even when Phase B hits a systemic failure and
+        # raises past this point. Otherwise the cache stays stale-empty (reset at
+        # cycle top) for the outage window this feature exists to surface.
         self._github._last_queued_prs = remaining_queued
         self._github_queued = len(remaining_queued)
+        _raise_if_systemic_failure("PR Phase B (new items)", attempted_b, failed_b)
+
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
         self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
 
@@ -585,6 +599,12 @@ class Headhunter:
                     f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                 )
                 continue
+        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
+        # reflect current queue state even when Phase A hits a systemic failure and
+        # raises past this point. Otherwise the cache stays stale-empty (reset at
+        # cycle top) for the outage window this feature exists to surface.
+        self._github._last_queued_issues = remaining_queued
+        self._github_issue_queued = len(remaining_queued)
         # A fully-failed multi-item batch is more likely systemic (auth/outage)
         # than N coincidental poison pills -- escalate so it's visible, even though
         # the Phase C caller intentionally swallows it (issue failures must not
@@ -625,11 +645,14 @@ class Headhunter:
                     f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                 )
                 continue
-        _raise_if_systemic_failure("Issue Phase B (new items)", attempted_b, failed_b)
-
-        # Expose remaining queued for /headhunter/pending REST endpoint
+        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
+        # reflect current queue state even when Phase B hits a systemic failure and
+        # raises past this point. Otherwise the cache stays stale-empty (reset at
+        # cycle top) for the outage window this feature exists to surface.
         self._github._last_queued_issues = remaining_queued
         self._github_issue_queued = len(remaining_queued)
+        _raise_if_systemic_failure("Issue Phase B (new items)", attempted_b, failed_b)
+
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
         self._github_issue_pending = max(0, self._github_issue_pending - newly_queued_in_phase_b)
 

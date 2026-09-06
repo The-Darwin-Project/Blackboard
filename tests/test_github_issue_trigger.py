@@ -729,3 +729,153 @@ class TestIssueDrainLoopGateClosedBranch:
         assert hh._github_issue_queued == 1
         # pending started at 2 (both new); 1 moved to queued state -- avoid double-count
         assert hh._github_issue_pending == 1
+
+
+# =============================================================================
+# Regression tests for the ai-review HIGH finding on PR #232: bookkeeping
+# (_last_queued_prs/_github_queued and the Issue equivalents) must run BEFORE
+# _raise_if_systemic_failure(), not after -- otherwise a systemic failure (2+
+# items, all failed) leaves /headhunter/pending reporting a stale-empty queue
+# (reset to [] at the top of the cycle) for the exact outage window this
+# feature exists to surface, until the next successful cycle self-heals it.
+#
+# PR-side escalation propagates all the way out of _github_poll_and_process
+# (called directly from Headhunter.run()'s circuit breaker loop with no
+# wrapping try/except around Phase A/B) -- so these tests call
+# hh._github_poll_and_process() directly and expect the raise.
+#
+# Issue-side escalation is caught and logged as a WARNING by
+# _github_poll_and_process's wrapper around the _github_poll_issues() call
+# (see header pattern 17) -- it never reaches Headhunter.run()'s circuit
+# breaker. So these tests call hh._github_poll_issues() directly (the phase's
+# own function, one layer below the swallowing wrapper) to observe the raise.
+# =============================================================================
+
+class TestSystemicFailureEscalationPreservesQueueState:
+    @pytest.mark.asyncio
+    async def test_pr_phase_a_systemic_failure_still_reports_queued_state(self):
+        """2 queued PRs, both fail promotion -> Phase A escalates. The queue
+        cache must reflect both still-queued PRs, not the stale-empty reset
+        from the top of the cycle."""
+        hh, _ = _make_hh()
+        pr_a = _make_pr(1, "2026-07-01T00:00:00Z", queued=True)
+        pr_b = _make_pr(2, "2026-07-02T00:00:00Z", queued=True)
+        hh._github.poll_work_items = AsyncMock(return_value=[pr_b, pr_a])
+        hh._github.load_triage_instruction = MagicMock(return_value="SI")
+        hh._github.fetch_context = AsyncMock(side_effect=Exception("systemic: auth expired"))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        with pytest.raises(RuntimeError, match="PR Phase A"):
+            await hh._github_poll_and_process()
+
+        remaining_numbers = {pr["number"] for pr in hh._github._last_queued_prs}
+        assert remaining_numbers == {1, 2}, (
+            f"expected both fully-failed queued PRs to still be reported as "
+            f"queued (not stale-empty), got {remaining_numbers}"
+        )
+        assert hh._github_queued == 2
+
+    @pytest.mark.asyncio
+    async def test_pr_phase_b_systemic_failure_still_reports_queued_state(self):
+        """1 queued PR fails alone (poison-pill, stays isolated, no Phase A
+        escalation) + 2 new PRs both fail -> Phase B escalates. The queue
+        cache must still report the Phase-A-failed PR as queued, not the
+        stale-empty reset."""
+        hh, _ = _make_hh()
+        queued_pr = _make_pr(1, "2026-07-01T00:00:00Z", queued=True)
+        new_pr_a = _make_pr(2, "2026-07-02T00:00:00Z")
+        new_pr_b = _make_pr(3, "2026-07-03T00:00:00Z")
+        hh._github.poll_work_items = AsyncMock(
+            return_value=[queued_pr, new_pr_a, new_pr_b]
+        )
+        hh._github.load_triage_instruction = MagicMock(return_value="SI")
+        hh._github.fetch_context = AsyncMock(side_effect=Exception("boom"))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[])
+
+        with pytest.raises(RuntimeError, match="PR Phase B"):
+            await hh._github_poll_and_process()
+
+        remaining_numbers = {pr["number"] for pr in hh._github._last_queued_prs}
+        assert remaining_numbers == {1}, (
+            f"expected the Phase-A-failed queued PR #1 to still be reported "
+            f"as queued (not stale-empty from the top-of-cycle reset), got "
+            f"{remaining_numbers}"
+        )
+        assert hh._github_queued == 1
+
+    @pytest.mark.asyncio
+    async def test_issue_phase_a_systemic_failure_still_reports_queued_state(self):
+        """2 queued issues, both fail promotion -> Phase A escalates, caught
+        one layer up by _github_poll_and_process (logged, non-fatal) but
+        observable directly at _github_poll_issues(). The queue cache must
+        reflect both still-queued issues, not the stale-empty reset."""
+        hh, _ = _make_hh()
+        issue_a = _make_queued_issue(1, "2026-07-01T00:00:00Z")
+        issue_b = _make_queued_issue(2, "2026-07-02T00:00:00Z")
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_b, issue_a])
+        hh._github._load_issue_triage_instruction = AsyncMock(
+            side_effect=Exception("systemic: auth expired")
+        )
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        with pytest.raises(RuntimeError, match="Issue Phase A"):
+            await hh._github_poll_issues()
+
+        remaining_numbers = {i["issue_number"] for i in hh._github._last_queued_issues}
+        assert remaining_numbers == {1, 2}, (
+            f"expected both fully-failed queued issues to still be reported "
+            f"as queued (not stale-empty), got {remaining_numbers}"
+        )
+        assert hh._github_issue_queued == 2
+
+    @pytest.mark.asyncio
+    async def test_issue_phase_b_systemic_failure_still_reports_queued_state(self):
+        """1 queued issue fails alone (poison-pill, stays isolated, no Phase A
+        escalation) + 2 new issues both fail -> Phase B escalates. The queue
+        cache must still report the Phase-A-failed issue as queued, not the
+        stale-empty reset."""
+        hh, _ = _make_hh()
+        queued_issue = _make_queued_issue(1, "2026-07-01T00:00:00Z")
+        new_issue_a = _make_new_issue(2, "2026-07-02T00:00:00Z")
+        new_issue_b = _make_new_issue(3, "2026-07-03T00:00:00Z")
+        hh._github.poll_issues_all_installations = AsyncMock(
+            return_value=[queued_issue, new_issue_a, new_issue_b]
+        )
+        hh._github._load_issue_triage_instruction = AsyncMock(side_effect=Exception("boom"))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        with pytest.raises(RuntimeError, match="Issue Phase B"):
+            await hh._github_poll_issues()
+
+        remaining_numbers = {i["issue_number"] for i in hh._github._last_queued_issues}
+        assert remaining_numbers == {1}, (
+            f"expected the Phase-A-failed queued issue #1 to still be "
+            f"reported as queued (not stale-empty from the top-of-cycle "
+            f"reset), got {remaining_numbers}"
+        )
+        assert hh._github_issue_queued == 1
+
+    @pytest.mark.asyncio
+    async def test_issue_systemic_failure_is_swallowed_by_poll_and_process(self):
+        """Confirms the header-comment-17 fix: Issue-side escalation does NOT
+        reach Headhunter.run()'s circuit breaker -- _github_poll_and_process's
+        wrapper around _github_poll_issues() catches it and only logs a
+        warning, unlike the PR-side phases which propagate."""
+        hh, _ = _make_hh()
+        issue_a = _make_queued_issue(1, "2026-07-01T00:00:00Z")
+        issue_b = _make_queued_issue(2, "2026-07-02T00:00:00Z")
+        hh._github.poll_work_items = AsyncMock(return_value=[])
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_b, issue_a])
+        hh._github._load_issue_triage_instruction = AsyncMock(side_effect=Exception("boom"))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        await hh._github_poll_and_process()  # must NOT raise -- swallowed one layer up
+
+        remaining_numbers = {i["issue_number"] for i in hh._github._last_queued_issues}
+        assert remaining_numbers == {1, 2}
