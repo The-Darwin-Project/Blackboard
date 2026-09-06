@@ -12,7 +12,54 @@ final result looks like.
 > diverge from what you observe in Jira, treat this doc as possibly stale and
 > the source files as ground truth.
 
-## 1. What This Integration Does
+## 0. Why This Exists
+
+**The problem**: turning a Jira ticket into real work today usually means a
+human reads it, figures out what actually needs doing, decides who should do
+it, and then manually chases that work to completion — re-reading the ticket
+each time context is needed, manually updating status, and manually pinging
+the reporter when it's done. That triage-and-babysit loop is repetitive,
+easy to defer, and doesn't scale with ticket volume.
+
+**What we're solving**: give any Jira user a way to hand a ticket directly to
+an autonomous execution system, entirely through normal Jira actions
+(assignee, label, status, comments) — no new tool, dashboard login, or
+API integration required on the requester's side. The ticket becomes a
+two-way channel: you describe intent and approve scope in Jira; Darwin
+plans, executes, and reports back in Jira.
+
+**Why a Planning → To Do gate instead of "just run it"**: LLM-generated plans
+can misread scope or intent. Splitting analysis (`Planning`, side-effect
+free) from execution (`To Do`, triggers real agent dispatch) gives you a
+mandatory human checkpoint to correct the plan *before* anything autonomous
+happens — via the same @mention/comment loop you'd use with a human
+collaborator, not a special UI.
+
+**Why the status/comment discipline** (milestone-only updates, single close
+comment, reporter @mention): each Jira comment is an email to every watcher.
+Untuned automation tends to over-notify, which trains people to ignore the
+channel. The comment discipline exists so the Jira thread stays a trustworthy
+signal — when you get a notification, it means something meaningful actually
+happened.
+
+## 1. What Is Headhunter Jira?
+
+**Headhunter Jira** is one of two "heads" of the **Headhunter** agent — an
+in-process Darwin daemon whose job is *not* to do the work itself, but to
+watch an external system's issue tracker, classify/analyze what's being
+asked, and hand qualified work off to **FRIDAY** (the Brain/orchestrator) as
+a tracked event. The GitLab-facing head does the same job for merge
+requests; this head does it for Jira issues. Neither head executes code,
+touches infrastructure, or makes autonomous decisions about scope — it polls,
+analyzes with an LLM, posts its findings back as a comment, and only creates
+a live, agent-dispatched event once a human has explicitly moved the issue to
+`To Do`.
+
+In short: Headhunter Jira is the **intake and triage layer** between "someone
+filed a Jira issue" and "FRIDAY is actively orchestrating agents against it."
+Everything below describes how to drive that intake layer from the Jira side.
+
+## 2. What This Integration Does
 
 Darwin's Headhunter Jira daemon polls Jira on a schedule, looking for issues
 that are:
@@ -31,7 +78,7 @@ It runs a **two-phase flow** driven entirely by the issue's **Status**:
 You never need to open a dashboard — the Jira issue itself is the entire
 control surface and the entire communication channel.
 
-## 2. Creating a Mission
+## 3. Creating a Mission
 
 1. Create a Jira issue as you normally would (bug, task, story — whatever
    your project uses).
@@ -39,14 +86,14 @@ control surface and the entire communication channel.
 3. **Add the base label** (ask your Darwin admin what it's configured to —
    defaults to `darwin`).
 4. Optionally add a **second label** to route the issue to a specialized
-   analysis prompt (see §3). If you don't add one, the bot uses its built-in
+   analysis prompt (see §4). If you don't add one, the bot uses its built-in
    default analyst persona.
 5. **Set Status to `Planning`.**
 
 That's it — no special fields, no custom issue type is required beyond what
 your project already uses. The bot picks up issues on its next poll cycle.
 
-## 3. Labels Are Routing, Not Decoration
+## 4. Labels Are Routing, Not Decoration
 
 Beyond the required base label (`darwin`), any **additional label** you add
 can select a different analysis "skill" — a domain-specific system prompt
@@ -65,7 +112,7 @@ persona vs. a security-audit persona vs. a generic one).
 has a specialized skill configured (e.g., `qe_testing`, `darwin_audit`) —
 it materially changes the quality and focus of the plan you get back.
 
-## 4. The Planning Phase: Review the Bot's Comment
+## 5. The Planning Phase: Review the Bot's Comment
 
 Once your issue is in `Planning` with the right assignee/label, on the next
 poll cycle the bot will:
@@ -97,7 +144,7 @@ plan looks right.
 Move the **Status to `To Do`**. This is the explicit human approval gate —
 nothing autonomous happens until you do this.
 
-## 5. The To Do Phase: Approval Triggers Execution
+## 6. The To Do Phase: Approval Triggers Execution
 
 The moment an issue lands in `To Do` (with bot assignee + label still set),
 on the next poll cycle the bot:
@@ -136,7 +183,7 @@ work is in progress, expect it to be picked up as a signal — though the
 primary approval/re-plan loop is designed around the `Planning` phase.
 Practical implication: comment naturally, tag the bot when you need attention.
 
-## 6. Completion
+## 7. Completion
 
 When the work finishes, the bot enforces a strict, single-shot close
 sequence so your inbox isn't flooded:
@@ -152,7 +199,7 @@ If something couldn't be resolved automatically, the closing comment
 contains findings/escalation details instead of a "done" confirmation — read
 the comment text, not just the status, to know the real outcome.
 
-## 7. Quick Reference
+## 8. Quick Reference
 
 | You do this in Jira | Bot does this |
 |---|---|
@@ -164,7 +211,7 @@ the comment text, not just the status, to know the real outcome.
 | (automatic) | Milestone comments during execution (not every step) |
 | (automatic) | Status → `Dev Complete` + one final comment mentioning you, when finished |
 
-## 8. Things That Won't Happen (By Design)
+## 9. Things That Won't Happen (By Design)
 
 - The bot will **not** start any work while the issue is in `Planning` —
   that phase is analysis-only, no side effects.
@@ -177,7 +224,7 @@ the comment text, not just the status, to know the real outcome.
   if you see continued chatter after "Dev Complete," that's unexpected
   behavior worth flagging to your Darwin admin.
 
-## 9. If Nothing Seems to Happen
+## 10. If Nothing Seems to Happen
 
 Check with your Darwin admin (this is deployment configuration, not
 something you can see from Jira):
