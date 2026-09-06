@@ -16,8 +16,10 @@
 # 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
 #     _get_issue_state/_set_issue_state are the canonical accessors.
 # 11. [Pattern]: _get_active_jira_keys() mirrors GitLab headhunter's _get_active_mr_keys() for dedup.
-# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing comments.
-#     Capped at 10 comment checks per cycle to avoid Jira rate limits.
+# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing comments
+#     AND immediately checks has_reeval_signal in the same poll cycle (does not wait for the next cycle).
+#     Capped at 10 comment checks per cycle to avoid Jira rate limits. Assumes single in-process daemon
+#     loop invocation -- no concurrent poll_and_process() calls for the same instance.
 # 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool), not text parsing.
 #     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
 # 14. [Constraint]: Skill URL 10KB cap -- len(content) > 10240 → cache BUSINESS_ANALYST_SYSTEM_PROMPT
@@ -474,23 +476,35 @@ class HeadhunterJira:
 
     async def has_reeval_signal(self, issue: dict, last_comment_id: str) -> bool:
         """Check if a watcher tagged the bot in a comment after our last analysis."""
-        watchers = await self.get_watchers(issue["key"])
+        issue_key = issue.get("key", "?")
+        watchers = await self.get_watchers(issue_key)
         comments = issue.get("fields", {}).get("comment", {}).get("comments", [])
 
         found_last = False
+        scanned = 0
         for comment in comments:
             if comment["id"] == last_comment_id:
                 found_last = True
                 continue
             if not found_last:
                 continue
+            scanned += 1
             author_id = comment.get("author", {}).get("accountId", "")
             if author_id == self._bot_account_id:
                 continue
             if author_id not in watchers:
                 continue
             if self._mentions_bot(comment.get("body", {})):
+                logger.info(
+                    f"Jira reeval signal for {issue_key}: True "
+                    f"(last_comment_id={last_comment_id}, scanned={scanned}, reason=watcher mention found)"
+                )
                 return True
+        reason = "no comments after anchor" if scanned == 0 else "no watcher mentions"
+        logger.info(
+            f"Jira reeval signal for {issue_key}: False "
+            f"(last_comment_id={last_comment_id}, scanned={scanned}, reason={reason})"
+        )
         return False
 
     # =========================================================================
@@ -731,19 +745,29 @@ class HeadhunterJira:
                     bot_comment_id = self._find_bot_comment(issue)
                     cold_start_checks += 1
                     if bot_comment_id:
-                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": bot_comment_id})
-                        continue
-                result = await self.analyze_and_comment(issue)
-                if result:
-                    comment_id, _analysis = result
-                    await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
-            elif state.get("phase") == "analyzed":
-                last_cid = state.get("last_comment_id", "")
-                if last_cid and await self.has_reeval_signal(issue, last_cid):
+                        state = {"phase": "analyzed", "last_comment_id": bot_comment_id}
+                        await self._set_issue_state(key, state)
+                        logger.info(f"Jira cold-start: anchoring {key} to comment {bot_comment_id}")
+                    else:
+                        logger.info(f"Jira cold-start: no bot comment found for {key}, running fresh analysis")
+                if state is None:
+                    # No bot comment found -- run fresh analysis
                     result = await self.analyze_and_comment(issue)
                     if result:
                         comment_id, _analysis = result
                         await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+                    continue
+
+            if state and state.get("phase") == "analyzed":
+                last_cid = state.get("last_comment_id", "")
+                if last_cid and await self.has_reeval_signal(issue, last_cid):
+                    logger.info(f"Jira reeval signal detected for {key} after comment {last_cid}")
+                    result = await self.analyze_and_comment(issue)
+                    if result:
+                        comment_id, _analysis = result
+                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+                else:
+                    logger.debug(f"Jira reeval check for {key}: no signal (anchor={last_cid})")
 
         # Phase 2: Create events for To Do issues (gated by global WIP cap)
         if not await self.check_flow_gate():
