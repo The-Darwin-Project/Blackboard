@@ -586,3 +586,109 @@ async def test_headhunter_pending_sorts_all_platforms_by_created_at():
     assert [item.get("action") for item in data] == ["review_requested", "active", "queued"]
     assert data[1]["pr_title"] == "Active PR"
     assert data[2]["pr_title"] == "Queued PR"
+
+
+# =============================================================================
+# Regression tests for issue #230: /headhunter/pending exposes queued GitHub Issues
+# =============================================================================
+
+
+async def _get_pending_with_mocked_github(hh_mock):
+    """GET /queue/headhunter/pending with GitLab returning no todos and
+    dependencies._brain.agents['_headhunter'] wired to hh_mock, so only the
+    GitHub queued-PR/queued-Issue append path is exercised."""
+    mock_resp = MagicMock()
+    mock_resp.is_success = True
+    mock_resp.json.return_value = []
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_auth = MagicMock()
+    mock_auth.get_token.return_value = "fake-token"
+
+    mock_brain = MagicMock()
+    mock_brain.agents = {"_headhunter": hh_mock}
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        with patch.dict(
+            os.environ,
+            {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
+            clear=False,
+        ):
+            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
+                with patch("httpx.AsyncClient", return_value=mock_client):
+                    from src import dependencies
+                    from src.main import app
+
+                    original_bb = dependencies._blackboard
+                    original_brain = dependencies._brain
+                    dependencies._blackboard = MagicMock()
+                    dependencies._brain = mock_brain
+                    try:
+                        transport = ASGITransport(app=app)
+                        async with AsyncClient(transport=transport, base_url="http://test") as client:
+                            return await client.get("/queue/headhunter/pending")
+                    finally:
+                        dependencies._blackboard = original_bb
+                        dependencies._brain = original_brain
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_includes_queued_github_issues():
+    """Queued GitHub Issues must appear alongside queued PRs, using
+    issue-specific field names (issue_number/issue_title)."""
+    hh = MagicMock()
+    hh._github.queued_prs = []
+    hh._github.queued_issues = [{
+        "owner": "o", "repo": "r", "issue_number": 9, "issue_title": "Needs triage",
+        "author": "alice", "created_at": "2026-07-01T00:00:00Z",
+        "html_url": "https://github.com/o/r/issues/9",
+    }]
+
+    resp = await _get_pending_with_mocked_github(hh)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    item = data[0]
+    assert item["platform"] == "github"
+    assert item["issue_number"] == 9
+    assert item["issue_title"] == "Needs triage"
+    assert item["project_path"] == "o/r"
+    assert item["queue_position"] == 1
+    assert item["action"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_headhunter_pending_merges_and_sorts_queued_prs_and_issues():
+    """Queued PRs and queued Issues both surface, are globally sorted by
+    created_at (FIFO across platforms), and each keeps its own independent
+    1-based queue_position numbering within its own platform list."""
+    hh = MagicMock()
+    hh._github.queued_prs = [{
+        "number": 5, "title": "PR fix", "owner": "o", "repo": "r",
+        "user": "bob", "created_at": "2026-07-02T00:00:00Z",
+        "html_url": "https://github.com/o/r/pull/5",
+    }]
+    hh._github.queued_issues = [{
+        "owner": "o", "repo": "r", "issue_number": 9, "issue_title": "Issue triage",
+        "author": "alice", "created_at": "2026-07-01T00:00:00Z",
+        "html_url": "https://github.com/o/r/issues/9",
+    }]
+
+    resp = await _get_pending_with_mocked_github(hh)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    # Global sort by created_at: the issue (07-01) precedes the PR (07-02)
+    assert data[0]["issue_number"] == 9
+    assert data[1]["pr_number"] == 5
+    # queue_position is numbered independently per platform list (both start at 1)
+    assert data[0]["queue_position"] == 1
+    assert data[1]["queue_position"] == 1

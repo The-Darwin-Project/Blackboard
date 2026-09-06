@@ -384,3 +384,215 @@ async def test_process_closed_events_routes_issue_to_github():
     hh._github.post_issue_feedback.assert_called_once_with(issue_event)
     hh._github.post_feedback.assert_not_called()
     hh._gitlab.post_feedback.assert_not_called()
+
+
+# =============================================================================
+# Regression tests for issue #230 (hh-github-issue-hardening)
+#
+# Covers: None-guards in prompt builders, per-item exception isolation in the
+# GitHub Issue drain loop (Phase A promote / Phase B new), and the additive
+# darwin-queued lifecycle for issues.
+# =============================================================================
+
+
+def _make_hh(extra_env=None):
+    """Build a Headhunter with a stub blackboard (GitHub head enabled)."""
+    env = {
+        "HEADHUNTER_GITHUB_ENABLED": "true",
+        "GITHUB_APP_ID": "123",
+        "GITHUB_INSTALLATION_ID": "456",
+    }
+    if extra_env:
+        env.update(extra_env)
+    bb = _make_blackboard()
+    with patch.dict(os.environ, env, clear=False):
+        hh = Headhunter(bb)
+    return hh, bb
+
+
+def _make_queued_issue(issue_number, created_at, **overrides):
+    issue = {
+        "owner": "o", "repo": "r", "issue_number": issue_number,
+        "issue_title": f"Issue {issue_number}", "state": "open", "author": "alice",
+        "labels": ["darwin-work", "darwin-queued"], "assignees": [],
+        "html_url": f"https://github.com/o/r/issues/{issue_number}",
+        "created_at": created_at, "body": "desc",
+    }
+    issue.update(overrides)
+    return issue
+
+
+def _make_new_issue(issue_number, created_at, **overrides):
+    issue = {
+        "owner": "o", "repo": "r", "issue_number": issue_number,
+        "issue_title": f"Issue {issue_number}", "state": "open", "author": "alice",
+        "labels": ["darwin-work"], "assignees": [],
+        "html_url": f"https://github.com/o/r/issues/{issue_number}",
+        "created_at": created_at, "body": "desc",
+    }
+    issue.update(overrides)
+    return issue
+
+
+# ---------------------------------------------------------------------------
+# 1-2. None-guards in prompt builders
+# ---------------------------------------------------------------------------
+
+
+class TestPromptBuilderNoneGuards:
+    """context.get(field) can return None (key present, value None), not just
+    a missing key -- .get(field, default) does NOT catch that case. The fix
+    uses `or` fallback chains so a None title can't crash/garble the prompt."""
+
+    def test_issue_title_none_falls_back_to_unknown(self):
+        bb = _make_blackboard()
+        with patch.dict(os.environ, {"HEADHUNTER_GITHUB_ENABLED": "false"}, clear=False):
+            hh = Headhunter(bb)
+        ctx = {"issue_number": 1, "issue_title": None, "owner": "o", "repo": "r"}
+
+        prompt = hh._build_issue_analysis_prompt(ctx)
+
+        assert "GitHub Issue #1: unknown" in prompt
+
+    def test_mr_title_and_pr_title_none_falls_back_to_unknown(self):
+        bb = _make_blackboard()
+        with patch.dict(os.environ, {"HEADHUNTER_GITHUB_ENABLED": "false"}, clear=False):
+            hh = Headhunter(bb)
+        ctx = {"action_name": "assigned", "mr_title": None, "pr_title": None}
+
+        prompt = hh._build_analysis_prompt(ctx)
+
+        assert "MR: unknown" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 3-4. Per-item exception isolation in the Issue drain loop
+# ---------------------------------------------------------------------------
+
+
+class TestIssueDrainLoopExceptionIsolation:
+    @pytest.mark.asyncio
+    async def test_phase_b_new_issue_exception_does_not_stop_the_batch(self):
+        """One new issue raising during processing must not prevent the next
+        new issue in the same cycle from being processed, nor bubble out of
+        _github_poll_issues (which would trip the GitHub circuit breaker)."""
+        hh, _ = _make_hh()
+        issue_1 = _make_new_issue(1, "2026-07-01T00:00:00Z")
+        issue_2 = _make_new_issue(2, "2026-07-02T00:00:00Z")
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_1, issue_2])
+        hh._github._load_issue_triage_instruction = AsyncMock(return_value=("SI", None))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh._github.create_issue_event = AsyncMock(side_effect=[Exception("boom"), "evt-2"])
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        await hh._github_poll_issues()  # must not raise
+
+        assert hh._github.create_issue_event.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_phase_a_queued_issue_exception_does_not_stop_promotion(self):
+        """One queued issue failing promotion must not prevent a later queued
+        issue from being promoted in the same FIFO pass."""
+        hh, _ = _make_hh()
+        issue_a = _make_queued_issue(1, "2026-07-01T00:00:00Z")  # older -> promoted first
+        issue_b = _make_queued_issue(2, "2026-07-02T00:00:00Z")
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_b, issue_a])
+        hh._github._load_issue_triage_instruction = AsyncMock(return_value=("SI", None))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh._github.create_issue_event = AsyncMock(side_effect=[Exception("boom on A"), "evt-B"])
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        await hh._github_poll_issues()  # must not raise
+
+        assert hh._github.create_issue_event.call_count == 2
+        # A failed and was never promoted -- it must still be reported as queued
+        # (via _last_queued_issues / /headhunter/pending), while B (which
+        # succeeded) must be dropped from the queue.
+        remaining_numbers = {i["issue_number"] for i in hh._github._last_queued_issues}
+        assert remaining_numbers == {1}, (
+            f"expected only failed issue #1 to remain queued, got {remaining_numbers}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5-8. darwin-queued lifecycle for Issues (additive, mirrors PR queue)
+# ---------------------------------------------------------------------------
+
+
+class TestIssueQueueLifecycle:
+    @pytest.mark.asyncio
+    async def test_queue_issue_is_additive_does_not_remove_darwin_work(self):
+        """Unlike _queue_pr, _queue_issue must never remove darwin-work --
+        _poll_issues filters server-side on labels=darwin-work, so removing
+        it would make a queued issue invisible to future polls."""
+        platform, _ = _make_platform()
+        platform._add_labels = AsyncMock()
+        platform._remove_label = AsyncMock()
+        platform._post_comment = AsyncMock()
+
+        issue = _make_new_issue(3, "2026-07-01T00:00:00Z", labels=["darwin-work"])
+        await platform._queue_issue(issue, 1)
+
+        platform._add_labels.assert_called_once()
+        add_labels_arg = platform._add_labels.call_args[0][-1]
+        assert platform._queued_label in add_labels_arg
+        platform._remove_label.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queue_issue_idempotent_skips_comment_when_already_queued(self):
+        """If darwin-queued is already present (e.g. pod restart mid-cycle),
+        _queue_issue must not repost the acknowledgement comment."""
+        platform, _ = _make_platform()
+        platform._add_labels = AsyncMock()
+        platform._remove_label = AsyncMock()
+        platform._post_comment = AsyncMock()
+
+        issue = _make_queued_issue(4, "2026-07-01T00:00:00Z")
+        await platform._queue_issue(issue, 1)
+
+        platform._post_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_promote_queued_issue_removes_work_and_queued_labels(self):
+        """create_issue_event must remove BOTH darwin-work and darwin-queued
+        on promote -- the darwin-queued removal is a no-op/404-silenced for
+        issues that were never queued."""
+        platform, bb = _make_platform()
+        platform._add_labels = AsyncMock()
+        removed_labels = []
+        platform._remove_label = AsyncMock(
+            side_effect=lambda installation_id, owner, repo, number, label: removed_labels.append(label)
+        )
+        platform._post_comment = AsyncMock()
+        bb.create_event = AsyncMock(return_value="evt-promoted")
+        bb.set_github_issue_processed = AsyncMock()
+
+        issue = _make_queued_issue(8, "2026-07-01T00:00:00Z")
+        await platform.create_issue_event(issue, "plan text")
+
+        assert platform._work_label in removed_labels
+        assert platform._queued_label in removed_labels
+
+    @pytest.mark.asyncio
+    async def test_github_poll_issues_promotes_queued_before_new_fifo(self):
+        """Queued issues (Phase A) must be fully drained before any new
+        darwin-work issue (Phase B) is processed, mirroring the PR path."""
+        hh, _ = _make_hh()
+        queued_issue = _make_queued_issue(1, "2026-07-01T00:00:00Z")
+        new_issue = _make_new_issue(2, "2026-07-02T00:00:00Z")
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[new_issue, queued_issue])
+        hh._github._load_issue_triage_instruction = AsyncMock(return_value=("SI", None))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        processed_order = []
+
+        async def mock_create_issue_event(issue, plan_text=None):
+            processed_order.append(issue["issue_number"])
+            return f"evt-{issue['issue_number']}"
+
+        hh._github.create_issue_event = AsyncMock(side_effect=mock_create_issue_event)
+
+        await hh._github_poll_issues()
+
+        assert processed_order == [1, 2]
