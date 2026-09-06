@@ -640,3 +640,71 @@ class TestCommentJiraIssueSelfCommentWarning:
             )
         turn = ctx.append_and_broadcast.call_args[0][1]
         assert "Warning: this comment was posted as the bot's own Jira account." not in turn.thoughts
+
+    @pytest.mark.asyncio
+    async def test_self_mention_no_warning_when_post_fails(self, monkeypatch):
+        """QE regression: a self-mention warning must never be appended on a failed POST
+        (Pre-Flight Round 1, Auditor A, HIGH finding #1 -- guards against a misleading warning
+        on an unrelated failure)."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        ctx = _make_ctx()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        with patch("src.agents.handlers_integration.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            await handle_comment_jira_issue(
+                ctx, "evt-1", {"issue_key": "CNV-1", "comment": "cc bot-acct-123 please look"}, None,
+            )
+        turn = ctx.append_and_broadcast.call_args[0][1]
+        assert "Warning: this comment was posted as the bot's own Jira account." not in turn.thoughts
+        assert "Failed to comment" in turn.thoughts
+
+
+# =========================================================================
+# QE Regression: Multi-Cycle Reeval (VMER-1655 production scenario)
+# =========================================================================
+
+class TestMultiCycleReeval:
+    @pytest.mark.asyncio
+    async def test_reeval_detected_in_later_cycle_after_cold_start_anchor(self, jira_head, stub_blackboard):
+        """QE regression for the original VMER-1655 bug: cold-start anchors to the bot's last
+        comment on cycle 1 (no signal yet -- correctly no analysis). A human watcher mention
+        then arrives before cycle 2. Before the fix, the anchor+continue path meant this signal
+        could never be observed because has_reeval_signal always compares against the same
+        anchor with no newer comments recorded elsewhere; this test proves cross-cycle state
+        continuity now works end-to-end via two real poll_and_process() calls, not a single
+        mocked cycle."""
+        issue = _make_issue()
+        issue["fields"]["comment"]["comments"] = [
+            _make_adf_comment("c10", "bot-acct-123"),
+        ]
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock) as mock_analyze,
+        ):
+            # Cycle 1: pod just restarted, Redis empty, bot comment is last -- anchor only.
+            await jira_head.poll_and_process()
+            mock_analyze.assert_not_called()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state["phase"] == "analyzed"
+            assert state["last_comment_id"] == "c10"
+
+            # A human watcher mentions the bot between cycles.
+            issue["fields"]["comment"]["comments"].append(
+                _make_adf_comment("c11", "watcher-1", mentions=["bot-acct-123"])
+            )
+            mock_analyze.return_value = ("c99", "analysis")
+
+            # Cycle 2: must detect the signal against the anchor persisted in cycle 1.
+            await jira_head.poll_and_process()
+            mock_analyze.assert_called_once()
+            state = await jira_head._get_issue_state("CNV-85192")
+            assert state["phase"] == "analyzed"
+            assert state["last_comment_id"] == "c99"
