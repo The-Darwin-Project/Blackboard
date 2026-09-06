@@ -210,6 +210,8 @@ class TestCiGatingRetriggerSkillContracts:
         assert "leaf" in body
         assert "retrigger" in body
         assert "brain-native" in body or "native" in body
+        assert "parameter" in body
+        assert "promptly" in body or "torn down" in body
 
     def test_t_comms_1_darwin_comms_mentions_jenkins_retrigger(self):
         skill = (REPO_ROOT / "gemini-sidecar" / "skills" / "darwin-comms" / "SKILL.md").read_text()
@@ -220,6 +222,8 @@ class TestCiGatingRetriggerSkillContracts:
         assert "jenkins_retrigger" in rule
         assert "leaf_job" in rule
         assert "build_number" in rule
+        assert "parameter" in rule.lower()
+        assert "fetch" in rule.lower()
 
     def test_dual_source_jenkins_retrigger_rules_are_synced(self):
         sidecar_sysadmin = REPO_ROOT / "gemini-sidecar" / "rules" / "sysadmin.md"
@@ -238,6 +242,8 @@ class TestCiGatingRetriggerSkillContracts:
         assert "jenkins_retrigger" in developer_text
         assert "leaf_job" in developer_text
         assert "build_number" in developer_text
+        assert "parameter" in developer_text.lower()
+        assert "fetch" in developer_text.lower()
 
 
 # =========================================================================

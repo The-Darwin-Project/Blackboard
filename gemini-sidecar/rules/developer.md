@@ -134,6 +134,8 @@ confirms the root cause is transient infrastructure -- not a code defect,
 test regression, or persistent failure signature. One retrigger per leaf job
 per investigation.
 
+Jenkins leaf jobs are frequently parameterized (cluster name, branch, config file, test suite selector). Before retriggering, fetch the failing build's parameters (via the build-status/recent-builds tools) and pass the same parameters through to the new trigger -- a parameterless retrigger on a parameterized job is silently rejected or ignored by Jenkins rather than erroring visibly, wasting an investigation cycle before anyone notices the build never actually ran.
+
 This is distinct from the "do NOT modify CI/CD pipelines" rule above: a
 retrigger runs an existing pipeline job as-is, it does not modify pipeline
 configuration. Do not retrigger wrapper jobs -- wrapper-level retrigger is
