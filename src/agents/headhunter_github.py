@@ -23,6 +23,12 @@
 # 16. [Pattern]: post_issue_feedback guards via is_feedback_sent() at entry (defense-in-depth dedup).
 # 17. [Pattern]: set_github_issue_processed called BEFORE label swap -- dedup survives label API failures.
 # 18. [Pattern]: domain is always "disorder" -- FRIDAY classifies during triage, not headhunter.
+# 19. [Pattern]: _queue_issue() is additive-only -- unlike _queue_pr it does NOT remove
+#     darwin-work, since _poll_issues filters server-side on labels=darwin-work and removing
+#     it would make queued issues invisible to future polls. queued_issues @property exposes
+#     _last_queued_issues for /headhunter/pending REST endpoint.
+# 20. [Pattern]: create_issue_event removes both darwin-work AND darwin-queued on promote --
+#     the queued removal is a no-op (silenced 404) for issues that were never queued.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -128,6 +134,7 @@ class GitHubPlatform:
         self._queued_label = os.getenv("HEADHUNTER_GITHUB_LABEL_QUEUED", "darwin-queued")
         self._work_label = os.getenv("HEADHUNTER_GITHUB_LABEL_WORK", "darwin-work")
         self._last_queued_prs: list[dict] = []
+        self._last_queued_issues: list[dict] = []
         # Skill URL map: populated from HEADHUNTER_GITHUB_SKILL_<LABEL> env vars at runtime.
         # Both env-var key (underscores) and label lookup (hyphens→underscores) normalize identically.
         self._issue_skill_urls: dict[str, str] = {
@@ -150,6 +157,11 @@ class GitHubPlatform:
     def queued_prs(self) -> list[dict]:
         """Snapshot of queued PRs from the last poll cycle (for /headhunter/pending)."""
         return list(self._last_queued_prs)
+
+    @property
+    def queued_issues(self) -> list[dict]:
+        """Snapshot of queued Issues from the last poll cycle (for /headhunter/pending)."""
+        return list(self._last_queued_issues)
 
     def enabled(self) -> bool:
         return (
@@ -830,9 +842,10 @@ class GitHubPlatform:
         # Mark processed BEFORE label swap — dedup survives a label API failure on next cycle
         await self.blackboard.set_github_issue_processed(owner, repo, number)
 
-        # Label swap: ADD active BEFORE removing work
+        # Label swap: ADD active BEFORE removing work/queued
         await self._add_labels(installation_id, owner, repo, number, [self._active_label])
         await self._remove_label(installation_id, owner, repo, number, self._work_label)
+        await self._remove_label(installation_id, owner, repo, number, self._queued_label)
 
         cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
         if cortex_url and cortex_url.startswith(("https://", "http://")):
@@ -1065,6 +1078,31 @@ class GitHubPlatform:
             await self._post_comment(
                 installation_id, owner, repo, number,
                 f"**Darwin** acknowledged your PR — queued at position {position}. "
+                "FIFO processing when capacity opens.",
+            )
+
+    async def _queue_issue(self, issue: dict, position: int) -> None:
+        """Acknowledge a GitHub Issue into the darwin-queued state.
+
+        Unlike _queue_pr, this does NOT remove darwin-work: `_poll_issues` filters
+        server-side on `labels=darwin-work`, so removing it here would make queued
+        issues invisible to future polls. darwin-queued is purely additive.
+        Comment is informational — failure is silent (best-effort).
+        Idempotency: if darwin-queued already present (pod restart), skip comment.
+        """
+        owner = issue["owner"]
+        repo = issue["repo"]
+        number = issue["issue_number"]
+        installation_id = issue.get("installation_id", "")
+        labels = set(issue.get("labels", []))
+        already_queued = self._queued_label in labels
+
+        await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
+
+        if not already_queued:
+            await self._post_comment(
+                installation_id, owner, repo, number,
+                f"**Darwin** acknowledged this issue — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
 

@@ -17,6 +17,12 @@
 #     Output controlled by max_output_tokens. _COMMENT_LIMIT (default 2000) for aggregated notes only.
 # 14. [Pattern]: analyze_and_plan returns plan_text only (str). Domain classification removed —
 #     events land in disorder, FRIDAY classifies during triage.
+# 15. [Pattern]: Per-item try/except in all GitHub drain loops (Phase A/B PRs, Phase A/B
+#     Issues) isolates one bad item (e.g. None title) from starving the rest of the batch
+#     or bubbling out of _github_poll_and_process and tripping the GitHub circuit breaker.
+# 16. [Pattern]: Issue queue mirrors PR queue (Phase A promote FIFO, Phase B queue-on-close)
+#     but is purely additive — _queue_issue adds darwin-queued without removing darwin-work,
+#     since _poll_issues filters server-side on labels=darwin-work.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -83,6 +89,7 @@ class Headhunter:
         self._github_pending: int = 0
         self._github_issue_pending: int = 0
         self._github_queued: int = 0
+        self._github_issue_queued: int = 0
 
         # Platform adapters
         self._gitlab = GitLabPlatform(blackboard)
@@ -168,7 +175,7 @@ class Headhunter:
         """Build structured prompt with full context for LLM analysis."""
         parts = [
             f"Action: {context.get('action_name', 'unknown')}",
-            f"MR: {context.get('mr_title', context.get('pr_title', 'unknown'))}",
+            f"MR: {context.get('mr_title') or context.get('pr_title') or 'unknown'}",
             f"State: {context.get('mr_state', context.get('pr_state', 'unknown'))} | "
             f"Merge status: {context.get('merge_status', context.get('mergeable', 'unknown'))}",
             f"Branch: {context.get('source_branch', context.get('head_branch', '?'))} -> "
@@ -207,7 +214,7 @@ class Headhunter:
     def _build_issue_analysis_prompt(context: dict) -> str:
         """Build issue-specific prompt. Excludes PR-only fields (branch, pipeline, merge, head_sha)."""
         # Sanitize title to prevent XML-like breakout in the prompt
-        title = context.get("issue_title", "unknown").replace("</", "< /")
+        title = (context.get("issue_title") or "unknown").replace("</", "< /")
         parts = [
             f"GitHub Issue #{context.get('issue_number', '?')}: {title}",
             f"Repo: {context.get('owner', '?')}/{context.get('repo', '?')}",
@@ -232,7 +239,13 @@ class Headhunter:
     @property
     def pending_count(self) -> int:
         """Pending items from last poll cycle (not yet converted to events)."""
-        return self._gitlab_pending + self._github_pending + self._github_issue_pending + self._github_queued
+        return (
+            self._gitlab_pending
+            + self._github_pending
+            + self._github_issue_pending
+            + self._github_queued
+            + self._github_issue_queued
+        )
 
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""
@@ -399,10 +412,17 @@ class Headhunter:
         for pr in queued_items:
             if not await self.check_flow_gate():
                 break
-            context = await self._github.fetch_context(pr)
-            plan_text = await self.analyze_and_plan(context, si)
-            await self._github.create_platform_event(pr, plan_text, context)
-            remaining_queued.pop(0)
+            try:
+                context = await self._github.fetch_context(pr)
+                plan_text = await self.analyze_and_plan(context, si)
+                await self._github.create_platform_event(pr, plan_text, context)
+                remaining_queued.pop(0)
+            except Exception as e:
+                logger.warning(
+                    f"GitHub queued PR processing failed for "
+                    f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
+                )
+                continue
 
         # Phase B: Process new darwin-review PRs.
         # gate_closed flag avoids per-item Redis gate re-check once closure is confirmed.
@@ -422,9 +442,16 @@ class Headhunter:
                         f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
                     )
                 continue
-            context = await self._github.fetch_context(pr)
-            plan_text = await self.analyze_and_plan(context, si)
-            await self._github.create_platform_event(pr, plan_text, context)
+            try:
+                context = await self._github.fetch_context(pr)
+                plan_text = await self.analyze_and_plan(context, si)
+                await self._github.create_platform_event(pr, plan_text, context)
+            except Exception as e:
+                logger.warning(
+                    f"GitHub PR processing failed for "
+                    f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
+                )
+                continue
 
         # Expose remaining queued for /headhunter/pending REST endpoint
         self._github._last_queued_prs = remaining_queued
@@ -442,34 +469,107 @@ class Headhunter:
             logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
 
     async def _github_poll_issues(self) -> None:
-        """Poll GitHub Issues (darwin-work label), triage via LLM, and create events.
+        """Poll GitHub Issues (darwin-work label), queue/promote to mirror PR Phase A/B.
 
-        Issues skip queue logic — they are processed immediately or skipped if gate is closed.
-        LLM triage (analyze_and_plan) is called per issue with its label-specific SI,
-        matching the PR triage path for consistent evidence quality.
+        `_poll_issues` filters server-side by `labels=darwin-work` only — this is
+        intentional (see _queue_issue) so already-queued issues (which keep
+        darwin-work + gain darwin-queued) still surface here. Classification into
+        queued/new happens client-side by checking for the darwin-queued label.
+        Gate open: promote queued FIFO, then process new (queuing any that arrive
+        after the gate closes mid-loop). Gate closed: queue all new items and
+        expose queued state for /headhunter/pending observability.
         """
+        self._github._last_queued_issues = []
+
         prev_pending = self._github_issue_pending
         try:
             issues = await self._github.poll_issues_all_installations()
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (preserving last count={prev_pending}): {e}")
             return
-        self._github_issue_pending = len(issues)
-        if not issues:
+
+        queued_items = sorted(
+            [i for i in issues if self._github._queued_label in i.get("labels", [])],
+            key=lambda x: x.get("created_at", ""),
+        )
+        new_items = [i for i in issues if self._github._queued_label not in i.get("labels", [])]
+        self._github_issue_pending = len(new_items)
+
+        if not await self.check_flow_gate():
+            logger.debug("Headhunter flow gate closed -- queuing new issues, observing queued state")
+            for i, issue in enumerate(new_items, start=len(queued_items) + 1):
+                try:
+                    await self._github._queue_issue(issue, i)
+                except Exception as e:
+                    logger.warning(
+                        f"GitHub queue issue failed for "
+                        f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
+                    )
+            newly_queued = [{**issue, "queued": True} for issue in new_items]
+            self._github._last_queued_issues = queued_items + newly_queued
+            self._github_issue_queued = len(self._github._last_queued_issues)
+            self._github_issue_pending = 0  # All new items moved to queued state — avoid double-count
             return
 
-        logger.info(f"Headhunter GitHub Issues: {len(issues)} actionable issue(s)")
-        for issue in issues:
+        if issues:
+            logger.info(f"Headhunter GitHub Issues: {len(issues)} actionable issue(s)")
+
+        # Phase A: Promote oldest queued Issues first (FIFO)
+        remaining_queued = list(queued_items)
+        for issue in queued_items:
             if not await self.check_flow_gate():
-                logger.info("Headhunter flow gate closed mid-issue-cycle -- stopping")
                 break
-            # Load label-specific SI then triage via LLM (same path as PR triage).
-            # skill_warning is non-None when skill URL exceeded 10KB cap.
-            si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
-            plan_text = await self.analyze_and_plan(issue, si)
-            if skill_warning:
-                issue = {**issue, "_skill_size_warning": skill_warning}
-            await self._github.create_issue_event(issue, plan_text)
+            try:
+                # Load label-specific SI then triage via LLM (same path as PR triage).
+                # skill_warning is non-None when skill URL exceeded 10KB cap.
+                si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
+                plan_text = await self.analyze_and_plan(issue, si)
+                if skill_warning:
+                    issue = {**issue, "_skill_size_warning": skill_warning}
+                await self._github.create_issue_event(issue, plan_text)
+                remaining_queued.pop(0)
+            except Exception as e:
+                logger.warning(
+                    f"GitHub queued issue processing failed for "
+                    f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
+                )
+                continue
+
+        # Phase B: Process new issues (darwin-work label, not yet queued).
+        gate_closed = False
+        newly_queued_in_phase_b = 0
+        for issue in new_items:
+            if gate_closed or not await self.check_flow_gate():
+                gate_closed = True
+                position = len(remaining_queued) + 1
+                try:
+                    await self._github._queue_issue(issue, position)
+                    remaining_queued.append({**issue, "queued": True})
+                    newly_queued_in_phase_b += 1
+                except Exception as e:
+                    logger.warning(
+                        f"GitHub queue issue failed for "
+                        f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
+                    )
+                continue
+            try:
+                si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
+                plan_text = await self.analyze_and_plan(issue, si)
+                if skill_warning:
+                    issue = {**issue, "_skill_size_warning": skill_warning}
+                await self._github.create_issue_event(issue, plan_text)
+            except Exception as e:
+                logger.warning(
+                    f"GitHub issue processing failed for "
+                    f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
+                )
+                continue
+
+        # Expose remaining queued for /headhunter/pending REST endpoint
+        self._github._last_queued_issues = remaining_queued
+        self._github_issue_queued = len(remaining_queued)
+        # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
+        self._github_issue_pending = max(0, self._github_issue_pending - newly_queued_in_phase_b)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)
