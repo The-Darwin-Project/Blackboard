@@ -17,8 +17,8 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 |---|---|---|
 | `display_text` | Yes | The user's actual message or anomaly description. Never a generic label. |
 | `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"`, `"timekeeper"`, `"jarvis"` |
-| `domain` | Yes | Initial Cynefin state. `"disorder"` for unclassified sources (chat, slack, timekeeper). Real domain for assessed sources (headhunter, aligner). |
-| `domain_confidence` | Yes | `"assessed"` when source did real LLM triage (headhunter, aligner). `"default"` for unclassified sources. |
+| `domain` | Yes | Initial Cynefin state. `"disorder"` for unclassified sources (chat, slack, timekeeper, headhunter). Real domain for assessed sources (aligner). |
+| `domain_confidence` | Yes | `"assessed"` when source pairs LLM triage with a real (non-disorder) `domain` (aligner). `"default"` for unclassified sources and for sources that do real triage but still land in `"disorder"` (headhunter, JenkinsObserver). |
 | `brain_domain` | No | Set by Brain's `classify_event` function call. Overrides `domain` once set. Starts `None`. |
 | `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. Headhunter uses `_classify_severity(action, pipeline)`. |
 | `brain_severity` | No | Set by Brain's `classify_event` (optional severity param). Overrides `severity` once set. Starts `None`. |
@@ -35,7 +35,7 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 ## Source-Specific Patterns
 
 * **Aligner**: Full evidence with LLM-classified domain/severity + metrics. `domain_confidence="assessed"`.
-* **Headhunter**: `source_type="headhunter"`, severity classified from `(action_name, pipeline_status)` via `_classify_severity()`. `display_text` = GitLab action description. `gitlab_context` includes real `pipeline_status` from GitLab API + `todo_created_at` for temporal reasoning. `domain_confidence="assessed"`. No metrics.
+* **Headhunter**: `source_type="headhunter"`, severity classified from `(action_name, pipeline_status)` via `_classify_severity()`. `display_text` = GitLab action description. `gitlab_context` includes real `pipeline_status` from GitLab API + `todo_created_at` for temporal reasoning. `domain_confidence="default"` despite real Flash triage having occurred — `domain` stays `"disorder"` (events land in disorder for FRIDAY to classify during triage), and `"assessed"` is reserved for sources that pair it with a real (non-disorder) `domain` value (see JenkinsObserver rationale below). No metrics.
 
   Severity mapping:
   - `build_failed` -> `warning`

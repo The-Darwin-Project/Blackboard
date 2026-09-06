@@ -19,11 +19,14 @@
 #     le=200 on all three -- never raise this to unbounded. q/scope/channel/service filters are
 #     partly Qdrant-indexed (scope/service) and partly post-fetch on the current page only
 #     (channel has no payload index; q is a page-local substring match everywhere).
-# 13. [Pattern]: GET /headhunter/pending merges Blackboard-active GitHub PR/Issue events
-#     (action=new/active/deferred, mirroring get_active_events_with_status()) after the
-#     queued_prs cache items (action="queued") -- Blackboard is the source of truth for
-#     "still being worked on" since queued_prs/queued_issues only hold WIP-cap-blocked
-#     items and drop the entry the instant an event is created (#233). Per-item fetch via
+# 13. [Pattern]: GET /headhunter/pending appends GitHub queued Issues (hh._github.queued_issues)
+#     after the queued PR block, mirroring the PR shape with issue-specific field names
+#     (issue_number/issue_title in place of pr_number/pr_title). It then merges
+#     Blackboard-active GitHub PR/Issue events (action=new/active/deferred, mirroring
+#     get_active_events_with_status()) after the queued_prs cache items (action="queued")
+#     -- Blackboard is the source of truth for "still being worked on" since
+#     queued_prs/queued_issues only hold WIP-cap-blocked items and drop the entry the
+#     instant an event is created (#233). Per-item fetch via
 #     asyncio.gather(return_exceptions=True) -- one malformed/legacy event record must not
 #     drop every other active GitHub item for the poll. _github_active_item() is the shared
 #     PR/Issue row builder (field names differ: pr_number/pr_title/pr_url vs issue_number/
@@ -1165,8 +1168,21 @@ async def headhunter_pending_todos():
                     "action": "queued",
                     "priority": 0,
                 })
+            for idx, issue in enumerate(hh._github.queued_issues, start=1):
+                result.append({
+                    "platform": "github",
+                    "issue_number": issue.get("issue_number"),
+                    "issue_title": issue.get("issue_title", ""),
+                    "project_path": f"{issue.get('owner', '')}/{issue.get('repo', '')}",
+                    "author": issue.get("author", ""),
+                    "created_at": issue.get("created_at", ""),
+                    "target_url": issue.get("html_url", ""),
+                    "queue_position": idx,
+                    "action": "queued",
+                    "priority": 0,
+                })
     except Exception as e:
-        logger.warning(f"GitHub queued PR lookup skipped: {e}")
+        logger.warning(f"GitHub queued PR/Issue lookup skipped: {e}")
 
     # Append active GitHub PR/Issue events from the Blackboard (source of truth for
     # "Darwin is working on this" -- these items are no longer in the queued_prs/
