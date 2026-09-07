@@ -64,8 +64,15 @@ function jobPath(job) {
   return String(job || '')
     .split('/')
     .filter(Boolean)
-    .map((seg) => `job/${encodeURIComponent(seg)}`)
+    .map((seg) => {
+      if (seg === '.' || seg === '..') throw new Error(`Invalid job path segment: "${seg}"`);
+      return `job/${encodeURIComponent(seg)}`;
+    })
     .join('/');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function request(method, urlStr, { body, isForm } = {}) {
@@ -103,9 +110,24 @@ function request(method, urlStr, { body, isForm } = {}) {
   });
 }
 
-async function httpsGetJson(urlStr) {
-  const res = await request('GET', urlStr);
-  return res.body;
+async function httpsGetJson(urlStr, retries = 2) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let res;
+    try {
+      res = await request('GET', urlStr);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) { await sleep(300 * (attempt + 1)); continue; }
+      throw err;
+    }
+    if (res.statusCode >= 200 && res.statusCode < 300) return res.body;
+    lastErr = new Error(`Jenkins returned HTTP ${res.statusCode} for ${urlStr}`);
+    // Only retry transient server-side failures; a 4xx (e.g. 404) won't change on retry.
+    if (res.statusCode >= 500 && attempt < retries) { await sleep(300 * (attempt + 1)); continue; }
+    throw lastErr;
+  }
+  throw lastErr;
 }
 
 async function fetchBuildParameters(job, build) {
@@ -147,10 +169,16 @@ async function jenkinsTriggerBuild(args) {
     res = await request('POST', `${base}/build`, { body: '', isForm: true });
   }
 
+  // A 200 (dedup no-op) or a redirect to something other than a queue item
+  // (e.g. an auth proxy bouncing to a login page) means nothing was actually
+  // queued -- status code alone is not sufficient to declare success.
+  const queueUrl = res.headers.location || null;
+  const triggered = [200, 201, 302].includes(res.statusCode) && typeof queueUrl === 'string' && queueUrl.includes('/queue/');
+
   return {
-    triggered: [200, 201, 302].includes(res.statusCode),
+    triggered,
     statusCode: res.statusCode,
-    queueUrl: res.headers.location || null,
+    queueUrl,
     parametersUsed: merged,
     sourceBuild,
   };
@@ -189,9 +217,16 @@ async function handleToolCall(name, args) {
 // require.main === module and the stdio JSON-RPC loop starts exactly as before.
 if (require.main === module) {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
-  rl.on('line', async (line) => {
+  rl.on('line', (line) => {
+    handleLine(line).catch((err) => {
+      console.error(`[DarwinJenkins] Unhandled error processing input line: ${err.message}`);
+    });
+  });
+
+  async function handleLine(line) {
     let req;
     try { req = JSON.parse(line); } catch { return; }
+    if (!req || typeof req !== 'object') return;
     const { id, method, params } = req;
 
     if (method === 'initialize') {
@@ -224,7 +259,7 @@ if (require.main === module) {
     }
 
     respondError(id, -32601, `Method not found: ${method}`);
-  });
+  }
 
   console.error('[DarwinJenkins] MCP server started');
 }

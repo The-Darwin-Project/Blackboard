@@ -180,6 +180,24 @@ COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
      jenkins-mcp.js catalog-skills.js ./
 
+# Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name
+# contract that server.js/ws-*.js role gating depends on (jenkins_trigger_build,
+# jenkins_get_build_status, jenkins_get_recent_builds). This check MUST hard-fail
+# the build -- a soft check here would let a tool rename ship silently unverified.
+# Replaces the old @kud/mcp-jenkins upstream-contract verification RUN step
+# removed when that npm dependency was dropped for this local server.
+RUN node -e " \
+      const { TOOLS } = require('./jenkins-mcp.js'); \
+      const expected = ['jenkins_trigger_build', 'jenkins_get_build_status', 'jenkins_get_recent_builds']; \
+      const names = (TOOLS || []).map((t) => t.name); \
+      const missing = expected.filter((n) => !names.includes(n)); \
+      if (missing.length > 0) { \
+        console.error('FATAL: jenkins-mcp.js TOOLS array missing expected tool(s): ' + missing.join(', ') + ' -- build must not proceed'); \
+        process.exit(1); \
+      } \
+      console.log('jenkins-mcp.js tool contract verified'); \
+    "
+
 # Install agent-to-FRIDAY callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
 RUN chmod +x /usr/local/bin/sendResults && \
