@@ -147,7 +147,7 @@ describe('Jenkins MCP credential helpers', () => {
     });
 
     await withMockedCliSetup({
-      resolveCommand: () => '/usr/local/bin/mcp-jenkins',
+      resolveCommand: () => 'node',
       writeClaudeMcpServer: (name, config) => {
         claudeRegistration = { name, config };
       },
@@ -160,14 +160,11 @@ describe('Jenkins MCP credential helpers', () => {
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     const config = settings.mcpServers.Jenkins;
 
-    assert.equal(config.command, '/usr/local/bin/mcp-jenkins');
+    assert.equal(config.command, 'node');
+    assert.deepEqual(config.args, ['/app/jenkins-mcp.js']);
     assert.equal(config.env.MCP_JENKINS_URL, 'https://jenkins.example.test');
     assert.equal(config.env.MCP_JENKINS_USER, 'darwin-user');
     assert.equal(config.env.MCP_JENKINS_API_TOKEN, 'darwin-token');
-    assert.equal(
-      config.env.MCP_JENKINS_ALLOW_TOOLS,
-      'jenkins_trigger_build,jenkins_get_build_status,jenkins_get_recent_builds',
-    );
     assert.deepEqual(claudeRegistration, { name: 'Jenkins', config });
   });
 
@@ -185,7 +182,7 @@ describe('Jenkins MCP credential helpers', () => {
     setEnv('JENKINS_INSECURE_TLS', 'true');
 
     await withMockedCliSetup({
-      resolveCommand: () => '/usr/local/bin/mcp-jenkins',
+      resolveCommand: () => 'node',
       writeClaudeMcpServer: () => {},
     }, async () => {
       const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
@@ -198,6 +195,7 @@ describe('Jenkins MCP credential helpers', () => {
       settings.mcpServers.Jenkins.env.NODE_TLS_REJECT_UNAUTHORIZED,
       '0',
     );
+    assert.equal(settings.mcpServers.Jenkins.env.MCP_JENKINS_INSECURE_TLS, 'true');
     assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, undefined);
   });
 
@@ -211,7 +209,7 @@ describe('Jenkins MCP credential helpers', () => {
     });
 
     await withMockedCliSetup({
-      resolveCommand: () => '/usr/local/bin/mcp-jenkins',
+      resolveCommand: () => 'node',
       writeClaudeMcpServer: () => {},
     }, async () => {
       const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
@@ -220,6 +218,67 @@ describe('Jenkins MCP credential helpers', () => {
 
     const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
     assert.equal(fs.existsSync(settingsPath), false, 'settings.json must not be created on read failure');
+  });
+});
+
+describe('jenkins-mcp.js parameter merge', () => {
+  const JENKINS_MCP_PATH = path.resolve(__dirname, '..', 'jenkins-mcp.js');
+  const https = require('https');
+
+  function stubHttps({ getBody, capturePostBody }) {
+    const saved = https.request;
+    https.request = (opts, callback) => {
+      const req = {
+        on() { return req; },
+        write(chunk) { if (opts.method === 'POST' && capturePostBody) capturePostBody(chunk); },
+        end() {
+          const isPost = opts.method === 'POST';
+          const res = {
+            statusCode: isPost ? 201 : 200,
+            headers: isPost ? { location: 'https://jenkins.example.test/queue/item/42/' } : {},
+            on(event, handler) {
+              if (event === 'data') handler(isPost ? '' : getBody);
+              if (event === 'end') handler();
+              return res;
+            },
+          };
+          callback(res);
+        },
+      };
+      return req;
+    };
+    return () => { https.request = saved; };
+  }
+
+  it('T-9: jenkins_trigger_build merges fetched build parameters with caller overrides (caller wins)', async () => {
+    setEnv('MCP_JENKINS_URL', 'https://jenkins.example.test');
+    setEnv('MCP_JENKINS_USER', 'darwin-user');
+    setEnv('MCP_JENKINS_API_TOKEN', 'darwin-token');
+
+    let postBody = '';
+    const restoreHttps = stubHttps({
+      getBody: JSON.stringify({
+        actions: [{ parameters: [{ name: 'BRANCH', value: 'main' }, { name: 'CLUSTER', value: 'old-cluster' }] }],
+      }),
+      capturePostBody: (chunk) => { postBody += chunk; },
+    });
+
+    try {
+      delete require.cache[require.resolve(JENKINS_MCP_PATH)];
+      const { jenkinsTriggerBuild } = require(JENKINS_MCP_PATH);
+
+      const result = await jenkinsTriggerBuild({ job: 'my-job', parameters: { CLUSTER: 'new-cluster' } });
+
+      assert.equal(result.triggered, true);
+      assert.equal(result.queueUrl, 'https://jenkins.example.test/queue/item/42/');
+      assert.deepEqual(result.parametersUsed, { BRANCH: 'main', CLUSTER: 'new-cluster' });
+      const params = new URLSearchParams(postBody);
+      assert.equal(params.get('BRANCH'), 'main');
+      assert.equal(params.get('CLUSTER'), 'new-cluster');
+    } finally {
+      restoreHttps();
+      delete require.cache[require.resolve(JENKINS_MCP_PATH)];
+    }
   });
 });
 
