@@ -821,11 +821,12 @@ function hasJenkinsCredentials() {
 }
 
 /**
- * Configure the Jenkins MCP server (@kud/mcp-jenkins) for Gemini CLI and Claude Code.
- * Static user/API-token auth, same shape as GitLab's PAT (no session exchange).
- * MCP_JENKINS_ALLOW_TOOLS restricts the exposed tool surface to retrigger +
- * read-only status tools -- it scopes which TOOLS are exposed, not which JOBS
- * a retrigger can target; job-level scoping is enforced by agent rules (prose).
+ * Configure the Jenkins MCP server (local gemini-sidecar/jenkins-mcp.js) for Gemini CLI and
+ * Claude Code. Static user/API-token auth, same shape as GitLab's PAT (no session exchange).
+ * Replaces @kud/mcp-jenkins: that package could not read a prior build's parameters before
+ * retriggering, so a retrigger of a parameterized job posted to /build with no params and
+ * Jenkins queued nothing. The local server exposes exactly the same 3 tools and fetches +
+ * forwards parameters on trigger; job-level scoping is enforced by agent rules (prose).
  */
 async function setupJenkinsMCP() {
   if (!hasJenkinsCredentials()) return;
@@ -843,13 +844,12 @@ async function setupJenkinsMCP() {
   const insecureTls = process.env.JENKINS_INSECURE_TLS === 'true';
 
   const mcpConfig = {
-    command: resolveCommand('mcp-jenkins'),
-    args: [],
+    command: resolveCommand('node'),
+    args: ['/app/jenkins-mcp.js'],
     env: {
       MCP_JENKINS_URL: process.env.JENKINS_URL,
       MCP_JENKINS_USER: username,
       MCP_JENKINS_API_TOKEN: apiToken,
-      MCP_JENKINS_ALLOW_TOOLS: 'jenkins_trigger_build,jenkins_get_build_status,jenkins_get_recent_builds',
     },
   };
 
@@ -858,6 +858,7 @@ async function setupJenkinsMCP() {
     // unlike ArgoCD, this sidecar makes no direct HTTPS fetch() of its own to
     // Jenkins, so there is nothing else that needs the global override.
     mcpConfig.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    mcpConfig.env.MCP_JENKINS_INSECURE_TLS = 'true';
   }
 
   const geminiSettingsDir = `${process.env.HOME}/.gemini`;

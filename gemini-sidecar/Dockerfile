@@ -119,23 +119,6 @@ RUN npm install -g kubernetes-mcp-server@latest && \
     ln -sf "$(npm prefix -g)/bin/kubernetes-mcp-server" /usr/local/bin/kubernetes-mcp-server && \
     kubernetes-mcp-server --help 2>&1 | head -1 || echo "kubernetes-mcp-server installed"
 
-# Jenkins MCP server (CI job retrigger + status for SysAdmin/Developer sidecars)
-RUN npm install -g @kud/mcp-jenkins@latest && \
-    ln -sf "$(npm prefix -g)/bin/mcp-jenkins" /usr/local/bin/mcp-jenkins && \
-    mcp-jenkins --help 2>&1 | head -1 || echo "mcp-jenkins installed"
-
-# Verify @kud/mcp-jenkins@latest still honors the env/tool-name contract this
-# sidecar depends on (MCP_JENKINS_ALLOW_TOOLS + the 3 allowed tool names). This
-# check MUST hard-fail the build -- a soft `|| echo` here would let an upstream
-# contract change ship silently unverified.
-RUN JENKINS_MCP_DIST="$(npm prefix -g)/lib/node_modules/@kud/mcp-jenkins/dist" && \
-    grep -rq "ALLOW_TOOLS" "$JENKINS_MCP_DIST" && \
-    grep -rq "jenkins_trigger_build" "$JENKINS_MCP_DIST" && \
-    grep -rq "jenkins_get_build_status" "$JENKINS_MCP_DIST" && \
-    grep -rq "jenkins_get_recent_builds" "$JENKINS_MCP_DIST" && \
-    echo "mcp-jenkins contract verified" || \
-    (echo "FATAL: @kud/mcp-jenkins@latest no longer matches expected ALLOW_TOOLS/tool-name contract — build must not proceed" && exit 1)
-
 # Playwright MCP server (headless browser automation via accessibility snapshots)
 # Agents can navigate, click, fill forms, take screenshots, monitor network -- no vision model needed
 # PLAYWRIGHT_BROWSERS_PATH: shared location so chromium installed by root is found by non-root USER 1001
@@ -191,11 +174,29 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 
-# Copy server code (modular -- entrypoint + 12 modules + 3 MCP servers)
+# Copy server code (modular -- entrypoint + 12 modules + 4 MCP servers)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
      team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
-     catalog-skills.js ./
+     jenkins-mcp.js catalog-skills.js ./
+
+# Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name
+# contract that server.js/ws-*.js role gating depends on (jenkins_trigger_build,
+# jenkins_get_build_status, jenkins_get_recent_builds). This check MUST hard-fail
+# the build -- a soft check here would let a tool rename ship silently unverified.
+# Replaces the old @kud/mcp-jenkins upstream-contract verification RUN step
+# removed when that npm dependency was dropped for this local server.
+RUN node -e " \
+      const { TOOLS } = require('./jenkins-mcp.js'); \
+      const expected = ['jenkins_trigger_build', 'jenkins_get_build_status', 'jenkins_get_recent_builds']; \
+      const names = (TOOLS || []).map((t) => t.name); \
+      const missing = expected.filter((n) => !names.includes(n)); \
+      if (missing.length > 0) { \
+        console.error('FATAL: jenkins-mcp.js TOOLS array missing expected tool(s): ' + missing.join(', ') + ' -- build must not proceed'); \
+        process.exit(1); \
+      } \
+      console.log('jenkins-mcp.js tool contract verified'); \
+    "
 
 # Install agent-to-FRIDAY callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
