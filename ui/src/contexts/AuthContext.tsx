@@ -14,6 +14,14 @@
 // 6. [Design]: Layer 2 gates logout() on user?.expired to prevent false logout during in-flight silent renew.
 //    Edge case: server-side token revocation while client TTL says "not expired" → user stays on broken session
 //    until Layer 1 TTL fires or Layer 3 WS 4001 catches it. Accepted: false logout during renewal is worse.
+// 7. [Design]: sanitizeRedirectTarget validates via URL parsing + strict origin comparison rather than a
+//    prefix blocklist, because prefix checks are brittle against parser-differential bypasses (backslash
+//    tricks, control-char normalization). A bare non-'/'-prefixed raw value (e.g. "dashboard") is
+//    intentionally resolved to a same-origin absolute path ("/dashboard") rather than rejected — the
+//    origin check is the security boundary, not the leading slash. Do not simplify this back to a prefix
+//    check. `url.pathname` has its leading slashes collapsed to one before reuse: an absolute same-origin
+//    input whose path itself starts with "//" (e.g. https://<app-origin>//evil.com) would otherwise
+//    reconstruct to a protocol-relative payload despite passing the origin check.
 import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
 import { UserManager, User, WebStorageStateStore } from 'oidc-client-ts';
 import { getConfig, setTokenGetter, setOnUnauthorized, setWSAuthFailureCallback } from '../api/client';
@@ -47,10 +55,11 @@ function sanitizeRedirectTarget(raw: string): string {
   try {
     const url = new URL(raw, window.location.origin);
     if (url.origin === window.location.origin) {
-      return url.pathname + url.search + url.hash;
+      const pathname = url.pathname.replace(/^\/+/, '/');
+      return pathname + url.search + url.hash;
     }
-  } catch {
-    // malformed state, fall through to default
+  } catch (err) {
+    console.error('[Auth] Failed to parse redirect target:', err);
   }
   return '/';
 }
@@ -116,10 +125,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const raw = typeof u.state === 'string' ? u.state : '/';
             const target = sanitizeRedirectTarget(raw);
             if (!cancelled) {
+              window.history.replaceState({}, '', target);
               setUser(u);
               setPostLoginRedirect(target);
             }
-            window.history.replaceState({}, '', target);
           } catch (err) {
             console.error('[Auth] Callback error:', err);
           }
