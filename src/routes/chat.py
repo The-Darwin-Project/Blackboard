@@ -6,10 +6,11 @@
 #    Depends(require_auth). require_auth hard-401s anonymous callers, which
 #    would make this route unreachable in the default DEX_ENABLED=false
 #    deployment (see knowledge_graph_api.py's ai-rule) -- chat must keep
-#    working with no auth configured. Only deny when the target event has a
-#    recorded owner that differs from the caller; events with no recorded
-#    owner (default/no-Dex deployment) remain open, same as pre-existing
-#    single-tenant behavior.
+#    working with no auth configured. Deny-by-default like queue.py: an
+#    event whose created_by_email doesn't match the caller's email is
+#    denied even if created_by_email is None (unowned/automated events),
+#    since None == None only when both caller and event are the anonymous
+#    no-Dex identity, which preserves single-tenant no-Dex behavior.
 # 2. [Pattern]: Brain-notification failures around the append-to-existing
 #    path are caught broadly (Exception, not just RuntimeError) and logged
 #    as non-fatal -- same fire-and-forget convention as queue.py's
@@ -79,7 +80,7 @@ async def create_chat_event(
         if request.event_id:
             existing = await blackboard.get_event(request.event_id)
             if existing:
-                if existing.created_by_email and existing.created_by_email != user.email:
+                if existing.created_by_email != user.email:
                     logger.warning(
                         "Denied chat append to event %s: caller %s is not the owner",
                         request.event_id, user.email,
