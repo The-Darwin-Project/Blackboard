@@ -43,6 +43,18 @@ const AuthContext = createContext<AuthState>({
 
 let _userManager: UserManager | null = null;
 
+function sanitizeRedirectTarget(raw: string): string {
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.origin === window.location.origin) {
+      return url.pathname + url.search + url.hash;
+    }
+  } catch {
+    // malformed state, fall through to default
+  }
+  return '/';
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -102,7 +114,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           try {
             const u = await mgr.signinRedirectCallback();
             const raw = typeof u.state === 'string' ? u.state : '/';
-            const target = raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') ? raw : '/';
+            const target = sanitizeRedirectTarget(raw);
             if (!cancelled) {
               setUser(u);
               setPostLoginRedirect(target);
