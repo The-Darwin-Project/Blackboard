@@ -122,7 +122,7 @@ function App() {
 }
 
 function AuthCallbackHandler() {
-  const { isLoading } = useAuth();
+  const { isLoading, postLoginRedirect } = useAuth();
 
   if (isLoading) {
     return (
@@ -135,7 +135,7 @@ function AuthCallbackHandler() {
     );
   }
 
-  return <Navigate to="/" replace />;
+  return <Navigate to={postLoginRedirect} replace />;
 }
 
 export default App;
