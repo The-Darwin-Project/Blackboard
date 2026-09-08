@@ -4,6 +4,10 @@
 #    mirroring tests/test_queue.py's _post_with_mocked_deps helper.
 # 2. [Constraint]: Covers the evt-dc56392b UI bug -- REST /chat/ must append to an existing event
 #    (mirroring the WS user_message handler) instead of always creating a new one.
+# 3. [Constraint]: Also covers the code-review HIGH findings on that fix: the created_by_email
+#    ownership check (denied for mismatched owner, allowed when no owner recorded -- default
+#    no-Dex deployment) and non-RuntimeError brain-notify failures not escaping as a 500 (which
+#    would otherwise cause a REST-fallback retry to append a duplicate turn).
 """Route tests for POST /chat/."""
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 
-def _make_event_document(event_id: str, conversation=None):
+def _make_event_document(event_id: str, conversation=None, created_by_email=None):
     from src.models import EventDocument, EventEvidence, EventInput
     doc = EventDocument(
         id=event_id,
@@ -28,6 +32,7 @@ def _make_event_document(event_id: str, conversation=None):
                 severity="info",
             ),
         ),
+        created_by_email=created_by_email,
     )
     if conversation:
         doc.conversation = conversation
@@ -135,6 +140,68 @@ async def test_chat_append_survives_brain_not_initialized():
 
     resp = await _post_chat(
         {"message": "reply", "event_id": "evt-active02"}, mock_bb, mock_brain=None
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "appended"
+
+
+@pytest.mark.asyncio
+async def test_chat_append_survives_brain_notify_transient_error():
+    """A non-RuntimeError raised from resume_if_parked (e.g. Redis WatchError) must not
+    escape as a 500 -- the turn is already durably persisted, so a 500 here would make a
+    REST-fallback retry append a duplicate turn."""
+    event = _make_event_document("evt-active03")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock(return_value=1)
+
+    mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(side_effect=ConnectionError("redis unavailable"))
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_chat(
+        {"message": "reply", "event_id": "evt-active03"}, mock_bb, mock_brain
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "appended"
+    mock_bb.append_turn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_append_denied_for_non_owner():
+    """event_id owned by a different user -> 403, no turn appended (evt-dc56392b HIGH finding:
+    missing ownership check let any caller post to any event_id)."""
+    event = _make_event_document("evt-owned001", created_by_email="owner@example.com")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock(return_value=1)
+
+    resp = await _post_chat(
+        {"message": "hijack attempt", "event_id": "evt-owned001"}, mock_bb
+    )
+
+    assert resp.status_code == 403
+    mock_bb.append_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chat_append_allowed_when_no_recorded_owner():
+    """event_id with no recorded owner (default no-Dex deployment) stays open, same as
+    pre-existing single-tenant behavior -- the ownership check must not lock out the
+    common DEX_ENABLED=false deployment."""
+    event = _make_event_document("evt-anon0001", created_by_email=None)
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock(return_value=1)
+
+    resp = await _post_chat(
+        {"message": "reply", "event_id": "evt-anon0001"}, mock_bb
     )
 
     assert resp.status_code == 200
