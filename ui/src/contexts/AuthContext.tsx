@@ -24,6 +24,7 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   authConfig: AuthConfig | null;
+  postLoginRedirect: string;
   login: () => void;
   logout: () => void;
   getAccessToken: () => string | null;
@@ -34,6 +35,7 @@ const AuthContext = createContext<AuthState>({
   isAuthenticated: false,
   isLoading: true,
   authConfig: null,
+  postLoginRedirect: '/',
   login: () => {},
   logout: () => {},
   getAccessToken: () => null,
@@ -45,6 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [postLoginRedirect, setPostLoginRedirect] = useState('/');
 
   useEffect(() => {
     let cancelled = false;
@@ -98,8 +101,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (window.location.pathname === '/callback') {
           try {
             const u = await mgr.signinRedirectCallback();
-            if (!cancelled) setUser(u);
-            window.history.replaceState({}, '', '/');
+            const raw = typeof u.state === 'string' ? u.state : '/';
+            const target = raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') ? raw : '/';
+            if (!cancelled) {
+              setUser(u);
+              setPostLoginRedirect(target);
+            }
+            window.history.replaceState({}, '', target);
           } catch (err) {
             console.error('[Auth] Callback error:', err);
           }
@@ -128,7 +136,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(() => {
-    _userManager?.signinRedirect();
+    _userManager?.signinRedirect({ state: window.location.pathname + window.location.search });
   }, []);
 
   const logout = useCallback(() => {
@@ -162,10 +170,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated: !!user && !user.expired,
     isLoading,
     authConfig,
+    postLoginRedirect,
     login,
     logout,
     getAccessToken,
-  }), [user, isLoading, authConfig, login, logout, getAccessToken]);
+  }), [user, isLoading, authConfig, postLoginRedirect, login, logout, getAccessToken]);
 
   return (
     <AuthContext.Provider value={value}>
