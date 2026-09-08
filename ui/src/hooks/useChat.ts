@@ -15,18 +15,21 @@ export function useChat(wsSend?: (data: object) => void) {
   const queryClient = useQueryClient();
 
   const httpMutation = useMutation({
-    mutationFn: (params: { message: string; service?: string }) =>
-      createChatEvent(params.message, params.service),
-    onSuccess: () => {
+    mutationFn: (params: { message: string; service?: string; eventId?: string }) =>
+      createChatEvent(params.message, params.service, params.eventId),
+    onSuccess: (_data, params) => {
       queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
+      if (params.eventId) {
+        queryClient.invalidateQueries({ queryKey: ['eventDocument', params.eventId] });
+      }
     },
   });
 
-  const sendMessage = useCallback((message: string, service?: string, image?: string) => {
+  const sendMessage = useCallback((message: string, service?: string, image?: string, eventId?: string) => {
     if (wsSend) {
       wsSend({ type: 'chat', message, service: service || 'general', ...(image ? { image } : {}) });
     } else {
-      httpMutation.mutate({ message, service });
+      httpMutation.mutate({ message, service, eventId });
     }
   }, [wsSend, httpMutation]);
 

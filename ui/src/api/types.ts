@@ -332,6 +332,7 @@ export interface ArchitectureEvent {
 export interface ChatEventRequest {
   message: string;
   service?: string;
+  event_id?: string;
 }
 
 export interface ChatEventResponse {

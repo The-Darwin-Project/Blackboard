@@ -1,6 +1,7 @@
 // BlackBoard/ui/src/components/ChatInput.tsx
 // @ai-rules:
-// 1. [Pattern]: Dual send path -- WS user_message when eventId provided, REST createChatEvent otherwise.
+// 1. [Pattern]: Dual send path -- WS user_message when connected, REST otherwise. eventId is always
+//    threaded through so the REST fallback appends to the selected event instead of creating a new one.
 // 2. [Pattern]: Image paste via clipboard -> resizeImage -> pendingImage state.
 // 3. [Constraint]: wsSend is optional; falls back to useChat REST when not available.
 /**
@@ -41,7 +42,7 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
         ...(pendingImage ? { image: pendingImage } : {}),
       });
     } else {
-      sendMessage(message.trim(), undefined, pendingImage || undefined);
+      sendMessage(message.trim(), undefined, pendingImage || undefined, eventId || undefined);
     }
     setMessage('');
     setPendingImage(null);

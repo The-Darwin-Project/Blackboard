@@ -231,9 +231,10 @@ export async function getEvents(
 
 export async function createChatEvent(
   message: string,
-  service?: string
+  service?: string,
+  eventId?: string
 ): Promise<ChatEventResponse> {
-  const request: ChatEventRequest = { message, service };
+  const request: ChatEventRequest = { message, service, event_id: eventId };
   return fetchApi<ChatEventResponse>('/chat/', {
     method: 'POST',
     body: JSON.stringify(request),
