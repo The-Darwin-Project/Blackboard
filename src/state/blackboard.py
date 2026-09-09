@@ -1963,42 +1963,41 @@ return 1
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
+        # Doc status write and the active/waiting_approval->closed set migration run in
+        # ONE WATCH/MULTI/EXEC -- not two sequential pipelines. Two pipelines meant a
+        # crash/connection drop between them could leave the doc CLOSED while the id
+        # stayed stranded in EVENT_ACTIVE and/or EVENT_WAITING_APPROVAL, recreating the
+        # exact #240 desync one step later. Set migration always runs (even if the doc
+        # itself is missing) to match pre-existing cleanup behavior for a raced-away doc.
         key = f"{self.EVENT_PREFIX}{event_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
             while True:
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
-                    if not data:
-                        break
-                    event = EventDocument(**json.loads(data))
-                    event.closed_at = time.time()
-                    event.status = EventStatus.CLOSED
-                    if token_usage:
-                        event.token_usage = token_usage
-                    close_turn = ConversationTurn(
-                        turn=len(event.conversation) + 1,
-                        actor="brain",
-                        action="close",
-                        thoughts=summary,
-                        evidence=close_reason,
-                    )
-                    event.conversation.append(close_turn)
                     pipe.multi()
-                    pipe.set(key, json.dumps(event.model_dump()))
+                    if data:
+                        event = EventDocument(**json.loads(data))
+                        event.closed_at = time.time()
+                        event.status = EventStatus.CLOSED
+                        if token_usage:
+                            event.token_usage = token_usage
+                        close_turn = ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="brain",
+                            action="close",
+                            thoughts=summary,
+                            evidence=close_reason,
+                        )
+                        event.conversation.append(close_turn)
+                        pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.srem(self.EVENT_ACTIVE, event_id)
+                    pipe.srem(self.EVENT_WAITING_APPROVAL, event_id)
+                    pipe.zadd(self.EVENT_CLOSED, {event_id: time.time()})
                     await pipe.execute()
                     break
                 except WatchError:
                     continue
-        # Move from active/waiting_approval to closed, atomically.
-        # Events can be closed while parked (e.g. force-close, timeout) so the
-        # waiting_approval eviction must not be skipped -- leaving a stale id in
-        # EVENT_WAITING_APPROVAL desyncs it from the event's actual CLOSED status (#240).
-        async with self.redis.pipeline(transaction=True) as batch:
-            batch.srem(self.EVENT_ACTIVE, event_id)
-            batch.srem(self.EVENT_WAITING_APPROVAL, event_id)
-            batch.zadd(self.EVENT_CLOSED, {event_id: time.time()})
-            await batch.execute()
         logger.info(f"Closed event: {event_id}")
 
     # =========================================================================

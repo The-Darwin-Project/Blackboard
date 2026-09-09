@@ -10,6 +10,10 @@
 #    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
 # 8. [Pattern]: wait_for_agent shares count_agent_waits_in_dispatch_epoch() (from tool_gates.py)
 #    with the WAIT_LOOP gate -- single source of truth for epoch-scoped wait counting.
+# 9. [Pattern]: request_user_approval broadcasts event_status_changed(waiting_approval) after
+#    park_for_approval() succeeds, gated on re-reading the event's actual status (not just
+#    "we called park") since the #240 CLOSED-race guard can make park_for_approval a no-op.
+#    Mirrors Brain.resume_if_parked()'s symmetric broadcast on the way back out (#240).
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
@@ -88,6 +92,16 @@ async def handle_request_user_approval(
     bb = ctx.get_blackboard()
     await bb.park_for_approval(event_id)
     event = await bb.get_event(event_id)
+    if event and event.status == EventStatus.WAITING_APPROVAL:
+        # Only the UI queue-sidebar refresh, not the turn itself -- the request_approval
+        # turn already broadcasts via append_and_broadcast above. Skipped if park_for_approval
+        # no-op'd (event already CLOSED, #240 race guard) so we don't announce a park that
+        # didn't happen.
+        await ctx.broadcast({
+            "type": "event_status_changed",
+            "event_id": event_id,
+            "status": EventStatus.WAITING_APPROVAL.value,
+        })
     if event and event.source in ("slack", "chat"):
         ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
     return False

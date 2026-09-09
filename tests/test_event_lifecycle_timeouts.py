@@ -187,7 +187,9 @@ class TestResumeIfParked:
 
     @pytest.mark.asyncio
     async def test_resume_parked_event(self):
-        """resume_if_parked returns True and re-enqueues for waiting_approval events."""
+        """resume_if_parked returns True, re-enqueues, and broadcasts the resume transition
+        for waiting_approval events (event_status_changed -- #240: the UI queue sidebar
+        must refresh on resume, not just on close)."""
         from src.agents.brain import Brain
         event = _make_event(status=EventStatus.WAITING_APPROVAL)
         brain = MagicMock()
@@ -196,11 +198,17 @@ class TestResumeIfParked:
         brain.blackboard.resume_from_approval = AsyncMock()
         brain._scheduler = MagicMock()
         brain._scheduler.enqueue = MagicMock(return_value=True)
+        brain._broadcast = AsyncMock()
 
         result = await Brain.resume_if_parked(brain, "evt-test")
         assert result is True
         brain.blackboard.resume_from_approval.assert_awaited_once_with("evt-test")
         brain._scheduler.enqueue.assert_called_once_with("evt-test")
+        brain._broadcast.assert_awaited_once_with({
+            "type": "event_status_changed",
+            "event_id": "evt-test",
+            "status": "active",
+        })
 
     @pytest.mark.asyncio
     async def test_no_resume_for_active_event(self):
