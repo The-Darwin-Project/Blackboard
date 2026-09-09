@@ -31,6 +31,10 @@
 #     drop every other active GitHub item for the poll. _github_active_item() is the shared
 #     PR/Issue row builder (field names differ: pr_number/pr_title/pr_url vs issue_number/
 #     title/html_url).
+# 14. [Pattern]: GET /waiting_approval defensively drops (and SREMs) event ids whose event
+#     doc is missing or already CLOSED -- a zombie in EVENT_WAITING_APPROVAL desynced from
+#     the event's real status. Brain also runs a periodic sweep for the same class of zombie
+#     (see Brain._sweep_waiting_approval_zombies), this is a belt-and-suspenders read guard (#240).
 """
 Conversation Queue API - Event document management.
 
@@ -177,19 +181,24 @@ async def list_waiting_approval_events(
     events = []
     for eid in event_ids:
         event = await blackboard.get_event(eid)
-        if event:
-            events.append({
-                "id": event.id,
-                "source": event.source,
-                "service": event.service,
-                "subject_type": getattr(event, "subject_type", "service"),
-                "status": event.status.value,
-                "reason": event.event.reason,
-                "evidence": _serialize_evidence(event),
-                "turns": len(event.conversation),
-                "created": event.event.timeDate,
-                "created_by_email": event.created_by_email,
-            })
+        # Defensive filter: a closed (or missing) event id left over in the
+        # waiting_approval set is a zombie -- desynced from actual event state (#240).
+        # Evict it opportunistically so subsequent polls don't keep re-fetching it.
+        if not event or event.status == EventStatus.CLOSED:
+            await blackboard.redis.srem(blackboard.EVENT_WAITING_APPROVAL, eid)
+            continue
+        events.append({
+            "id": event.id,
+            "source": event.source,
+            "service": event.service,
+            "subject_type": getattr(event, "subject_type", "service"),
+            "status": event.status.value,
+            "reason": event.event.reason,
+            "evidence": _serialize_evidence(event),
+            "turns": len(event.conversation),
+            "created": event.event.timeDate,
+            "created_by_email": event.created_by_email,
+        })
     return events
 
 

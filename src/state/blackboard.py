@@ -1990,9 +1990,15 @@ return 1
                     break
                 except WatchError:
                     continue
-        # Move from active to closed
-        await self.redis.srem(self.EVENT_ACTIVE, event_id)
-        await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
+        # Move from active/waiting_approval to closed, atomically.
+        # Events can be closed while parked (e.g. force-close, timeout) so the
+        # waiting_approval eviction must not be skipped -- leaving a stale id in
+        # EVENT_WAITING_APPROVAL desyncs it from the event's actual CLOSED status (#240).
+        async with self.redis.pipeline(transaction=True) as batch:
+            batch.srem(self.EVENT_ACTIVE, event_id)
+            batch.srem(self.EVENT_WAITING_APPROVAL, event_id)
+            batch.zadd(self.EVENT_CLOSED, {event_id: time.time()})
+            await batch.execute()
         logger.info(f"Closed event: {event_id}")
 
     # =========================================================================
