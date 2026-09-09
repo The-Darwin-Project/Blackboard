@@ -250,7 +250,7 @@ class TestDashboardWsIngestionEnqueues:
         adapter, blackboard, brain = self._make_adapter()
         blackboard.get_event.return_value = _make_event(conversation=[])
         ws = AsyncMock()
-        user = MagicMock(label="Tal")
+        user = MagicMock(label="Tal", email=None)
 
         await adapter._handle_user_message(
             ws, {"event_id": "evt-sync-1", "message": "hello"}, user
@@ -296,6 +296,27 @@ class TestDashboardWsIngestionEnqueues:
 
         blackboard.get_event.assert_not_called()
         brain.enqueue_for_processing.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_user_message_denied_for_non_owner(self):
+        """evt-58ef1b0e HIGH finding: WS handler had no per-event ownership check, letting
+        any connected client append to (and enqueue) an event it doesn't own -- bypassing
+        the REST /chat/ 403 added for the identical operation."""
+        adapter, blackboard, brain = self._make_adapter()
+        event = _make_event(conversation=[])
+        event.created_by_email = "owner@example.com"
+        blackboard.get_event.return_value = event
+        ws = AsyncMock()
+        user = MagicMock(label="Mallory", email="mallory@example.com")
+
+        await adapter._handle_user_message(
+            ws, {"event_id": "evt-sync-1", "message": "hijack attempt"}, user
+        )
+
+        blackboard.append_turn.assert_not_called()
+        brain.enqueue_for_processing.assert_not_called()
+        ws.send_json.assert_called_once()
+        assert ws.send_json.call_args[0][0]["type"] == "error"
 
 
 class TestSlackIngestionEnqueues:

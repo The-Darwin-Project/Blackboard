@@ -7,6 +7,10 @@
 # 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
 # 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
 # 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership.
+# 9. [Pattern]: _handle_user_message enforces the same deny-by-default ownership check as
+#    chat.py's REST append-to-existing-event path (created_by_email != user.email, including
+#    None != None only matching for anonymous no-Dex callers) -- keeps WS and REST append
+#    paths consistent so ownership can't be bypassed by switching transport.
 # 8. [Pattern]: ArgoCDObserver injected post-init via set_argocd_observer(), same shape as Kargo. No UI
 #    consumer sends argocd_health_update yet (v1 dead wire) -- no _send_initial_argocd_state needed.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
@@ -153,6 +157,13 @@ class DashboardWSAdapter:
             return
         event = await self._blackboard.get_event(event_id)
         if not event:
+            return
+        if event.created_by_email != user.email:
+            logger.warning(
+                "Denied WS append to event %s: caller %s is not the owner",
+                event_id, user.email,
+            )
+            await ws.send_json({"type": "error", "message": "Not authorized to post to this event"})
             return
         turn = ConversationTurn(
             turn=len(event.conversation) + 1,
