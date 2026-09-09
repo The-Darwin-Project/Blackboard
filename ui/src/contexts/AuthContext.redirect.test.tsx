@@ -143,6 +143,55 @@ describe('AuthContext post-login redirect', () => {
     await waitFor(() => expect(screen.getByTestId('redirect').textContent).toBe('/'));
   });
 
+  it('scenario 3d: same-origin absolute URL with a "//evil.com" path is neutralized to a single-slash path', async () => {
+    vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG);
+    setLocation('/callback');
+    mockSigninRedirectCallback.mockResolvedValue({ state: `${window.location.origin}//evil.com` });
+
+    render(<AuthProvider><Probe /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByTestId('redirect').textContent).toBe('/evil.com'));
+    expect(window.location.pathname).toBe('/evil.com');
+    expect(window.location.pathname.startsWith('//')).toBe(false);
+  });
+
+  it('scenario 3e: unparseable state falls back to "/" and logs the error', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const urlSpy = vi.spyOn(global, 'URL').mockImplementation(() => {
+      throw new TypeError('Invalid URL');
+    });
+    vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG);
+    setLocation('/callback');
+    mockSigninRedirectCallback.mockResolvedValue({ state: '/reports?id=xyz' });
+
+    render(<AuthProvider><Probe /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByTestId('redirect').textContent).toBe('/'));
+    expect(consoleErrorSpy).toHaveBeenCalledWith('[Auth] Failed to parse redirect target:', expect.any(TypeError));
+
+    urlSpy.mockRestore();
+  });
+
+  it('scenario 3f: hash fragment round-trips through the reconstructed target', async () => {
+    vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG);
+    setLocation('/callback');
+    mockSigninRedirectCallback.mockResolvedValue({ state: '/reports?id=xyz#section-2' });
+
+    render(<AuthProvider><Probe /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByTestId('redirect').textContent).toBe('/reports?id=xyz#section-2'));
+  });
+
+  it('scenario 3g: non-string state falls back to "/"', async () => {
+    vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG);
+    setLocation('/callback');
+    mockSigninRedirectCallback.mockResolvedValue({ state: { nested: 'object' } });
+
+    render(<AuthProvider><Probe /></AuthProvider>);
+
+    await waitFor(() => expect(screen.getByTestId('redirect').textContent).toBe('/'));
+  });
+
   it('scenario 4: token-expiry re-login on a non-root route returns to that route', async () => {
     vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG);
     setLocation('/incidents');
