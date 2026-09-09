@@ -8,6 +8,11 @@
 // 7. [Pattern]: invalidateAligner on event_created + event_closed + reconnect (diverges from HH which skips event_created).
 // 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
 // 7. [Pattern]: Inline ref assignment for selectedEventIdRef (render phase sync for WS handlers).
+// 8. [Gotcha]: waitingApprovalEvents is invalidated on BOTH event_closed (event closed while
+//    parked) AND event_status_changed (park -> waiting_approval, resume -> active) -- all three
+//    transitions that touch EVENT_WAITING_APPROVAL now have a WS broadcast + invalidation path,
+//    not just close. Backend broadcast sites: close_event (queue.py/brain.py close paths),
+//    request_user_approval (handlers_state.py, park), resume_if_parked (brain.py, resume) (#240).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -123,7 +128,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateWaitingApproval, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgents = useMemo(() => {
@@ -156,6 +161,9 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateEvent(closedId);
         invalidateActive();
         invalidateClosed();
+        // A closed event may have been parked (waiting_approval) at close time (#240)
+        // -- invalidate so the queue sidebar drops it instead of showing a zombie.
+        invalidateWaitingApproval();
         invalidateHeadhunter();
         invalidateAligner();
         invalidateJenkins();
@@ -174,6 +182,12 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         });
       }
       invalidateActive();
+      // Covers both directions of the waiting_approval transition: park
+      // (status='waiting_approval', now broadcast by request_user_approval) and
+      // resume (status='active', now broadcast by resume_if_parked). Unconditional
+      // because other status_changed events (e.g. deferred) invalidating an unrelated
+      // query is a harmless no-op refetch (#240).
+      invalidateWaitingApproval();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();

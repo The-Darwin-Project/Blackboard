@@ -87,6 +87,7 @@ export function useQueueInvalidation() {
       queryClient.invalidateQueries({ queryKey: ['eventDocument'] });
     },
     invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
+    invalidateWaitingApproval: () => queryClient.invalidateQueries({ queryKey: ['waitingApprovalEvents'] }),
     invalidateHeadhunter: () => queryClient.invalidateQueries({ queryKey: ['headhunterPending'] }),
     invalidateAligner: () => queryClient.invalidateQueries({ queryKey: ['alignerPending'] }),
     invalidateJenkins: () => queryClient.invalidateQueries({ queryKey: ['jenkinsPending'] }),

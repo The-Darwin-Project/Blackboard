@@ -1963,36 +1963,41 @@ return 1
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
+        # Doc status write and the active/waiting_approval->closed set migration run in
+        # ONE WATCH/MULTI/EXEC -- not two sequential pipelines. Two pipelines meant a
+        # crash/connection drop between them could leave the doc CLOSED while the id
+        # stayed stranded in EVENT_ACTIVE and/or EVENT_WAITING_APPROVAL, recreating the
+        # exact #240 desync one step later. Set migration always runs (even if the doc
+        # itself is missing) to match pre-existing cleanup behavior for a raced-away doc.
         key = f"{self.EVENT_PREFIX}{event_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
             while True:
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
-                    if not data:
-                        break
-                    event = EventDocument(**json.loads(data))
-                    event.closed_at = time.time()
-                    event.status = EventStatus.CLOSED
-                    if token_usage:
-                        event.token_usage = token_usage
-                    close_turn = ConversationTurn(
-                        turn=len(event.conversation) + 1,
-                        actor="brain",
-                        action="close",
-                        thoughts=summary,
-                        evidence=close_reason,
-                    )
-                    event.conversation.append(close_turn)
                     pipe.multi()
-                    pipe.set(key, json.dumps(event.model_dump()))
+                    if data:
+                        event = EventDocument(**json.loads(data))
+                        event.closed_at = time.time()
+                        event.status = EventStatus.CLOSED
+                        if token_usage:
+                            event.token_usage = token_usage
+                        close_turn = ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="brain",
+                            action="close",
+                            thoughts=summary,
+                            evidence=close_reason,
+                        )
+                        event.conversation.append(close_turn)
+                        pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.srem(self.EVENT_ACTIVE, event_id)
+                    pipe.srem(self.EVENT_WAITING_APPROVAL, event_id)
+                    pipe.zadd(self.EVENT_CLOSED, {event_id: time.time()})
                     await pipe.execute()
                     break
                 except WatchError:
                     continue
-        # Move from active to closed
-        await self.redis.srem(self.EVENT_ACTIVE, event_id)
-        await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
         logger.info(f"Closed event: {event_id}")
 
     # =========================================================================
@@ -2011,6 +2016,13 @@ return 1
                         logger.warning(f"park_for_approval: {event_id} not found")
                         return
                     event = EventDocument(**json.loads(data))
+                    if event.status == EventStatus.CLOSED:
+                        # Race with close_event(): the event was closed between the
+                        # decision to park and this write. Parking now would resurrect
+                        # a closed event (flip it back to WAITING_APPROVAL) and re-add
+                        # it to EVENT_WAITING_APPROVAL as a zombie (#240).
+                        logger.warning(f"park_for_approval: {event_id} already closed, skipping park")
+                        return
                     if event.status == EventStatus.WAITING_APPROVAL:
                         return  # Already parked, idempotent
                     event.status = EventStatus.WAITING_APPROVAL

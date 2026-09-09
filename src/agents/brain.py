@@ -195,6 +195,16 @@
 #     _write_terminal_turn/_reenqueue_if_open/_finalize_agent_turn factor out the
 #     write-turn -> release-task-state -> re-enqueue sequence shared by the
 #     question/agent_busy/empty-result/error early-return paths (was hand-copied 4x).
+# 48. [Pattern]: _sweep_waiting_approval_zombies (5min loop, started in start_event_loop)
+#     evicts EVENT_WAITING_APPROVAL and EVENT_ACTIVE ids whose event is missing/CLOSED --
+#     self-healing complement to close_event()'s single-transaction SREM/SREM/ZADD and the
+#     defensive filters in GET /waiting_approval + GET /active (queue.py). Both sets are
+#     swept since they're symmetric halves of the same partial-close failure mode (#240).
+# 49. [Pattern]: resume_if_parked() broadcasts event_status_changed(status=active) after a
+#     successful resume_from_approval(); handle_request_user_approval (handlers_state.py)
+#     broadcasts event_status_changed(status=waiting_approval) after a successful park.
+#     Mirrors the existing NEW->ACTIVE broadcast-at-call-site convention (see #27) so the UI
+#     queue sidebar refreshes on every EVENT_WAITING_APPROVAL transition, not just close (#240).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -4517,6 +4527,11 @@ class Brain:
         await self.blackboard.resume_from_approval(event_id)
         if self._scheduler:
             self._scheduler.enqueue(event_id)
+        await self._broadcast({
+            "type": "event_status_changed",
+            "event_id": event_id,
+            "status": EventStatus.ACTIVE.value,
+        })
         logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
 
@@ -5255,6 +5270,43 @@ class Brain:
         except Exception as e:
             logger.warning("hold_watch orphan recovery failed (non-fatal): %s", e)
 
+    async def _sweep_zombie_set(self, set_name: str, event_ids: list[str]) -> int:
+        """Evict ids from `set_name` whose event doc is missing or already CLOSED."""
+        swept = 0
+        for eid in event_ids:
+            event = await self.blackboard.get_event(eid)
+            if not event or event.status.value == "closed":
+                await self.blackboard.redis.srem(set_name, eid)
+                swept += 1
+        return swept
+
+    async def _sweep_waiting_approval_zombies(self, interval: float = 300.0) -> None:
+        """Periodically evict zombie ids from EVENT_WAITING_APPROVAL and EVENT_ACTIVE.
+
+        An id is a zombie if its event doc is missing or already CLOSED -- this can
+        only linger if a set fell out of sync with actual event state (e.g. a
+        close_event() call that predates the #240 atomic-pipeline fix, or any other
+        partial-write). Both sets are swept: a CLOSED-but-still-active id is the
+        symmetric failure mode of a CLOSED-but-still-parked id, and self-healing only
+        one side leaves the other unguarded. Complements the defensive filters in
+        GET /waiting_approval and GET /active.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                waiting_ids = await self.blackboard.get_waiting_approval_events()
+                active_ids = await self.blackboard.get_active_events()
+                swept = await self._sweep_zombie_set(self.blackboard.EVENT_WAITING_APPROVAL, waiting_ids)
+                swept += await self._sweep_zombie_set(self.blackboard.EVENT_ACTIVE, active_ids)
+                if swept:
+                    logger.info(f"waiting_approval/active zombie sweep: evicted {swept} stale id(s)")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"waiting_approval/active zombie sweep error: {e}")
+
     async def start_event_loop(self) -> None:
         """Start the ReconcileScheduler with trigger-based event processing.
 
@@ -5267,6 +5319,7 @@ class Brain:
         self._running = True
         await self._cleanup_stale_events()
         await self._recover_hold_watch_orphans()
+        asyncio.create_task(self._sweep_waiting_approval_zombies())
 
         self._scheduler = ReconcileScheduler(
             reconcile_fn=self.process_event,
