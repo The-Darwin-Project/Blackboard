@@ -2017,6 +2017,13 @@ return 1
                         logger.warning(f"park_for_approval: {event_id} not found")
                         return
                     event = EventDocument(**json.loads(data))
+                    if event.status == EventStatus.CLOSED:
+                        # Race with close_event(): the event was closed between the
+                        # decision to park and this write. Parking now would resurrect
+                        # a closed event (flip it back to WAITING_APPROVAL) and re-add
+                        # it to EVENT_WAITING_APPROVAL as a zombie (#240).
+                        logger.warning(f"park_for_approval: {event_id} already closed, skipping park")
+                        return
                     if event.status == EventStatus.WAITING_APPROVAL:
                         return  # Already parked, idempotent
                     event.status = EventStatus.WAITING_APPROVAL

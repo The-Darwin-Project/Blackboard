@@ -8,6 +8,9 @@
 // 7. [Pattern]: invalidateAligner on event_created + event_closed + reconnect (diverges from HH which skips event_created).
 // 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
 // 7. [Pattern]: Inline ref assignment for selectedEventIdRef (render phase sync for WS handlers).
+// 8. [Gotcha]: event_closed also invalidates waitingApprovalEvents -- an event can be CLOSED
+//    while parked (waiting_approval) at close time, leaving a zombie in the queue sidebar
+//    if only activeEvents/closedEvents are refreshed (#240).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -123,7 +126,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateWaitingApproval, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgents = useMemo(() => {
@@ -156,6 +159,9 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateEvent(closedId);
         invalidateActive();
         invalidateClosed();
+        // A closed event may have been parked (waiting_approval) at close time (#240)
+        // -- invalidate so the queue sidebar drops it instead of showing a zombie.
+        invalidateWaitingApproval();
         invalidateHeadhunter();
         invalidateAligner();
         invalidateJenkins();
