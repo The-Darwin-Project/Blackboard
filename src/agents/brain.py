@@ -5209,6 +5209,15 @@ class Brain:
                 if event.status.value == "waiting_approval":
                     logger.info(f"Exempting waiting_approval event from stale cleanup: {eid}")
                     continue
+                # Exempt wait_for_user parks: must never auto-close, regardless of
+                # duration (see @ai-rules #50). These stay status=ACTIVE, so they're
+                # identified by their last turn's shape (action="wait", waitingFor="user"),
+                # the same shape used by handle_wait_for_user and the _escalate_to_human
+                # nudge-cascade fallback -- both must survive restart the same way.
+                last_turn = event.conversation[-1]
+                if last_turn.action == "wait" and last_turn.waitingFor == "user":
+                    logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
+                    continue
                 self._clear_jarvis_wait(eid)
                 self._jarvis_wait_count.pop(eid, None)
                 self._recall_lessons.pop(eid, None)

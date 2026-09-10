@@ -224,14 +224,16 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 Once you enter the close phase, execute the close. Do not park with
 wait_for_user during close — it creates orphaned events stuck in active
-status that never self-resolve without the idle timeout safety net.
+status that never self-resolve on their own: wait_for_user has no timeout
+backstop and holds the event open indefinitely until the user replies.
 
 For CASUAL events (farewells, acknowledgments, sign-offs): close
 immediately after your final message. The conversation is done.
 
 For non-CASUAL events where user confirmation is required (chat.md and
 slack.md close protocol): request confirmation BEFORE entering close
-phase. Enter close only after the user confirms or the idle timeout fires.
+phase. Enter close only after the user explicitly confirms — wait_for_user
+parks do not time out, so there is no fallback that closes the event for you.
 
 ## System States
 

@@ -4,6 +4,8 @@
 # 2. [Pattern]: handlers_state tests follow test_handle_close_event.py's _mock_ctx() shape.
 # 3. [Pattern]: Brain._process_with_llm test follows test_brain_fc_terminal_guard.py's
 #    _make_brain()/MockStream harness, isolated to the pure text-only-no-FC branch.
+# 4. [Pattern]: Brain._cleanup_stale_events test follows test_brain_close_paths.py's
+#    MagicMock-blackboard harness (no real Redis).
 """Regression tests: wait_for_user must never get an idle-timeout backstop.
 
 Covers all three places that used to schedule (or re-arm) the idle timeout for a
@@ -15,10 +17,17 @@ plain "waiting for user" park (status stays ACTIVE, no StalenessGuard[chat] cove
    ACTIVE wait_for_user park.
 3. Brain._process_with_llm's terminal text-only (no function call) branch -- must mark
    _waiting_for_user without scheduling an idle timeout.
+
+Plus the positive counterpart of all of the above: a wait_for_user park doesn't just
+avoid getting an idle timer -- it must actually stay open and resumable indefinitely.
+Brain._cleanup_stale_events (the restart/crash-recovery cleanup, a completely separate
+mechanism from the idle timeout) must exempt these parks too, no matter how long they've
+been waiting, and a follow-up user turn must still process normally afterward.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Optional
@@ -28,7 +37,13 @@ import pytest
 
 from src.agents.handlers_state import handle_classify_event, handle_wait_for_user
 from src.agents.llm.types import FunctionCall
-from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+from src.models import (
+    ConversationTurn,
+    EventDocument,
+    EventEvidence,
+    EventInput,
+    EventStatus,
+)
 
 
 # =============================================================================
@@ -256,3 +271,85 @@ class TestTerminalTextOnlyNeverSchedulesIdleTimeout:
 
         assert "evt-text-only" in brain._waiting_for_user
         brain._idle_timeout.schedule.assert_not_called()
+
+
+# =============================================================================
+# 4. Positive coverage: wait_for_user parks stay open and resumable indefinitely
+# =============================================================================
+
+
+def _parked_event(event_id: str = "evt-parked", parked_seconds_ago: float = 0.0) -> EventDocument:
+    """An ACTIVE event whose last turn is a wait_for_user park, as produced by
+    handle_wait_for_user (and by Brain._escalate_to_human, which shares the same
+    action="wait"/waitingFor="user" turn shape)."""
+    return EventDocument(
+        id=event_id,
+        source="chat",
+        status=EventStatus.ACTIVE,
+        service="test-svc",
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(display_text="test", source_type="chat", severity="info"),
+        ),
+        conversation=[
+            ConversationTurn(turn=0, actor="user", action="message", thoughts="can you check this?"),
+            ConversationTurn(
+                turn=1, actor="brain", action="wait", thoughts="On it, one sec.",
+                waitingFor="user", timestamp=time.time() - parked_seconds_ago,
+            ),
+        ],
+    )
+
+
+class TestWaitForUserParkSurvivesRestartAndResumes:
+    @pytest.mark.asyncio
+    async def test_stale_cleanup_never_closes_a_wait_for_user_park_no_matter_the_age(self):
+        """_cleanup_stale_events runs on every Brain restart. A wait_for_user park
+        must survive it regardless of how long it's been parked -- there's no
+        time-based check in the exemption, so this proves "indefinitely", not just
+        "until the next restart"."""
+        from src.agents.brain import Brain
+
+        # Simulate a park that's been sitting for 30 days -- long past what the
+        # old idle-timeout backstop (~15-25 min) would have tolerated.
+        event = _parked_event(parked_seconds_ago=30 * 24 * 3600)
+
+        bb = MagicMock()
+        bb.EVENT_ACTIVE = "darwin:event:active"
+        bb.EVENT_QUEUE = "darwin:queue"
+        bb.redis = MagicMock()
+        bb.redis.srem = AsyncMock()
+        bb.redis.lpush = AsyncMock()
+        bb.get_active_events = AsyncMock(return_value=["evt-parked"])
+        bb.mark_turns_evaluated = AsyncMock()
+        bb.get_event = AsyncMock(return_value=event)
+        bb.close_event = AsyncMock()
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+
+        await brain._cleanup_stale_events()
+
+        bb.close_event.assert_not_awaited()
+        assert event.status == EventStatus.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_follow_up_user_turn_processes_correctly_after_surviving_restart(self):
+        """The park isn't just left un-closed -- it's genuinely resumable: a real
+        follow-up turn (the user replying) still classifies and re-invokes the LLM
+        normally, exactly as it would if the event had never been parked."""
+        event = _parked_event(parked_seconds_ago=30 * 24 * 3600)
+        ctx, bb = _mock_ctx(event, is_waiting=True)
+
+        result = await handle_classify_event(
+            ctx, "evt-parked",
+            {"domain": "complicated", "reasoning": "user followed up"},
+            None,
+        )
+
+        # Re-invokes the LLM to act on the follow-up, same as any live event.
+        assert result is True
+        assert ctx.append_and_broadcast.await_count == 2
+        # Still ACTIVE (not WAITING_APPROVAL), so the re-arm branch is a no-op --
+        # confirms resumption doesn't accidentally reintroduce an idle timer.
+        ctx.get_idle_timeout.assert_not_called()
