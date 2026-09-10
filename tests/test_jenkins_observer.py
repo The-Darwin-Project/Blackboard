@@ -1621,6 +1621,74 @@ class TestTV7eConfigurableTriggerStates:
         assert len(staged_keys) == 0, \
             f"UNSTABLE jobs should also not be staged individually, got: {staged_keys}"
 
+    @pytest.mark.parametrize("raw_value", ["", "   ", ",,,", " , , "])
+    def test_empty_or_malformed_trigger_states_marks_unhealthy(self, raw_value):
+        """An explicit empty/whitespace/comma-only JENKINS_OBSERVER_TRIGGER_STATES
+        must not silently disable CI-gating triggering -- it must log an error and
+        flip view_unhealthy True, mirroring the JENKINS_OBSERVER_VIEWS=='' pattern."""
+        from src.agents.jenkins_observer import _TRIGGER_STATES_UNCONFIGURED_KEY
+
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_TRIGGER_STATES=raw_value)):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+
+        assert obs._trigger_states == set()
+        assert obs._view_unhealthy.get(_TRIGGER_STATES_UNCONFIGURED_KEY) is True
+        assert obs.view_unhealthy is True
+
+    async def test_empty_trigger_states_stages_nothing_but_reports_unhealthy(self):
+        """With an empty resolved trigger-states set, _poll_and_stage() must still
+        run to completion without raising, must stage nothing (since
+        _is_triggering_result() is False for every result), but the observer must
+        surface the dark condition via view_unhealthy rather than looking green."""
+        bb = _mock_blackboard()
+
+        jobs = [
+            _make_job_result(job_name="failed-job", result="FAILURE", color="red",
+                              timestamp=int(time.time() * 1000)),
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_TRIGGER_STATES="")):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=jobs)
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._skills_si = "test skills"
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert staged_keys == [], \
+            f"empty trigger-states must stage nothing, got: {staged_keys}"
+        assert obs.view_unhealthy is True, \
+            "empty trigger-states must not look healthy just because polling succeeded"
+
+    def test_unrecognized_token_alone_also_marks_unhealthy(self):
+        """A TRIGGER_STATES value made entirely of unrecognized/typo'd tokens still
+        resolves to a non-empty _trigger_states set (the parser doesn't validate
+        against the known-result allowlist), so it does NOT trip the empty-set
+        unhealthy guard -- documenting the boundary of this fix versus the
+        separate token-allowlist-validation gap."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_TRIGGER_STATES="NOTAREALSTATE")):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+
+        assert obs._trigger_states == {"NOTAREALSTATE"}
+        assert obs.view_unhealthy is False
+
 
 # =========================================================================
 # T-V13: JOB_METADATA parse - wrapper type

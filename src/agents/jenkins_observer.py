@@ -98,6 +98,11 @@ _VIEWS_UNCONFIGURED_KEY = "__no_views_configured__"
 # config, or circuit breaker open) -- cleared once the adapter is usable again
 # so _poll_and_stage() can recompute real per-view health.
 _ADAPTER_UNAVAILABLE_KEY = "__adapter_unavailable__"
+# Set in __init__() when JENKINS_OBSERVER_TRIGGER_STATES resolves to an empty
+# set (unset default is fine -- this only fires on an explicit empty/blank/
+# comma-only override) -- _is_triggering_result() would otherwise return False
+# for every result, silently disabling all CI-gating triggering.
+_TRIGGER_STATES_UNCONFIGURED_KEY = "__no_trigger_states_configured__"
 
 # Bounds on the one-time legacy pipe-key migration in start() -- this runs on
 # the app's critical startup path (awaited before the readiness probe), so it
@@ -396,19 +401,29 @@ class JenkinsObserver:
             v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
         self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
+
+        self._view_unhealthy: dict[str, bool] = {}
+
         _default_trigger_states = "FAILURE,UNSTABLE,ABORTED,MISSING"
         self._trigger_states: set[str] = {
             s.strip().upper()
             for s in os.getenv("JENKINS_OBSERVER_TRIGGER_STATES", _default_trigger_states).split(",")
             if s.strip()
         }
+        if not self._trigger_states:
+            logger.error(
+                "JenkinsObserver: JENKINS_OBSERVER_TRIGGER_STATES resolved to an "
+                "empty set (empty, whitespace-only, or comma-only override) -- "
+                "no Jenkins result will ever trigger CI-gating staging. Marking "
+                "unhealthy."
+            )
+            self._view_unhealthy[_TRIGGER_STATES_UNCONFIGURED_KEY] = True
+
         self._analysis_enabled = _env_flag("JENKINS_OBSERVER_ANALYSIS_ENABLED")
         logger.info(
             "JenkinsObserver: narrative analysis %s (JENKINS_OBSERVER_ANALYSIS_ENABLED)",
             "enabled" if self._analysis_enabled else "disabled",
         )
-
-        self._view_unhealthy: dict[str, bool] = {}
 
         self._skills_si: str = _FALLBACK_SI
         self._skills_loaded_at: float = 0.0
