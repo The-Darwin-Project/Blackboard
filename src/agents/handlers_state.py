@@ -14,6 +14,10 @@
 #    park_for_approval() succeeds, gated on re-reading the event's actual status (not just
 #    "we called park") since the #240 CLOSED-race guard can make park_for_approval a no-op.
 #    Mirrors Brain.resume_if_parked()'s symmetric broadcast on the way back out (#240).
+# 10. [Constraint]: wait_for_user never schedules ctx.get_idle_timeout() -- it has no idle-timeout
+#     backstop and must never auto-close, regardless of duration. classify_event's re-arm (fired
+#     while already waiting) is gated on status == WAITING_APPROVAL for the same reason: only
+#     request_user_approval parks get an idle timer.
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
@@ -137,9 +141,8 @@ async def handle_wait_for_user(
         waitingFor="user",
     )
     await ctx.append_and_broadcast(event_id, turn)
-    event = await bb.get_event(event_id)
-    if event and event.source in ("slack", "chat"):
-        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
+    # No idle-timeout backstop: wait_for_user must never auto-close, regardless
+    # of duration (see @ai-rules #10). Bookkeeping only via mark_waiting_for_user above.
     return False
 
 
@@ -395,7 +398,14 @@ async def handle_classify_event(
     await ctx.append_and_broadcast(event_id, nudge)
     if ctx.is_waiting_for_user(event_id):
         event_doc = await bb.get_event(event_id)
-        if event_doc and ctx.is_waiting_for_user(event_id):
+        # Re-arm only for WAITING_APPROVAL (request_user_approval's own backstop).
+        # Plain wait_for_user parks (status stays ACTIVE) never get an idle timer --
+        # they must never auto-close, regardless of duration.
+        if (
+            event_doc
+            and event_doc.status == EventStatus.WAITING_APPROVAL
+            and ctx.is_waiting_for_user(event_id)
+        ):
             ctx.get_idle_timeout().schedule(
                 event_id, warning_sec=ctx.get_conversation_timeout(event_doc)
             )

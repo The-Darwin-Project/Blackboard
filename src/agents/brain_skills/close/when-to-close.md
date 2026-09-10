@@ -12,7 +12,7 @@ Each event source has a different relationship to closure because each has a dif
   - For `subject_type=ci_gating`: closure means the gating decision is satisfied (all required jobs pass or are waived) — not that a single job passed or that metrics returned to normal. Verify via the gating decision service before closing. A pipeline retry in progress is a non-terminal state — defer, do not close.
 - **Chat/Slack events** (user-initiated) -- A human is on the other side of this conversation. Premature closure kills the feedback loop; delayed closure wastes their attention. Distinguish two patterns:
   - **Terminal response** (you fully answered a question, no follow-up expected): close immediately in the same processing cycle. Do not ask "anything else?" -- that creates orphaned waits when the user doesn't reply.
-  - **Interactive session** (you asked a clarifying question, or the user requested ongoing work): park and let the idle timeout handle abandonment if the user doesn't return.
+  - **Interactive session** (you asked a clarifying question, or the user requested ongoing work): park and wait. There is no idle timeout backstop -- if the user goes quiet for an extended period, you must proactively revisit and close the conversation as abandoned rather than leaving it parked indefinitely.
 - **Headhunter events** (autonomous) -- These track CI/CD processes with observable terminal states. Closing before the process reaches a terminal state means the outcome is never recorded, and Nightwatcher cannot cluster it. Close after the failure reaches a terminal state AND plan completion. Escalation is not resolution -- if you escalated while the pipeline was still running/pending, defer and verify the terminal outcome before closing. The same principle applies after escalation: filing an incident or notifying maintainers does not mean the underlying process resolved. Before closing, verify that the pipeline/MR/resource reached a terminal state post-escalation. If verification is not possible (resource no longer observable), state that explicitly in the closure reason.
 - **TimeKeeper events** -- These are scheduled tasks with pre-configured owner expectations. Follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- JARVIS meta-events exist for cross-event intelligence and system-level reflection. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
@@ -28,7 +28,9 @@ prompted and may be thinking, distracted, or composing a response.
 Close is forbidden until ONE of:
 
 1. The user responds (clearing the open question)
-2. The idle timeout fires (user abandoned the conversation)
+2. You judge the conversation abandoned after an extended period of user
+   silence (there is no idle timeout to do this for you -- it is your
+   responsibility to proactively revisit and close)
 3. You explicitly retract the question with a terminal statement ("Let me know
    if you need anything else" without a question mark is terminal)
 
@@ -43,7 +45,7 @@ The Cynefin domain determines the resolution standard because each domain has a 
 - **COMPLICATED**: Expert analysis confirmed resolution. Evidence: verified state change or terminal state.
 - **COMPLEX**: Emergent pattern proven to hold. NOT "I tried something" -- "the solution held across verification."
 - **CHAOTIC**: NEVER close from CHAOTIC. The system is unstable -- closing records a false resolution. Reclassify to COMPLICATED when stable, then close from there.
-- **CASUAL**: NEVER close from CASUAL directly. Casual is a conversational resting state, not a resolution state -- it carries no completion semantics. Reclassify first: farewell -> CLEAR -> close. Task shift -> COMPLICATED -> resolve -> back to CASUAL if user stays. Idle timeout auto-closes. Domain cycling (casual -> complicated -> casual) is healthy, not friction.
+- **CASUAL**: NEVER close from CASUAL directly. Casual is a conversational resting state, not a resolution state -- it carries no completion semantics. Reclassify first: farewell -> CLEAR -> close. Task shift -> COMPLICATED -> resolve -> back to CASUAL if user stays. There is no idle timeout to auto-close an abandoned CASUAL conversation -- if the user has gone quiet for an extended period, reclassify to CLEAR and close proactively. Domain cycling (casual -> complicated -> casual) is healthy, not friction.
 
 ## Recurring Known Failures
 
