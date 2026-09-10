@@ -11,6 +11,9 @@
 #    IDLE_TIMEOUT_APPROVAL_SEC/IDLE_TIMEOUT_CLOSE_SEC/CHAT_STALE_TTL) wherever these
 #    three env vars are read together -- see Brain.__init__. It fails fast if the
 #    WAITING_APPROVAL notice-window invariant is violated.
+# 7. [Pattern]: generation(event_id) exposes the internal generation counter (see #5)
+#    read-only, for external long-running operations (Brain's idle-close retry loop)
+#    to detect a re-arm that happened after they started -- see Brain._idle_close_retry_loop.
 """
 Idle timeout manager for chat/slack events.
 
@@ -73,6 +76,17 @@ class IdleTimeoutManager:
         """Check if an event has an active timer."""
         task = self._timers.get(event_id)
         return task is not None and not task.done()
+
+    def generation(self, event_id: str) -> int:
+        """Current schedule() generation for an event (0 if never scheduled).
+
+        Callers outside this class that hold a long-running, independently
+        scheduled operation against an event (e.g. Brain's idle-close retry
+        loop) can capture this at start time and compare against it later to
+        detect that the event was re-armed (schedule() called again) in the
+        meantime -- the same staleness signal `_run_timer` uses internally.
+        """
+        return self._generation.get(event_id, 0)
 
     @property
     def close_sec(self) -> int:

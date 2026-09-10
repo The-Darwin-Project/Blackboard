@@ -205,6 +205,22 @@
 #     broadcasts event_status_changed(status=waiting_approval) after a successful park.
 #     Mirrors the existing NEW->ACTIVE broadcast-at-call-site convention (see #27) so the UI
 #     queue sidebar refreshes on every EVENT_WAITING_APPROVAL transition, not just close (#240).
+# 50. [Pattern]: Idle-close retry subsystem (evt-321b0b68). `_idle_close_retry_tasks`
+#     (dict[str, asyncio.Task]) + `_idle_close_retry_count` (dict[str, int]) back a
+#     self-healing recovery path for `_idle_timeout_close`: if the fetch-then-close
+#     sequence (`get_event` -> `_finish_idle_timeout_close` -> `_close_and_broadcast`)
+#     raises, `_schedule_idle_close_retry` starts one persistent per-event
+#     `_idle_close_retry_loop` task (NOT a self-rescheduling chain -- that self-cancels,
+#     see git history) that retries on `IDLE_TIMEOUT_CLOSE_RETRY_SEC` until it succeeds
+#     or the event stops waiting. Generation-aware: captures
+#     `IdleTimeoutManager.generation(event_id)` at start and aborts if a later
+#     legitimate re-arm (`schedule()`) bumps it, so a stale retry can't race a fresh
+#     warn->close cycle to a premature close. `_clear_idle_close_retry(event_id)` is
+#     the single cleanup point (mirrors `_clear_jarvis_wait`) -- called from every site
+#     that clears `_waiting_for_user` (`clear_waiting`, `_close_and_broadcast`,
+#     `_idle_timeout_warn`'s vanished-event branch, `clear_waiting_for_user`). It
+#     no-ops on the task currently executing it (a retry loop cleaning up its own
+#     success) instead of self-cancelling -- same self-reference hazard as above.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -526,7 +542,7 @@ class _BrainToolContext:
         self._b._waiting_for_user[eid] = time.time()
 
     def clear_waiting_for_user(self, eid: str) -> None:
-        self._b._waiting_for_user.pop(eid, None)
+        self._b.clear_waiting(eid)
 
     def is_waiting_for_user(self, eid: str) -> bool:
         return eid in self._b._waiting_for_user
@@ -4539,10 +4555,7 @@ class Brain:
         """Clear the wait_for_user state for an event (called when user responds)."""
         self._waiting_for_user.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
-        retry_task = self._idle_close_retry_tasks.pop(event_id, None)
-        if retry_task and not retry_task.done():
-            retry_task.cancel()
-        self._idle_close_retry_count.pop(event_id, None)
+        self._clear_idle_close_retry(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
         self._response_emitted_for.discard(event_id)
 
@@ -4857,6 +4870,7 @@ class Brain:
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
+        self._clear_idle_close_retry(event_id)
         self._waiting_for_agent.pop(event_id, None)
         self._clear_jarvis_wait(event_id)
         self._jarvis_wait_count.pop(event_id, None)
@@ -5820,19 +5834,44 @@ class Brain:
         return _safe_int_env("IDLE_TIMEOUT_APPROVAL_SEC", 5100)
 
     def _get_idle_timeout_for_event(self, event: "EventDocument") -> int:
-        """Status-aware idle timeout: WAITING_APPROVAL gets the extended approval
-        timeout, everything else gets the short conversation timeout.
+        """Status-aware idle timeout: WAITING_APPROVAL and an ACTIVE
+        `wait_for_user` park both get the extended approval timeout;
+        everything else (a plain conversational pause after a text-only
+        response) gets the short conversation timeout.
+
+        `wait_for_user` deliberately leaves the event ACTIVE rather than
+        WAITING_APPROVAL (see handle_wait_for_user), so status alone can't
+        distinguish it from an ordinary active event -- `_is_wait_for_user_park`
+        checks the most recent substantive turn instead.
 
         Single source of truth for this status->timeout decision -- every call
         site that (re-)arms the idle timer on an event that may already be
-        WAITING_APPROVAL must go through this helper, not re-implement the
-        branch inline, so the status-blind bug class (short timeout scheduled
-        over a WAITING_APPROVAL event, clobbering the real backstop) can't
+        parked (either park type) must go through this helper, not re-implement
+        the branch inline, so the status-blind bug class (short timeout
+        scheduled over a parked event, clobbering the real backstop) can't
         recur at yet another call site.
         """
         if event.status == EventStatus.WAITING_APPROVAL:
             return self._get_approval_timeout(event)
+        if self._is_wait_for_user_park(event):
+            return self._get_approval_timeout(event)
         return self._get_conversation_timeout(event)
+
+    @staticmethod
+    def _is_wait_for_user_park(event: "EventDocument") -> bool:
+        """True if the most recent substantive (non-courtesy-warning) turn is
+        a `wait_for_user`-style park: `actor="brain"`, `action="wait"`,
+        `waitingFor="user"` (see handle_wait_for_user, and the analogous
+        _escalate_to_human path). Distinct from `wait_for_agent`/
+        `wait_for_jarvis`, which also use `action="wait"` but a different
+        `waitingFor` value, and from an ordinary text-only response turn
+        (`action="response"`), which does not warrant the extended timeout.
+        """
+        for turn in reversed(event.conversation):
+            if turn.is_courtesy_warning:
+                continue
+            return turn.actor == "brain" and turn.action == "wait" and turn.waitingFor == "user"
+        return False
 
     async def _idle_timeout_warn(self, event_id: str) -> None:
         """Send idle timeout warning to user (Slack thread or dashboard turn)."""
@@ -5842,6 +5881,7 @@ class Brain:
         event = await self.blackboard.get_event(event_id)
         if not event or event.status == "closed":
             self._waiting_for_user.pop(event_id, None)
+            self._clear_idle_close_retry(event_id)
             return
         warning_text = "If nothing else is needed, I'll close this in 5 minutes."
         if event.source == "slack" and event.slack_channel_id and event.slack_thread_ts:
@@ -5868,29 +5908,40 @@ class Brain:
         logger.info(f"Idle timeout warning turn for {event_id}")
 
     async def _idle_timeout_close(self, event_id: str) -> None:
-        """Auto-close event after idle timeout (with race guards)."""
+        """Auto-close event after idle timeout (with race guards).
+
+        The entire fetch-then-close-or-skip sequence is guarded: a failure
+        anywhere in it (the initial `get_event`, or inside
+        `_finish_idle_timeout_close` -> `_close_and_broadcast`'s own Redis
+        calls) is treated the same way, via `_schedule_idle_close_retry`.
+        `_close_and_broadcast` is naturally idempotent against a retried,
+        already-completed close (its own leading `status == "closed"` guard),
+        so retrying the whole sequence rather than just the first read is safe.
+        """
         if event_id not in self._waiting_for_user:
             logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
-            self._idle_close_retry_count.pop(event_id, None)
+            self._clear_idle_close_retry(event_id)
             return
         try:
             event = await self.blackboard.get_event(event_id)
+            await self._finish_idle_timeout_close(event_id, event)
         except Exception as e:
             # _run_timer's `finally` unconditionally pops this event's timer once
             # we return, and nothing else re-arms a waiting event without a live
             # timer -- _scan_active_for_reconcile's idle safety net explicitly
             # requires `not is_waiting` before re-enqueueing, and has_timer() has
             # no periodic caller. Without an explicit re-arm here, a single
-            # transient get_event failure (e.g. a Redis blip) would permanently
-            # strand this event in _waiting_for_user with no recovery path --
-            # exactly the "sole backstop, must stay finite or leaks" scenario
-            # this timeout exists to prevent. Retry the close attempt itself
-            # (not the full warn->close cycle -- no need to re-warn the user)
-            # on a short interval until blackboard reads recover.
+            # transient failure anywhere in this sequence (e.g. a Redis blip,
+            # whether on the initial read or inside the close itself) would
+            # permanently strand this event in _waiting_for_user with no
+            # recovery path -- exactly the "sole backstop, must stay finite or
+            # leaks" scenario this timeout exists to prevent. Retry the whole
+            # close attempt (not the full warn->close IdleTimeoutManager cycle
+            # -- no need to re-warn the user) on a short interval until
+            # blackboard reads/writes recover.
             self._schedule_idle_close_retry(event_id, e)
             return
         self._idle_close_retry_count.pop(event_id, None)
-        await self._finish_idle_timeout_close(event_id, event)
 
     async def _finish_idle_timeout_close(self, event_id: str, event: "EventDocument | None") -> None:
         """Shared close/skip decision, given an already-fetched event.
@@ -5910,19 +5961,38 @@ class Brain:
             )
             return
         logger.warning(f"Idle timeout: auto-closing {event_id}")
-        self._waiting_for_user.pop(event_id, None)
+        # Do NOT pop _waiting_for_user here (pre-emptively, before the close
+        # actually succeeds): _close_and_broadcast does its own pop once the
+        # close genuinely completes. Popping early would make the retry
+        # loop's `event_id not in self._waiting_for_user` check (its signal
+        # for "give up, no longer applicable") fire even when this specific
+        # attempt failed inside _close_and_broadcast itself -- defeating
+        # retry coverage for exactly the failure class it's meant to catch.
         await self._close_and_broadcast(
             event_id,
             summary="Automatically closed after idle timeout (no user response).",
             close_reason="idle_timeout",
         )
 
+    def _record_idle_close_retry_failure(self, event_id: str, error: Exception) -> int:
+        """Bump and log the retry-attempt counter for an event; shared by the
+        first-failure and in-loop-failure sites so the escalating-log-level
+        logic can't drift between them. Returns the new attempt count."""
+        count = self._idle_close_retry_count.get(event_id, 0) + 1
+        self._idle_close_retry_count[event_id] = count
+        level = logger.error if count >= 5 else logger.warning
+        level(
+            "Idle timeout close: get_event/close failed for %s (attempt %d), "
+            "retrying shortly (event left in _waiting_for_user): %s", event_id, count, error,
+        )
+        return count
+
     def _schedule_idle_close_retry(self, event_id: str, error: Exception) -> None:
         """Start (if not already running) a self-healing retry loop for a
-        get_event failure inside `_idle_timeout_close` -- recovery for the
-        "sole backstop" gap: without this, the event is left in
-        `_waiting_for_user` with no active timer and no periodic scan that
-        would ever re-arm it (see caller for the full trace).
+        failure anywhere in `_idle_timeout_close`'s fetch-then-close sequence
+        -- recovery for the "sole backstop" gap: without this, the event is
+        left in `_waiting_for_user` with no active timer and no periodic scan
+        that would ever re-arm it (see caller for the full trace).
 
         Deliberately retries the close attempt only, not the full warn->close
         `IdleTimeoutManager` cycle -- re-sending the courtesy warning on every
@@ -5930,49 +6000,81 @@ class Brain:
         per event (not a chain of one-shot tasks that reschedule each other)
         -- a self-rescheduling chain would call `.cancel()` on its own
         in-flight task from within itself on every failed attempt.
+
+        Captures the current IdleTimeoutManager generation for this event and
+        passes it to the loop so a later legitimate re-arm (schedule() bumps
+        the generation) makes the loop abandon its close attempt instead of
+        force-closing a freshly-parked event out from under the new timer.
         """
-        count = self._idle_close_retry_count.get(event_id, 0) + 1
-        self._idle_close_retry_count[event_id] = count
-        level = logger.error if count >= 5 else logger.warning
-        level(
-            "Idle timeout close: get_event failed for %s (attempt %d), retrying "
-            "shortly (event left in _waiting_for_user): %s", event_id, count, error,
-        )
+        self._record_idle_close_retry_failure(event_id, error)
         if event_id in self._idle_close_retry_tasks:
             return  # a retry loop is already running for this event
+        generation = self._idle_timeout.generation(event_id)
         self._idle_close_retry_tasks[event_id] = asyncio.create_task(
-            self._idle_close_retry_loop(event_id), name=f"idle-close-retry-{event_id[:12]}"
+            self._idle_close_retry_loop(event_id, generation), name=f"idle-close-retry-{event_id[:12]}"
         )
 
-    async def _idle_close_retry_loop(self, event_id: str) -> None:
-        """Retry `get_event` on a fixed interval (read fresh each attempt, so
-        it's tunable at runtime) until it succeeds or the event is no longer
-        waiting. Retries indefinitely on a sustained outage -- we can't know
-        the event's real status while reads are failing, so retrying is safer
-        than guessing and force-closing."""
+    async def _idle_close_retry_loop(self, event_id: str, generation: int) -> None:
+        """Retry the fetch-then-close sequence on a fixed interval (read fresh
+        each attempt, so it's tunable at runtime) until it succeeds or the
+        event is no longer waiting. Retries indefinitely on a sustained
+        outage -- we can't know the event's real status while reads are
+        failing, so retrying is safer than guessing and force-closing.
+
+        Generation-aware: aborts without acting if the event was re-armed
+        (`IdleTimeoutManager.schedule()` called again, bumping the
+        generation) since this loop started -- that re-arm's own fresh
+        warn->close cycle now owns the event's future, and this stale loop
+        must not race it to a premature close.
+        """
         try:
             while True:
                 await asyncio.sleep(_safe_int_env("IDLE_TIMEOUT_CLOSE_RETRY_SEC", 60))
                 if event_id not in self._waiting_for_user:
                     return
+                if self._idle_timeout.generation(event_id) != generation:
+                    logger.info(
+                        "Idle timeout close retry for %s abandoned: event was "
+                        "re-armed since this retry loop started", event_id,
+                    )
+                    return
                 try:
                     event = await self.blackboard.get_event(event_id)
+                    await self._finish_idle_timeout_close(event_id, event)
                 except Exception as e:
-                    count = self._idle_close_retry_count.get(event_id, 0) + 1
-                    self._idle_close_retry_count[event_id] = count
-                    level = logger.error if count >= 5 else logger.warning
-                    level(
-                        "Idle timeout close retry: get_event still failing for "
-                        "%s (attempt %d), retrying again shortly: %s", event_id, count, e,
-                    )
+                    self._record_idle_close_retry_failure(event_id, e)
                     continue
                 self._idle_close_retry_count.pop(event_id, None)
-                await self._finish_idle_timeout_close(event_id, event)
                 return
         except asyncio.CancelledError:
             pass
         finally:
             self._idle_close_retry_tasks.pop(event_id, None)
+
+    def _clear_idle_close_retry(self, event_id: str) -> None:
+        """Clear idle-close retry state for an event: the attempt counter,
+        and (unless this is being called from within that very task's own
+        execution -- see `_idle_close_retry_loop`'s call chain through
+        `_finish_idle_timeout_close` -> `_close_and_broadcast` -> here on a
+        successful retry) the in-flight retry task itself.
+
+        Called from every site that removes an event from `_waiting_for_user`
+        (`clear_waiting`, `_close_and_broadcast`, the ToolContext-facing
+        `clear_waiting_for_user`) so a stale retry never outlives the state
+        it exists to fix -- mirrors this codebase's `_clear_jarvis_wait`
+        pattern for the analogous `_waiting_for_jarvis` state.
+        """
+        self._idle_close_retry_count.pop(event_id, None)
+        task = self._idle_close_retry_tasks.get(event_id)
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            # Called from inside this very task's own success path -- let it
+            # return and pop itself in its `finally` rather than self-cancel.
+            return
+        self._idle_close_retry_tasks.pop(event_id, None)
+        if not task.done():
+            task.cancel()
 
     # =========================================================================
     # Helpers
