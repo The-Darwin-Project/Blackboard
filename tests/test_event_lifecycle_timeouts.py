@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.models import EventDocument, EventInput, EventStatus, EventEvidence
+from src.models import ConversationTurn, EventDocument, EventInput, EventStatus, EventEvidence
 from src.scheduling.idle_timeout import IdleTimeoutManager
 
 
@@ -248,6 +248,88 @@ class TestApprovalTimeout:
             approval = Brain._get_approval_timeout(MagicMock(), event)
             conversation = Brain._get_conversation_timeout(MagicMock(), event)
             assert approval > conversation
+
+
+# =============================================================================
+# 4c. End-to-end: idle guard defers to StalenessGuard[chat] for real closure
+# =============================================================================
+
+
+class TestApprovalParkSurvivesIdleThenStalenessCloses:
+    """Ties Guard A (IdleTimeoutManager + _idle_timeout_close) and Guard B
+    (_check_chat_staleness / _close_stale_chat_event) together end-to-end, at an
+    accelerated timescale, to prove the actual production sequencing from
+    evt-321b0b68: a WAITING_APPROVAL event survives the short idle-close attempt,
+    and is only closed once by the staleness guard once it is genuinely stale."""
+
+    @pytest.mark.asyncio
+    async def test_real_timer_skips_close_while_waiting_approval_then_staleness_closes(self):
+        from src.agents.brain import Brain
+
+        event = _make_event(status=EventStatus.WAITING_APPROVAL)
+        # Last turn far enough in the past that a tiny CHAT_STALE_TTL is already exceeded.
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="request_approval",
+                              timestamp=time.time() - 3600)
+        ]
+
+        brain = MagicMock()
+        brain._waiting_for_user = {event.id: time.time() - 3600}
+        brain.blackboard = MagicMock()
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._close_and_broadcast = AsyncMock()
+
+        # --- Guard A: the real IdleTimeoutManager, driving the real bound
+        # _idle_timeout_close, at a millisecond timescale standing in for the
+        # ~20 minute production warn->close window.
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_SEC": "0"}):
+            mgr = IdleTimeoutManager(
+                warn_callback=AsyncMock(),
+                close_callback=lambda eid: Brain._idle_timeout_close(brain, eid),
+            )
+        mgr.schedule(event.id, warning_sec=0.01)
+        await asyncio.sleep(0.15)
+
+        # The event survived: still WAITING_APPROVAL, never closed, and still
+        # tracked in _waiting_for_user so Guard B can see it.
+        brain._close_and_broadcast.assert_not_awaited()
+        assert event.id in brain._waiting_for_user
+
+        # --- Guard B: StalenessGuard[chat]'s real check+close pair now takes
+        # over, using a tiny CHAT_STALE_TTL to stand in for the ~90 minute
+        # production threshold. The pre-seeded conversation turn (1hr old) is
+        # already past it.
+        with patch.dict("os.environ", {"CHAT_STALE_TTL": "1"}):
+            is_stale = await Brain._check_chat_staleness(brain, event.id)
+        assert is_stale is True
+
+        await Brain._close_stale_chat_event(brain, event.id)
+        brain._close_and_broadcast.assert_awaited_once_with(
+            event.id,
+            summary="Chat session timed out waiting for user approval",
+            close_reason="timeout",
+        )
+        assert event.id not in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_staleness_guard_does_not_fire_before_ttl_elapsed(self):
+        """Guard B must not consider a freshly-parked WAITING_APPROVAL event stale --
+        only genuinely abandoned events (past CHAT_STALE_TTL since the last turn) trigger it."""
+        from src.agents.brain import Brain
+
+        event = _make_event(status=EventStatus.WAITING_APPROVAL)
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="request_approval",
+                              timestamp=time.time())  # just parked
+        ]
+        brain = MagicMock()
+        brain._waiting_for_user = {event.id: time.time()}
+        brain.blackboard = MagicMock()
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+
+        with patch.dict("os.environ", {"CHAT_STALE_TTL": "5400"}):
+            is_stale = await Brain._check_chat_staleness(brain, event.id)
+        assert is_stale is False
 
 
 # =============================================================================
