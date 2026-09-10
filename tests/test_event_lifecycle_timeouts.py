@@ -48,14 +48,21 @@ def _make_event(
 
 
 def _bind_real_finish_close(brain: MagicMock, brain_cls) -> None:
-    """Bind the real Brain._finish_idle_timeout_close onto a bare MagicMock
-    `brain` -- otherwise `self._finish_idle_timeout_close(...)` inside the
-    real (unbound) `_idle_timeout_close` resolves to an auto-vivified,
-    non-async MagicMock attribute instead of running the actual close/skip
-    decision."""
-    async def _real(event_id, event):
+    """Bind the real Brain._finish_idle_timeout_close and _close_with_recovery
+    onto a bare MagicMock `brain` -- otherwise `self._finish_idle_timeout_close(...)`
+    / `self._close_with_recovery(...)` inside the real (unbound)
+    `_idle_timeout_close` / `_close_stale_chat_event` / `_close_stale_jarvis_event`
+    resolve to auto-vivified, non-async MagicMock attributes instead of
+    running the actual close/skip/recovery logic."""
+    async def _real_finish(event_id, event):
         return await brain_cls._finish_idle_timeout_close(brain, event_id, event)
-    brain._finish_idle_timeout_close = AsyncMock(side_effect=_real)
+    brain._finish_idle_timeout_close = AsyncMock(side_effect=_real_finish)
+
+    async def _real_close_with_recovery(event_id, summary, close_reason="resolved", generation=None):
+        return await brain_cls._close_with_recovery(
+            brain, event_id, summary, close_reason=close_reason, generation=generation,
+        )
+    brain._close_with_recovery = AsyncMock(side_effect=_real_close_with_recovery)
 
 
 def _fake_close_and_broadcast(brain: MagicMock) -> AsyncMock:
@@ -568,52 +575,55 @@ class TestApprovalTimeout:
 # =============================================================================
 
 
-class TestIsWaitForUserPark:
+class TestIsWaitForUserParkFallback:
+    """Covers the tail-of-conversation inference fallback, used only for
+    events with no `_park_kind` record (pre-`_park_kind` rollout backward
+    compat -- see TestIsWaitForUserParkDurableRecord for the now-authoritative
+    `_park_kind` path)."""
+
+    def _brain(self) -> "Brain":
+        from src.agents.brain import Brain
+        return Brain(blackboard=MagicMock(), agents={})
 
     def test_true_for_wait_for_user_turn(self):
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = [
             ConversationTurn(turn=1, actor="brain", action="wait",
                               waitingFor="user", timestamp=time.time()),
         ]
-        assert Brain._is_wait_for_user_park(event) is True
+        assert self._brain()._is_wait_for_user_park(event) is True
 
     def test_false_for_plain_text_response(self):
         """An ordinary conversational reply (no explicit wait_for_user call)
         must not be mistaken for a long-timeout park."""
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = [
             ConversationTurn(turn=1, actor="brain", action="response",
                               timestamp=time.time()),
         ]
-        assert Brain._is_wait_for_user_park(event) is False
+        assert self._brain()._is_wait_for_user_park(event) is False
 
     def test_false_for_wait_for_agent(self):
         """wait_for_agent also uses action="wait" but a different waitingFor
         value -- must not be conflated with wait_for_user."""
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = [
             ConversationTurn(turn=1, actor="brain", action="wait",
                               waitingFor="agent:developer", timestamp=time.time()),
         ]
-        assert Brain._is_wait_for_user_park(event) is False
+        assert self._brain()._is_wait_for_user_park(event) is False
 
     def test_false_for_wait_for_jarvis(self):
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = [
             ConversationTurn(turn=1, actor="brain", action="wait",
                               waitingFor="jarvis", timestamp=time.time()),
         ]
-        assert Brain._is_wait_for_user_park(event) is False
+        assert self._brain()._is_wait_for_user_park(event) is False
 
     def test_skips_trailing_courtesy_warning_turn(self):
         """A courtesy-warning turn appended after the wait_for_user park must
         not mask it -- the park is still the most recent substantive turn."""
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = [
             ConversationTurn(turn=1, actor="brain", action="wait",
@@ -621,13 +631,83 @@ class TestIsWaitForUserPark:
             ConversationTurn(turn=2, actor="brain", action="response",
                               is_courtesy_warning=True, timestamp=time.time()),
         ]
-        assert Brain._is_wait_for_user_park(event) is True
+        assert self._brain()._is_wait_for_user_park(event) is True
 
     def test_false_for_empty_conversation(self):
-        from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         event.conversation = []
-        assert Brain._is_wait_for_user_park(event) is False
+        assert self._brain()._is_wait_for_user_park(event) is False
+
+
+class TestIsWaitForUserParkDurableRecord:
+    """HIGH fix (verification pass #4, Change 1): _park_kind is now the
+    authoritative source, consulted BEFORE any tail-scan -- so no future
+    turn type (courtesy warning, classify_event's nudge turn, or anything
+    appended after those) can ever misclassify an existing park again."""
+
+    def _brain(self) -> "Brain":
+        from src.agents.brain import Brain
+        return Brain(blackboard=MagicMock(), agents={})
+
+    def test_park_kind_user_wins_regardless_of_tail(self):
+        brain = self._brain()
+        event = _make_event(status=EventStatus.ACTIVE)
+        brain._park_kind[event.id] = "user"
+        # Tail says "agent" -- _park_kind must win.
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait",
+                              waitingFor="agent:developer", timestamp=time.time()),
+        ]
+        assert brain._is_wait_for_user_park(event) is True
+
+    def test_park_kind_agent_overrides_tail_looking_like_user(self):
+        brain = self._brain()
+        event = _make_event(status=EventStatus.ACTIVE)
+        brain._park_kind[event.id] = "agent"
+        # Tail happens to look exactly like a wait_for_user turn -- the
+        # durable record must still win.
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait",
+                              waitingFor="user", timestamp=time.time()),
+        ]
+        assert brain._is_wait_for_user_park(event) is False
+
+    def test_classify_event_nudge_turn_does_not_misclassify_wait_for_user_park(self):
+        """The exact regression this change fixes: handle_classify_event
+        appends a nudge turn (action="tool_result", waitingFor="classify_event")
+        on top of a genuine wait_for_user park. Tail-scan alone would see the
+        nudge as the newest turn and misclassify -- the durable _park_kind
+        record must not be affected by it at all."""
+        brain = self._brain()
+        event = _make_event(status=EventStatus.ACTIVE)
+        brain._park_kind[event.id] = "user"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait",
+                              waitingFor="user", timestamp=time.time() - 10),
+            ConversationTurn(turn=2, actor="brain", action="tool_result",
+                              waitingFor="classify_event", timestamp=time.time()),
+        ]
+        assert brain._is_wait_for_user_park(event) is True
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_APPROVAL_SEC": "5100", "IDLE_TIMEOUT_CONVERSATION_SEC": "900"}):
+            assert brain._get_idle_timeout_for_event(event) == 5100
+
+    def test_courtesy_warning_turn_also_does_not_misclassify_wait_for_user_park(self):
+        """The other masking turn type (the original round-1 bug, now fixed
+        via is_courtesy_warning): a courtesy-warning turn appended on top of
+        a wait_for_user park must not affect the durable _park_kind record
+        either. Both masking turn types are covered in this one suite."""
+        brain = self._brain()
+        event = _make_event(status=EventStatus.ACTIVE)
+        brain._park_kind[event.id] = "user"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait",
+                              waitingFor="user", timestamp=time.time() - 10),
+            ConversationTurn(turn=2, actor="brain", action="response",
+                              is_courtesy_warning=True, timestamp=time.time()),
+        ]
+        assert brain._is_wait_for_user_park(event) is True
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_APPROVAL_SEC": "5100", "IDLE_TIMEOUT_CONVERSATION_SEC": "900"}):
+            assert brain._get_idle_timeout_for_event(event) == 5100
 
 
 class TestGetIdleTimeoutForEvent:
@@ -743,7 +823,7 @@ class TestApprovalParkSurvivesIdleThenStalenessCloses:
         brain._waiting_for_user = {event.id: time.time() - 3600}
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=event)
-        brain._close_and_broadcast = AsyncMock()
+        brain._close_and_broadcast = _fake_close_and_broadcast(brain)
         brain._next_turn_number = AsyncMock(return_value=2)
 
         async def _append(eid, turn, ev=None):
@@ -857,6 +937,158 @@ class TestResumeIfParked:
 
         result = await Brain.resume_if_parked(brain, "evt-test")
         assert result is False
+
+
+# =============================================================================
+# 5b. Change 2 (verification pass #4): _close_and_broadcast / _finalize_close
+#     split -- a failure in the "observable" finalization group must not skip
+#     the naturally-idempotent state cleanup, and a retry must complete the
+#     group without repeating the storage write.
+# =============================================================================
+
+
+class _RetryableBlackboard:
+    """Minimal stateful blackboard double: get_event reflects whether
+    close_event has actually been called, so a retried _close_and_broadcast
+    genuinely exercises the "already closed, skip the write" branch."""
+
+    def __init__(self, event: EventDocument, journal_side_effect):
+        self._event = event
+        self._closed = False
+        self.get_event = AsyncMock(side_effect=self._get_event)
+        self.close_event = AsyncMock(side_effect=self._close_event)
+        self.persist_report = AsyncMock()
+        self.append_journal = AsyncMock(side_effect=journal_side_effect)
+        self.record_event = AsyncMock()
+
+    async def _get_event(self, event_id):
+        if self._closed:
+            closed = self._event.model_copy(deep=True)
+            closed.status = EventStatus.CLOSED
+            return closed
+        return self._event
+
+    async def _close_event(self, event_id, summary, close_reason="resolved", token_usage=None):
+        self._closed = True
+
+
+class TestFinalizeCloseRetrySafety:
+
+    @pytest.mark.asyncio
+    async def test_finalization_failure_still_clears_state_and_retry_completes_without_reclosing(self):
+        """A failure in the observable group (journal/record_event/broadcast)
+        must not leave _waiting_for_user or the other per-event dicts
+        stranded -- state cleanup runs unconditionally, before that group.
+        A subsequent retry must complete journal/record/broadcast exactly
+        once each, without calling blackboard.close_event a second time."""
+        from src.agents.brain import Brain
+
+        event = _make_event(event_id="evt-finalize-retry", status=EventStatus.ACTIVE)
+        bb = _RetryableBlackboard(event, journal_side_effect=[Exception("journal down"), None])
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+        brain._waiting_for_user[event.id] = time.time()
+        brain._park_kind[event.id] = "user"
+        brain._idle_close_retry_count[event.id] = 2
+        brain._response_emitted_for.add(event.id)
+        brain._reflex_fired_for.add(event.id)
+
+        # First attempt: storage close succeeds, but the observable group
+        # fails on append_journal and re-raises (as _finalize_close's
+        # comment documents it must, so a retry loop sees the failure).
+        with pytest.raises(Exception, match="journal down"):
+            await brain._close_and_broadcast(event.id, "test summary", close_reason="resolved")
+
+        bb.close_event.assert_awaited_once()
+        bb.append_journal.assert_awaited_once()
+        bb.record_event.assert_not_awaited()
+        brain._broadcast.assert_not_awaited()
+
+        # State cleanup already ran, despite the failure -- nothing stranded.
+        assert event.id not in brain._waiting_for_user
+        assert event.id not in brain._park_kind
+        assert event.id not in brain._idle_close_retry_count
+        assert event.id not in brain._response_emitted_for
+        assert event.id not in brain._reflex_fired_for
+        assert event.id not in brain._close_finalized
+
+        # Retry (simulating the idle-close retry loop's next attempt):
+        # the storage write must not repeat (blackboard now reports
+        # status="closed"), but journal/record_event/broadcast must all
+        # still fire, exactly once more each.
+        await brain._close_and_broadcast(event.id, "test summary", close_reason="resolved")
+
+        bb.close_event.assert_awaited_once()  # still just the one real write
+        assert bb.append_journal.await_count == 2
+        bb.record_event.assert_awaited_once()
+        brain._broadcast.assert_awaited_once()
+        assert event.id in brain._close_finalized
+
+
+# =============================================================================
+# 5c. Change 3 (verification pass #4): StalenessGuard close paths get real
+#     recovery via _close_with_recovery -- a close failure must not strand
+#     the event with its backstop state already erased.
+# =============================================================================
+
+
+class TestStalenessGuardCloseRecovery:
+
+    @pytest.mark.asyncio
+    async def test_close_stale_chat_event_failure_leaves_event_waiting_and_schedules_retry(self):
+        from src.agents.brain import Brain
+
+        event = _make_event(status=EventStatus.WAITING_APPROVAL)
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=event)
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = time.time()
+        brain._close_and_broadcast = AsyncMock(side_effect=Exception("close failed"))
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            await Brain._close_stale_chat_event(brain, event.id)
+
+            # Unlike the pre-Change-3 behavior (pre-pop then no recovery),
+            # the event must still be tracked and a retry must be scheduled.
+            assert event.id in brain._waiting_for_user
+            assert event.id in brain._idle_close_retry_tasks
+
+            # A subsequent successful retry drains it.
+            brain._close_and_broadcast = _fake_close_and_broadcast(brain)
+            await asyncio.wait_for(brain._idle_close_retry_tasks[event.id], timeout=1.0)
+
+        assert event.id not in brain._waiting_for_user
+        assert event.id not in brain._idle_close_retry_tasks
+
+    @pytest.mark.asyncio
+    async def test_close_stale_jarvis_event_failure_leaves_event_waiting_and_schedules_retry(self):
+        from src.agents.brain import Brain
+
+        event_id = "evt-jarvis-stale"
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=_make_event(event_id=event_id, source="jarvis"))
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_jarvis[event_id] = time.time()
+        brain._close_and_broadcast = AsyncMock(side_effect=Exception("close failed"))
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            await Brain._close_stale_jarvis_event(brain, event_id)
+
+            # Jarvis-wait state must survive the failed attempt (not
+            # pre-cleared), and the generalized retry loop (which checks
+            # _waiting_for_jarvis too, not just _waiting_for_user) must
+            # actually retry rather than immediately abandoning.
+            assert event_id in brain._waiting_for_jarvis
+            assert event_id in brain._idle_close_retry_tasks
+
+            async def _pop_jarvis(eid, summary=None, close_reason=None):
+                brain._waiting_for_jarvis.pop(eid, None)
+            brain._close_and_broadcast = AsyncMock(side_effect=_pop_jarvis)
+            await asyncio.wait_for(brain._idle_close_retry_tasks[event_id], timeout=1.0)
+
+        assert event_id not in brain._waiting_for_jarvis
+        assert event_id not in brain._idle_close_retry_tasks
 
 
 # =============================================================================

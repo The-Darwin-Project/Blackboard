@@ -134,6 +134,10 @@ async def handle_wait_for_user(
         return False
     summary = args.get("summary", "")
     ctx.mark_waiting_for_user(event_id)
+    # Durable park-kind record: the authoritative source _is_wait_for_user_park
+    # consults, so a later turn (courtesy warning, classify_event nudge, ...)
+    # becoming the new conversation tail can never misclassify this park.
+    ctx.set_park_kind(event_id, "user")
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
@@ -219,6 +223,7 @@ async def handle_wait_for_agent(
     if assigned == 0:
         return False
     ctx.mark_waiting_for_agent(event_id, agent_name, assigned)
+    ctx.set_park_kind(event_id, "agent")
     # Post-yield race guard: if task completed during the append_and_broadcast
     # yield, _release_task_state already ran (popping an empty dict). Clear
     # the just-set wait immediately to avoid deadlock.
@@ -277,6 +282,7 @@ async def handle_wait_for_jarvis(
     )
     await ctx.append_and_broadcast(event_id, turn)
     ctx.mark_jarvis_wait(event_id, last_respond_ts or time.time())
+    ctx.set_park_kind(event_id, "jarvis")
     ctx.increment_jarvis_wait_count(event_id)
     ctx.update_last_processed(event_id)
     return False

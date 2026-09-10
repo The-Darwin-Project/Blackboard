@@ -74,6 +74,15 @@ def _make_brain_with_event(
     brain.blackboard = MagicMock()
     brain.blackboard.get_event = AsyncMock(return_value=event)
     brain._close_and_broadcast = AsyncMock()
+
+    # _close_stale_chat_event/_close_stale_jarvis_event now route through
+    # _close_with_recovery (Change 3, evt-321b0b68) -- bind a stand-in that
+    # forwards to the already-mocked _close_and_broadcast, since `brain` is a
+    # bare MagicMock and the real method would otherwise resolve to an
+    # auto-vivified non-async attribute.
+    async def _close_with_recovery(event_id, summary, close_reason="resolved", generation=None):
+        await brain._close_and_broadcast(event_id, summary, close_reason=close_reason)
+    brain._close_with_recovery = AsyncMock(side_effect=_close_with_recovery)
     return brain
 
 
@@ -196,13 +205,21 @@ class TestChatStalenessCheckTimerReset:
 
 
 class TestCloseStaleChat:
-    """_close_stale_chat_event must discard event from _waiting_for_user before closing."""
+    """_close_stale_chat_event must result in the event being discarded from
+    _waiting_for_user -- but only as a side effect of a genuinely successful
+    close (via _close_and_broadcast), not pre-emptively (see Change 3,
+    evt-321b0b68: pre-popping before the close succeeds erases the retry
+    loop's only signal that the event is still a legitimate target)."""
 
     @pytest.mark.asyncio
     async def test_close_removes_from_waiting_for_user(self, monkeypatch):
-        """After closure, event_id must not remain in _waiting_for_user."""
+        """After a successful closure, event_id must not remain in _waiting_for_user."""
         event = _make_event()
         brain = _make_brain_with_event(event)
+
+        async def _pop_on_close(event_id, summary=None, close_reason=None):
+            brain._waiting_for_user.pop(event_id, None)
+        brain._close_and_broadcast = AsyncMock(side_effect=_pop_on_close)
 
         from src.agents.brain import Brain
         await Brain._close_stale_chat_event(brain, event.id)

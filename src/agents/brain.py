@@ -207,20 +207,51 @@
 #     queue sidebar refreshes on every EVENT_WAITING_APPROVAL transition, not just close (#240).
 # 50. [Pattern]: Idle-close retry subsystem (evt-321b0b68). `_idle_close_retry_tasks`
 #     (dict[str, asyncio.Task]) + `_idle_close_retry_count` (dict[str, int]) back a
-#     self-healing recovery path for `_idle_timeout_close`: if the fetch-then-close
-#     sequence (`get_event` -> `_finish_idle_timeout_close` -> `_close_and_broadcast`)
-#     raises, `_schedule_idle_close_retry` starts one persistent per-event
-#     `_idle_close_retry_loop` task (NOT a self-rescheduling chain -- that self-cancels,
-#     see git history) that retries on `IDLE_TIMEOUT_CLOSE_RETRY_SEC` until it succeeds
-#     or the event stops waiting. Generation-aware: captures
-#     `IdleTimeoutManager.generation(event_id)` at start and aborts if a later
-#     legitimate re-arm (`schedule()`) bumps it, so a stale retry can't race a fresh
-#     warn->close cycle to a premature close. `_clear_idle_close_retry(event_id)` is
-#     the single cleanup point (mirrors `_clear_jarvis_wait`) -- called from every site
-#     that clears `_waiting_for_user` (`clear_waiting`, `_close_and_broadcast`,
-#     `_idle_timeout_warn`'s vanished-event branch, `clear_waiting_for_user`). It
-#     no-ops on the task currently executing it (a retry loop cleaning up its own
-#     success) instead of self-cancelling -- same self-reference hazard as above.
+#     self-healing recovery path shared by every system-driven close: a `get_event`
+#     failure in `_idle_timeout_close` retries via `_retry_idle_timeout_fetch_and_close`
+#     (re-derives skip-or-close from scratch); a close-write failure anywhere (idle
+#     timeout, StalenessGuard[chat]/[jarvis]) goes through `_close_with_recovery`,
+#     which wraps `_close_and_broadcast` and hands `_schedule_idle_close_retry` the
+#     exact `attempt()` callable to repeat. `_schedule_idle_close_retry` starts one
+#     persistent per-event `_idle_close_retry_loop` task (NOT a self-rescheduling
+#     chain -- that self-cancels, see git history) that repeats `attempt()` on
+#     `IDLE_TIMEOUT_CLOSE_RETRY_SEC` until it succeeds or the event is no longer a
+#     valid target (checks both `_waiting_for_user` and `_waiting_for_jarvis`, since
+#     this one loop backs both StalenessGuard variants). Generation-aware: captures
+#     `IdleTimeoutManager.generation(event_id)` at start (or accepts one already
+#     resolved by the caller) and aborts if a later legitimate re-arm (`schedule()`)
+#     bumps it, so a stale retry can't race a fresh warn->close cycle to a premature
+#     close. `_clear_idle_close_retry(event_id)` is the single cleanup point (mirrors
+#     `_clear_jarvis_wait`) -- called from every site that clears `_waiting_for_user`
+#     (`clear_waiting`, `_finalize_close`, `_idle_timeout_warn`'s vanished-event
+#     branch, `clear_waiting_for_user`). It no-ops on the task currently executing it
+#     (a retry loop cleaning up its own success) instead of self-cancelling -- same
+#     self-reference hazard as above.
+# 51. [Pattern]: `_park_kind` (dict[str, str]: event_id -> "user"|"agent"|"jarvis") is
+#     the durable, authoritative record of which park a `wait_for_*` call created --
+#     set at the park site (`handle_wait_for_user`, `_escalate_to_human`,
+#     `handle_wait_for_agent`, `handle_wait_for_jarvis`) and consulted by
+#     `_is_wait_for_user_park` BEFORE any tail-of-conversation scan. Replaces
+#     inferring the park kind from the newest substantive conversation turn, which
+#     broke every time a new turn type (courtesy warning, `handle_classify_event`'s
+#     nudge turn) became the new tail. Falls back to the old tail-scan only when no
+#     `_park_kind` record exists (pre-rollout events) -- logs at DEBUG so fallback
+#     usage is observable and should trend to zero. Cleared everywhere
+#     `_waiting_for_user` is cleared (same call-site discipline as item 50).
+# 52. [Pattern]: `_close_and_broadcast` is split into a guarded storage-close (skips
+#     the mutating `close_event()` write if already closed) and `_finalize_close`,
+#     which ALWAYS runs after it -- even on an already-closed event, i.e. a retried
+#     call after a partial failure. Inside `_finalize_close`, naturally-idempotent
+#     per-event dict/task cleanup (`.pop`/`.discard`) runs FIRST and unconditionally,
+#     so a failure further down can never strand that state; the "observable" group
+#     (journal/record_event/broadcast) runs after and is additionally gated by
+#     `_close_finalized` (a set, never cleared per-event) so a successful retry
+#     doesn't re-emit them -- at-least-once, not exactly-once, since a failure in
+#     that group re-raises for the retry loop to catch. `_close_with_recovery` (item
+#     50) is the single wrapper system-driven closes (idle-timeout, StalenessGuard[chat]/
+#     [jarvis]) use to get retry coverage on top of this; LLM-driven closes
+#     (`close_event` tool) call `_close_and_broadcast` directly and surface failures
+#     to the LLM's own tool-result handling instead.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -246,7 +277,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, TypedDict
 
 import httpx
 
@@ -547,6 +578,9 @@ class _BrainToolContext:
     def is_waiting_for_user(self, eid: str) -> bool:
         return eid in self._b._waiting_for_user
 
+    def set_park_kind(self, eid: str, kind: str) -> None:
+        self._b._park_kind[eid] = kind
+
     def mark_waiting_for_agent(self, eid: str, agent: str, wait_turn: int) -> None:
         self._b._waiting_for_agent[eid] = (agent, wait_turn)
 
@@ -775,6 +809,15 @@ class Brain:
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Wait-for-user state: event_id -> wait_start_timestamp (serves idle timeout + on-ice threshold)
         self._waiting_for_user: dict[str, float] = {}
+        # Durable park-kind record: event_id -> "user" | "agent" | "jarvis", set at the
+        # park site that created the wait (handle_wait_for_user, _escalate_to_human,
+        # handle_wait_for_agent, handle_wait_for_jarvis). Authoritative source for
+        # _is_wait_for_user_park -- replaces inferring the park kind from the tail of
+        # the conversation, which breaks every time a new turn type (courtesy warning,
+        # classify_event nudge, ...) becomes the new tail. Cleared everywhere
+        # _waiting_for_user is cleared (see _clear_idle_close_retry's call-site
+        # discipline, mirrored here).
+        self._park_kind: dict[str, str] = {}
         # Idle timeout manager for chat/slack events (warn + auto-close)
         from ..scheduling.idle_timeout import IdleTimeoutManager, assert_approval_notice_window
         self._idle_timeout = IdleTimeoutManager(
@@ -790,6 +833,14 @@ class Brain:
         # (strong refs -- event loop only holds weak refs, see _graph_enrich_tasks).
         self._idle_close_retry_tasks: dict[str, asyncio.Task] = {}
         self._idle_close_retry_count: dict[str, int] = {}
+        # Event ids whose "observable" close finalization (journal/record_event/
+        # broadcast) has already run at least once -- see _finalize_close. Guards
+        # against re-emitting those on a retried finalization after a partial
+        # failure. Deliberately never cleared per-event (a retry must be able to
+        # tell "already finalized" apart from "never attempted" even after
+        # _waiting_for_user etc. are long gone) -- grows only with lifetime
+        # closes, like this codebase's other close-scoped sets.
+        self._close_finalized: set[str] = set()
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
@@ -4554,6 +4605,7 @@ class Brain:
     def clear_waiting(self, event_id: str) -> None:
         """Clear the wait_for_user state for an event (called when user responds)."""
         self._waiting_for_user.pop(event_id, None)
+        self._park_kind.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
         self._clear_idle_close_retry(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
@@ -4726,6 +4778,7 @@ class Brain:
         """
         idle_min = int(idle_seconds // 60)
         self._waiting_for_user[event_id] = time.time()
+        self._park_kind[event_id] = "user"
 
         email = None
         evidence = event.event.evidence
@@ -4813,54 +4866,73 @@ class Brain:
             logger.error(f"Orphan {event_id} closed after 3 failed re-queue attempts")
 
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
-        """Close an event and broadcast the closure to UI."""
+        """Close an event and broadcast the closure to UI.
+
+        The mutating storage-close (killing active work, draining tokens,
+        the actual `close_event()` write) is guarded and skipped if the
+        event is already closed. Finalization (`_finalize_close`) always
+        runs regardless -- even on an already-closed event -- so a retried
+        call after a partial failure can still complete whatever didn't run
+        the first time. See `_finalize_close` for why every step there must
+        be safe to repeat.
+        """
         event = await self.blackboard.get_event(event_id)
-        if not event or event.status.value == "closed":
+        if not event:
             return
-        if self._ephemeral_provisioner:
-            await self._ephemeral_provisioner.terminate_agent(event_id)
-        await self.cancel_active_task(event_id, f"Event closing: {summary}")
-        token_usage = None
-        try:
-            from .llm import get_token_meter
-            token_usage = get_token_meter().drain_event(event_id)
-        except Exception:
-            pass
-        # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
-        # System-driven closes (duplicate, timeout, error, force_closed) bypass.
-        if close_reason == "resolved":
-            from .tool_gates import has_unevaluated_close_blocker
-            latest = await self.blackboard.get_event(event_id)
-            if latest and has_unevaluated_close_blocker(latest.conversation):
-                logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
-                return
-        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        if event.status.value != "closed":
+            if self._ephemeral_provisioner:
+                await self._ephemeral_provisioner.terminate_agent(event_id)
+            await self.cancel_active_task(event_id, f"Event closing: {summary}")
+            token_usage = None
+            try:
+                from .llm import get_token_meter
+                token_usage = get_token_meter().drain_event(event_id)
+            except Exception:
+                pass
+            # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
+            # System-driven closes (duplicate, timeout, error, force_closed) bypass.
+            if close_reason == "resolved":
+                from .tool_gates import has_unevaluated_close_blocker
+                latest = await self.blackboard.get_event(event_id)
+                if latest and has_unevaluated_close_blocker(latest.conversation):
+                    logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
+                    return
+            await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        await self._finalize_close(event_id, event, summary)
+
+    async def _finalize_close(self, event_id: str, event: "EventDocument | None", summary: str) -> None:
+        """Always-run finalization for a close -- whether `_close_and_broadcast`'s
+        storage write just succeeded, or the event was already closed (a
+        retried, idempotent call after an earlier failure here).
+
+        Every step must be safe to repeat:
+        - Per-event dict/task cleanups are naturally idempotent
+          (`.pop(..., None)` / `.discard`) and run FIRST, unconditionally --
+          a failure further down must never leave this state stranded. This
+          is exactly the "sole backstop" leak class the idle-close retry
+          loop exists to fix; popping this state only on a code path that
+          might not be reached defeats it.
+        - The "observable" steps (journal, record_event, broadcast) are
+          additionally gated by `_close_finalized` so a retry normally
+          doesn't re-emit them. If they fail, `event_id` is NOT added to
+          `_close_finalized`, so a retry redoes the whole group (harmless --
+          everything in it is either newly-idempotent or tolerant of a
+          duplicate). This is at-least-once, not exactly-once: a rare
+          retry-after-failure may duplicate a journal line or a broadcast;
+          both are benign, unlike the silent skip (and leaked in-memory
+          state) this replaces.
+        """
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)
         except Exception as e:
             logger.warning(f"Report persistence failed for {event_id} (non-fatal): {e}")
-        # Append to service ops journal (temporal memory)
-        if event:
-            turns = len(event.conversation)
-            await self.blackboard.append_journal(
-                event.service,
-                f"[{event_id}] {summary}"
-            )
-            # Invalidate journal cache for this service (immediate freshness)
-            self._journal_cache.pop(event.service, None)
-            # Archive to deep memory (fire-and-forget, non-blocking).
-            # Re-fetch post-close: the pre-close `event` snapshot lacks the final
-            # closing turns (summary, close_reason) that Archivist needs to see.
-            archivist = self.agents.get("_archivist_memory")
-            if archivist and hasattr(archivist, "archive_event"):
-                closed_event = await self.blackboard.get_event(event_id)
-                if closed_event:
-                    asyncio.create_task(archivist.archive_event(closed_event))
         # Cancel any active state watcher subscription
         if self._state_watcher:
             self._state_watcher.cancel(event_id)
-        # Clean up all per-event state to prevent memory leaks
+        # Clean up all per-event state to prevent memory leaks -- naturally
+        # idempotent, must run before the observable steps below so a
+        # failure there can never strand this state.
         self._cycle_id_for_event.pop(event_id, None)
         self.clear_hold_watch(event_id)
         if event and event.source == "jarvis":
@@ -4869,6 +4941,7 @@ class Brain:
                 self._live_adapter.on_meta_event_closed(event_id)
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.pop(event_id, None)
+        self._park_kind.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
         self._clear_idle_close_retry(event_id)
         self._waiting_for_agent.pop(event_id, None)
@@ -4888,16 +4961,45 @@ class Brain:
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
-        await self.blackboard.record_event(
-            EventType.BRAIN_EVENT_CLOSED,
-            {"event_id": event_id, "service": event.service if event else "unknown"},
-            narrative=f"Event {event_id} closed: {summary[:120]}",
-        )
-        await self._broadcast({
-            "type": "event_closed",
-            "event_id": event_id,
-            "summary": summary,
-            })
+
+        if event_id in self._close_finalized:
+            return
+        try:
+            # Append to service ops journal (temporal memory)
+            if event:
+                await self.blackboard.append_journal(
+                    event.service,
+                    f"[{event_id}] {summary}"
+                )
+                # Invalidate journal cache for this service (immediate freshness)
+                self._journal_cache.pop(event.service, None)
+                # Archive to deep memory (fire-and-forget, non-blocking).
+                # Re-fetch post-close: the pre-close `event` snapshot lacks the final
+                # closing turns (summary, close_reason) that Archivist needs to see.
+                archivist = self.agents.get("_archivist_memory")
+                if archivist and hasattr(archivist, "archive_event"):
+                    closed_event = await self.blackboard.get_event(event_id)
+                    if closed_event:
+                        asyncio.create_task(archivist.archive_event(closed_event))
+            await self.blackboard.record_event(
+                EventType.BRAIN_EVENT_CLOSED,
+                {"event_id": event_id, "service": event.service if event else "unknown"},
+                narrative=f"Event {event_id} closed: {summary[:120]}",
+            )
+            await self._broadcast({
+                "type": "event_closed",
+                "event_id": event_id,
+                "summary": summary,
+                })
+        except Exception:
+            logger.exception(
+                "Close finalization (journal/record_event/broadcast) failed for "
+                "%s -- will retry; state cleanup above already ran, so nothing "
+                "is stranded by this failure.", event_id,
+            )
+            raise
+        self._close_finalized.add(event_id)
+
         if event and event.source == "headhunter":
             hh = self.agents.get("_headhunter")
             if hh and hasattr(hh, "process_event_feedback"):
@@ -5772,8 +5874,14 @@ class Brain:
     async def _close_stale_jarvis_event(self, event_id: str) -> None:
         """Close a stale jarvis event that exceeded its TTL."""
         logger.warning(f"StalenessGuard: closing stale jarvis event {event_id}")
-        self._clear_jarvis_wait(event_id)
-        await self._close_and_broadcast(
+        # Do NOT pre-clear jarvis-wait state here: _close_and_broadcast (via
+        # _close_with_recovery) owns that teardown, but only on genuine
+        # success. Clearing it first -- before we know the close actually
+        # succeeded -- would erase the only signal the recovery retry loop
+        # has that this event is still a legitimate close target, exactly
+        # the bug _finish_idle_timeout_close's analogous non-pre-pop already
+        # guards against for the idle-timeout path.
+        await self._close_with_recovery(
             event_id,
             summary="JARVIS meta-event timed out (no response within TTL)",
             close_reason="timeout",
@@ -5801,8 +5909,10 @@ class Brain:
     async def _close_stale_chat_event(self, event_id: str) -> None:
         """Close a stale chat/slack event that exceeded its approval TTL."""
         logger.warning(f"StalenessGuard[chat]: closing stale chat event {event_id}")
-        self._waiting_for_user.pop(event_id, None)
-        await self._close_and_broadcast(
+        # Do NOT pre-pop _waiting_for_user here -- see _close_stale_jarvis_event's
+        # comment above; _close_and_broadcast (via _close_with_recovery) owns
+        # this pop on genuine success only.
+        await self._close_with_recovery(
             event_id,
             summary="Chat session timed out waiting for user approval",
             close_reason="timeout",
@@ -5842,7 +5952,7 @@ class Brain:
         `wait_for_user` deliberately leaves the event ACTIVE rather than
         WAITING_APPROVAL (see handle_wait_for_user), so status alone can't
         distinguish it from an ordinary active event -- `_is_wait_for_user_park`
-        checks the most recent substantive turn instead.
+        checks the durable `_park_kind` record instead.
 
         Single source of truth for this status->timeout decision -- every call
         site that (re-)arms the idle timer on an event that may already be
@@ -5857,16 +5967,33 @@ class Brain:
             return self._get_approval_timeout(event)
         return self._get_conversation_timeout(event)
 
-    @staticmethod
-    def _is_wait_for_user_park(event: "EventDocument") -> bool:
-        """True if the most recent substantive (non-courtesy-warning) turn is
-        a `wait_for_user`-style park: `actor="brain"`, `action="wait"`,
-        `waitingFor="user"` (see handle_wait_for_user, and the analogous
-        _escalate_to_human path). Distinct from `wait_for_agent`/
-        `wait_for_jarvis`, which also use `action="wait"` but a different
-        `waitingFor` value, and from an ordinary text-only response turn
-        (`action="response"`), which does not warrant the extended timeout.
+    def _is_wait_for_user_park(self, event: "EventDocument") -> bool:
+        """True if this event's current park is a `wait_for_user`-style park
+        (as opposed to `wait_for_agent`/`wait_for_jarvis`, or no park at all
+        -- an ordinary conversational pause after a text-only response).
+
+        Prefers the durable `_park_kind` record (set at the park site --
+        `handle_wait_for_user`, `_escalate_to_human`, and the agent/jarvis
+        wait sites -- and cleared everywhere `_waiting_for_user` is cleared).
+        This is authoritative and immune to what the *newest* conversation
+        turn happens to be: courtesy-warning turns, `handle_classify_event`'s
+        nudge turn, or any future turn type appended after the park.
+
+        Falls back to inferring the park kind from the tail of the
+        conversation ONLY when `_park_kind` has no record for this event --
+        i.e. an event parked before this field existed (backward compat
+        during rollout). Logs at DEBUG when the fallback fires so its use is
+        observable; it should trend to zero as old parks close out, at which
+        point the fallback path can be deleted.
         """
+        kind = self._park_kind.get(event.id)
+        if kind is not None:
+            return kind == "user"
+        logger.debug(
+            "_is_wait_for_user_park: no _park_kind record for %s, falling "
+            "back to tail-of-conversation inference (pre-_park_kind event)",
+            event.id,
+        )
         for turn in reversed(event.conversation):
             if turn.is_courtesy_warning:
                 continue
@@ -5881,6 +6008,7 @@ class Brain:
         event = await self.blackboard.get_event(event_id)
         if not event or event.status == "closed":
             self._waiting_for_user.pop(event_id, None)
+            self._park_kind.pop(event_id, None)
             self._clear_idle_close_retry(event_id)
             return
         warning_text = "If nothing else is needed, I'll close this in 5 minutes."
@@ -5910,13 +6038,12 @@ class Brain:
     async def _idle_timeout_close(self, event_id: str) -> None:
         """Auto-close event after idle timeout (with race guards).
 
-        The entire fetch-then-close-or-skip sequence is guarded: a failure
-        anywhere in it (the initial `get_event`, or inside
-        `_finish_idle_timeout_close` -> `_close_and_broadcast`'s own Redis
-        calls) is treated the same way, via `_schedule_idle_close_retry`.
-        `_close_and_broadcast` is naturally idempotent against a retried,
-        already-completed close (its own leading `status == "closed"` guard),
-        so retrying the whole sequence rather than just the first read is safe.
+        The get_event fetch and the close itself are each guarded, funneling
+        into the same recovery path either way: a `get_event` failure
+        schedules a retry whose attempt re-fetches and re-derives the
+        skip-or-close decision from scratch (`_retry_idle_timeout_fetch_and_close`);
+        a close failure is caught and retried by `_close_with_recovery`, the
+        single recovery contract shared with the StalenessGuard close paths.
         """
         if event_id not in self._waiting_for_user:
             logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
@@ -5924,31 +6051,68 @@ class Brain:
             return
         try:
             event = await self.blackboard.get_event(event_id)
-            await self._finish_idle_timeout_close(event_id, event)
         except Exception as e:
             # _run_timer's `finally` unconditionally pops this event's timer once
             # we return, and nothing else re-arms a waiting event without a live
             # timer -- _scan_active_for_reconcile's idle safety net explicitly
             # requires `not is_waiting` before re-enqueueing, and has_timer() has
             # no periodic caller. Without an explicit re-arm here, a single
-            # transient failure anywhere in this sequence (e.g. a Redis blip,
-            # whether on the initial read or inside the close itself) would
-            # permanently strand this event in _waiting_for_user with no
-            # recovery path -- exactly the "sole backstop, must stay finite or
-            # leaks" scenario this timeout exists to prevent. Retry the whole
-            # close attempt (not the full warn->close IdleTimeoutManager cycle
-            # -- no need to re-warn the user) on a short interval until
-            # blackboard reads/writes recover.
-            self._schedule_idle_close_retry(event_id, e)
+            # transient get_event failure (e.g. a Redis blip) would permanently
+            # strand this event in _waiting_for_user with no recovery path --
+            # exactly the "sole backstop, must stay finite or leaks" scenario
+            # this timeout exists to prevent. We don't yet know the skip-or-close
+            # decision (get_event failed before we could check), so the retry
+            # attempt re-fetches and re-derives it from scratch.
+            self._schedule_idle_close_retry(
+                event_id, e, attempt=lambda: self._retry_idle_timeout_fetch_and_close(event_id),
+            )
             return
-        self._idle_close_retry_count.pop(event_id, None)
+        if event and event.status == EventStatus.WAITING_APPROVAL:
+            # Approval-parked events are owned by StalenessGuard[chat]
+            # (CHAT_STALE_TTL, see _check_chat_staleness) once past this short
+            # idle window. Do NOT pop _waiting_for_user here -- that guard
+            # requires event_id to still be present to act on it.
+            logger.info(
+                f"Idle timeout close skipped for {event_id}: status is "
+                "WAITING_APPROVAL, deferring to StalenessGuard[chat]"
+            )
+            return
+        logger.warning(f"Idle timeout: auto-closing {event_id}")
+        await self._close_with_recovery(
+            event_id,
+            summary="Automatically closed after idle timeout (no user response).",
+            close_reason="idle_timeout",
+        )
+
+    async def _retry_idle_timeout_fetch_and_close(self, event_id: str) -> None:
+        """Retry body for `_idle_timeout_close`'s own `get_event` failure:
+        re-fetch and re-run the skip-or-close decision from scratch, exactly
+        as the first attempt would have if `get_event` had succeeded.
+        Deliberately separate from `_close_with_recovery`'s generic
+        "retry this specific close" attempts (used by the close-write
+        failure case here and by the StalenessGuard paths) -- those already
+        know "close, with this summary" is the right action; this one does
+        not yet know skip-vs-close and must re-derive it.
+        """
+        event = await self.blackboard.get_event(event_id)
+        await self._finish_idle_timeout_close(event_id, event)
 
     async def _finish_idle_timeout_close(self, event_id: str, event: "EventDocument | None") -> None:
-        """Shared close/skip decision, given an already-fetched event.
+        """Shared close/skip decision, given an already-fetched event. Used
+        by `_idle_timeout_close`'s first attempt and by
+        `_retry_idle_timeout_fetch_and_close`'s retry of a `get_event`
+        failure -- both cases where the skip-or-close decision hasn't been
+        made yet and must be (re-)derived from a fresh fetch.
 
-        Split out of `_idle_timeout_close` so the retry loop (which fetches
-        the event itself, on its own schedule) can reach the same decision
-        without recursing back into `_idle_timeout_close` and re-fetching.
+        Deliberately calls `_close_and_broadcast` directly here, NOT
+        `_close_with_recovery` -- when reached via the retry path, this runs
+        *inside* the retry loop's own `attempt()` call, whose surrounding
+        try/except already treats a raised exception here as "attempt
+        failed, log and retry again." Routing it through
+        `_close_with_recovery` instead would additionally try to schedule a
+        *second* retry loop for the event this task already is (a no-op,
+        since one is already registered) while swallowing the exception the
+        loop's own except needs to see.
         """
         if event and event.status == EventStatus.WAITING_APPROVAL:
             # Approval-parked events are owned by StalenessGuard[chat]
@@ -5964,8 +6128,7 @@ class Brain:
         # Do NOT pop _waiting_for_user here (pre-emptively, before the close
         # actually succeeds): _close_and_broadcast does its own pop once the
         # close genuinely completes. Popping early would make the retry
-        # loop's `event_id not in self._waiting_for_user` check (its signal
-        # for "give up, no longer applicable") fire even when this specific
+        # loop's "still a valid target" check fire even when this specific
         # attempt failed inside _close_and_broadcast itself -- defeating
         # retry coverage for exactly the failure class it's meant to catch.
         await self._close_and_broadcast(
@@ -5973,6 +6136,43 @@ class Brain:
             summary="Automatically closed after idle timeout (no user response).",
             close_reason="idle_timeout",
         )
+
+    async def _close_with_recovery(
+        self, event_id: str, summary: str, close_reason: str = "resolved", generation: int | None = None,
+    ) -> None:
+        """Single recovery contract for every system-driven close path
+        (idle-timeout's close step, StalenessGuard[chat]/[jarvis]): attempt
+        `_close_and_broadcast`, and on failure schedule a generation-aware
+        retry of *this exact close* instead of letting the exception
+        propagate and strand the event with its backstop state erased.
+
+        LLM-driven closes (the `close_event` tool) are not backstop-driven
+        and do not go through this -- an LLM-initiated close failing is
+        surfaced to the LLM's own tool-result handling, not silently retried
+        in the background.
+
+        `generation` lets a caller that has already resolved the event's
+        current `IdleTimeoutManager` generation pass it straight through
+        instead of `_schedule_idle_close_retry` re-reading it -- primarily
+        so tests can pin an exact value; production callers can omit it and
+        the current generation is read at failure time, which is equivalent
+        since nothing schedules a new timer between this call and its
+        failure.
+
+        Owns the `_idle_close_retry_count` lifecycle for whatever it wraps:
+        clears it on success, leaves it for `_schedule_idle_close_retry` to
+        manage on failure. Callers must not also touch it themselves.
+        """
+        try:
+            await self._close_and_broadcast(event_id, summary=summary, close_reason=close_reason)
+        except Exception as e:
+            self._schedule_idle_close_retry(
+                event_id, e,
+                attempt=lambda: self._close_and_broadcast(event_id, summary=summary, close_reason=close_reason),
+                generation=generation,
+            )
+        else:
+            self._idle_close_retry_count.pop(event_id, None)
 
     def _record_idle_close_retry_failure(self, event_id: str, error: Exception) -> int:
         """Bump and log the retry-attempt counter for an event; shared by the
@@ -5983,16 +6183,34 @@ class Brain:
         level = logger.error if count >= 5 else logger.warning
         level(
             "Idle timeout close: get_event/close failed for %s (attempt %d), "
-            "retrying shortly (event left in _waiting_for_user): %s", event_id, count, error,
+            "retrying shortly (event left in its wait-state dict): %s", event_id, count, error,
         )
         return count
 
-    def _schedule_idle_close_retry(self, event_id: str, error: Exception) -> None:
-        """Start (if not already running) a self-healing retry loop for a
-        failure anywhere in `_idle_timeout_close`'s fetch-then-close sequence
-        -- recovery for the "sole backstop" gap: without this, the event is
-        left in `_waiting_for_user` with no active timer and no periodic scan
-        that would ever re-arm it (see caller for the full trace).
+    def _schedule_idle_close_retry(
+        self,
+        event_id: str,
+        error: Exception,
+        attempt: Callable[[], Awaitable[None]],
+        generation: int | None = None,
+    ) -> None:
+        """Start (if not already running) a self-healing retry loop that
+        repeats `attempt()` until it succeeds -- recovery for the "sole
+        backstop" gap: without this, the event is left in its wait-state
+        dict with no active timer and no periodic scan that would ever
+        re-arm it (see caller for the full trace). Shared by the
+        idle-timeout path (`_idle_timeout_close`'s `get_event` failure calls
+        this directly; a close failure goes through `_close_with_recovery`)
+        and, via `_close_with_recovery`, the StalenessGuard[chat]/[jarvis]
+        close paths.
+
+        `attempt` is exactly the operation that failed -- re-fetch-and-decide
+        for a `get_event` failure with no decision made yet, or a specific
+        `_close_and_broadcast(..., summary, close_reason)` call for a
+        failure after the decision was already made. This is why the loop
+        itself carries no skip-or-close logic of its own: the caller who
+        first attempted the operation already knows what "retry this" means
+        for its own case, and passes exactly that.
 
         Deliberately retries the close attempt only, not the full warn->close
         `IdleTimeoutManager` cycle -- re-sending the courtesy warning on every
@@ -6001,7 +6219,8 @@ class Brain:
         -- a self-rescheduling chain would call `.cancel()` on its own
         in-flight task from within itself on every failed attempt.
 
-        Captures the current IdleTimeoutManager generation for this event and
+        Captures the current IdleTimeoutManager generation for this event
+        (unless the caller already resolved one and passed it through) and
         passes it to the loop so a later legitimate re-arm (schedule() bumps
         the generation) makes the loop abandon its close attempt instead of
         force-closing a freshly-parked event out from under the new timer.
@@ -6009,17 +6228,27 @@ class Brain:
         self._record_idle_close_retry_failure(event_id, error)
         if event_id in self._idle_close_retry_tasks:
             return  # a retry loop is already running for this event
-        generation = self._idle_timeout.generation(event_id)
+        if generation is None:
+            generation = self._idle_timeout.generation(event_id)
         self._idle_close_retry_tasks[event_id] = asyncio.create_task(
-            self._idle_close_retry_loop(event_id, generation), name=f"idle-close-retry-{event_id[:12]}"
+            self._idle_close_retry_loop(event_id, generation, attempt),
+            name=f"idle-close-retry-{event_id[:12]}",
         )
 
-    async def _idle_close_retry_loop(self, event_id: str, generation: int) -> None:
-        """Retry the fetch-then-close sequence on a fixed interval (read fresh
-        each attempt, so it's tunable at runtime) until it succeeds or the
-        event is no longer waiting. Retries indefinitely on a sustained
-        outage -- we can't know the event's real status while reads are
+    async def _idle_close_retry_loop(
+        self, event_id: str, generation: int, attempt: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Retry `attempt()` on a fixed interval (read fresh each attempt, so
+        it's tunable at runtime) until it succeeds or the event is no longer
+        a valid retry target. Retries indefinitely on a sustained outage --
+        we can't know the event's real status while reads/writes are
         failing, so retrying is safer than guessing and force-closing.
+
+        "Still a valid retry target" checks both `_waiting_for_user` (chat/
+        dashboard parks and the idle-timeout path) and `_waiting_for_jarvis`
+        (jarvis meta-events, tracked in a separate dict) -- this loop backs
+        recovery for both StalenessGuard variants, which use disjoint wait
+        dicts.
 
         Generation-aware: aborts without acting if the event was re-armed
         (`IdleTimeoutManager.schedule()` called again, bumping the
@@ -6030,7 +6259,7 @@ class Brain:
         try:
             while True:
                 await asyncio.sleep(_safe_int_env("IDLE_TIMEOUT_CLOSE_RETRY_SEC", 60))
-                if event_id not in self._waiting_for_user:
+                if event_id not in self._waiting_for_user and event_id not in self._waiting_for_jarvis:
                     return
                 if self._idle_timeout.generation(event_id) != generation:
                     logger.info(
@@ -6039,8 +6268,7 @@ class Brain:
                     )
                     return
                 try:
-                    event = await self.blackboard.get_event(event_id)
-                    await self._finish_idle_timeout_close(event_id, event)
+                    await attempt()
                 except Exception as e:
                     self._record_idle_close_retry_failure(event_id, e)
                     continue
@@ -6055,14 +6283,15 @@ class Brain:
         """Clear idle-close retry state for an event: the attempt counter,
         and (unless this is being called from within that very task's own
         execution -- see `_idle_close_retry_loop`'s call chain through
-        `_finish_idle_timeout_close` -> `_close_and_broadcast` -> here on a
-        successful retry) the in-flight retry task itself.
+        `attempt()` -> `_close_and_broadcast` -> `_finalize_close` -> here on
+        a successful retry) the in-flight retry task itself.
 
         Called from every site that removes an event from `_waiting_for_user`
-        (`clear_waiting`, `_close_and_broadcast`, the ToolContext-facing
-        `clear_waiting_for_user`) so a stale retry never outlives the state
-        it exists to fix -- mirrors this codebase's `_clear_jarvis_wait`
-        pattern for the analogous `_waiting_for_jarvis` state.
+        (`clear_waiting`, `_finalize_close`, `_idle_timeout_warn`'s
+        vanished-event branch, the ToolContext-facing `clear_waiting_for_user`)
+        so a stale retry never outlives the state it exists to fix -- mirrors
+        this codebase's `_clear_jarvis_wait` pattern for the analogous
+        `_waiting_for_jarvis` state.
         """
         self._idle_close_retry_count.pop(event_id, None)
         task = self._idle_close_retry_tasks.get(event_id)

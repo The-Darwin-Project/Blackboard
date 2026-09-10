@@ -445,9 +445,13 @@ class _FakeParkToolContext:
         self.broadcast = AsyncMock()
         self.append_and_broadcast = AsyncMock(return_value=1)
         self.idle_timeout = MagicMock(schedule=MagicMock())
+        self.park_kind: dict[str, str] = {}
 
     def mark_waiting_for_user(self, event_id: str) -> None:
         pass
+
+    def set_park_kind(self, event_id: str, kind: str) -> None:
+        self.park_kind[event_id] = kind
 
     async def next_turn_number(self, event_id: str) -> int:
         return 2
@@ -649,6 +653,38 @@ class TestClassifyEventReArmUsesStatusAwareTimeout:
         await handle_classify_event(ctx, event.id, {"domain": "complicated"}, None)
 
         ctx.idle_timeout.schedule.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_real_wait_for_user_park_survives_classify_event_nudge_turn(self, bb):
+        """End-to-end regression (Change 1, verification pass #4): drives the
+        REAL Brain + _BrainToolContext (not the simplified fake above) through
+        an actual wait_for_user park followed by handle_classify_event's own
+        nudge turn -- the exact sequence that used to misclassify the park via
+        tail-of-conversation inference (the nudge turn, action="tool_result",
+        waitingFor="classify_event", became the new tail and was not a
+        courtesy-warning turn, so the old fallback returned False). The
+        durable _park_kind record must make the re-arm use the approval
+        timeout regardless of what turn is now the conversation tail."""
+        from src.agents.brain import Brain
+        from src.agents.handlers_state import handle_wait_for_user, handle_classify_event
+
+        event = _make_event("evt-real-ctx-nudge01", status=EventStatus.ACTIVE, source="chat")
+        await _seed(bb, event)
+        await bb.redis.sadd(bb.EVENT_ACTIVE, event.id)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+        brain._idle_timeout.schedule = MagicMock()
+        ctx = brain._tool_ctx
+
+        await handle_wait_for_user(ctx, event.id, {"summary": "waiting on user"}, None)
+        assert brain._park_kind.get(event.id) == "user"
+        brain._idle_timeout.schedule.reset_mock()  # only care about the re-arm below
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_APPROVAL_SEC": "5100", "IDLE_TIMEOUT_CONVERSATION_SEC": "900"}):
+            await handle_classify_event(ctx, event.id, {"domain": "complicated"}, None)
+
+        brain._idle_timeout.schedule.assert_called_once_with(event.id, warning_sec=5100)
 
 
 # =============================================================================
