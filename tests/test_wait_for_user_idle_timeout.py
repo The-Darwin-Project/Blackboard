@@ -274,6 +274,67 @@ class TestTerminalTextOnlyNeverSchedulesIdleTimeout:
 
 
 # =============================================================================
+# 3b. Terminal text-only branch persists waitingFor="user" on the response turn
+#     itself (commit c351eb5e) -- this is the restart-durable signal that lets
+#     _cleanup_stale_events recognize the park after _waiting_for_user (in-memory
+#     only) is wiped by a Brain restart.
+# =============================================================================
+
+
+class TestTerminalTextOnlyPersistsWaitingForUserOnTurn:
+    @staticmethod
+    def _last_appended_turn(brain):
+        """The response turn is always the last (or only) call to
+        _append_and_broadcast in this branch -- an optional thoughts_turn may
+        precede it when the LLM streamed reasoning chunks."""
+        assert brain._append_and_broadcast.await_args_list, "no turn was appended"
+        _, turn = brain._append_and_broadcast.await_args_list[-1].args
+        return turn
+
+    @pytest.mark.asyncio
+    async def test_slack_source_tags_persisted_turn_waiting_for_user(self):
+        chunks = [_Chunk(text="Here's the answer, let me know if you need more.")]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="slack")
+
+        with _gate_patch([]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-text-only", event, response_emitted=False)
+
+        turn = self._last_appended_turn(brain)
+        assert turn.action == "response"
+        assert turn.waitingFor == "user"
+
+    @pytest.mark.asyncio
+    async def test_chat_source_tags_persisted_turn_waiting_for_user(self):
+        chunks = [_Chunk(text="Sure, here's what I found.")]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="chat")
+
+        with _gate_patch([]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-text-only", event, response_emitted=False)
+
+        turn = self._last_appended_turn(brain)
+        assert turn.action == "response"
+        assert turn.waitingFor == "user"
+
+    @pytest.mark.asyncio
+    async def test_non_chat_source_does_not_tag_persisted_turn(self):
+        """Automated sources (e.g. headhunter) are not a user-facing park -- the
+        response turn must not claim waitingFor="user", and the in-memory
+        wait-for-user bookkeeping must not be set either."""
+        chunks = [_Chunk(text="Done processing.")]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="headhunter")
+
+        with _gate_patch([]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-automated", event, response_emitted=False)
+
+        turn = self._last_appended_turn(brain)
+        assert turn.waitingFor is None
+        assert "evt-automated" not in brain._waiting_for_user
+
+
+# =============================================================================
 # 4. Positive coverage: wait_for_user parks stay open and resumable indefinitely
 # =============================================================================
 
@@ -301,7 +362,93 @@ def _parked_event(event_id: str = "evt-parked", parked_seconds_ago: float = 0.0)
     )
 
 
+def _text_only_parked_event(event_id: str = "evt-parked-text-only", parked_seconds_ago: float = 0.0) -> EventDocument:
+    """An ACTIVE event whose last turn is the *implicit* terminal text-only park
+    produced by Brain._process_with_llm for a chat/slack source (action="response",
+    waitingFor="user") -- distinct from the explicit action="wait" shape produced by
+    handle_wait_for_user / _escalate_to_human, and the specific gap closed by
+    commit c351eb5e."""
+    return EventDocument(
+        id=event_id,
+        source="chat",
+        status=EventStatus.ACTIVE,
+        service="test-svc",
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(display_text="test", source_type="chat", severity="info"),
+        ),
+        conversation=[
+            ConversationTurn(turn=0, actor="user", action="message", thoughts="what's the status?"),
+            ConversationTurn(
+                turn=1, actor="brain", action="response", thoughts="All green, nothing to do.",
+                waitingFor="user", timestamp=time.time() - parked_seconds_ago,
+            ),
+        ],
+    )
+
+
 class TestWaitForUserParkSurvivesRestartAndResumes:
+    @pytest.mark.asyncio
+    async def test_stale_cleanup_never_closes_a_text_only_park_no_matter_the_age(self):
+        """The terminal text-only (action="response") park must be exempted from
+        restart cleanup exactly like the explicit action="wait" park -- this is
+        the specific gap commit c351eb5e closed (HIGH finding: exemption only
+        matched action="wait", missing this call site)."""
+        from src.agents.brain import Brain
+
+        event = _text_only_parked_event(parked_seconds_ago=30 * 24 * 3600)
+
+        bb = MagicMock()
+        bb.EVENT_ACTIVE = "darwin:event:active"
+        bb.EVENT_QUEUE = "darwin:queue"
+        bb.redis = MagicMock()
+        bb.redis.srem = AsyncMock()
+        bb.redis.lpush = AsyncMock()
+        bb.get_active_events = AsyncMock(return_value=["evt-parked-text-only"])
+        bb.mark_turns_evaluated = AsyncMock()
+        bb.get_event = AsyncMock(return_value=event)
+        bb.close_event = AsyncMock()
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+
+        await brain._cleanup_stale_events()
+
+        bb.close_event.assert_not_awaited()
+        assert event.status == EventStatus.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_stale_cleanup_still_closes_a_plain_response_turn_without_waiting_for(self):
+        """Regression guard: the broadened exemption (action in ("wait", "response"))
+        must stay gated on waitingFor=="user" -- an ordinary action="response" turn
+        with no waitingFor (e.g. an automated-source reply, or the pre-fix shape this
+        PR replaced) must still be force-closed on restart, not blanket-exempted just
+        because action=="response"."""
+        from src.agents.brain import Brain
+
+        event = _text_only_parked_event(parked_seconds_ago=60)
+        event.conversation[-1].waitingFor = None
+
+        bb = MagicMock()
+        bb.EVENT_ACTIVE = "darwin:event:active"
+        bb.EVENT_QUEUE = "darwin:queue"
+        bb.redis = MagicMock()
+        bb.redis.srem = AsyncMock()
+        bb.redis.lpush = AsyncMock()
+        bb.get_active_events = AsyncMock(return_value=["evt-parked-text-only"])
+        bb.mark_turns_evaluated = AsyncMock()
+        bb.get_event = AsyncMock(return_value=event)
+        bb.close_event = AsyncMock()
+        bb.persist_report = AsyncMock()
+        bb.append_journal = AsyncMock()
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+
+        await brain._cleanup_stale_events()
+
+        bb.close_event.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_stale_cleanup_never_closes_a_wait_for_user_park_no_matter_the_age(self):
         """_cleanup_stale_events runs on every Brain restart. A wait_for_user park
