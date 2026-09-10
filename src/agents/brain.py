@@ -5779,13 +5779,14 @@ class Brain:
 
         Longer than `_get_conversation_timeout` so a human reviewing a plan or
         deployment has real time before the courtesy warn->close fires. Default
-        (5400s) matches CHAT_STALE_TTL so WAITING_APPROVAL events get their
-        warn/close courtesy just ahead of StalenessGuard[chat] taking over (see
+        (5100s) is kept slightly under CHAT_STALE_TTL (5400s) so the warn->close
+        courtesy on WAITING_APPROVAL events completes with a real notice window
+        before StalenessGuard[chat] becomes eligible to close (see
         `_idle_timeout_close`'s WAITING_APPROVAL race guard). `wait_for_user`
         events stay ACTIVE (no StalenessGuard[chat] coverage), so this timeout
         is their sole backstop -- must stay finite or those events leak.
         """
-        return _safe_int_env("IDLE_TIMEOUT_APPROVAL_SEC", 5400)
+        return _safe_int_env("IDLE_TIMEOUT_APPROVAL_SEC", 5100)
 
     async def _idle_timeout_warn(self, event_id: str) -> None:
         """Send idle timeout warning to user (Slack thread or dashboard turn)."""
