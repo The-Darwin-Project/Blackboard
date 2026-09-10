@@ -2,6 +2,8 @@
 # @ai-rules:
 # 1. [Pattern]: Per-event asyncio.Task for warn->close flow. Dict tracks active timers.
 # 2. [Constraint]: close_callback MUST re-check _waiting_for_user before closing (race guard).
+#    It must also re-check event status: WAITING_APPROVAL events are skipped and left to
+#    StalenessGuard[chat] (CHAT_STALE_TTL) -- see Brain._idle_timeout_close.
 # 3. [Pattern]: Restart recovery via periodic fallback scan (every 60s) for waiting events without timers.
 # 4. [Gotcha]: cancel() must suppress CancelledError from the timer task.
 # 5. [Gotcha]: Generation counter prevents stale timer callbacks from closing re-scheduled events.

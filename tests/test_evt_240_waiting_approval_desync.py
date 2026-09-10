@@ -46,10 +46,10 @@ from src.state.blackboard import BlackboardState
 # =============================================================================
 
 
-def _make_event(event_id: str, status: EventStatus = EventStatus.ACTIVE) -> EventDocument:
+def _make_event(event_id: str, status: EventStatus = EventStatus.ACTIVE, source: str = "chat") -> EventDocument:
     return EventDocument(
         id=event_id,
-        source="chat",
+        source=source,
         service="test-svc",
         status=status,
         event=EventInput(
@@ -444,6 +444,7 @@ class _FakeParkToolContext:
         self._bb = bb
         self.broadcast = AsyncMock()
         self.append_and_broadcast = AsyncMock(return_value=1)
+        self.idle_timeout = MagicMock(schedule=MagicMock())
 
     def mark_waiting_for_user(self, event_id: str) -> None:
         pass
@@ -455,10 +456,15 @@ class _FakeParkToolContext:
         return self._bb
 
     def get_idle_timeout(self):
-        return MagicMock(schedule=MagicMock())
+        return self.idle_timeout
 
     def get_conversation_timeout(self, event) -> int:
+        """Distinct from get_approval_timeout so tests can prove which one a
+        call-site actually uses."""
         return 300
+
+    def get_approval_timeout(self, event) -> int:
+        return 5400
 
 
 class TestParkAndResumeBroadcasts:
@@ -519,3 +525,59 @@ class TestParkAndResumeBroadcasts:
             "event_id": event.id,
             "status": "active",
         })
+
+
+# =============================================================================
+# 6. Idle timer scheduled with the extended approval timeout, not the
+#    generic conversation timeout, at the two approval-park sites.
+# =============================================================================
+
+
+class TestApprovalParkUsesApprovalTimeout:
+
+    @pytest.mark.asyncio
+    async def test_request_user_approval_schedules_with_approval_timeout(self, bb):
+        """handle_request_user_approval must arm the idle timer with
+        get_approval_timeout(), not the shorter get_conversation_timeout()."""
+        from src.agents.handlers_state import handle_request_user_approval
+
+        event = _make_event("evt-approval-timeout01", status=EventStatus.ACTIVE)
+        await _seed(bb, event)
+        await bb.redis.sadd(bb.EVENT_ACTIVE, event.id)
+        ctx = _FakeParkToolContext(bb)
+
+        await handle_request_user_approval(ctx, event.id, {"plan_summary": "test"}, None)
+
+        ctx.idle_timeout.schedule.assert_called_once_with(event.id, warning_sec=5400)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_user_schedules_with_approval_timeout(self, bb):
+        """handle_wait_for_user (which leaves the event ACTIVE, not WAITING_APPROVAL)
+        must also arm the idle timer with get_approval_timeout() -- it's this
+        extended timeout, not StalenessGuard[chat], that is its sole backstop."""
+        from src.agents.handlers_state import handle_wait_for_user
+
+        event = _make_event("evt-approval-timeout02", status=EventStatus.ACTIVE)
+        await _seed(bb, event)
+        await bb.redis.sadd(bb.EVENT_ACTIVE, event.id)
+        ctx = _FakeParkToolContext(bb)
+
+        await handle_wait_for_user(ctx, event.id, {"summary": "waiting on user"}, None)
+
+        ctx.idle_timeout.schedule.assert_called_once_with(event.id, warning_sec=5400)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_user_rejected_for_automated_source_no_timer(self, bb):
+        """Automated sources (e.g. headhunter/aligner) never reach the idle-timer
+        call at all -- wait_for_user is chat/slack-only. Regression guard for the
+        '#5 automated sources must remain untouched' requirement."""
+        from src.agents.handlers_state import handle_wait_for_user
+
+        event = _make_event("evt-automated01", status=EventStatus.ACTIVE, source="headhunter")
+        await _seed(bb, event)
+        await bb.redis.sadd(bb.EVENT_ACTIVE, event.id)
+        ctx = _FakeParkToolContext(bb)
+
+        await handle_wait_for_user(ctx, event.id, {"summary": "n/a"}, None)
+
+        ctx.idle_timeout.schedule.assert_not_called()

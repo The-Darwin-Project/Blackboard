@@ -629,6 +629,9 @@ class _BrainToolContext:
     def get_conversation_timeout(self, event) -> int:
         return self._b._get_conversation_timeout(event)
 
+    def get_approval_timeout(self, event) -> int:
+        return self._b._get_approval_timeout(event)
+
     # --- Callbacks ---
     async def append_and_broadcast(self, event_id, turn, event=None) -> int:
         return await self._b._append_and_broadcast(event_id, turn, event)
@@ -5771,6 +5774,19 @@ class Brain:
             return _safe_int_env("IDLE_TIMEOUT_CASUAL_SEC", 600)
         return _safe_int_env("IDLE_TIMEOUT_CONVERSATION_SEC", 900)
 
+    def _get_approval_timeout(self, event: "EventDocument") -> int:
+        """Extended idle timeout for events parked on an approval/wait-for-user gate.
+
+        Longer than `_get_conversation_timeout` so a human reviewing a plan or
+        deployment has real time before the courtesy warn->close fires. Default
+        (5400s) matches CHAT_STALE_TTL so WAITING_APPROVAL events get their
+        warn/close courtesy just ahead of StalenessGuard[chat] taking over (see
+        `_idle_timeout_close`'s WAITING_APPROVAL race guard). `wait_for_user`
+        events stay ACTIVE (no StalenessGuard[chat] coverage), so this timeout
+        is their sole backstop -- must stay finite or those events leak.
+        """
+        return _safe_int_env("IDLE_TIMEOUT_APPROVAL_SEC", 5400)
+
     async def _idle_timeout_warn(self, event_id: str) -> None:
         """Send idle timeout warning to user (Slack thread or dashboard turn)."""
         if event_id not in self._waiting_for_user:
@@ -5804,9 +5820,20 @@ class Brain:
         logger.info(f"Idle timeout warning turn for {event_id}")
 
     async def _idle_timeout_close(self, event_id: str) -> None:
-        """Auto-close event after idle timeout (with race guard)."""
+        """Auto-close event after idle timeout (with race guards)."""
         if event_id not in self._waiting_for_user:
             logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
+            return
+        event = await self.blackboard.get_event(event_id)
+        if event and event.status == EventStatus.WAITING_APPROVAL:
+            # Approval-parked events are owned by StalenessGuard[chat]
+            # (CHAT_STALE_TTL, see _check_chat_staleness) once past this short
+            # idle window. Do NOT pop _waiting_for_user here -- that guard
+            # requires event_id to still be present to act on it.
+            logger.info(
+                f"Idle timeout close skipped for {event_id}: status is "
+                "WAITING_APPROVAL, deferring to StalenessGuard[chat]"
+            )
             return
         logger.warning(f"Idle timeout: auto-closing {event_id}")
         self._waiting_for_user.pop(event_id, None)

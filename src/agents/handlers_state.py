@@ -103,7 +103,12 @@ async def handle_request_user_approval(
             "status": EventStatus.WAITING_APPROVAL.value,
         })
     if event and event.source in ("slack", "chat"):
-        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
+        # Approval parks use the extended approval timeout, not the casual
+        # conversation timeout -- a human reviewing a plan needs real time.
+        # WAITING_APPROVAL events are additionally protected by the
+        # _idle_timeout_close race guard (Brain), which defers final closure
+        # to StalenessGuard[chat] (CHAT_STALE_TTL).
+        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_approval_timeout(event))
     return False
 
 
@@ -139,7 +144,11 @@ async def handle_wait_for_user(
     await ctx.append_and_broadcast(event_id, turn)
     event = await bb.get_event(event_id)
     if event and event.source in ("slack", "chat"):
-        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
+        # wait_for_user events stay ACTIVE (not WAITING_APPROVAL), so they are
+        # not covered by StalenessGuard[chat] -- this extended approval
+        # timeout is their only backstop. Must remain finite (see
+        # _get_approval_timeout) or these events leak indefinitely.
+        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_approval_timeout(event))
     return False
 
 

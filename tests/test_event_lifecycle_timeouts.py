@@ -167,15 +167,87 @@ class TestIdleTimeoutRaceGuard:
 
     @pytest.mark.asyncio
     async def test_close_proceeds_when_still_waiting(self):
-        """If user hasn't responded, close proceeds."""
+        """If user hasn't responded and the event isn't WAITING_APPROVAL, close proceeds."""
         from src.agents.brain import Brain
         brain = MagicMock()
         brain._waiting_for_user = {"evt-test": time.time() - 900}
+        brain.blackboard = MagicMock()
+        brain.blackboard.get_event = AsyncMock(return_value=_make_event(status=EventStatus.ACTIVE))
         brain._close_and_broadcast = AsyncMock()
 
         await Brain._idle_timeout_close(brain, "evt-test")
         brain._close_and_broadcast.assert_awaited_once()
         assert "evt-test" not in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_close_skipped_when_waiting_approval(self):
+        """WAITING_APPROVAL events are not closed by the short idle timer -- StalenessGuard[chat]
+        (CHAT_STALE_TTL) owns them instead. _waiting_for_user must stay populated so that guard
+        can still see and act on the event."""
+        from src.agents.brain import Brain
+        brain = MagicMock()
+        brain._waiting_for_user = {"evt-test": time.time() - 900}
+        brain.blackboard = MagicMock()
+        brain.blackboard.get_event = AsyncMock(
+            return_value=_make_event(status=EventStatus.WAITING_APPROVAL)
+        )
+        brain._close_and_broadcast = AsyncMock()
+
+        await Brain._idle_timeout_close(brain, "evt-test")
+        brain._close_and_broadcast.assert_not_awaited()
+        assert "evt-test" in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_close_proceeds_when_event_missing(self):
+        """A vanished event (e.g. expired Redis key) falls through to the normal close path
+        rather than being silently skipped."""
+        from src.agents.brain import Brain
+        brain = MagicMock()
+        brain._waiting_for_user = {"evt-test": time.time() - 900}
+        brain.blackboard = MagicMock()
+        brain.blackboard.get_event = AsyncMock(return_value=None)
+        brain._close_and_broadcast = AsyncMock()
+
+        await Brain._idle_timeout_close(brain, "evt-test")
+        brain._close_and_broadcast.assert_awaited_once()
+        assert "evt-test" not in brain._waiting_for_user
+
+
+# =============================================================================
+# 4b. Approval timeout env var (IDLE_TIMEOUT_APPROVAL_SEC)
+# =============================================================================
+
+
+class TestApprovalTimeout:
+
+    def test_default_is_5400_seconds(self):
+        """Default approval timeout is 5400s (matches CHAT_STALE_TTL)."""
+        from src.agents.brain import Brain
+        event = _make_event()
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("IDLE_TIMEOUT_APPROVAL_SEC", None)
+            assert Brain._get_approval_timeout(MagicMock(), event) == 5400
+
+    def test_respects_env_override(self):
+        """IDLE_TIMEOUT_APPROVAL_SEC overrides the default."""
+        from src.agents.brain import Brain
+        event = _make_event()
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_APPROVAL_SEC": "120"}):
+            assert Brain._get_approval_timeout(MagicMock(), event) == 120
+
+    def test_longer_than_conversation_timeout(self):
+        """The approval timeout must exceed the casual/conversation timeout, or approval
+        parks get no benefit over a casual pause."""
+        from src.agents.brain import Brain
+        event = _make_event()
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("IDLE_TIMEOUT_APPROVAL_SEC", None)
+            os.environ.pop("IDLE_TIMEOUT_CONVERSATION_SEC", None)
+            approval = Brain._get_approval_timeout(MagicMock(), event)
+            conversation = Brain._get_conversation_timeout(MagicMock(), event)
+            assert approval > conversation
 
 
 # =============================================================================
