@@ -870,6 +870,7 @@ class TestApprovalParkSurvivesIdleThenStalenessCloses:
             event.id,
             summary="Chat session timed out waiting for user approval",
             close_reason="timeout",
+            retryable=True,
         )
         assert event.id not in brain._waiting_for_user
 
@@ -1082,7 +1083,7 @@ class TestStalenessGuardCloseRecovery:
             assert event_id in brain._waiting_for_jarvis
             assert event_id in brain._idle_close_retry_tasks
 
-            async def _pop_jarvis(eid, summary=None, close_reason=None):
+            async def _pop_jarvis(eid, summary=None, close_reason=None, retryable=False):
                 brain._waiting_for_jarvis.pop(eid, None)
             brain._close_and_broadcast = AsyncMock(side_effect=_pop_jarvis)
             await asyncio.wait_for(brain._idle_close_retry_tasks[event_id], timeout=1.0)
@@ -1138,7 +1139,7 @@ class TestIdleCloseRetryLoopSurvivesFinalizationCleanup:
             assert event.id not in brain._waiting_for_jarvis
             # ...but finalization hasn't succeeded yet -- this is the signal
             # that must keep the loop from abandoning.
-            assert event.id in brain._close_finalization_pending
+            assert event.id in brain._close_observables_pending
             assert event.id in brain._idle_close_retry_tasks
 
             # Let the real retry loop wake up and retry for real.
@@ -1151,8 +1152,93 @@ class TestIdleCloseRetryLoopSurvivesFinalizationCleanup:
         bb.record_event.assert_awaited_once()
         brain._broadcast.assert_awaited_once()
         assert event.id in brain._close_finalized
-        assert event.id not in brain._close_finalization_pending
+        assert event.id not in brain._close_observables_pending
         assert event.id not in brain._idle_close_retry_tasks
+
+
+# =============================================================================
+# 5e. Round-6 regression: the retry loop's three-way OR-check must itself
+#     decide to abandon -- every prior abandon test forces the outcome
+#     externally (a manual generation bump, or `.cancel()`), never exercising
+#     the plain membership check on its own merits. And `_finalize_close`'s
+#     "already finalized" short-circuit must discard `_close_observables_pending`
+#     just like the observable group's own success path does -- previously
+#     only reachable in theory, never asserted.
+# =============================================================================
+
+
+class TestIdleCloseRetryLoopAbandonsViaWaitDictCheck:
+
+    @pytest.mark.asyncio
+    async def test_loop_abandons_organically_when_no_longer_a_valid_target(self):
+        """Drive `_idle_close_retry_loop` directly for an event_id that was
+        never added to `_waiting_for_user`, `_waiting_for_jarvis`, or
+        `_close_observables_pending` -- i.e. the event is genuinely no longer
+        a valid retry target by the loop's own three-way check, with no
+        generation mismatch and no external `.cancel()` involved. The loop
+        must abandon on its first wake without ever calling `attempt()`."""
+        from src.agents.brain import Brain
+
+        brain = Brain(blackboard=MagicMock(), agents={})
+        attempt = AsyncMock()
+
+        assert "evt-organic-abandon" not in brain._waiting_for_user
+        assert "evt-organic-abandon" not in brain._waiting_for_jarvis
+        assert "evt-organic-abandon" not in brain._close_observables_pending
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            await brain._idle_close_retry_loop("evt-organic-abandon", generation=0, attempt=attempt)
+
+        attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_generation_mismatch_abandon_discards_pending_marker(self):
+        """Round-6 HIGH fix: the generation-mismatch abandon branch (a
+        legitimate re-arm) must discard `_close_observables_pending` too,
+        not just the wait-dict-check abandon branch. Without this, a
+        re-arm landing while the observable group is still genuinely stuck
+        failing strands the marker forever and drops that event's
+        journal/audit/broadcast permanently, since the abandoning loop's
+        task -- the only thing that would have retried it -- is gone."""
+        from src.agents.brain import Brain
+
+        event_id = "evt-generation-mismatch-pending"
+        brain = Brain(blackboard=MagicMock(), agents={})
+        brain._close_observables_pending.add(event_id)
+        attempt = AsyncMock()
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            # generation=0 captured at schedule time; bump the live generation
+            # so the loop's mismatch check fires on its first wake.
+            brain._idle_timeout.schedule(event_id, warning_sec=5100)
+            brain._idle_timeout.cancel(event_id)  # don't let the fresh timer actually fire
+            await brain._idle_close_retry_loop(event_id, generation=0, attempt=attempt)
+
+        attempt.assert_not_awaited()
+        assert event_id not in brain._close_observables_pending
+
+
+class TestFinalizeCloseAlreadyFinalizedShortCircuitDiscardsPending:
+
+    @pytest.mark.asyncio
+    async def test_already_finalized_short_circuit_discards_pending_marker(self):
+        """A `_finalize_close` call that hits the "already finalized"
+        short-circuit (event_id already in `_close_finalized`, e.g. a
+        retried call reaching here after the observable group already
+        succeeded once) must discard a leftover `_close_observables_pending`
+        entry too -- not just on the observable group's own success path."""
+        from src.agents.brain import Brain
+
+        event = _make_event(event_id="evt-already-finalized")
+        bb = MagicMock()
+        bb.persist_report = AsyncMock()
+        brain = Brain(blackboard=bb, agents={})
+        brain._close_finalized.add(event.id)
+        brain._close_observables_pending.add(event.id)
+
+        await brain._finalize_close(event.id, event, "test summary")
+
+        assert event.id not in brain._close_observables_pending
 
 
 # =============================================================================

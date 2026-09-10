@@ -217,7 +217,7 @@
 #     chain -- that self-cancels, see git history) that repeats `attempt()` on
 #     `IDLE_TIMEOUT_CLOSE_RETRY_SEC` until it succeeds or the event is no longer a
 #     valid target: checks `_waiting_for_user`, `_waiting_for_jarvis` (since this
-#     one loop backs both StalenessGuard variants), AND `_close_finalization_pending`
+#     one loop backs both StalenessGuard variants), AND `_close_observables_pending`
 #     (item 53 -- required so an observable-group failure, which happens AFTER
 #     `_finalize_close` already emptied both wait dicts, isn't misread as
 #     "abandoned"). Generation-aware: captures
@@ -260,13 +260,27 @@
 #     `_waiting_for_user`/`_waiting_for_jarvis`, those dicts read exactly like
 #     "event no longer waiting, abandon the retry" even when the REAL reason
 #     they're empty is that THIS close's own cleanup already ran and only the
-#     observable group is what's failing/retrying. `_close_finalization_pending`
+#     observable group is what's failing/retrying. `_close_observables_pending`
 #     (set[str]) is added at the top of `_finalize_close`, discarded on the
 #     already-finalized short-circuit or on the observable group's success, and
 #     LEFT IN PLACE if the observable group raises -- giving the retry loop a
 #     viability signal that survives the wait-dicts being cleared. Unlike
 #     `_close_finalized`, this one does not accumulate: every add is matched by
 #     a discard within the same finalization attempt or the next successful one.
+# 54. [Gotcha]: (round-6 fix, evt-321b0b68) Item 53's viability signal had two
+#     more gaps of its own. First: `_idle_close_retry_loop`'s OTHER abandon
+#     branch (generation-mismatch, a legitimate re-arm) returned without
+#     discarding `_close_observables_pending`, reopening the exact "silently
+#     and permanently drop the journal/audit/broadcast" bug class item 53 was
+#     written to fix, via this sibling exit path -- now discards there too.
+#     Second: `_close_and_broadcast`/`_finalize_close` take a `retryable: bool
+#     = False` parameter so the several direct, non-`_close_with_recovery`
+#     callers (duplicate-close, MR-merge close, orphan/max-turns force-close,
+#     emergency-stop, the `close_event` tool) don't leak a permanent,
+#     never-discarded `_close_observables_pending` entry on an observable-group
+#     failure they have no retry loop to eventually clear it via -- only
+#     `_close_with_recovery` and `_finish_idle_timeout_close` (both genuinely
+#     backed by `_idle_close_retry_loop`) pass `retryable=True`.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -868,7 +882,7 @@ class Brain:
         # this event_id (either already-finalized short-circuit, or the
         # observable group's own success) -- unlike `_close_finalized`, this
         # one does NOT accumulate over the process lifetime.
-        self._close_finalization_pending: set[str] = set()
+        self._close_observables_pending: set[str] = set()
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
@@ -4893,7 +4907,9 @@ class Brain:
             self._orphan_requeue_count.pop(event_id, None)
             logger.error(f"Orphan {event_id} closed after 3 failed re-queue attempts")
 
-    async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
+    async def _close_and_broadcast(
+        self, event_id: str, summary: str, close_reason: str = "resolved", retryable: bool = False,
+    ) -> None:
         """Close an event and broadcast the closure to UI.
 
         The mutating storage-close (killing active work, draining tokens,
@@ -4903,6 +4919,15 @@ class Brain:
         call after a partial failure can still complete whatever didn't run
         the first time. See `_finalize_close` for why every step there must
         be safe to repeat.
+
+        `retryable` must be True only when the caller guarantees a failure
+        here will actually be retried (`_close_with_recovery` and
+        `_finish_idle_timeout_close`, both backed by `_idle_close_retry_loop`)
+        -- see `_finalize_close` for why this matters for
+        `_close_observables_pending`. Defaults to False: the several
+        direct, non-retried callers (duplicate-close, MR-merge close,
+        orphan/max-turns force-close, emergency-stop, the `close_event` tool)
+        get no retry, so a failure must not leave a permanent entry behind.
         """
         event = await self.blackboard.get_event(event_id)
         if not event:
@@ -4926,9 +4951,11 @@ class Brain:
                     logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
                     return
             await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
-        await self._finalize_close(event_id, event, summary)
+        await self._finalize_close(event_id, event, summary, retryable=retryable)
 
-    async def _finalize_close(self, event_id: str, event: "EventDocument | None", summary: str) -> None:
+    async def _finalize_close(
+        self, event_id: str, event: "EventDocument | None", summary: str, retryable: bool = False,
+    ) -> None:
         """Always-run finalization for a close -- whether `_close_and_broadcast`'s
         storage write just succeeded, or the event was already closed (a
         retried, idempotent call after an earlier failure here).
@@ -4949,16 +4976,21 @@ class Brain:
           retry-after-failure may duplicate a journal line or a broadcast;
           both are benign, unlike the silent skip (and leaked in-memory
           state) this replaces.
-        - `_close_finalization_pending` is added HERE, before the
+        - `_close_observables_pending` is added HERE, before the
           unconditional cleanup below, and only removed once this call either
           short-circuits (already finalized) or the observable group
-          succeeds. If the observable group raises instead, the marker is
-          deliberately left in place -- `_idle_close_retry_loop` checks it
-          alongside the wait-state dicts so a retry isn't misread as "no
-          longer a valid target" just because this call's own cleanup
-          already emptied `_waiting_for_user`/`_waiting_for_jarvis`.
+          succeeds. If the observable group raises instead and `retryable`
+          is True, the marker is deliberately left in place --
+          `_idle_close_retry_loop` checks it alongside the wait-state dicts
+          so a retry isn't misread as "no longer a valid target" just
+          because this call's own cleanup already emptied
+          `_waiting_for_user`/`_waiting_for_jarvis`. If `retryable` is False
+          (the default -- no retry loop is coming for this attempt), the
+          marker is discarded before re-raising instead, so it can't
+          accumulate forever for the several direct, non-retried callers of
+          `_close_and_broadcast`.
         """
-        self._close_finalization_pending.add(event_id)
+        self._close_observables_pending.add(event_id)
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)
@@ -5000,7 +5032,7 @@ class Brain:
                 agent.cleanup_event(event_id)
 
         if event_id in self._close_finalized:
-            self._close_finalization_pending.discard(event_id)
+            self._close_observables_pending.discard(event_id)
             return
         try:
             # Append to service ops journal (temporal memory)
@@ -5030,14 +5062,26 @@ class Brain:
                 "summary": summary,
                 })
         except Exception:
-            logger.exception(
-                "Close finalization (journal/record_event/broadcast) failed for "
-                "%s -- will retry; state cleanup above already ran, so nothing "
-                "is stranded by this failure.", event_id,
-            )
+            if retryable:
+                logger.exception(
+                    "Close finalization (journal/record_event/broadcast) failed for "
+                    "%s -- will retry; state cleanup above already ran, so nothing "
+                    "is stranded by this failure.", event_id,
+                )
+            else:
+                # No retry loop is coming for this attempt (a direct,
+                # non-`_close_with_recovery` caller) -- discard the pending
+                # marker now instead of leaving a permanent entry behind.
+                logger.exception(
+                    "Close finalization (journal/record_event/broadcast) failed for "
+                    "%s -- no retry scheduled for this caller; state cleanup above "
+                    "already ran, but the journal/audit/broadcast steps were dropped.",
+                    event_id,
+                )
+                self._close_observables_pending.discard(event_id)
             raise
         self._close_finalized.add(event_id)
-        self._close_finalization_pending.discard(event_id)
+        self._close_observables_pending.discard(event_id)
 
         if event and event.source == "headhunter":
             hh = self.agents.get("_headhunter")
@@ -6174,6 +6218,11 @@ class Brain:
             event_id,
             summary="Automatically closed after idle timeout (no user response).",
             close_reason="idle_timeout",
+            # This call only ever runs as the `attempt()` callable of an
+            # already-scheduled `_idle_close_retry_loop` (the get_event-failure
+            # retry path) -- an observable-group failure here will genuinely
+            # be retried by that loop, so the pending marker must survive it.
+            retryable=True,
         )
 
     async def _close_with_recovery(
@@ -6203,11 +6252,16 @@ class Brain:
         manage on failure. Callers must not also touch it themselves.
         """
         try:
-            await self._close_and_broadcast(event_id, summary=summary, close_reason=close_reason)
+            # A failure here is guaranteed a retry (the except below always
+            # schedules one), so the observable-group pending marker must
+            # survive it -- retryable=True.
+            await self._close_and_broadcast(event_id, summary=summary, close_reason=close_reason, retryable=True)
         except Exception as e:
             self._schedule_idle_close_retry(
                 event_id, e,
-                attempt=lambda: self._close_and_broadcast(event_id, summary=summary, close_reason=close_reason),
+                attempt=lambda: self._close_and_broadcast(
+                    event_id, summary=summary, close_reason=close_reason, retryable=True,
+                ),
                 generation=generation,
             )
         else:
@@ -6287,7 +6341,7 @@ class Brain:
         dashboard parks and the idle-timeout path), `_waiting_for_jarvis`
         (jarvis meta-events, tracked in a separate dict) -- this loop backs
         recovery for both StalenessGuard variants, which use disjoint wait
-        dicts -- AND `_close_finalization_pending`. That third check matters
+        dicts -- AND `_close_observables_pending`. That third check matters
         specifically when `attempt` is `_close_and_broadcast` (the
         StalenessGuard/idle-timeout close-write failure case, as opposed to
         the get_event-failure case where no close has been attempted yet):
@@ -6296,7 +6350,7 @@ class Brain:
         (journal/record_event/broadcast) runs -- if that group then fails,
         the wait dicts being empty must NOT be read as "abandoned," or the
         observable steps are silently and permanently dropped (the exact bug
-        this check exists to prevent). `_close_finalization_pending` stays
+        this check exists to prevent). `_close_observables_pending` stays
         populated across that window precisely to keep this loop retrying.
 
         Generation-aware: aborts without acting if the event was re-armed
@@ -6311,7 +6365,7 @@ class Brain:
                 if (
                     event_id not in self._waiting_for_user
                     and event_id not in self._waiting_for_jarvis
-                    and event_id not in self._close_finalization_pending
+                    and event_id not in self._close_observables_pending
                 ):
                     return
                 if self._idle_timeout.generation(event_id) != generation:
@@ -6319,6 +6373,14 @@ class Brain:
                         "Idle timeout close retry for %s abandoned: event was "
                         "re-armed since this retry loop started", event_id,
                     )
+                    # Mirror the discard done on the other two exit paths
+                    # (already-finalized short-circuit, observable-group
+                    # success) -- this loop is the only thing keeping the
+                    # marker meaningful, and abandoning without discarding
+                    # it here strands it permanently, reopening the exact
+                    # silently-dropped-journal/audit/broadcast bug class
+                    # this marker exists to prevent.
+                    self._close_observables_pending.discard(event_id)
                     return
                 try:
                     await attempt()
