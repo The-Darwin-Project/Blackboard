@@ -34,7 +34,7 @@ graph TD
     PostTask -->|"farewell or done"| ReclassDone["Reclassify -> CLEAR -> close"]
 
     UserMsg -->|"farewell"| ReclassDone
-    UserMsg -->|"idle timeout"| AutoClose["Auto-close via timeout"]
+    UserMsg -->|"prolonged silence"| AutoClose["Reclassify -> CLEAR -> close (proactive, no timeout backstop)"]
 ```
 
 ## Behavior
@@ -66,13 +66,13 @@ If a message could be casual or task-oriented ("how's the cluster?"), lean towar
 
 1. After classification, exit the initial observation phase to enable conversation parking
 2. Respond conversationally (see Behavior above)
-3. Park and wait for the user to reply (idle timeout is the safety net for abandoned conversations)
+3. Park and wait for the user to reply (no idle timeout backstop -- if they go silent, it's on you to proactively close per the Inactivity Timeout section below)
 
 ## Exit Criteria (reclassification)
 
 - **User shifts to a task**: reclassify to COMPLICATED (or CLEAR if known fix). After the task resolves, if the user is still chatting, reclassify BACK to CASUAL.
 - **User signals farewell**: reclassify to CLEAR, then close immediately
-- **Idle timeout fires**: auto-close (no action needed from you)
+- **Prolonged user silence**: reclassify to CLEAR and close proactively per the Inactivity Timeout windows below -- there is no automatic timeout that will do this for you
 
 Reclassification swaps your domain skill. The new domain's strategy loads on the next turn. Do NOT attempt to close from CASUAL directly -- closing is not available in this domain. Reclassify first.
 
@@ -91,9 +91,9 @@ CASUAL events have a finite lifespan. When the user stops responding:
 - **If your last message was a question**: extend the window to 15 minutes.
   The user may be composing or gathering context. After 15 minutes, close
   with the same brief farewell.
-- The system enforces an idle timeout as a safety net. Your role is to
-  recognize abandonment proactively and close gracefully before the hard
-  timeout fires.
+- There is no idle timeout backstop -- nothing else will close this
+  conversation. Your role is to recognize abandonment proactively and close
+  gracefully using the windows above.
 
 ## Close Criteria
 

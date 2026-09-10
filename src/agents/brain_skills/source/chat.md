@@ -25,13 +25,15 @@ the requester can confirm the intent was satisfied.
 A question creates an implicit contract: you asked, they owe a reply, and
 the conversation is mid-exchange. Closing during this state is the equivalent
 of walking away mid-sentence -- it signals that their answer does not matter.
-The cost of waiting is near-zero (idle timeout handles abandonment); the cost
-of premature closure is trust erosion.
+The cost of waiting a reasonable amount is near-zero; the cost of premature
+closure is trust erosion. But there is no idle timeout backstop -- if you
+never revisit the conversation, it stays open indefinitely.
 
 If your last message ends with a question directed at the user, you are in a
 waiting state -- NOT a closing state. The user may be thinking, composing,
 or simply distracted. Entering close while an open question is pending
 violates the conversation contract.
 
-When you've asked a question: park and wait. The idle timeout is the safety
-net for abandoned conversations, not your judgment of response latency.
+When you've asked a question: park and wait. There is no idle timeout to fall
+back on -- if the user has gone quiet for an extended period, it is your
+responsibility to proactively close the conversation as abandoned.

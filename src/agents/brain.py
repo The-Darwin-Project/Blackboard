@@ -2055,6 +2055,7 @@ class Brain:
             await self._append_and_broadcast(event_id, thoughts_turn)
 
         if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
+            is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -2062,11 +2063,15 @@ class Brain:
                 thoughts=accumulated_text,
                 evidence=grounding_evidence if grounding_evidence else None,
                 response_parts=captured_parts,
+                # waitingFor="user" marks this persisted turn as a wait_for_user-equivalent
+                # park so _cleanup_stale_events recognizes it after a restart wipes
+                # _waiting_for_user below (see brain.py ~5217).
+                waitingFor="user" if is_user_park else None,
             )
             await self._append_and_broadcast(event_id, response_turn)
             await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
             self._last_processed[event_id] = time.time()
-            if event.source in ("slack", "chat"):
+            if is_user_park:
                 # No idle-timeout backstop: a terminal text-only response leaves the event
                 # waiting for the user exactly like wait_for_user does, and that state must
                 # never auto-close regardless of duration (see @ai-rules #50).
@@ -5211,11 +5216,14 @@ class Brain:
                     continue
                 # Exempt wait_for_user parks: must never auto-close, regardless of
                 # duration (see @ai-rules #50). These stay status=ACTIVE, so they're
-                # identified by their last turn's shape (action="wait", waitingFor="user"),
-                # the same shape used by handle_wait_for_user and the _escalate_to_human
-                # nudge-cascade fallback -- both must survive restart the same way.
+                # identified by their last turn's shape (waitingFor="user"), which is
+                # produced by three call sites that must all survive restart the same
+                # way: handle_wait_for_user and the _escalate_to_human nudge-cascade
+                # fallback (action="wait"), and _process_with_llm's terminal
+                # text-only-response branch (action="response") -- the implicit
+                # wait_for_user-equivalent park for a plain chat/slack reply.
                 last_turn = event.conversation[-1]
-                if last_turn.action == "wait" and last_turn.waitingFor == "user":
+                if last_turn.waitingFor == "user" and last_turn.action in ("wait", "response"):
                     logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
                     continue
                 self._clear_jarvis_wait(eid)

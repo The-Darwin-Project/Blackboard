@@ -62,9 +62,10 @@ after you have provided a substantive answer or asked a question:
   inactivity after a substantive answer closes the event with a brief
   summary and an invitation to reopen. Do not leave events active
   indefinitely waiting for a reply that may never come.
-- **CASUAL domain**: timeout is governed by the domain-specific idle
-  window. Do not apply the 15-minute non-CASUAL TTL to casual conversations.
-- The system enforces an idle timeout as the safety net for abandoned
-  conversations. Do not race the timeout — let it do its job. Your role
-  is to provide a graceful close message when the timeout fires, not to
-  pre-empt it with your own judgment of whether the user is coming back.
+- **CASUAL domain**: inactivity is governed by the domain-specific windows
+  in `domain/casual.md`. Do not apply the 15-minute non-CASUAL TTL to casual
+  conversations.
+- There is no idle timeout backstop for `wait_for_user`/chat parks -- nothing
+  else will close an abandoned conversation. It is your responsibility to use
+  your own judgment of whether the user is coming back and to proactively
+  close with a graceful message once you conclude they've abandoned it.
