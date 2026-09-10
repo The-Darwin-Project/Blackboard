@@ -216,8 +216,11 @@
 #     persistent per-event `_idle_close_retry_loop` task (NOT a self-rescheduling
 #     chain -- that self-cancels, see git history) that repeats `attempt()` on
 #     `IDLE_TIMEOUT_CLOSE_RETRY_SEC` until it succeeds or the event is no longer a
-#     valid target (checks both `_waiting_for_user` and `_waiting_for_jarvis`, since
-#     this one loop backs both StalenessGuard variants). Generation-aware: captures
+#     valid target: checks `_waiting_for_user`, `_waiting_for_jarvis` (since this
+#     one loop backs both StalenessGuard variants), AND `_close_finalization_pending`
+#     (item 53 -- required so an observable-group failure, which happens AFTER
+#     `_finalize_close` already emptied both wait dicts, isn't misread as
+#     "abandoned"). Generation-aware: captures
 #     `IdleTimeoutManager.generation(event_id)` at start (or accepts one already
 #     resolved by the caller) and aborts if a later legitimate re-arm (`schedule()`)
 #     bumps it, so a stale retry can't race a fresh warn->close cycle to a premature
@@ -252,6 +255,18 @@
 #     [jarvis]) use to get retry coverage on top of this; LLM-driven closes
 #     (`close_event` tool) call `_close_and_broadcast` directly and surface failures
 #     to the LLM's own tool-result handling instead.
+# 53. [Gotcha]: (round-5 fix, evt-321b0b68) Item 52's cleanup-before-observables
+#     split has a trap for item 50's retry loop: once cleanup pops
+#     `_waiting_for_user`/`_waiting_for_jarvis`, those dicts read exactly like
+#     "event no longer waiting, abandon the retry" even when the REAL reason
+#     they're empty is that THIS close's own cleanup already ran and only the
+#     observable group is what's failing/retrying. `_close_finalization_pending`
+#     (set[str]) is added at the top of `_finalize_close`, discarded on the
+#     already-finalized short-circuit or on the observable group's success, and
+#     LEFT IN PLACE if the observable group raises -- giving the retry loop a
+#     viability signal that survives the wait-dicts being cleared. Unlike
+#     `_close_finalized`, this one does not accumulate: every add is matched by
+#     a discard within the same finalization attempt or the next successful one.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -841,6 +856,19 @@ class Brain:
         # _waiting_for_user etc. are long gone) -- grows only with lifetime
         # closes, like this codebase's other close-scoped sets.
         self._close_finalized: set[str] = set()
+        # Event ids currently inside a `_finalize_close` call that has not yet
+        # reached (or given up on) the observable group -- see _finalize_close.
+        # Exists because that call's unconditional per-event cleanup (popping
+        # _waiting_for_user/_waiting_for_jarvis) runs BEFORE the observable
+        # group, so those dicts are no longer a valid "is this event still a
+        # legitimate close target" signal once storage-close has succeeded.
+        # `_idle_close_retry_loop` ORs this into its viability check so an
+        # observable-group failure doesn't get misread as "abandon, no longer
+        # waiting." Cleared as soon as finalization is no longer in flight for
+        # this event_id (either already-finalized short-circuit, or the
+        # observable group's own success) -- unlike `_close_finalized`, this
+        # one does NOT accumulate over the process lifetime.
+        self._close_finalization_pending: set[str] = set()
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
@@ -4921,7 +4949,16 @@ class Brain:
           retry-after-failure may duplicate a journal line or a broadcast;
           both are benign, unlike the silent skip (and leaked in-memory
           state) this replaces.
+        - `_close_finalization_pending` is added HERE, before the
+          unconditional cleanup below, and only removed once this call either
+          short-circuits (already finalized) or the observable group
+          succeeds. If the observable group raises instead, the marker is
+          deliberately left in place -- `_idle_close_retry_loop` checks it
+          alongside the wait-state dicts so a retry isn't misread as "no
+          longer a valid target" just because this call's own cleanup
+          already emptied `_waiting_for_user`/`_waiting_for_jarvis`.
         """
+        self._close_finalization_pending.add(event_id)
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)
@@ -4963,6 +5000,7 @@ class Brain:
                 agent.cleanup_event(event_id)
 
         if event_id in self._close_finalized:
+            self._close_finalization_pending.discard(event_id)
             return
         try:
             # Append to service ops journal (temporal memory)
@@ -4999,6 +5037,7 @@ class Brain:
             )
             raise
         self._close_finalized.add(event_id)
+        self._close_finalization_pending.discard(event_id)
 
         if event and event.source == "headhunter":
             hh = self.agents.get("_headhunter")
@@ -6244,11 +6283,21 @@ class Brain:
         we can't know the event's real status while reads/writes are
         failing, so retrying is safer than guessing and force-closing.
 
-        "Still a valid retry target" checks both `_waiting_for_user` (chat/
-        dashboard parks and the idle-timeout path) and `_waiting_for_jarvis`
+        "Still a valid retry target" checks `_waiting_for_user` (chat/
+        dashboard parks and the idle-timeout path), `_waiting_for_jarvis`
         (jarvis meta-events, tracked in a separate dict) -- this loop backs
         recovery for both StalenessGuard variants, which use disjoint wait
-        dicts.
+        dicts -- AND `_close_finalization_pending`. That third check matters
+        specifically when `attempt` is `_close_and_broadcast` (the
+        StalenessGuard/idle-timeout close-write failure case, as opposed to
+        the get_event-failure case where no close has been attempted yet):
+        once the storage write succeeds, `_finalize_close`'s unconditional
+        cleanup empties both wait dicts BEFORE the observable group
+        (journal/record_event/broadcast) runs -- if that group then fails,
+        the wait dicts being empty must NOT be read as "abandoned," or the
+        observable steps are silently and permanently dropped (the exact bug
+        this check exists to prevent). `_close_finalization_pending` stays
+        populated across that window precisely to keep this loop retrying.
 
         Generation-aware: aborts without acting if the event was re-armed
         (`IdleTimeoutManager.schedule()` called again, bumping the
@@ -6259,7 +6308,11 @@ class Brain:
         try:
             while True:
                 await asyncio.sleep(_safe_int_env("IDLE_TIMEOUT_CLOSE_RETRY_SEC", 60))
-                if event_id not in self._waiting_for_user and event_id not in self._waiting_for_jarvis:
+                if (
+                    event_id not in self._waiting_for_user
+                    and event_id not in self._waiting_for_jarvis
+                    and event_id not in self._close_finalization_pending
+                ):
                     return
                 if self._idle_timeout.generation(event_id) != generation:
                     logger.info(

@@ -1092,6 +1092,70 @@ class TestStalenessGuardCloseRecovery:
 
 
 # =============================================================================
+# 5d. Round-5 regression: _idle_close_retry_loop's viability check used to
+#     read `_finalize_close`'s OWN cleanup (which unconditionally pops
+#     _waiting_for_user/_waiting_for_jarvis BEFORE the observable group runs,
+#     per Change 2) as "event no longer waiting, abandon" -- so an
+#     observable-group failure was silently and permanently dropped: the
+#     retry loop woke up, saw both wait dicts already empty (its own doing),
+#     and returned without ever calling `attempt()` again. Drives the REAL
+#     _close_with_recovery -> _close_and_broadcast -> _finalize_close and the
+#     REAL _idle_close_retry_loop (no mocking of _close_and_broadcast) so this
+#     exact interaction is exercised end-to-end.
+# =============================================================================
+
+
+class TestIdleCloseRetryLoopSurvivesFinalizationCleanup:
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_completes_observable_group_after_its_own_cleanup_emptied_wait_dicts(self):
+        from src.agents.brain import Brain
+
+        event = _make_event(event_id="evt-retry-loop-finalize", status=EventStatus.WAITING_APPROVAL)
+        bb = _RetryableBlackboard(event, journal_side_effect=[Exception("journal down"), None])
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+        brain._waiting_for_user[event.id] = time.time()
+        brain._park_kind[event.id] = "user"
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            # Real _close_with_recovery: storage close succeeds, _finalize_close's
+            # unconditional cleanup pops _waiting_for_user, then the observable
+            # group fails on append_journal and re-raises -- exactly the
+            # sequence that used to defeat the retry loop's viability check.
+            await brain._close_with_recovery(event.id, "test summary", close_reason="timeout")
+
+            bb.close_event.assert_awaited_once()
+            bb.append_journal.assert_awaited_once()
+            bb.record_event.assert_not_awaited()
+            brain._broadcast.assert_not_awaited()
+
+            # This is the trap: cleanup already emptied both wait dicts, so a
+            # viability check that only looks at those two would (incorrectly)
+            # conclude the event is no longer a valid retry target.
+            assert event.id not in brain._waiting_for_user
+            assert event.id not in brain._waiting_for_jarvis
+            # ...but finalization hasn't succeeded yet -- this is the signal
+            # that must keep the loop from abandoning.
+            assert event.id in brain._close_finalization_pending
+            assert event.id in brain._idle_close_retry_tasks
+
+            # Let the real retry loop wake up and retry for real.
+            await asyncio.wait_for(brain._idle_close_retry_tasks[event.id], timeout=1.0)
+
+        # The observable group must have actually run again and completed --
+        # not been silently dropped -- and the storage write must not repeat.
+        bb.close_event.assert_awaited_once()
+        assert bb.append_journal.await_count == 2
+        bb.record_event.assert_awaited_once()
+        brain._broadcast.assert_awaited_once()
+        assert event.id in brain._close_finalized
+        assert event.id not in brain._close_finalization_pending
+        assert event.id not in brain._idle_close_retry_tasks
+
+
+# =============================================================================
 # 6. _waiting_for_user dict semantics
 # =============================================================================
 
