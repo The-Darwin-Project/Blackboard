@@ -220,14 +220,17 @@ class TestIdleTimeoutRaceGuard:
 
 class TestApprovalTimeout:
 
-    def test_default_is_5400_seconds(self):
-        """Default approval timeout is 5400s (matches CHAT_STALE_TTL)."""
+    def test_default_is_5100_seconds(self):
+        """Default approval timeout is 5100s -- slightly under CHAT_STALE_TTL (5400s) so the
+        warn->close courtesy on WAITING_APPROVAL events completes with a real notice window
+        before StalenessGuard[chat] becomes eligible to close (see QE fast-follow finding on
+        evt-321b0b68: a default equal to CHAT_STALE_TTL collapsed that window to ~60s)."""
         from src.agents.brain import Brain
         event = _make_event()
         with patch.dict("os.environ", {}, clear=False):
             import os
             os.environ.pop("IDLE_TIMEOUT_APPROVAL_SEC", None)
-            assert Brain._get_approval_timeout(MagicMock(), event) == 5400
+            assert Brain._get_approval_timeout(MagicMock(), event) == 5100
 
     def test_respects_env_override(self):
         """IDLE_TIMEOUT_APPROVAL_SEC overrides the default."""
