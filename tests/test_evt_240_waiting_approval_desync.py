@@ -37,7 +37,7 @@ import pytest
 import fakeredis.aioredis
 from httpx import ASGITransport, AsyncClient
 
-from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput, EventStatus
 from src.state.blackboard import BlackboardState
 
 
@@ -581,3 +581,87 @@ class TestApprovalParkUsesApprovalTimeout:
         await handle_wait_for_user(ctx, event.id, {"summary": "n/a"}, None)
 
         ctx.idle_timeout.schedule.assert_not_called()
+
+
+# =============================================================================
+# 7. Emergent interaction: the idle-timeout courtesy warn can reset the
+#    StalenessGuard[chat] clock for non-Slack (dashboard) chat sources.
+#
+# evt-321b0b68's own risk notes flag that IDLE_TIMEOUT_APPROVAL_SEC and
+# CHAT_STALE_TTL both default to 5400s "so the courtesy warn->close still
+# fires before Guard B". The developer's unit tests mock Brain/ToolContext
+# directly and never exercise the *real* _idle_timeout_warn against a real
+# BlackboardState, so this interaction was never observed: for source="chat"
+# (dashboard, no Slack thread), _idle_timeout_warn appends a real
+# ConversationTurn (timestamped `now`) to the event. _check_chat_staleness
+# computes staleness from the *latest conversation turn timestamp*, not from
+# the original park time. Because the warn fires at t=IDLE_TIMEOUT_APPROVAL_SEC
+# -- exactly the CHAT_STALE_TTL boundary -- it lands at or before Guard B can
+# ever observe staleness, and its own appended turn resets Guard B's clock.
+# Net effect: dashboard-sourced approval parks are not closed at ~90 minutes
+# as the plan's SP describes, but at ~2x that (~180 minutes), because the
+# courtesy warn silently re-arms the staleness window it was supposed to
+# precede. Slack-sourced events are unaffected as long as the Slack
+# chat_postMessage courtesy warn succeeds (it doesn't append a turn) -- but
+# hit the same reset if that post fails and falls back to a turn append.
+# =============================================================================
+
+
+class TestApprovalWarnResetsStalenessClock:
+
+    @pytest.mark.asyncio
+    async def test_warn_turn_resets_staleness_clock_for_chat_source(self, bb):
+        """Baseline: past CHAT_STALE_TTL, the event is correctly flagged stale.
+        After the real _idle_timeout_warn fires (as it does at exactly the
+        IDLE_TIMEOUT_APPROVAL_SEC/CHAT_STALE_TTL boundary by default), the same
+        check flips back to False -- the courtesy warn undid the staleness it
+        was meant to precede."""
+        from src.agents.brain import Brain
+
+        t0 = 1_000_000.0
+        event = _make_event("evt-warn-reset01", status=EventStatus.WAITING_APPROVAL, source="chat")
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="request_approval", timestamp=t0)
+        ]
+        await _seed(bb, event)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = t0
+
+        past_ttl = t0 + 5401  # just past the default CHAT_STALE_TTL / IDLE_TIMEOUT_APPROVAL_SEC
+        with patch("time.time", return_value=past_ttl):
+            assert await brain._check_chat_staleness(event.id) is True
+
+            await brain._idle_timeout_warn(event.id)
+
+            assert await brain._check_chat_staleness(event.id) is False
+
+    @pytest.mark.asyncio
+    async def test_slack_source_warn_does_not_reset_clock_when_post_succeeds(self, bb):
+        """Control case: when the Slack post succeeds, the warn does NOT append a
+        conversation turn, so the staleness clock is untouched -- confirming the
+        reset in the test above is specific to the turn-append fallback path."""
+        from src.agents.brain import Brain
+
+        t0 = 1_000_000.0
+        event = _make_event("evt-warn-noreset01", status=EventStatus.WAITING_APPROVAL, source="slack")
+        event.slack_channel_id = "C123"
+        event.slack_thread_ts = "111.222"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="request_approval", timestamp=t0)
+        ]
+        await _seed(bb, event)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = t0
+        brain._get_slack_channel = MagicMock(return_value=MagicMock(
+            _app=MagicMock(client=MagicMock(chat_postMessage=AsyncMock()))
+        ))
+
+        past_ttl = t0 + 5401
+        with patch("time.time", return_value=past_ttl):
+            assert await brain._check_chat_staleness(event.id) is True
+
+            await brain._idle_timeout_warn(event.id)
+
+            assert await brain._check_chat_staleness(event.id) is True
