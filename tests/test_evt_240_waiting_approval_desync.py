@@ -584,6 +584,68 @@ class TestApprovalParkUsesApprovalTimeout:
 
 
 # =============================================================================
+# 6b. classify_event's idle-timer re-arm is status-aware (same bug class as
+#     section 6, recurring at a third, unaudited call site).
+# =============================================================================
+
+
+class _FakeClassifyToolContext(_FakeParkToolContext):
+    """_FakeParkToolContext plus the extra surface handle_classify_event needs."""
+
+    def __init__(self, bb: BlackboardState, waiting: bool):
+        super().__init__(bb)
+        self._waiting = waiting
+
+    def is_waiting_for_user(self, event_id: str) -> bool:
+        return self._waiting
+
+
+class TestClassifyEventReArmUsesStatusAwareTimeout:
+
+    @pytest.mark.asyncio
+    async def test_rearm_uses_approval_timeout_when_waiting_approval(self, bb):
+        """Re-triaging a WAITING_APPROVAL event (e.g. reclassify mid-park) must
+        re-arm with get_approval_timeout(), not the short conversation timeout --
+        otherwise the courtesy warning (and its downstream staleness-clock
+        interaction) fires far earlier than the approval park intends."""
+        from src.agents.handlers_state import handle_classify_event
+
+        event = _make_event("evt-classify-rearm01", status=EventStatus.WAITING_APPROVAL, source="chat")
+        await _seed(bb, event)
+        ctx = _FakeClassifyToolContext(bb, waiting=True)
+
+        await handle_classify_event(ctx, event.id, {"domain": "complicated"}, None)
+
+        ctx.idle_timeout.schedule.assert_called_once_with(event.id, warning_sec=5400)
+
+    @pytest.mark.asyncio
+    async def test_rearm_uses_conversation_timeout_when_not_waiting_approval(self, bb):
+        """An ACTIVE event's re-arm (e.g. mid wait_for_user) keeps using the
+        short conversation timeout -- only WAITING_APPROVAL gets the extension."""
+        from src.agents.handlers_state import handle_classify_event
+
+        event = _make_event("evt-classify-rearm02", status=EventStatus.ACTIVE, source="chat")
+        await _seed(bb, event)
+        ctx = _FakeClassifyToolContext(bb, waiting=True)
+
+        await handle_classify_event(ctx, event.id, {"domain": "complicated"}, None)
+
+        ctx.idle_timeout.schedule.assert_called_once_with(event.id, warning_sec=300)
+
+    @pytest.mark.asyncio
+    async def test_no_rearm_when_not_waiting_for_user(self, bb):
+        from src.agents.handlers_state import handle_classify_event
+
+        event = _make_event("evt-classify-rearm03", status=EventStatus.ACTIVE, source="chat")
+        await _seed(bb, event)
+        ctx = _FakeClassifyToolContext(bb, waiting=False)
+
+        await handle_classify_event(ctx, event.id, {"domain": "complicated"}, None)
+
+        ctx.idle_timeout.schedule.assert_not_called()
+
+
+# =============================================================================
 # 7. Emergent interaction: the idle-timeout courtesy warn can reset the
 #    StalenessGuard[chat] clock for non-Slack (dashboard) chat sources.
 #
@@ -607,15 +669,16 @@ class TestApprovalParkUsesApprovalTimeout:
 # =============================================================================
 
 
-class TestApprovalWarnResetsStalenessClock:
+class TestApprovalWarnDoesNotResetStalenessClock:
 
     @pytest.mark.asyncio
-    async def test_warn_turn_resets_staleness_clock_for_chat_source(self, bb):
-        """Baseline: past CHAT_STALE_TTL, the event is correctly flagged stale.
-        After the real _idle_timeout_warn fires (as it does at exactly the
-        IDLE_TIMEOUT_APPROVAL_SEC/CHAT_STALE_TTL boundary by default), the same
-        check flips back to False -- the courtesy warn undid the staleness it
-        was meant to precede."""
+    async def test_warn_turn_does_not_reset_staleness_clock_for_chat_source(self, bb):
+        """Regression (evt-321b0b68 follow-up): past CHAT_STALE_TTL, the event is
+        correctly flagged stale. After the real _idle_timeout_warn fires (as it
+        does at exactly the IDLE_TIMEOUT_APPROVAL_SEC/CHAT_STALE_TTL boundary by
+        default) and appends its fallback courtesy-warning turn, the staleness
+        check must still report True -- the courtesy warning is excluded from
+        the staleness computation and must not undo the staleness it precedes."""
         from src.agents.brain import Brain
 
         t0 = 1_000_000.0
@@ -634,7 +697,7 @@ class TestApprovalWarnResetsStalenessClock:
 
             await brain._idle_timeout_warn(event.id)
 
-            assert await brain._check_chat_staleness(event.id) is False
+            assert await brain._check_chat_staleness(event.id) is True
 
     @pytest.mark.asyncio
     async def test_slack_source_warn_does_not_reset_clock_when_post_succeeds(self, bb):

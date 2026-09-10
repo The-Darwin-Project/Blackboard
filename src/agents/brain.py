@@ -757,10 +757,15 @@ class Brain:
         # Wait-for-user state: event_id -> wait_start_timestamp (serves idle timeout + on-ice threshold)
         self._waiting_for_user: dict[str, float] = {}
         # Idle timeout manager for chat/slack events (warn + auto-close)
-        from ..scheduling.idle_timeout import IdleTimeoutManager
+        from ..scheduling.idle_timeout import IdleTimeoutManager, assert_approval_notice_window
         self._idle_timeout = IdleTimeoutManager(
             warn_callback=self._idle_timeout_warn,
             close_callback=self._idle_timeout_close,
+        )
+        assert_approval_notice_window(
+            _safe_int_env("IDLE_TIMEOUT_APPROVAL_SEC", 5100),
+            self._idle_timeout.close_sec,
+            _safe_int_env("CHAT_STALE_TTL", 5400),
         )
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
@@ -5747,8 +5752,11 @@ class Brain:
         if event.status != EventStatus.WAITING_APPROVAL:
             return False
         ttl = float(os.getenv("CHAT_STALE_TTL", "5400"))
+        # Courtesy idle-timeout warnings are excluded here -- they're an automated
+        # notice, not user activity, and must not reset the clock they precede
+        # (see ConversationTurn.is_courtesy_warning / _idle_timeout_warn).
         last_turn_ts = max(
-            (t.timestamp or 0.0 for t in event.conversation),
+            (t.timestamp or 0.0 for t in event.conversation if not t.is_courtesy_warning),
             default=0.0,
         )
         return (time.time() - last_turn_ts) > ttl if last_turn_ts else False
@@ -5816,6 +5824,7 @@ class Brain:
             actor="brain",
             action="response",
             thoughts=warning_text,
+            is_courtesy_warning=True,
         )
         await self._append_and_broadcast(event_id, turn)
         logger.info(f"Idle timeout warning turn for {event_id}")
@@ -5825,7 +5834,20 @@ class Brain:
         if event_id not in self._waiting_for_user:
             logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
             return
-        event = await self.blackboard.get_event(event_id)
+        try:
+            event = await self.blackboard.get_event(event_id)
+        except Exception as e:
+            # Without this guard, a raised exception here (e.g. Redis timeout)
+            # would propagate to _run_timer's broad except Exception, which only
+            # logs and pops the timer -- silently defeating this timeout as the
+            # sole backstop for wait_for_user (ACTIVE) events. Catch locally,
+            # log with full context, and leave _waiting_for_user untouched so a
+            # later re-arm (e.g. handle_classify_event) can still retry the close.
+            logger.warning(
+                "Idle timeout close: get_event failed for %s, aborting this "
+                "attempt (event left in _waiting_for_user): %s", event_id, e,
+            )
+            return
         if event and event.status == EventStatus.WAITING_APPROVAL:
             # Approval-parked events are owned by StalenessGuard[chat]
             # (CHAT_STALE_TTL, see _check_chat_staleness) once past this short

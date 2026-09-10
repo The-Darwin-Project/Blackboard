@@ -6,6 +6,9 @@
 # 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
 # 5. [Pattern]: EventDocument.slack_* fields and ConversationTurn.source are Optional for backward compat with existing Redis data (pre-Slack events have None).
 # 6. [Pattern]: EventDocument.created_by_email is Optional[str] for backward compat -- existing Redis events deserialize with None.
+# 7. [Pattern]: ConversationTurn.is_courtesy_warning defaults to False for backward compat -- existing Redis
+#    turns deserialize with False. True marks an automated idle-timeout courtesy warning, excluded from
+#    StalenessGuard[chat]'s last-turn-timestamp computation (see Brain._check_chat_staleness).
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -357,6 +360,12 @@ class ConversationTurn(BaseModel):
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
     batch_size: Optional[int] = Field(None, description="Number of parallel FCs in this batch (set on first turn only)")
     batch_index: Optional[int] = Field(None, description="Position in parallel batch (1-based, set on continuation turns)")
+    is_courtesy_warning: bool = Field(
+        default=False,
+        description="True for an automated idle-timeout courtesy warning turn. "
+                     "Excluded from StalenessGuard[chat]'s last-turn-timestamp computation "
+                     "so the courtesy notice itself cannot reset the staleness clock it precedes.",
+    )
 
 
 _PHASE_ALIASES: dict[str, str] = {

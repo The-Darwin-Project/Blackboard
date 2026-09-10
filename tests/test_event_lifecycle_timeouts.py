@@ -254,16 +254,64 @@ class TestApprovalTimeout:
 
 
 # =============================================================================
+# 4b-2. Notice-window invariant: APPROVAL_SEC + CLOSE_SEC < CHAT_STALE_TTL
+# =============================================================================
+
+
+class TestApprovalNoticeWindowInvariant:
+    """assert_approval_notice_window() must fail fast if the three independently
+    configured env vars (IDLE_TIMEOUT_APPROVAL_SEC, IDLE_TIMEOUT_CLOSE_SEC,
+    CHAT_STALE_TTL) drift into a state that inverts the courtesy notice window
+    on WAITING_APPROVAL events (sum > ttl), and warn on the zero-margin boundary
+    (sum == ttl, matching the current production defaults) -- this exact class
+    of drift already caused the evt-321b0b68 QE fast-follow finding (5400s
+    default vs 5100s)."""
+
+    def test_defaults_do_not_raise(self):
+        """Production defaults (5100, 300, 5400) sit exactly on the zero-margin
+        boundary (5100 + 300 == 5400) -- this must not raise (it would break
+        every default-config startup), but it does log a warning flagging the
+        zero margin."""
+        from src.scheduling.idle_timeout import assert_approval_notice_window
+        assert_approval_notice_window(5100, 300, 5400)
+
+    def test_warns_but_does_not_raise_when_sum_equals_ttl(self, caplog):
+        """Boundary case: sum == ttl is a zero-margin race, not an inversion --
+        it must warn, not raise."""
+        from src.scheduling.idle_timeout import assert_approval_notice_window
+        with caplog.at_level("WARNING"):
+            assert_approval_notice_window(5100, 300, 5400)
+        assert "zero margin" in caplog.text
+
+    def test_raises_when_sum_exceeds_ttl(self):
+        from src.scheduling.idle_timeout import assert_approval_notice_window
+        with pytest.raises(ValueError, match="Idle-timeout invariant violated"):
+            assert_approval_notice_window(5400, 300, 5400)
+
+    def test_brain_init_raises_on_misconfigured_env(self):
+        """Brain.__init__ must enforce the invariant at construction time, not
+        just leave it as an unvalidated docstring claim."""
+        from src.agents.brain import Brain
+        with patch.dict("os.environ", {
+            "IDLE_TIMEOUT_APPROVAL_SEC": "5400",
+            "CHAT_STALE_TTL": "5400",
+        }):
+            with pytest.raises(ValueError, match="Idle-timeout invariant violated"):
+                Brain(blackboard=MagicMock(), agents={})
+
+
+# =============================================================================
 # 4c. End-to-end: idle guard defers to StalenessGuard[chat] for real closure
 # =============================================================================
 
 
 class TestApprovalParkSurvivesIdleThenStalenessCloses:
-    """Ties Guard A (IdleTimeoutManager + _idle_timeout_close) and Guard B
-    (_check_chat_staleness / _close_stale_chat_event) together end-to-end, at an
-    accelerated timescale, to prove the actual production sequencing from
-    evt-321b0b68: a WAITING_APPROVAL event survives the short idle-close attempt,
-    and is only closed once by the staleness guard once it is genuinely stale."""
+    """Ties Guard A (IdleTimeoutManager + the real _idle_timeout_warn/_idle_timeout_close)
+    and Guard B (_check_chat_staleness / _close_stale_chat_event) together end-to-end, at
+    an accelerated timescale, to prove the actual production sequencing from
+    evt-321b0b68: a WAITING_APPROVAL event survives the short idle-close attempt, its
+    courtesy warning does not reset StalenessGuard[chat]'s clock, and the event is only
+    closed once by the staleness guard once it is genuinely stale."""
 
     @pytest.mark.asyncio
     async def test_real_timer_skips_close_while_waiting_approval_then_staleness_closes(self):
@@ -281,27 +329,42 @@ class TestApprovalParkSurvivesIdleThenStalenessCloses:
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=event)
         brain._close_and_broadcast = AsyncMock()
+        brain._next_turn_number = AsyncMock(return_value=2)
+
+        async def _append(eid, turn, ev=None):
+            event.conversation.append(turn)
+            return turn.turn
+
+        brain._append_and_broadcast = AsyncMock(side_effect=_append)
 
         # --- Guard A: the real IdleTimeoutManager, driving the real bound
-        # _idle_timeout_close, at a millisecond timescale standing in for the
-        # ~20 minute production warn->close window.
+        # _idle_timeout_warn and _idle_timeout_close, at a millisecond timescale
+        # standing in for the ~20 minute production warn->close window. Using the
+        # real warn callback (not an AsyncMock) exercises the actual fallback
+        # courtesy-warning turn append (event.source == "chat" here), which is
+        # exactly the path that used to reset StalenessGuard[chat]'s clock.
         with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_SEC": "0"}):
             mgr = IdleTimeoutManager(
-                warn_callback=AsyncMock(),
+                warn_callback=lambda eid: Brain._idle_timeout_warn(brain, eid),
                 close_callback=lambda eid: Brain._idle_timeout_close(brain, eid),
             )
         mgr.schedule(event.id, warning_sec=0.01)
         await asyncio.sleep(0.15)
 
-        # The event survived: still WAITING_APPROVAL, never closed, and still
-        # tracked in _waiting_for_user so Guard B can see it.
+        # The courtesy warning fired and appended its turn...
+        brain._append_and_broadcast.assert_awaited_once()
+        assert any(t.is_courtesy_warning for t in event.conversation)
+
+        # ...but the event survived close: still WAITING_APPROVAL, never closed,
+        # and still tracked in _waiting_for_user so Guard B can see it.
         brain._close_and_broadcast.assert_not_awaited()
         assert event.id in brain._waiting_for_user
 
         # --- Guard B: StalenessGuard[chat]'s real check+close pair now takes
         # over, using a tiny CHAT_STALE_TTL to stand in for the ~90 minute
         # production threshold. The pre-seeded conversation turn (1hr old) is
-        # already past it.
+        # already past it -- and, crucially, the just-appended courtesy-warning
+        # turn (timestamped "now") must NOT mask that staleness.
         with patch.dict("os.environ", {"CHAT_STALE_TTL": "1"}):
             is_stale = await Brain._check_chat_staleness(brain, event.id)
         assert is_stale is True

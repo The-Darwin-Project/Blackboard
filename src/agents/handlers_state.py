@@ -405,9 +405,17 @@ async def handle_classify_event(
     if ctx.is_waiting_for_user(event_id):
         event_doc = await bb.get_event(event_id)
         if event_doc and ctx.is_waiting_for_user(event_id):
-            ctx.get_idle_timeout().schedule(
-                event_id, warning_sec=ctx.get_conversation_timeout(event_doc)
+            # Status-aware timeout selection, matching the park sites in
+            # handle_request_user_approval / handle_wait_for_user: a
+            # WAITING_APPROVAL re-arm must use the extended approval timeout,
+            # not the short conversation timeout, or the courtesy warning
+            # fires far earlier than intended (see _get_approval_timeout).
+            timeout = (
+                ctx.get_approval_timeout(event_doc)
+                if event_doc.status == EventStatus.WAITING_APPROVAL
+                else ctx.get_conversation_timeout(event_doc)
             )
+            ctx.get_idle_timeout().schedule(event_id, warning_sec=timeout)
     return True
 
 

@@ -7,6 +7,10 @@
 # 3. [Pattern]: Restart recovery via periodic fallback scan (every 60s) for waiting events without timers.
 # 4. [Gotcha]: cancel() must suppress CancelledError from the timer task.
 # 5. [Gotcha]: Generation counter prevents stale timer callbacks from closing re-scheduled events.
+# 6. [Constraint]: assert_approval_notice_window() must be called (with the resolved
+#    IDLE_TIMEOUT_APPROVAL_SEC/IDLE_TIMEOUT_CLOSE_SEC/CHAT_STALE_TTL) wherever these
+#    three env vars are read together -- see Brain.__init__. It fails fast if the
+#    WAITING_APPROVAL notice-window invariant is violated.
 """
 Idle timeout manager for chat/slack events.
 
@@ -70,6 +74,11 @@ class IdleTimeoutManager:
         task = self._timers.get(event_id)
         return task is not None and not task.done()
 
+    @property
+    def close_sec(self) -> int:
+        """The configured IDLE_TIMEOUT_CLOSE_SEC (courtesy warn->close gap)."""
+        return self._close_sec
+
     def cancel_all(self) -> None:
         """Cancel all active timers (shutdown)."""
         for eid in list(self._timers):
@@ -92,3 +101,40 @@ class IdleTimeoutManager:
             logger.warning("Idle timeout error for %s: %s", event_id, e)
         finally:
             self._timers.pop(event_id, None)
+
+
+def assert_approval_notice_window(approval_sec: int, close_sec: int, chat_stale_ttl: int) -> None:
+    """Enforce the WAITING_APPROVAL notice-window invariant: approval_sec + close_sec < chat_stale_ttl.
+
+    This guarantees the courtesy warn->close attempt on a WAITING_APPROVAL event
+    (skipped by Brain._idle_timeout_close and handed to StalenessGuard[chat])
+    completes with a real notice window before CHAT_STALE_TTL makes the event
+    eligible for staleness closure. Violating it collapses or inverts that
+    window (see _get_approval_timeout / _check_chat_staleness).
+
+    Raises only on a genuine inversion (sum strictly exceeds the TTL) -- the
+    production defaults (5100 + 300 == 5400) land exactly on the boundary,
+    which is a zero-margin race rather than a broken close ordering, so that
+    case is logged as a warning instead of a hard startup failure.
+
+    Raises:
+        ValueError: if approval_sec + close_sec exceeds chat_stale_ttl.
+    """
+    total = approval_sec + close_sec
+    if total > chat_stale_ttl:
+        raise ValueError(
+            "Idle-timeout invariant violated: IDLE_TIMEOUT_APPROVAL_SEC "
+            f"({approval_sec}) + IDLE_TIMEOUT_CLOSE_SEC ({close_sec}) = {total} "
+            f"> CHAT_STALE_TTL ({chat_stale_ttl}). This inverts the WAITING_APPROVAL "
+            "courtesy notice window before StalenessGuard[chat] becomes eligible "
+            "to close -- see Brain._get_approval_timeout."
+        )
+    if total == chat_stale_ttl:
+        logger.warning(
+            "Idle-timeout notice window has zero margin: IDLE_TIMEOUT_APPROVAL_SEC "
+            "(%d) + IDLE_TIMEOUT_CLOSE_SEC (%d) == CHAT_STALE_TTL (%d). The deferred "
+            "idle-close attempt and StalenessGuard[chat]'s eligibility land on the "
+            "same instant. Consider lowering IDLE_TIMEOUT_APPROVAL_SEC/"
+            "IDLE_TIMEOUT_CLOSE_SEC or raising CHAT_STALE_TTL for a real buffer.",
+            approval_sec, close_sec, chat_stale_ttl,
+        )
