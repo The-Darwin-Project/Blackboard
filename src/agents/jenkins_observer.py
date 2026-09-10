@@ -29,9 +29,13 @@
 #     the security-invariant order: redact -> strip pipeline noise -> slice -> sanitize.
 #     _strip_pipeline_annotations is defined in the adapter (wire-format knowledge) but
 #     called here (agents -> adapters is the correct hexagonal direction).
-# 15. [Pattern]: _poll_and_stage() only stages FAILURE/UNSTABLE/ABORTED and truly-missing
-#     jobs (no build at all). A job with result=None but a build_number is in-progress and
-#     must not be staged as a failure signal.
+# 15. [Pattern]: _poll_and_stage() only stages jobs whose Jenkins `result` is in the
+#     operator-configured JENKINS_OBSERVER_TRIGGER_STATES set (default
+#     FAILURE,UNSTABLE,ABORTED,MISSING -- matches the prior hardcoded behavior for
+#     backward compatibility). A job with result=None but a build_number is in-progress and
+#     must not be staged as a failure signal (filtered out before the trigger-state check).
+#     `result is None` (no build at all) maps to the "MISSING" sentinel -- see
+#     _is_triggering_result().
 # 16. [Pattern]: Maintainer escalation list from JENKINS_OBSERVER_MAINTAINERS env CSV,
 #     injected into ci_context.maintainer matching Headhunter's static-source shape.
 # 17. [Constraint]: LLM narrative analysis (from _parse_triage_response) must be passed
@@ -392,6 +396,12 @@ class JenkinsObserver:
             v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
         self._recency_hours = float(os.getenv("JENKINS_OBSERVER_RECENCY_HOURS", "72"))
+        _default_trigger_states = "FAILURE,UNSTABLE,ABORTED,MISSING"
+        self._trigger_states: set[str] = {
+            s.strip().upper()
+            for s in os.getenv("JENKINS_OBSERVER_TRIGGER_STATES", _default_trigger_states).split(",")
+            if s.strip()
+        }
         self._analysis_enabled = _env_flag("JENKINS_OBSERVER_ANALYSIS_ENABLED")
         logger.info(
             "JenkinsObserver: narrative analysis %s (JENKINS_OBSERVER_ANALYSIS_ENABLED)",
@@ -445,8 +455,8 @@ class JenkinsObserver:
 
         self._task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "JenkinsObserver started (interval=%ds, dwell=%ds, views=%s, dry_run=%s)",
-            self._poll_interval, self._dwell_seconds, self._views, self._dry_run,
+            "JenkinsObserver started (interval=%ds, dwell=%ds, views=%s, dry_run=%s, trigger_states=%s)",
+            self._poll_interval, self._dwell_seconds, self._views, self._dry_run, self._trigger_states,
         )
 
     async def _migrate_legacy_pipe_keys(self) -> None:
@@ -583,6 +593,12 @@ class JenkinsObserver:
         await self._process_candidates(groups)
         self._pending_count = await self.blackboard.count_jenkins_pending()
 
+    def _is_triggering_result(self, result: str | None) -> bool:
+        """True if a Jenkins build result should stage a CI-gating signal, per the
+        operator-configured JENKINS_OBSERVER_TRIGGER_STATES set. `result is None`
+        (no build at all) maps to the "MISSING" sentinel for this check."""
+        return (result or "MISSING") in self._trigger_states
+
     async def _poll_and_stage(self) -> None:
         """Phase 1: poll Jenkins views and stage failing/missing jobs.
 
@@ -631,10 +647,7 @@ class JenkinsObserver:
             # Only triggers when a significant portion of the view (>70%) is failing
             # and there are enough jobs for "board-wide" to be meaningful (>= 3)
             active = [j for j in post_recency if not (j.result is None and j.build_number is not None)]
-            failing = [
-                j for j in active
-                if j.result in ("FAILURE", "UNSTABLE", "ABORTED") or j.result is None
-            ]
+            failing = [j for j in active if self._is_triggering_result(j.result)]
             if len(active) >= 3 and len(failing) / len(active) > 0.7:
                 key = f"view-outage:{view}"
                 metadata = {
@@ -653,7 +666,7 @@ class JenkinsObserver:
 
             # Stage each failing/missing job individually
             for job in post_recency:
-                if job.result in ("FAILURE", "UNSTABLE", "ABORTED") or job.result is None:
+                if self._is_triggering_result(job.result):
                     if job.build_number is not None:
                         last_alert = await self.blackboard.get_jenkins_last_alerted_build(job.job_name)
                         if job.build_number <= last_alert:

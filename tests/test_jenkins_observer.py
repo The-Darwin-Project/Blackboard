@@ -1535,6 +1535,94 @@ class TestTV7dBoardRedActiveFloor:
 
 
 # =========================================================================
+# T-V7e: Configurable JENKINS_OBSERVER_TRIGGER_STATES
+# =========================================================================
+
+class TestTV7eConfigurableTriggerStates:
+
+    def test_default_trigger_states_matches_prior_hardcoded_set(self):
+        """Unset JENKINS_OBSERVER_TRIGGER_STATES -> defaults to the prior hardcoded
+        behavior (FAILURE, UNSTABLE, ABORTED, MISSING) for backward compatibility."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+
+        assert obs._trigger_states == {"FAILURE", "UNSTABLE", "ABORTED", "MISSING"}
+
+    async def test_narrowed_trigger_states_only_stages_failure(self):
+        """JENKINS_OBSERVER_TRIGGER_STATES=FAILURE -> an UNSTABLE job is NOT staged
+        while a FAILURE job in the same poll IS staged."""
+        bb = _mock_blackboard()
+
+        jobs = [
+            _make_job_result(job_name="unstable-job", result="UNSTABLE", color="yellow",
+                              timestamp=int(time.time() * 1000)),
+            _make_job_result(job_name="failed-job", result="FAILURE", color="red",
+                              timestamp=int(time.time() * 1000)),
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_TRIGGER_STATES="FAILURE")):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=jobs)
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._skills_si = "test skills"
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert "failed-job" in staged_keys
+        assert "unstable-job" not in staged_keys
+
+    async def test_narrowed_trigger_states_board_red_ratio_excludes_unstable(self):
+        """JENKINS_OBSERVER_TRIGGER_STATES=FAILURE -> a view where most jobs are
+        UNSTABLE (not FAILURE) must NOT trigger board-wide-red, since UNSTABLE no
+        longer counts as 'failing' under the narrowed config. Proves the per-job
+        gate and the board-wide-red ratio share the same check and cannot diverge."""
+        bb = _mock_blackboard()
+
+        jobs = [
+            _make_job_result(
+                job_name=f"job-{i}", result="UNSTABLE", color="yellow",
+                timestamp=int(time.time() * 1000),
+            )
+            for i in range(10)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_TRIGGER_STATES="FAILURE")):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(jobs=jobs)
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+            obs._skills_si = "test skills"
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert not any("view-outage:" in key for key in staged_keys), \
+            f"UNSTABLE jobs should not count as failing under TRIGGER_STATES=FAILURE, got: {staged_keys}"
+        assert len(staged_keys) == 0, \
+            f"UNSTABLE jobs should also not be staged individually, got: {staged_keys}"
+
+
+# =========================================================================
 # T-V13: JOB_METADATA parse - wrapper type
 # =========================================================================
 
