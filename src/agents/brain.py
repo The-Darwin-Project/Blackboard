@@ -205,6 +205,10 @@
 #     broadcasts event_status_changed(status=waiting_approval) after a successful park.
 #     Mirrors the existing NEW->ACTIVE broadcast-at-call-site convention (see #27) so the UI
 #     queue sidebar refreshes on every EVENT_WAITING_APPROVAL transition, not just close (#240).
+# 50. [Constraint]: wait_for_user has no idle-timeout backstop -- it must never auto-close,
+#     regardless of duration. The terminal text-only response branch in _process_with_llm sets
+#     _waiting_for_user but does NOT call self._idle_timeout.schedule(). The idle timeout's
+#     warn/close callbacks are only reachable via request_user_approval's WAITING_APPROVAL park.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -2063,8 +2067,10 @@ class Brain:
             await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
             self._last_processed[event_id] = time.time()
             if event.source in ("slack", "chat"):
+                # No idle-timeout backstop: a terminal text-only response leaves the event
+                # waiting for the user exactly like wait_for_user does, and that state must
+                # never auto-close regardless of duration (see @ai-rules #50).
                 self._waiting_for_user[event_id] = time.time()
-                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
 
         self._reasoning_by_event.pop(event_id, None)
         if accumulated_text or accumulated_thoughts:
@@ -5772,7 +5778,12 @@ class Brain:
         return _safe_int_env("IDLE_TIMEOUT_CONVERSATION_SEC", 900)
 
     async def _idle_timeout_warn(self, event_id: str) -> None:
-        """Send idle timeout warning to user (Slack thread or dashboard turn)."""
+        """Send idle timeout warning to user (Slack thread or dashboard turn).
+
+        Only reachable via a schedule() call, and the only remaining call site is
+        request_user_approval's WAITING_APPROVAL park -- wait_for_user (explicit tool
+        and implicit terminal-text-response parks) never schedules an idle timeout.
+        """
         if event_id not in self._waiting_for_user:
             logger.debug("Idle timeout warn aborted for %s: no longer waiting", event_id)
             return
@@ -5804,7 +5815,12 @@ class Brain:
         logger.info(f"Idle timeout warning turn for {event_id}")
 
     async def _idle_timeout_close(self, event_id: str) -> None:
-        """Auto-close event after idle timeout (with race guard)."""
+        """Auto-close event after idle timeout (with race guard).
+
+        Only reachable via a schedule() call, and the only remaining call site is
+        request_user_approval's WAITING_APPROVAL park -- wait_for_user (explicit tool
+        and implicit terminal-text-response parks) never schedules an idle timeout.
+        """
         if event_id not in self._waiting_for_user:
             logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
             return
