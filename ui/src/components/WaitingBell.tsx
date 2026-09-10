@@ -3,6 +3,8 @@
 // 1. [Pattern]: Polls activeEvents, filters for waiting_approval status, fetches last thoughts per event.
 // 2. [Pattern]: Urgency color escalation: green < 15min, amber < 60min, red > 60min. Shake animation at red.
 // 3. [Constraint]: Dropdown closes on outside click via document listener.
+// 4. [Gotcha]: The "last turn" wait-state check skips trailing is_courtesy_warning turns --
+//    they never set waitingFor, so treating them as the last turn drops the event from the bell.
 /**
  * Notification bell for events waiting on user action (approval or feedback).
  * Shows badge count, color-coded urgency, and shakes after 1 hour.
@@ -45,7 +47,15 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
         try {
           const doc = await getEventDocument(evt.id);
           if (!doc?.conversation?.length) continue;
-          const lastTurn = doc.conversation[doc.conversation.length - 1];
+          // Skip trailing courtesy-warning turns -- they're an automated idle-timeout
+          // notice, not a change in wait state, and never set waitingFor themselves
+          // (see ConversationTurn.is_courtesy_warning). Without this, an event
+          // silently drops off the bell the moment its courtesy warning fires.
+          let lastTurnIdx = doc.conversation.length - 1;
+          while (lastTurnIdx > 0 && doc.conversation[lastTurnIdx].is_courtesy_warning) {
+            lastTurnIdx--;
+          }
+          const lastTurn = doc.conversation[lastTurnIdx];
           if (lastTurn.waitingFor === 'user') {
             waiting.push({
               id: doc.id,

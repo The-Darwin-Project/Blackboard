@@ -286,6 +286,7 @@ export interface ConversationTurn {
   source?: string;
   user_name?: string;
   timestamp: number;
+  is_courtesy_warning?: boolean;
 }
 
 export type EventSource = 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';

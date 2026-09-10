@@ -11,6 +11,7 @@ Unit tests for Event Lifecycle Timeouts:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,6 +45,17 @@ def _make_event(
             ),
         ),
     )
+
+
+def _bind_real_finish_close(brain: MagicMock, brain_cls) -> None:
+    """Bind the real Brain._finish_idle_timeout_close onto a bare MagicMock
+    `brain` -- otherwise `self._finish_idle_timeout_close(...)` inside the
+    real (unbound) `_idle_timeout_close` resolves to an auto-vivified,
+    non-async MagicMock attribute instead of running the actual close/skip
+    decision."""
+    async def _real(event_id, event):
+        return await brain_cls._finish_idle_timeout_close(brain, event_id, event)
+    brain._finish_idle_timeout_close = AsyncMock(side_effect=_real)
 
 
 # =============================================================================
@@ -174,6 +186,7 @@ class TestIdleTimeoutRaceGuard:
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=_make_event(status=EventStatus.ACTIVE))
         brain._close_and_broadcast = AsyncMock()
+        _bind_real_finish_close(brain, Brain)
 
         await Brain._idle_timeout_close(brain, "evt-test")
         brain._close_and_broadcast.assert_awaited_once()
@@ -192,6 +205,7 @@ class TestIdleTimeoutRaceGuard:
             return_value=_make_event(status=EventStatus.WAITING_APPROVAL)
         )
         brain._close_and_broadcast = AsyncMock()
+        _bind_real_finish_close(brain, Brain)
 
         await Brain._idle_timeout_close(brain, "evt-test")
         brain._close_and_broadcast.assert_not_awaited()
@@ -207,10 +221,111 @@ class TestIdleTimeoutRaceGuard:
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=None)
         brain._close_and_broadcast = AsyncMock()
+        _bind_real_finish_close(brain, Brain)
 
         await Brain._idle_timeout_close(brain, "evt-test")
         brain._close_and_broadcast.assert_awaited_once()
         assert "evt-test" not in brain._waiting_for_user
+
+
+# =============================================================================
+# 4a-2. HIGH fix (verification pass #2): get_event failure inside
+#       _idle_timeout_close must actually recover, not just log-and-strand.
+# =============================================================================
+
+
+class TestIdleCloseRetryOnGetEventFailure:
+    """_run_timer's `finally` unconditionally drops the timer once
+    _idle_timeout_close returns, and _scan_active_for_reconcile's idle safety
+    net explicitly requires `not is_waiting` before ever re-enqueueing an
+    event -- so a bare log-and-return on a transient get_event failure
+    permanently strands a wait_for_user event with zero recovery path. The
+    fix must actually re-arm a retry (or otherwise recover), not just log."""
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_schedules_a_retry_instead_of_stranding(self):
+        from src.agents.brain import Brain
+
+        event = _make_event(status=EventStatus.ACTIVE)
+        bb = MagicMock()
+        bb.get_event = AsyncMock(side_effect=[Exception("redis timeout"), event])
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = time.time() - 900
+        brain._close_and_broadcast = AsyncMock()
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            await brain._idle_timeout_close(event.id)
+
+            # First attempt failed -- must not have given up silently: a
+            # retry task is tracked, and the event is still eligible (not
+            # incorrectly popped from _waiting_for_user by the failure path).
+            assert event.id in brain._idle_close_retry_tasks
+            brain._close_and_broadcast.assert_not_awaited()
+            assert event.id in brain._waiting_for_user
+
+            # Let the retry actually run (IDLE_TIMEOUT_CLOSE_RETRY_SEC=0 --
+            # get_event now succeeds per the side_effect list above).
+            await asyncio.wait_for(brain._idle_close_retry_tasks[event.id], timeout=1.0)
+
+        brain._close_and_broadcast.assert_awaited_once()
+        assert event.id not in brain._waiting_for_user
+        assert event.id not in brain._idle_close_retry_tasks
+
+    @pytest.mark.asyncio
+    async def test_persistent_failure_keeps_retrying_without_ever_closing(self):
+        """A sustained outage must not fall back to an unconditional close --
+        we don't know the event's real status, so retrying indefinitely is
+        the safe choice over guessing."""
+        from src.agents.brain import Brain
+
+        bb = MagicMock()
+        bb.get_event = AsyncMock(side_effect=Exception("redis still down"))
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user["evt-down"] = time.time() - 900
+        brain._close_and_broadcast = AsyncMock()
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "0"}):
+            await brain._idle_timeout_close("evt-down")
+            retry_task = brain._idle_close_retry_tasks["evt-down"]
+            # Let the (single, persistent) retry loop spin several times against
+            # the sustained failure -- it must keep retrying, never give up and
+            # force-close on a guess.
+            await asyncio.sleep(0.05)
+
+            assert brain._idle_close_retry_count["evt-down"] >= 2
+            brain._close_and_broadcast.assert_not_awaited()
+            assert "evt-down" in brain._waiting_for_user
+            assert "evt-down" in brain._idle_close_retry_tasks
+            assert not retry_task.done()  # still the same loop, still retrying
+
+            retry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retry_task
+
+    @pytest.mark.asyncio
+    async def test_clear_waiting_cancels_pending_retry(self):
+        """If the user responds (clear_waiting) while a retry is pending, the
+        stale retry task must not be left to fire later against a resolved
+        event."""
+        from src.agents.brain import Brain
+
+        bb = MagicMock()
+        bb.get_event = AsyncMock(side_effect=Exception("still down"))
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user["evt-resolved"] = time.time()
+
+        with patch.dict("os.environ", {"IDLE_TIMEOUT_CLOSE_RETRY_SEC": "60"}):
+            await brain._idle_timeout_close("evt-resolved")
+        assert "evt-resolved" in brain._idle_close_retry_tasks
+        pending_task = brain._idle_close_retry_tasks["evt-resolved"]
+
+        brain.clear_waiting("evt-resolved")
+
+        assert "evt-resolved" not in brain._idle_close_retry_tasks
+        assert "evt-resolved" not in brain._idle_close_retry_count
+        assert pending_task.cancelled() or pending_task.cancel()
 
 
 # =============================================================================
@@ -336,6 +451,7 @@ class TestApprovalParkSurvivesIdleThenStalenessCloses:
             return turn.turn
 
         brain._append_and_broadcast = AsyncMock(side_effect=_append)
+        _bind_real_finish_close(brain, Brain)
 
         # --- Guard A: the real IdleTimeoutManager, driving the real bound
         # _idle_timeout_warn and _idle_timeout_close, at a millisecond timescale

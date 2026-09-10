@@ -466,6 +466,12 @@ class _FakeParkToolContext:
     def get_approval_timeout(self, event) -> int:
         return 5400
 
+    def get_idle_timeout_for(self, event) -> int:
+        """Mirrors Brain._get_idle_timeout_for_event's status-aware branch,
+        using this fake's own distinct sentinels so tests can tell which one
+        a call site actually used."""
+        return self.get_approval_timeout(event) if event.status == EventStatus.WAITING_APPROVAL else self.get_conversation_timeout(event)
+
 
 class TestParkAndResumeBroadcasts:
 
@@ -646,26 +652,33 @@ class TestClassifyEventReArmUsesStatusAwareTimeout:
 
 
 # =============================================================================
-# 7. Emergent interaction: the idle-timeout courtesy warn can reset the
-#    StalenessGuard[chat] clock for non-Slack (dashboard) chat sources.
+# 7. Regression coverage (FIXED): the idle-timeout courtesy warn used to reset
+#    the StalenessGuard[chat] clock for non-Slack (dashboard) chat sources.
 #
-# evt-321b0b68's own risk notes flag that IDLE_TIMEOUT_APPROVAL_SEC and
-# CHAT_STALE_TTL both default to 5400s "so the courtesy warn->close still
-# fires before Guard B". The developer's unit tests mock Brain/ToolContext
-# directly and never exercise the *real* _idle_timeout_warn against a real
-# BlackboardState, so this interaction was never observed: for source="chat"
-# (dashboard, no Slack thread), _idle_timeout_warn appends a real
-# ConversationTurn (timestamped `now`) to the event. _check_chat_staleness
-# computes staleness from the *latest conversation turn timestamp*, not from
-# the original park time. Because the warn fires at t=IDLE_TIMEOUT_APPROVAL_SEC
-# -- exactly the CHAT_STALE_TTL boundary -- it lands at or before Guard B can
-# ever observe staleness, and its own appended turn resets Guard B's clock.
-# Net effect: dashboard-sourced approval parks are not closed at ~90 minutes
-# as the plan's SP describes, but at ~2x that (~180 minutes), because the
-# courtesy warn silently re-arms the staleness window it was supposed to
-# precede. Slack-sourced events are unaffected as long as the Slack
-# chat_postMessage courtesy warn succeeds (it doesn't append a turn) -- but
-# hit the same reset if that post fails and falls back to a turn append.
+# History: evt-321b0b68's own risk notes flagged that IDLE_TIMEOUT_APPROVAL_SEC
+# and CHAT_STALE_TTL both defaulted to 5400s "so the courtesy warn->close still
+# fires before Guard B". The developer's first-pass unit tests mocked
+# Brain/ToolContext directly and never exercised the *real* _idle_timeout_warn
+# against a real BlackboardState, so this interaction went unobserved: for
+# source="chat" (dashboard, no Slack thread), _idle_timeout_warn appended a
+# real ConversationTurn (timestamped `now`) to the event, and
+# _check_chat_staleness computed staleness from the *latest conversation turn
+# timestamp* -- including that courtesy turn -- rather than from the last
+# genuine user/park activity. Because the warn fired at
+# t=IDLE_TIMEOUT_APPROVAL_SEC -- exactly the CHAT_STALE_TTL boundary -- it
+# landed at or before Guard B could ever observe staleness, and its own
+# appended turn reset Guard B's clock. Net effect (pre-fix): dashboard-sourced
+# approval parks were not closed at ~90 minutes as the plan's SP describes,
+# but at ~2x that (~180 minutes), because the courtesy warn silently re-armed
+# the staleness window it was supposed to precede. Slack-sourced events were
+# unaffected as long as the Slack chat_postMessage courtesy warn succeeded (it
+# doesn't append a turn) -- but hit the same reset if that post failed and fell
+# back to a turn append.
+#
+# Fix: ConversationTurn.is_courtesy_warning (models.py) marks the fallback
+# turn _idle_timeout_warn appends; _check_chat_staleness excludes any turn so
+# marked from its last-turn-timestamp computation. The tests below assert the
+# *fixed* behavior directly (staleness clock survives the courtesy warn).
 # =============================================================================
 
 
@@ -728,3 +741,82 @@ class TestApprovalWarnDoesNotResetStalenessClock:
             await brain._idle_timeout_warn(event.id)
 
             assert await brain._check_chat_staleness(event.id) is True
+
+    @pytest.mark.asyncio
+    async def test_slack_source_warn_falls_back_to_turn_when_post_fails(self, bb):
+        """Failure-mode variant of the Slack control case above: a raising
+        chat_postMessage must fall back to the same turn-append path as a
+        dashboard/chat source, and that fallback turn must still not reset
+        StalenessGuard[chat]'s clock for a WAITING_APPROVAL event -- this is
+        the exact combination the PR's own comments called out as sharing the
+        dashboard/chat risk, but that no test exercised until now."""
+        from src.agents.brain import Brain
+
+        t0 = 1_000_000.0
+        event = _make_event("evt-warn-slackfail01", status=EventStatus.WAITING_APPROVAL, source="slack")
+        event.slack_channel_id = "C123"
+        event.slack_thread_ts = "111.222"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="request_approval", timestamp=t0)
+        ]
+        await _seed(bb, event)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = t0
+        brain._get_slack_channel = MagicMock(return_value=MagicMock(
+            _app=MagicMock(client=MagicMock(
+                chat_postMessage=AsyncMock(side_effect=Exception("slack_sdk error: rate_limited"))
+            ))
+        ))
+
+        past_ttl = t0 + 5401
+        with patch("time.time", return_value=past_ttl):
+            assert await brain._check_chat_staleness(event.id) is True
+
+            await brain._idle_timeout_warn(event.id)
+
+            refreshed = await bb.get_event(event.id)
+            assert len(refreshed.conversation) == 2, "fallback turn must be appended when the Slack post raises"
+            assert refreshed.conversation[-1].is_courtesy_warning is True
+
+            assert await brain._check_chat_staleness(event.id) is True
+
+    @pytest.mark.asyncio
+    async def test_wait_for_user_slack_source_warn_falls_back_to_turn_when_post_fails(self, bb):
+        """Same Slack-post-failure fallback, but for a wait_for_user (ACTIVE,
+        not WAITING_APPROVAL) event -- previously untested combination. ACTIVE
+        events aren't covered by StalenessGuard[chat] at all (status gate in
+        _check_chat_staleness), so the risk here isn't a clock reset -- it's
+        simply that this path (wait_for_user + slack + failed post) had zero
+        coverage. Confirms the fallback turn is appended correctly and that
+        _check_chat_staleness correctly stays out of it for ACTIVE events."""
+        from src.agents.brain import Brain
+
+        t0 = 1_000_000.0
+        event = _make_event("evt-warn-slackfail02", status=EventStatus.ACTIVE, source="slack")
+        event.slack_channel_id = "C123"
+        event.slack_thread_ts = "111.222"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="wait", timestamp=t0)
+        ]
+        await _seed(bb, event)
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = t0
+        brain._get_slack_channel = MagicMock(return_value=MagicMock(
+            _app=MagicMock(client=MagicMock(
+                chat_postMessage=AsyncMock(side_effect=Exception("slack_sdk error: rate_limited"))
+            ))
+        ))
+
+        past_ttl = t0 + 5401
+        with patch("time.time", return_value=past_ttl):
+            await brain._idle_timeout_warn(event.id)
+
+            refreshed = await bb.get_event(event.id)
+            assert len(refreshed.conversation) == 2, "fallback turn must be appended when the Slack post raises"
+            assert refreshed.conversation[-1].is_courtesy_warning is True
+
+            # ACTIVE (wait_for_user) events are never subject to StalenessGuard[chat] --
+            # IDLE_TIMEOUT_APPROVAL_SEC / _idle_timeout_close is their sole backstop.
+            assert await brain._check_chat_staleness(event.id) is False
