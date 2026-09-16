@@ -1,22 +1,30 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import Layout from './Layout';
 import { useWSConnection } from '../contexts/WebSocketContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-vi.mock('../contexts/WebSocketContext', () => ({
+vi.mock('../contexts/WebSocketContext', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual as any,
   useWSConnection: vi.fn(),
   useWSReconnect: vi.fn(),
   useWSMessage: vi.fn(),
-}));
+  };
+});
 
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: vi.fn(),
 }));
 
 describe('Layout connection degraded banner', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useAuth).mockReturnValue({
@@ -42,7 +50,7 @@ describe('Layout connection degraded banner', () => {
     );
 
     const retryButton = screen.getByText(/Retry Now/i);
-    expect(retryButton).toBeInTheDocument();
+    expect(retryButton).toBeTruthy();
     
     fireEvent.click(retryButton);
     expect(mockReconnect).toHaveBeenCalledTimes(1);
@@ -62,6 +70,6 @@ describe('Layout connection degraded banner', () => {
       </MemoryRouter></QueryClientProvider>
     );
 
-    expect(screen.queryByText(/Retry Now/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retry Now/i)).toBeNull();
   });
 });

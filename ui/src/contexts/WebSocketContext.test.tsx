@@ -3,6 +3,10 @@ import { render, screen, act, cleanup } from '@testing-library/react';
 import { WebSocketProvider, useWSConnection } from './WebSocketContext';
 import { useAuth } from './AuthContext';
 
+vi.mock('../api/client', () => ({
+  getWSAuthFailureCallback: () => mockLogout,
+}));
+
 vi.mock('./AuthContext', () => ({
   useAuth: vi.fn(),
 }));
@@ -49,7 +53,7 @@ describe('WebSocketContext resilience', () => {
       isAuthenticated: true,
       isLoading: false,
       user: { access_token: 'valid-token' },
-      getWSAuthFailureCallback: () => mockLogout,
+      
       renewToken: mockRenewToken,
       isRenewing: false,
       getAccessToken: () => 'valid-token',
@@ -251,7 +255,7 @@ describe('WebSocketContext resilience', () => {
       isAuthenticated: true,
       isLoading: false,
       user: { access_token: 'valid-token' },
-      getWSAuthFailureCallback: () => mockLogout,
+      
       renewToken: mockRenewToken,
       isRenewing: true, // Changed
     } as any);

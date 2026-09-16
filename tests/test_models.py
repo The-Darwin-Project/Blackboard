@@ -6,7 +6,7 @@
 import json
 
 import pytest
-from src.models import EventDocument, EventInput, HealthResponse
+from src.models import EventDocument, EventInput, HealthResponse, EventEvidence
 
 
 def test_health_response_valid():
@@ -158,17 +158,17 @@ async def test_create_event_without_email_defaults_none():
 def test_event_document_created_by_email_validator():
     """EventDocument.created_by_email validator normalizes whitespace to None."""
     # valid email
-    event = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="user@example.com")
+    event = EventDocument(source="chat", service="general", event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")), created_by_email="user@example.com")
     assert event.created_by_email == "user@example.com"
     
     # whitespace
-    event2 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="   ")
+    event2 = EventDocument(source="chat", service="general", event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")), created_by_email="   ")
     assert event2.created_by_email is None
     
     # empty string
-    event3 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="")
+    event3 = EventDocument(source="chat", service="general", event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")), created_by_email="")
     assert event3.created_by_email is None
     
     # None
-    event4 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email=None)
+    event4 = EventDocument(source="chat", service="general", event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")), created_by_email=None)
     assert event4.created_by_email is None

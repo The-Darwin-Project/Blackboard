@@ -236,7 +236,7 @@ function RenewProbe() {
 describe('AuthContext token renewal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG as any); //
     mockGetUser.mockResolvedValue({ access_token: 'valid-token', profile: { email: 'test@example.com' } });
   });
@@ -254,7 +254,7 @@ describe('AuthContext token renewal', () => {
     );
     
     await waitFor(() => {
-      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+      expect(screen.getByTestId('authed').textContent).toBe('true');
     });
     
     const mgr = (window as any).fakeUserManagerInstance;
@@ -264,9 +264,9 @@ describe('AuthContext token renewal', () => {
       expiredCallback();
     });
     
-    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
-    expect(screen.getByTestId('authed')).toHaveTextContent('true');
-    expect(screen.getByTestId('user')).toHaveTextContent('test@example.com');
+    expect(screen.getByTestId('renewing').textContent).toBe('true');
+    expect(screen.getByTestId('authed').textContent).toBe('true');
+    expect(screen.getByTestId('user').textContent).toBe('test@example.com');
   });
 
   it('onUserLoaded clears isRenewing', async () => {
@@ -277,7 +277,7 @@ describe('AuthContext token renewal', () => {
     );
     
     await waitFor(() => {
-      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+      expect(screen.getByTestId('authed').textContent).toBe('true');
     });
     
     const mgr = (window as any).fakeUserManagerInstance;
@@ -287,12 +287,12 @@ describe('AuthContext token renewal', () => {
     act(() => {
       expiredCallback();
     });
-    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
+    expect(screen.getByTestId('renewing').textContent).toBe('true');
     
     act(() => {
       loadedCallback({ access_token: 'new-token', profile: { email: 'test@example.com' } });
     });
-    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
+    expect(screen.getByTestId('renewing').textContent).toBe('false');
   });
 
   it('onSilentRenewError clears isRenewing and falls back to setUser(null)', async () => {
@@ -303,7 +303,7 @@ describe('AuthContext token renewal', () => {
     );
     
     await waitFor(() => {
-      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+      expect(screen.getByTestId('authed').textContent).toBe('true');
     });
     
     const mgr = (window as any).fakeUserManagerInstance;
@@ -321,9 +321,9 @@ describe('AuthContext token renewal', () => {
       errorCallback(new Error('renew failed'));
     });
     
-    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
-    expect(screen.getByTestId('authed')).toHaveTextContent('false');
-    expect(screen.getByTestId('user')).toHaveTextContent('none');
+    expect(screen.getByTestId('renewing').textContent).toBe('false');
+    expect(screen.getByTestId('authed').textContent).toBe('false');
+    expect(screen.getByTestId('user').textContent).toBe('none');
   });
 
   it('20s safety timeout flips isRenewing back to false', async () => {
@@ -334,7 +334,7 @@ describe('AuthContext token renewal', () => {
     );
     
     await waitFor(() => {
-      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+      expect(screen.getByTestId('authed').textContent).toBe('true');
     });
     
     const mgr = (window as any).fakeUserManagerInstance;
@@ -344,13 +344,13 @@ describe('AuthContext token renewal', () => {
       expiredCallback();
     });
     
-    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
+    expect(screen.getByTestId('renewing').textContent).toBe('true');
     
     await act(async () => {
       vi.advanceTimersByTime(20000);
     });
     
-    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
+    expect(screen.getByTestId('renewing').textContent).toBe('false');
     // Assert getUser was called again as a re-check
     expect(mockGetUser).toHaveBeenCalled();
   });
@@ -363,7 +363,7 @@ describe('AuthContext token renewal', () => {
     );
     
     await waitFor(() => {
-      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+      expect(screen.getByTestId('authed').textContent).toBe('true');
     });
     
     const mgr = (window as any).fakeUserManagerInstance;

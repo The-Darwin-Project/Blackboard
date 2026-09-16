@@ -1,33 +1,39 @@
-from fastapi.testclient import TestClient
-from src.main import app
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
+from src.adapters.dashboard_ws import DashboardWSAdapter
+from src.models import EventDocument, EventInput, EventEvidence
+from src import auth
 
-def test_dashboard_ws_rejects_anonymous_with_4001(monkeypatch):
+@pytest.mark.asyncio
+async def test_dashboard_ws_rejects_anonymous_with_4001(monkeypatch):
     """When auth is enabled and caller is anonymous, WS closes with 4001."""
-    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "DEX_ENABLED", True)
+    monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
     
-    with TestClient(app) as client:
-        from fastapi import WebSocketDisconnect
-        with pytest.raises(WebSocketDisconnect) as exc_info:
-            with client.websocket_connect("/ws") as ws:
-                ws.receive_text()
-        assert exc_info.value.code == 4001
+    mock_brain = MagicMock()
+    mock_blackboard = MagicMock()
+    adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
+    
+    ws = AsyncMock()
+    ws.headers = {}
+    ws.query_params = {}
+    
+    await adapter.websocket_handler(ws)
+    
+    ws.close.assert_called_once_with(code=4001)
 
-def test_dashboard_ws_handle_user_message_unowned_event(monkeypatch):
+@pytest.mark.asyncio
+async def test_dashboard_ws_handle_user_message_unowned_event(monkeypatch):
     """An authenticated operator replying to an unowned event succeeds."""
-    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "DEX_ENABLED", True)
+    monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "operator@example.com", "name": "Op"})
     
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "operator@example.com", "name": "Op"})
-    
-    from src.models import EventDocument, EventInput
     mock_event = EventDocument(
         event_id="evt-123",
-        source="jenkins",
+        source="headhunter",
         service="test",
-        event=EventInput(reason="test"),
+        event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")),
         created_by_email=None,
         status="active"
     )
@@ -36,66 +42,87 @@ def test_dashboard_ws_handle_user_message_unowned_event(monkeypatch):
     mock_blackboard.get_event = AsyncMock(return_value=mock_event)
     mock_blackboard.append_turn = AsyncMock()
     
-    app.state.dashboard_adapter._blackboard = mock_blackboard
+    mock_brain = MagicMock()
     
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws?token=valid-jwt") as ws:
-            ws.send_json({
-                "type": "user_message",
-                "event_id": "evt-123",
-                "message": "I will handle this"
-            })
-            import time
-            time.sleep(0.1)
-            mock_blackboard.append_turn.assert_awaited()
-            
-def test_dashboard_ws_handle_user_message_mismatched_owner(monkeypatch):
+    adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
+    
+    # Simulate connection
+    ws = AsyncMock()
+    ws.headers = {}
+    ws.query_params = {"token": "valid-jwt"}
+    
+    # We need to simulate receive_json yielding our message, then raising disconnect
+    ws.receive_json = AsyncMock(side_effect=[
+        {
+            "type": "user_message",
+            "event_id": "evt-123",
+            "message": "I will handle this"
+        },
+        Exception("disconnect")
+    ])
+    
+    await adapter.websocket_handler(ws)
+    
+    mock_blackboard.append_turn.assert_awaited()
+
+@pytest.mark.asyncio
+async def test_dashboard_ws_handle_user_message_mismatched_owner(monkeypatch):
     """An operator replying to an event owned by someone else is denied."""
-    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "DEX_ENABLED", True)
+    monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "operator@example.com", "name": "Op"})
     
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "operator@example.com", "name": "Op"})
-    
-    from src.models import EventDocument, EventInput
     mock_event = EventDocument(
         event_id="evt-123",
         source="chat",
         service="test",
-        event=EventInput(reason="test"),
+        event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")),
         created_by_email="other@example.com",
         status="active"
     )
     
     mock_blackboard = MagicMock()
     mock_blackboard.get_event = AsyncMock(return_value=mock_event)
-    app.state.dashboard_adapter._blackboard = mock_blackboard
     
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws?token=valid-jwt") as ws:
-            ws.send_json({
-                "type": "user_message",
-                "event_id": "evt-123",
-                "message": "Let me hijack this"
-            })
-            
-            resp = ws.receive_json()
-            assert resp["type"] == "error"
-            assert resp["kind"] == "auth_rejected"
-            assert resp["event_id"] == "evt-123"
-            assert "message" in resp
+    mock_brain = MagicMock()
+    
+    adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
+    
+    ws = AsyncMock()
+    ws.headers = {}
+    ws.query_params = {"token": "valid-jwt"}
+    
+    ws.receive_json = AsyncMock(side_effect=[
+        {
+            "type": "user_message",
+            "event_id": "evt-123",
+            "message": "Let me hijack this"
+        },
+        Exception("disconnect")
+    ])
+    
+    await adapter.websocket_handler(ws)
+    
+    # Assert error was sent
+    ws.send_json.assert_any_call({
+        "type": "error",
+        "kind": "auth_rejected",
+        "event_id": "evt-123",
+        "message": "Not authorized to post to this event"
+    })
 
-def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
+@pytest.mark.asyncio
+async def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
     """_handle_approve has no ownership check today and must NOT gain one."""
-    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "other@example.com", "name": "Op"})
+    monkeypatch.setattr(auth, "DEX_ENABLED", True)
+    monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
     
-    from src.models import EventDocument, EventInput
     mock_event = EventDocument(
         event_id="evt-123",
         source="chat",
         service="test",
-        event=EventInput(reason="test"),
+        event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")),
         created_by_email="owner@example.com",
         status="waiting_approval"
     )
@@ -108,31 +135,36 @@ def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
     mock_brain.resume_if_parked = AsyncMock(return_value=True)
     mock_brain.enqueue_for_processing = MagicMock()
     
-    app.state.dashboard_adapter._blackboard = mock_blackboard
-    app.state.dashboard_adapter._brain = mock_brain
+    adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
     
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws?token=valid-jwt") as ws:
-            ws.send_json({
-                "type": "approve",
-                "event_id": "evt-123"
-            })
-            import time
-            time.sleep(0.1)
-            mock_blackboard.append_turn.assert_awaited()
+    ws = AsyncMock()
+    ws.headers = {}
+    ws.query_params = {"token": "valid-jwt"}
+    
+    ws.receive_json = AsyncMock(side_effect=[
+        {
+            "type": "approve",
+            "event_id": "evt-123"
+        },
+        Exception("disconnect")
+    ])
+    
+    await adapter.websocket_handler(ws)
+    
+    mock_blackboard.append_turn.assert_awaited()
 
-def test_dashboard_ws_handle_emergency_stop_ignores_ownership(monkeypatch):
+@pytest.mark.asyncio
+async def test_dashboard_ws_handle_emergency_stop_ignores_ownership(monkeypatch):
     """_handle_emergency_stop has no ownership check today and must NOT gain one."""
-    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "other@example.com", "name": "Op"})
+    monkeypatch.setattr(auth, "DEX_ENABLED", True)
+    monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
     
-    from src.models import EventDocument, EventInput
     mock_event = EventDocument(
         event_id="evt-123",
         source="chat",
         service="test",
-        event=EventInput(reason="test"),
+        event=EventInput(reason="test", evidence=EventEvidence(display_text="test", source_type="chat", domain="disorder", severity="info")),
         created_by_email="owner@example.com",
         status="active"
     )
@@ -142,17 +174,22 @@ def test_dashboard_ws_handle_emergency_stop_ignores_ownership(monkeypatch):
     mock_blackboard.append_turn = AsyncMock()
     
     mock_brain = MagicMock()
-    mock_brain.cancel_event_tasks = AsyncMock(return_value=1)
+    mock_brain.emergency_stop = AsyncMock(return_value=1)
     
-    app.state.dashboard_adapter._blackboard = mock_blackboard
-    app.state.dashboard_adapter._brain = mock_brain
+    adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
     
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws?token=valid-jwt") as ws:
-            ws.send_json({
-                "type": "emergency_stop",
-                "event_id": "evt-123"
-            })
-            import time
-            time.sleep(0.1)
-            mock_brain.cancel_event_tasks.assert_awaited()
+    ws = AsyncMock()
+    ws.headers = {}
+    ws.query_params = {"token": "valid-jwt"}
+    
+    ws.receive_json = AsyncMock(side_effect=[
+        {
+            "type": "emergency_stop",
+            "event_id": "evt-123"
+        },
+        Exception("disconnect")
+    ])
+    
+    await adapter.websocket_handler(ws)
+    
+    mock_brain.emergency_stop.assert_awaited()

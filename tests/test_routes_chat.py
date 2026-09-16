@@ -212,7 +212,7 @@ async def test_chat_append_unowned_event_with_authenticated_operator(monkeypatch
     """An authenticated operator posting to /chat/ with event_id pointing to an unowned event succeeds."""
     monkeypatch.setattr("src.auth.DEX_ENABLED", True)
     monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "operator@example.com", "name": "Op"})
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "operator@example.com", "name": "Op"})
     
     event = _make_event_document("evt-anon0002", created_by_email=None)
 

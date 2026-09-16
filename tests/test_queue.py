@@ -697,7 +697,7 @@ async def test_headhunter_pending_merges_and_sorts_queued_prs_and_issues():
 async def test_approve_event_ignores_ownership(monkeypatch):
     """approve_event has no ownership check today and must NOT gain one."""
     monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "other@example.com", "name": "Op"})
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
     
     event = _make_event_document("evt-appr0002")
     event.created_by_email = "owner@example.com"
@@ -734,7 +734,7 @@ async def test_approve_event_ignores_ownership(monkeypatch):
 async def test_reject_event_ignores_ownership(monkeypatch):
     """reject_event has no ownership check today and must NOT gain one."""
     monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "other@example.com", "name": "Op"})
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
     
     event = _make_event_document("evt-rej0002")
     event.created_by_email = "owner@example.com"
@@ -772,7 +772,7 @@ async def test_reject_event_ignores_ownership(monkeypatch):
 async def test_close_event_by_user_ignores_ownership(monkeypatch):
     """close_event_by_user has no ownership check today and must NOT gain one."""
     monkeypatch.setattr("src.auth.DEX_ENABLED", True)
-    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "other@example.com", "name": "Op"})
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
     
     event = _make_event_document("evt-close0002")
     event.created_by_email = "owner@example.com"
