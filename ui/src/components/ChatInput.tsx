@@ -4,11 +4,6 @@
 //    threaded through so the REST fallback appends to the selected event instead of creating a new one.
 // 2. [Pattern]: Image paste via clipboard -> resizeImage -> pendingImage state.
 // 3. [Constraint]: wsSend is optional; falls back to useChat REST when not available.
-// 4. [Pattern]: Per-event draft isolation via draftsRef Map<string, string>. On eventId change,
-//    saves current message to the old event's draft and unconditionally sets the new event's draft
-//    (or empty string if none). The save-and-restore runs synchronously in one effect after the
-//    eventId prop commits, so `message` state at that point is provably the stale previous value
-//    (already archived), not new user input — an unconditional setMessage(draft) is correct.
 // 4. [Pattern]: Per-event draft isolation via draftsRef Map<string, Draft>. On eventId change,
 //    saves current message and image to the old event's draft and restores the new event's draft
 //    (or empty if none). The save-and-restore runs synchronously in one effect after eventId commits.

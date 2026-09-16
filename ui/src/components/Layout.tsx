@@ -150,7 +150,7 @@ function LayoutInner() {
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
         {selectedEventId && (
-          <ErrorBoundary fallback={
+          <ErrorBoundary key={selectedEventId} fallback={
             <div className="p-4 text-text-muted text-sm" style={{ width: 500 }}>
               Event panel encountered an error. Try refreshing.
             </div>

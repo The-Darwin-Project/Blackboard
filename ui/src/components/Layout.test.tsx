@@ -20,6 +20,15 @@ vi.mock('../contexts/AuthContext', () => ({
   useAuth: vi.fn(),
 }));
 
+
+vi.mock('./ops/EventChatPanel', () => ({
+  default: ({ eventId }: { eventId: string }) => {
+    if (eventId === 'bad-event') {
+      throw new Error('Simulated panel render crash');
+    }
+    return <div data-testid="chat-panel">Chat for {eventId}</div>;
+  },
+}));
 describe('Layout connection degraded banner', () => {
   afterEach(() => {
     cleanup();
@@ -71,5 +80,37 @@ describe('Layout connection degraded banner', () => {
     );
 
     expect(screen.queryByText(/Retry Now/i)).toBeNull();
+  });
+
+  it('resets ErrorBoundary when selectedEventId changes from crashed event to new event', () => {
+    vi.mocked(useWSConnection).mockReturnValue({
+      connectionDegraded: false,
+      reconnect: vi.fn(),
+    } as any);
+
+    // Suppress console.error from React error boundary during test
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { rerender } = render(
+      <QueryClientProvider client={new QueryClient()}><MemoryRouter>
+        <Layout>
+          <div>content</div>
+        </Layout>
+      </MemoryRouter></QueryClientProvider>
+    );
+
+    // Trigger selectEvent for 'bad-event' via custom event bridge
+    fireEvent(window, new CustomEvent('darwin:selectEvent', { detail: 'bad-event' }));
+
+    expect(screen.getByText(/Event panel encountered an error/i)).toBeTruthy();
+
+    // Now switch to 'good-event' -- key change must reset ErrorBoundary
+    fireEvent(window, new CustomEvent('darwin:selectEvent', { detail: 'good-event' }));
+
+    expect(screen.queryByText(/Event panel encountered an error/i)).toBeNull();
+    expect(screen.getByTestId('chat-panel')).toBeTruthy();
+    expect(screen.getByText('Chat for good-event')).toBeTruthy();
+
+    consoleSpy.mockRestore();
   });
 });
