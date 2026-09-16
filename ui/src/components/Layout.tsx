@@ -17,6 +17,7 @@ import { useEffect, useMemo } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Activity } from 'lucide-react';
 import { OpsControlProvider, useOpsControl } from '../contexts/OpsStateContext';
+import { useWSConnection } from '../contexts/WebSocketContext';
 import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
@@ -44,6 +45,7 @@ function LayoutInner() {
   const navigate = useNavigate();
   const { selectEvent, selectedEventId, deselectEvent } = useOpsControl();
   const { data: config } = useConfig();
+  const { connectionDegraded, reconnect: wsReconnect } = useWSConnection();
 
   const TABS = useMemo(() => {
     const tabs = [...BASE_TABS];
@@ -129,6 +131,20 @@ function LayoutInner() {
           ))}
         </nav>
       </header>
+
+      {/* Degraded connection banner (non-blocking) */}
+      {connectionDegraded && (
+        <div className="flex-shrink-0 bg-yellow-900/40 border-b border-yellow-700/50 px-4 py-1.5 flex items-center gap-3 text-xs text-yellow-200">
+          <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse flex-shrink-0" />
+          <span>Connection lost. Reconnecting…</span>
+          <button
+            onClick={wsReconnect}
+            className="ml-auto px-2 py-0.5 rounded bg-yellow-700/60 hover:bg-yellow-600/60 text-yellow-100 font-medium transition-colors"
+          >
+            Retry Now
+          </button>
+        </div>
+      )}
 
       {/* Body: Sidebar + Chat Panel + Main Content */}
       <div className="flex flex-1 overflow-hidden min-h-0">
