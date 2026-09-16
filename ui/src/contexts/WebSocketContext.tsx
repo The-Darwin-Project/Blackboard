@@ -89,6 +89,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
   // Trusted-proxy 1006 backstop
   const consecutive1006DropsRef = useRef(0);
+  const isMountedRef = useRef(true);
 
   // Mirror auth state/callbacks into refs for stable connect identity
   const { getAccessToken, renewToken, isRenewing: isAuthRenewing } = useAuth();
@@ -108,6 +109,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     if (isRenewingRef.current) return;
     if (isAuthRenewingRef.current) {
       console.log('[WS] Deferring connect -- auth renewal in progress');
+      if (!reconnectTimerRef.current) {
+        reconnectTimerRef.current = setTimeout(() => connectRef.current(), 1000);
+      }
       return;
     }
 
@@ -126,6 +130,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (!isMountedRef.current || wsRef.current !== ws) return;
         isConnectingRef.current = false;
 
         // Clear any pending reconnect timer (prevents double-connect)
@@ -157,6 +162,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         stableTimerRef.current = setTimeout(() => {
           pendingAuthCheckRef.current = false;
           consecutiveAuthRejectionsRef.current = 0;
+          consecutive1006DropsRef.current = 0;
         }, STABLE_CONNECTION_MS);
 
         // Start heartbeat -- detects HAProxy idle drops
@@ -176,6 +182,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onmessage = (event) => {
+        if (!isMountedRef.current || wsRef.current !== ws) return;
         lastMessageTimeRef.current = Date.now();
         // Confirmed healthy traffic -- reset ALL rejection counters
         pendingAuthCheckRef.current = false;
@@ -200,6 +207,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onclose = (event) => {
+        if (!isMountedRef.current || wsRef.current !== ws) return;
         setConnected(false);
         wsRef.current = null;
         isConnectingRef.current = false;
@@ -260,6 +268,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onerror = (err) => {
+        if (!isMountedRef.current || wsRef.current !== ws) return;
         console.error('[WS] Error:', err);
       };
     } catch (e) {
@@ -275,8 +284,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     isRenewingRef.current = true;
     try {
       const result = await renewTokenRef.current();
+      // Reset isRenewingRef BEFORE calling connect so connect entry guard is not tripped
+      isRenewingRef.current = false;
       if (result) {
         // Token refreshed -- reconnect with new token
+        // Token refreshed -- clear backoff timer and reconnect with new token
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
         connectRef.current();
       } else {
         // Renewal failed -- surface degraded, don't logout
@@ -284,6 +300,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setReconnecting(true);
         const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
         reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
+        if (!reconnectTimerRef.current) {
+          const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
+          reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
+        }
       }
     } finally {
       isRenewingRef.current = false;
@@ -293,6 +313,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     connect();
     return () => {
+      isMountedRef.current = false;
       if (heartbeatRef.current) {
         clearInterval(heartbeatRef.current);
         heartbeatRef.current = null;
@@ -306,7 +327,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         stableTimerRef.current = null;
       }
       if (wsRef.current) {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, [connect]);
@@ -347,8 +373,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onclose = null;
       wsRef.current.close();
+      wsRef.current = null;
     }
+    isConnectingRef.current = false;
     connectRef.current();
   }, []);
 

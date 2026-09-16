@@ -151,6 +151,7 @@ function LayoutInner() {
         <EventSidebar />
         {selectedEventId && (
           <ErrorBoundary key={selectedEventId} fallback={
+          <ErrorBoundary fallback={
             <div className="p-4 text-text-muted text-sm" style={{ width: 500 }}>
               Event panel encountered an error. Try refreshing.
             </div>

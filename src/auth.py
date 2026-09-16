@@ -220,6 +220,13 @@ async def require_obs_admin(request: Request) -> UserContext:
 # =============================================================================
 
 
+def _normalize_email(email: str | None) -> str | None:
+    if not email or not isinstance(email, str):
+        return None
+    s = email.strip().lower()
+    return s if s else None
+
+
 def can_append_message(
     created_by_email: str | None,
     user_email: str | None,
@@ -243,10 +250,16 @@ def can_append_message(
 
     if created_by_email is not None:
         return created_by_email == user_email
+    norm_created = _normalize_email(created_by_email)
+    norm_user = _normalize_email(user_email)
+
+    if norm_created is not None:
+        return norm_created == norm_user
 
     # Unowned / automated event
     if auth_enabled:
         return bool(user_email)
+        return norm_user is not None
     return True
 
 
@@ -263,5 +276,9 @@ def can_override_domain(
     Pure boolean -- zero side effects, zero logging.
     """
     if created_by_email is None:
+    norm_created = _normalize_email(created_by_email)
+    norm_user = _normalize_email(user_email)
+    if norm_created is None:
         return False
     return created_by_email == user_email
+    return norm_created == norm_user

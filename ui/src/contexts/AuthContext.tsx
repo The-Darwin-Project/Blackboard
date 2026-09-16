@@ -67,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [postLoginRedirect, setPostLoginRedirect] = useState('/');
   const renewalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const renewingRef = useRef(false);
+  const silentRenewPromiseRef = useRef<Promise<User | null> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +210,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (renewingRef.current) {
       console.log('[Auth] renewToken: already renewing, waiting for completion');
       return _userManager.getUser();
+    if (silentRenewPromiseRef.current) {
+      console.log('[Auth] renewToken: already renewing, awaiting in-flight promise');
+      return silentRenewPromiseRef.current;
     }
     try {
       renewingRef.current = true;
@@ -222,6 +226,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsRenewing(false);
       return null;
     }
+    const promise = (async () => {
+      try {
+        renewingRef.current = true;
+        setIsRenewing(true);
+        const u = await _userManager!.signinSilent();
+        return u;
+      } catch (err) {
+        console.error('[Auth] Manual renewToken failed:', err);
+        return null;
+      } finally {
+        renewingRef.current = false;
+        setIsRenewing(false);
+        silentRenewPromiseRef.current = null;
+      }
+    })();
+    silentRenewPromiseRef.current = promise;
+    return promise;
   }, []);
 
   useEffect(() => {
@@ -230,6 +251,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const onUnauthorized = useCallback(() => {
     if (user?.expired) logout();
+    if (user?.expired && !renewingRef.current) {
+      console.warn('[Auth] Token expired and no renewal in flight -- triggering logout');
+      logout();
+    }
   }, [user, logout]);
 
   useEffect(() => {
@@ -245,6 +270,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({
     user,
     isAuthenticated: !!user && !user.expired,
+    isAuthenticated: !!user && (!user.expired || isRenewing),
     isLoading,
     isRenewing,
     authConfig,

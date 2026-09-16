@@ -9,19 +9,40 @@
 //    (or empty string if none). The save-and-restore runs synchronously in one effect after the
 //    eventId prop commits, so `message` state at that point is provably the stale previous value
 //    (already archived), not new user input — an unconditional setMessage(draft) is correct.
+// 4. [Pattern]: Per-event draft isolation via draftsRef Map<string, Draft>. On eventId change,
+//    saves current message and image to the old event's draft and restores the new event's draft
+//    (or empty if none). The save-and-restore runs synchronously in one effect after eventId commits.
+// 5. [Pattern]: Step 9 resilience -- captures lastSubmissionRef on send, listens to WS error envelopes
+//    via useWSMessage, restores draft non-clobbering on error, and renders dismissible alert banner.
 /**
  * Event-aware chat input with image paste support.
+ * Event-aware chat input with image paste support and resilient error feedback.
  * Handles both "reply to event" (WS) and "create new event" (REST) modes.
  */
 import { useState, useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
 import { Send, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback, type FormEvent, type KeyboardEvent } from 'react';
+import { Send, Loader2, AlertCircle, X } from 'lucide-react';
 import { useChat } from '../hooks';
 import { useResizablePanel } from '../hooks/useResizablePanel';
 import { resizeImage } from '../utils/imageResize';
+import { useWSMessage } from '../contexts/WebSocketContext';
 
 interface ChatInputProps {
   eventId?: string | null;
   wsSend?: (msg: object) => void;
+}
+
+interface Draft {
+  text: string;
+  image: string | null;
+}
+
+interface LastSubmission {
+  text: string;
+  image: string | null;
+  eventId: string | null;
+  timestamp: number;
 }
 
 const MIN_INPUT_HEIGHT = 80;
@@ -31,9 +52,12 @@ const DEFAULT_INPUT_HEIGHT = 120;
 function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { sendMessage, isPending } = useChat(wsSend);
   const draftsRef = useRef<Map<string, string>>(new Map());
+  const draftsRef = useRef<Map<string, Draft>>(new Map());
   const prevEventIdRef = useRef<string | null | undefined>(eventId);
+  const lastSubmissionRef = useRef<LastSubmission | null>(null);
 
   // Per-event draft isolation: save draft for old event, restore for new event
   useEffect(() => {
@@ -41,10 +65,13 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
     if (prevId === eventId) return;
 
     // Save current message as draft for the previous event
+    // Save current message & image as draft for the previous event
     if (prevId) {
       const currentMsg = message.trim();
       if (currentMsg) {
         draftsRef.current.set(prevId, currentMsg);
+      if (currentMsg || pendingImage) {
+        draftsRef.current.set(prevId, { text: currentMsg, image: pendingImage });
       } else {
         draftsRef.current.delete(prevId);
       }
@@ -55,8 +82,33 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
     // previous-event value we just archived above, not new user input.
     const draft = eventId ? (draftsRef.current.get(eventId) ?? '') : '';
     setMessage(draft);
+    // Restore draft for the new event (or empty if no draft saved)
+    const draft = eventId ? draftsRef.current.get(eventId) : null;
+    setMessage(draft?.text ?? '');
+    setPendingImage(draft?.image ?? null);
+    setErrorMessage(null);
     prevEventIdRef.current = eventId;
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message read intentionally excluded
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message & pendingImage read intentionally excluded
+
+  // Listen for WS error envelopes (Step 9)
+  useWSMessage(useCallback((msg) => {
+    if (msg.type !== 'error') return;
+    // Guard by event_id if present
+    if (msg.event_id && msg.event_id !== eventId) return;
+
+    console.warn('[ChatInput] Received error envelope:', msg);
+    const errText = typeof msg.message === 'string' ? msg.message : 'Message rejected by server';
+    setErrorMessage(errText);
+
+    // Non-clobbering draft restore from lastSubmissionRef
+    const lastSub = lastSubmissionRef.current;
+    if (lastSub && (!lastSub.eventId || lastSub.eventId === eventId)) {
+      setMessage((cur) => cur.trim() ? cur : lastSub.text);
+      setPendingImage((cur) => cur ? cur : lastSub.image);
+    }
+  }, [eventId]));
+
   const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel<HTMLFormElement>({
     direction: 'vertical', min: MIN_INPUT_HEIGHT, max: MAX_INPUT_HEIGHT, defaultSize: DEFAULT_INPUT_HEIGHT,
   });
@@ -64,15 +116,34 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!message.trim() && !pendingImage) return;
+    const trimmed = message.trim();
+    if (!trimmed && !pendingImage) return;
+
+    // Record last submission for potential rollback on WS error
+    lastSubmissionRef.current = {
+      text: trimmed,
+      image: pendingImage,
+      eventId: eventId || null,
+      timestamp: Date.now(),
+    };
+
+    // Clear saved draft for this event upon submission
+    if (eventId) {
+      draftsRef.current.delete(eventId);
+    }
+    setErrorMessage(null);
+
     if (eventId && wsSend) {
       wsSend({
         type: 'user_message',
         event_id: eventId,
         message: message.trim(),
+        message: trimmed,
         ...(pendingImage ? { image: pendingImage } : {}),
       });
     } else {
       sendMessage(message.trim(), undefined, pendingImage || undefined, eventId || undefined);
+      sendMessage(trimmed, undefined, pendingImage || undefined, eventId || undefined);
     }
     setMessage('');
     setPendingImage(null);
@@ -113,6 +184,29 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
       </div>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '6px 12px 12px' }}>
+        {/* Error Alert Banner */}
+        {errorMessage && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '6px 10px', marginBottom: 6, borderRadius: 6,
+            background: '#ef444415', border: '1px solid #ef444440',
+            color: '#f87171', fontSize: 12, flexShrink: 0,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span className="truncate">{errorMessage}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setErrorMessage(null)}
+              style={{ background: 'transparent', border: 'none', color: '#f87171', cursor: 'pointer', padding: '0 4px', display: 'flex', alignItems: 'center' }}
+              aria-label="Dismiss error"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Event context indicator */}
         {eventId && (
           <div style={{

@@ -92,6 +92,10 @@ class DashboardWSAdapter:
         if self._auth_enabled and user.user_id == "anonymous":
             logger.warning("[Audit] WS auth rejected: anonymous user")
             await websocket.close(code=4001)
+            try:
+                await websocket.close(code=4001)
+            except (WebSocketDisconnect, RuntimeError):
+                pass
             return
 
         self._clients.add(websocket)
@@ -177,6 +181,10 @@ class DashboardWSAdapter:
             return
         event = await self._blackboard.get_event(event_id)
         if not event:
+            await ws.send_json({
+                "type": "error", "kind": "not_found",
+                "event_id": event_id, "message": f"Event {event_id} not found",
+            })
             return
         if not can_append_message(event.created_by_email, user.email, auth_enabled=self._auth_enabled):
             logger.warning(
