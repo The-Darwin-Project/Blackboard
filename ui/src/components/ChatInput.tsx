@@ -4,11 +4,14 @@
 //    threaded through so the REST fallback appends to the selected event instead of creating a new one.
 // 2. [Pattern]: Image paste via clipboard -> resizeImage -> pendingImage state.
 // 3. [Constraint]: wsSend is optional; falls back to useChat REST when not available.
+// 4. [Pattern]: Per-event draft isolation via draftsRef Map<string, string>. On eventId change,
+//    saves current message to the old event's draft and restores the new event's draft using
+//    functional updater setMessage(curr => curr.trim() ? curr : draft) to never clobber in-flight typing.
 /**
  * Event-aware chat input with image paste support.
  * Handles both "reply to event" (WS) and "create new event" (REST) modes.
  */
-import { useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { useChat } from '../hooks';
 import { useResizablePanel } from '../hooks/useResizablePanel';
@@ -27,6 +30,29 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const { sendMessage, isPending } = useChat(wsSend);
+  const draftsRef = useRef<Map<string, string>>(new Map());
+  const prevEventIdRef = useRef<string | null | undefined>(eventId);
+
+  // Per-event draft isolation: save draft for old event, restore for new event
+  useEffect(() => {
+    const prevId = prevEventIdRef.current;
+    if (prevId === eventId) return;
+
+    // Save current message as draft for the previous event
+    if (prevId) {
+      const currentMsg = message.trim();
+      if (currentMsg) {
+        draftsRef.current.set(prevId, currentMsg);
+      } else {
+        draftsRef.current.delete(prevId);
+      }
+    }
+
+    // Restore draft for the new event (functional updater: never clobber in-flight typing)
+    const draft = eventId ? (draftsRef.current.get(eventId) ?? '') : '';
+    setMessage(curr => curr.trim() ? curr : draft);
+    prevEventIdRef.current = eventId;
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message read intentionally excluded
   const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel<HTMLFormElement>({
     direction: 'vertical', min: MIN_INPUT_HEIGHT, max: MAX_INPUT_HEIGHT, defaultSize: DEFAULT_INPUT_HEIGHT,
   });
