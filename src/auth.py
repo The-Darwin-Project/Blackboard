@@ -248,8 +248,6 @@ def can_append_message(
     if auth_enabled is None:
         auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
 
-    if created_by_email is not None:
-        return created_by_email == user_email
     norm_created = _normalize_email(created_by_email)
     norm_user = _normalize_email(user_email)
 
@@ -258,7 +256,6 @@ def can_append_message(
 
     # Unowned / automated event
     if auth_enabled:
-        return bool(user_email)
         return norm_user is not None
     return True
 
@@ -275,10 +272,8 @@ def can_override_domain(
 
     Pure boolean -- zero side effects, zero logging.
     """
-    if created_by_email is None:
     norm_created = _normalize_email(created_by_email)
     norm_user = _normalize_email(user_email)
     if norm_created is None:
         return False
-    return created_by_email == user_email
     return norm_created == norm_user

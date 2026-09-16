@@ -287,7 +287,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // Reset isRenewingRef BEFORE calling connect so connect entry guard is not tripped
       isRenewingRef.current = false;
       if (result) {
-        // Token refreshed -- reconnect with new token
         // Token refreshed -- clear backoff timer and reconnect with new token
         if (reconnectTimerRef.current) {
           clearTimeout(reconnectTimerRef.current);
@@ -298,8 +297,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         // Renewal failed -- surface degraded, don't logout
         setConnectionDegraded(true);
         setReconnecting(true);
-        const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
-        reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
         if (!reconnectTimerRef.current) {
           const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
           reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);

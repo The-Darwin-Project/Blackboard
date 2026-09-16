@@ -91,7 +91,6 @@ class DashboardWSAdapter:
 
         if self._auth_enabled and user.user_id == "anonymous":
             logger.warning("[Audit] WS auth rejected: anonymous user")
-            await websocket.close(code=4001)
             try:
                 await websocket.close(code=4001)
             except (WebSocketDisconnect, RuntimeError):

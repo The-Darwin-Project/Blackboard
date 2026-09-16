@@ -15,12 +15,9 @@
 // 5. [Pattern]: Step 9 resilience -- captures lastSubmissionRef on send, listens to WS error envelopes
 //    via useWSMessage, restores draft non-clobbering on error, and renders dismissible alert banner.
 /**
- * Event-aware chat input with image paste support.
  * Event-aware chat input with image paste support and resilient error feedback.
  * Handles both "reply to event" (WS) and "create new event" (REST) modes.
  */
-import { useState, useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
-import { Send, Loader2 } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback, type FormEvent, type KeyboardEvent } from 'react';
 import { Send, Loader2, AlertCircle, X } from 'lucide-react';
 import { useChat } from '../hooks';
@@ -54,7 +51,6 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { sendMessage, isPending } = useChat(wsSend);
-  const draftsRef = useRef<Map<string, string>>(new Map());
   const draftsRef = useRef<Map<string, Draft>>(new Map());
   const prevEventIdRef = useRef<string | null | undefined>(eventId);
   const lastSubmissionRef = useRef<LastSubmission | null>(null);
@@ -64,12 +60,9 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
     const prevId = prevEventIdRef.current;
     if (prevId === eventId) return;
 
-    // Save current message as draft for the previous event
     // Save current message & image as draft for the previous event
     if (prevId) {
       const currentMsg = message.trim();
-      if (currentMsg) {
-        draftsRef.current.set(prevId, currentMsg);
       if (currentMsg || pendingImage) {
         draftsRef.current.set(prevId, { text: currentMsg, image: pendingImage });
       } else {
@@ -77,18 +70,12 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
       }
     }
 
-    // Restore draft for the new event (or empty if no draft saved).
-    // Unconditional set is correct: at effect-run time, message state is provably the stale
-    // previous-event value we just archived above, not new user input.
-    const draft = eventId ? (draftsRef.current.get(eventId) ?? '') : '';
-    setMessage(draft);
     // Restore draft for the new event (or empty if no draft saved)
     const draft = eventId ? draftsRef.current.get(eventId) : null;
     setMessage(draft?.text ?? '');
     setPendingImage(draft?.image ?? null);
     setErrorMessage(null);
     prevEventIdRef.current = eventId;
-  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message read intentionally excluded
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message & pendingImage read intentionally excluded
 
   // Listen for WS error envelopes (Step 9)
@@ -115,7 +102,6 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!message.trim() && !pendingImage) return;
     const trimmed = message.trim();
     if (!trimmed && !pendingImage) return;
 
@@ -137,12 +123,10 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
       wsSend({
         type: 'user_message',
         event_id: eventId,
-        message: message.trim(),
         message: trimmed,
         ...(pendingImage ? { image: pendingImage } : {}),
       });
     } else {
-      sendMessage(message.trim(), undefined, pendingImage || undefined, eventId || undefined);
       sendMessage(trimmed, undefined, pendingImage || undefined, eventId || undefined);
     }
     setMessage('');

@@ -206,25 +206,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const renewToken = useCallback(async (): Promise<User | null> => {
     if (!_userManager) return null;
-    // Dedup against an in-flight automaticSilentRenew
-    if (renewingRef.current) {
-      console.log('[Auth] renewToken: already renewing, waiting for completion');
-      return _userManager.getUser();
     if (silentRenewPromiseRef.current) {
       console.log('[Auth] renewToken: already renewing, awaiting in-flight promise');
       return silentRenewPromiseRef.current;
-    }
-    try {
-      renewingRef.current = true;
-      setIsRenewing(true);
-      const u = await _userManager.signinSilent();
-      // onUserLoaded will fire and clear isRenewing
-      return u;
-    } catch (err) {
-      console.error('[Auth] Manual renewToken failed:', err);
-      renewingRef.current = false;
-      setIsRenewing(false);
-      return null;
     }
     const promise = (async () => {
       try {
@@ -250,7 +234,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [getAccessToken]);
 
   const onUnauthorized = useCallback(() => {
-    if (user?.expired) logout();
     if (user?.expired && !renewingRef.current) {
       console.warn('[Auth] Token expired and no renewal in flight -- triggering logout');
       logout();
@@ -269,7 +252,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({
     user,
-    isAuthenticated: !!user && !user.expired,
     isAuthenticated: !!user && (!user.expired || isRenewing),
     isLoading,
     isRenewing,
