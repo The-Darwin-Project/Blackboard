@@ -132,8 +132,10 @@ class TestAdapterFailClosed:
 
         await adapter.websocket_handler(ws)
 
+        # ASGI fix: accept() is called FIRST so close(4001) transmits a real
+        # WS Close Frame (pre-accept close = HTTP 403 / code 1006, never 4001).
+        ws.accept.assert_called_once()
         ws.close.assert_called_once_with(code=4001)
-        ws.accept.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_adapter_accepts_valid_trusted_proxy(self, monkeypatch):
@@ -158,3 +160,99 @@ class TestAdapterFailClosed:
 
         ws.accept.assert_called_once()
         ws.close.assert_not_called()
+
+class TestAuthPredicates:
+    """Tests for pure auth predicates can_append_message and can_override_domain."""
+
+    def test_can_append_message_owned_matching(self):
+        assert auth.can_append_message("user@example.com", "user@example.com") is True
+
+    def test_can_append_message_owned_mismatched(self):
+        assert auth.can_append_message("owner@example.com", "other@example.com") is False
+
+    def test_can_append_message_owned_no_user(self):
+        assert auth.can_append_message("owner@example.com", None) is False
+
+    def test_can_append_message_unowned_auth_enabled_with_user(self):
+        assert auth.can_append_message(None, "user@example.com", auth_enabled=True) is True
+
+    def test_can_append_message_unowned_auth_enabled_no_user(self):
+        assert auth.can_append_message(None, None, auth_enabled=True) is False
+        assert auth.can_append_message(None, "", auth_enabled=True) is False
+
+    def test_can_append_message_unowned_auth_disabled(self):
+        assert auth.can_append_message(None, "user@example.com", auth_enabled=False) is True
+        assert auth.can_append_message(None, None, auth_enabled=False) is True
+
+    def test_can_append_message_auth_enabled_fallback(self, monkeypatch):
+        monkeypatch.setattr(auth, "DEX_ENABLED", True)
+        monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+        assert auth.can_append_message(None, "user@example.com", auth_enabled=None) is True
+
+        monkeypatch.setattr(auth, "DEX_ENABLED", False)
+        monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", True)
+        assert auth.can_append_message(None, "user@example.com", auth_enabled=None) is True
+
+        monkeypatch.setattr(auth, "DEX_ENABLED", False)
+        monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+        # auth disabled -> True even with no user
+        assert auth.can_append_message(None, None, auth_enabled=None) is True
+
+    def test_can_append_message_no_side_effects(self, caplog):
+        import logging
+        with caplog.at_level(logging.DEBUG):
+            auth.can_append_message(None, "user@example.com", auth_enabled=True)
+            auth.can_append_message("owner@example.com", "other@example.com", auth_enabled=True)
+        assert len(caplog.records) == 0
+
+    def test_can_override_domain_owned_matching(self):
+        assert auth.can_override_domain("user@example.com", "user@example.com") is True
+
+    def test_can_override_domain_owned_mismatched(self):
+        assert auth.can_override_domain("owner@example.com", "other@example.com") is False
+
+    def test_can_override_domain_unowned_always_false(self):
+        assert auth.can_override_domain(None, "user@example.com") is False
+        assert auth.can_override_domain(None, None) is False
+
+
+class TestNormalizeEmail:
+    """Tests for auth._normalize_email -- case-folding and whitespace-stripping.
+
+    Existing can_append_message/can_override_domain tests above only ever pass
+    already-lowercased, unpadded emails, so they never actually exercise
+    _normalize_email's transformation behavior (only its None/empty short-circuits
+    indirectly). These tests hit the function directly with mixed-case and
+    padded input, matching what a real OIDC `email` claim or user-typed address
+    can look like.
+    """
+
+    def test_lowercases_mixed_case_email(self):
+        assert auth._normalize_email("User@Example.COM") == "user@example.com"
+
+    def test_strips_surrounding_whitespace(self):
+        assert auth._normalize_email("  user@example.com  ") == "user@example.com"
+
+    def test_strips_and_lowercases_together(self):
+        assert auth._normalize_email("  User@Example.COM\n") == "user@example.com"
+
+    def test_none_returns_none(self):
+        assert auth._normalize_email(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert auth._normalize_email("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert auth._normalize_email("   ") is None
+
+    def test_non_string_input_returns_none(self):
+        assert auth._normalize_email(12345) is None  # type: ignore[arg-type]
+
+    def test_can_override_domain_matches_despite_case_and_whitespace_differences(self):
+        """End-to-end: a predicate consumer must not require pre-normalized input --
+        an owner email stored as-typed and a caller email from a JWT claim with
+        different case/whitespace must still be treated as the same identity."""
+        assert auth.can_override_domain("Dev@RedHat.com", "  dev@redhat.com  ") is True
+
+    def test_can_append_message_matches_despite_case_and_whitespace_differences(self):
+        assert auth.can_append_message(" Dev@RedHat.com ", "dev@redhat.com") is True

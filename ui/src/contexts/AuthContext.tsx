@@ -3,50 +3,45 @@
 // 1. [Pattern]: Fetches /config to discover auth settings. No hardcoded Dex URLs.
 // 2. [Pattern]: When auth.enabled=false, isLoading resolves immediately, no login gate.
 // 3. [Constraint]: Tokens stored in sessionStorage via oidc-client-ts (survives refresh, cleared on tab close).
-// 4. [Pattern]: Three-layer defense-in-depth for token expiry (auto-redirects to LoginPage on expiry):
-//    Layer 1 (OIDC events): addAccessTokenExpired/addSilentRenewError → setUser(null) → AuthGate shows LoginPage.
-//    Layer 2 (401 interceptor): fetchApi 401 → onUnauthorized → logout() (only when user.expired, guards silent-renew race).
+// 4. [Pattern]: Three-layer defense-in-depth for token expiry:
+//    Layer 1 (OIDC events): addAccessTokenExpired sets isRenewing=true WITHOUT nulling user.
+//      Only addSilentRenewError (genuinely dead token) or confirmed 401 terminates session.
+//    Layer 2 (401 interceptor): fetchApi 401 → onUnauthorized → logout() (only when user.expired).
 //    Layer 3 (WS 4001): server rejects WS → getWSAuthFailureCallback → logout() (full IdP session cleanup).
-// 5. [Design]: Layer 1 uses setUser(null) instead of logout()/signoutRedirect(). Both show LoginPage via AuthGate.
-//    setUser(null) is preferred because: (a) no network round-trip to Dex during expiry, (b) avoids redirect
-//    mid-render, (c) if Dex session is still alive the user re-authenticates quickly on next login click.
-//    Full IdP session cleanup (signoutRedirect) is handled by Layer 3 and the manual logout button.
-// 6. [Design]: Layer 2 gates logout() on user?.expired to prevent false logout during in-flight silent renew.
-//    Edge case: server-side token revocation while client TTL says "not expired" → user stays on broken session
-//    until Layer 1 TTL fires or Layer 3 WS 4001 catches it. Accepted: false logout during renewal is worse.
-// 7. [Design]: sanitizeRedirectTarget validates via URL parsing + strict origin comparison rather than a
-//    prefix blocklist, because prefix checks are brittle against parser-differential bypasses (backslash
-//    tricks, control-char normalization). A bare non-'/'-prefixed raw value (e.g. "dashboard") is
-//    intentionally resolved to a same-origin absolute path ("/dashboard") rather than rejected — the
-//    origin check is the security boundary, not the leading slash. Do not simplify this back to a prefix
-//    check. `url.pathname` has its leading slashes collapsed to one before reuse: an absolute same-origin
-//    input whose path itself starts with "//" (e.g. https://<app-origin>//evil.com) would otherwise
-//    reconstruct to a protocol-relative payload despite passing the origin check.
-import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
+// 5. [Design]: 20s safety timeout prevents permanent isRenewing=true if IdP iframe hangs.
+// 6. [Design]: renewToken() is exported for manual silent renewal (dedup'd against automaticSilentRenew).
+// 7. [Design]: isRenewing cleared on BOTH addUserLoaded (happy path) and addSilentRenewError (failure path).
+// 8. [Design]: sanitizeRedirectTarget validates via URL parsing + strict origin comparison rather than a
+//    prefix blocklist, because prefix checks are brittle against parser-differential bypasses.
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { UserManager, User, WebStorageStateStore } from 'oidc-client-ts';
 import { getConfig, setTokenGetter, setOnUnauthorized, setWSAuthFailureCallback } from '../api/client';
 import type { AuthConfig } from '../api/types';
 
-interface AuthState {
+export interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isRenewing: boolean;
   authConfig: AuthConfig | null;
   postLoginRedirect: string;
   login: () => void;
   logout: () => void;
   getAccessToken: () => string | null;
+  renewToken: () => Promise<User | null>;
 }
 
 const AuthContext = createContext<AuthState>({
   user: null,
   isAuthenticated: false,
   isLoading: true,
+  isRenewing: false,
   authConfig: null,
   postLoginRedirect: '/',
   login: () => {},
   logout: () => {},
   getAccessToken: () => null,
+  renewToken: () => Promise.resolve(null),
 });
 
 let _userManager: UserManager | null = null;
@@ -67,8 +62,12 @@ function sanitizeRedirectTarget(raw: string): string {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRenewing, setIsRenewing] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [postLoginRedirect, setPostLoginRedirect] = useState('/');
+  const renewalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const renewingRef = useRef(false);
+  const silentRenewPromiseRef = useRef<Promise<User | null> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +75,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let onUserUnloaded: (() => void) | undefined;
     let onAccessTokenExpired: (() => void) | undefined;
     let onSilentRenewError: ((err: Error) => Promise<void>) | undefined;
+
+    const clearRenewalTimeout = () => {
+      if (renewalTimeoutRef.current) {
+        clearTimeout(renewalTimeoutRef.current);
+        renewalTimeoutRef.current = null;
+      }
+    };
 
     (async () => {
       try {
@@ -102,14 +108,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         _userManager = mgr;
 
-        onUserLoaded = (u: User) => { if (!cancelled) setUser(u); };
+        onUserLoaded = (u: User) => {
+          if (cancelled) return;
+          clearRenewalTimeout();
+          setIsRenewing(false);
+          renewingRef.current = false;
+          setUser(u);
+        };
         onUserUnloaded = () => { if (!cancelled) setUser(null); };
         onAccessTokenExpired = () => {
-          console.warn('[Auth] Token expired');
-          if (!cancelled) setUser(null);
+          if (cancelled) return;
+          console.warn('[Auth] Token expired -- marking isRenewing (automaticSilentRenew in progress)');
+          setIsRenewing(true);
+          renewingRef.current = true;
+          // 20s safety timeout: if renewal doesn't complete, verify session
+          clearRenewalTimeout();
+          renewalTimeoutRef.current = setTimeout(async () => {
+            if (cancelled) return;
+            console.warn('[Auth] 20s renewal timeout -- verifying session');
+            setIsRenewing(false);
+            renewingRef.current = false;
+            try {
+              const current = await mgr.getUser();
+              if (!cancelled && (!current || current.expired)) {
+                console.warn('[Auth] Session expired after renewal timeout');
+                setUser(null);
+              }
+            } catch {
+              if (!cancelled) setUser(null);
+            }
+          }, 20_000);
         };
         onSilentRenewError = async (err: Error) => {
+          if (cancelled) return;
           console.error('[Auth] Silent renew failed:', err);
+          clearRenewalTimeout();
+          setIsRenewing(false);
+          renewingRef.current = false;
           const current = await mgr.getUser();
           if (!cancelled && (!current || current.expired)) setUser(null);
         };
@@ -147,6 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+      clearRenewalTimeout();
       if (_userManager) {
         if (onUserLoaded) _userManager.events.removeUserLoaded(onUserLoaded);
         if (onUserUnloaded) _userManager.events.removeUserUnloaded(onUserUnloaded);
@@ -168,12 +204,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return user?.access_token ?? null;
   }, [user]);
 
+  const renewToken = useCallback(async (): Promise<User | null> => {
+    if (!_userManager) return null;
+    if (silentRenewPromiseRef.current) {
+      console.log('[Auth] renewToken: already renewing, awaiting in-flight promise');
+      return silentRenewPromiseRef.current;
+    }
+    const promise = (async () => {
+      try {
+        renewingRef.current = true;
+        setIsRenewing(true);
+        const u = await _userManager!.signinSilent();
+        return u;
+      } catch (err) {
+        console.error('[Auth] Manual renewToken failed:', err);
+        return null;
+      } finally {
+        renewingRef.current = false;
+        setIsRenewing(false);
+        silentRenewPromiseRef.current = null;
+      }
+    })();
+    silentRenewPromiseRef.current = promise;
+    return promise;
+  }, []);
+
   useEffect(() => {
     setTokenGetter(getAccessToken);
   }, [getAccessToken]);
 
   const onUnauthorized = useCallback(() => {
-    if (user?.expired) logout();
+    if (user?.expired && !renewingRef.current) {
+      console.warn('[Auth] Token expired and no renewal in flight -- triggering logout');
+      logout();
+    }
   }, [user, logout]);
 
   useEffect(() => {
@@ -188,14 +252,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({
     user,
-    isAuthenticated: !!user && !user.expired,
+    isAuthenticated: !!user && (!user.expired || isRenewing),
     isLoading,
+    isRenewing,
     authConfig,
     postLoginRedirect,
     login,
     logout,
     getAccessToken,
-  }), [user, isLoading, authConfig, postLoginRedirect, login, logout, getAccessToken]);
+    renewToken,
+  }), [user, isLoading, isRenewing, authConfig, postLoginRedirect, login, logout, getAccessToken, renewToken]);
 
   return (
     <AuthContext.Provider value={value}>

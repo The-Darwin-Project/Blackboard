@@ -7,12 +7,13 @@
 # 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
 # 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
 # 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership.
-# 9. [Pattern]: _handle_user_message enforces the same deny-by-default ownership check as
-#    chat.py's REST append-to-existing-event path (created_by_email != user.email, including
-#    None != None only matching for anonymous no-Dex callers) -- keeps WS and REST append
-#    paths consistent so ownership can't be bypassed by switching transport.
 # 8. [Pattern]: ArgoCDObserver injected post-init via set_argocd_observer(), same shape as Kargo. No UI
 #    consumer sends argocd_health_update yet (v1 dead wire) -- no _send_initial_argocd_state needed.
+# 9. [Pattern]: websocket_handler accepts() FIRST, then validates auth and closes with 4001 if rejected.
+#    ASGI close() before accept() is treated as a rejected handshake -> browser gets HTTP 403 / code 1006, never 4001.
+# 10. [Pattern]: _handle_user_message uses auth.can_append_message for ownership checks. Structured [Audit]
+#     logs emitted at call site, not inside auth.py.
+# 11. [Pattern]: WS error envelope schema: {"type": "error", "kind": "auth_rejected"|"rate_limited"|"invalid_payload"|"error", "event_id": str, "message": str}.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ..auth import get_user_from_websocket
+from ..auth import can_append_message, get_user_from_websocket
 from ..models import ConversationTurn, EventEvidence
 
 if TYPE_CHECKING:
@@ -73,12 +74,28 @@ class DashboardWSAdapter:
         self._clients.difference_update(disconnected)
 
     async def websocket_handler(self, websocket: WebSocket) -> None:
-        """Handle a single Dashboard WebSocket lifecycle."""
-        user = get_user_from_websocket(websocket)
-        if self._auth_enabled and user.user_id == "anonymous":
-            await websocket.close(code=4001)
-            return
+        """Handle a single Dashboard WebSocket lifecycle.
+
+        Accept the connection FIRST so that close(4001) transmits a real
+        WS Close Frame -- ASGI close() before accept() is treated as a
+        rejected handshake (browser gets HTTP 403 / code 1006, never 4001).
+        """
         await websocket.accept()
+
+        try:
+            user = get_user_from_websocket(websocket)
+        except Exception as e:
+            logger.error("WebSocket user extraction failed: %s", e)
+            await websocket.close(code=1011)
+            return
+
+        if self._auth_enabled and user.user_id == "anonymous":
+            logger.warning("[Audit] WS auth rejected: anonymous user")
+            try:
+                await websocket.close(code=4001)
+            except (WebSocketDisconnect, RuntimeError):
+                pass
+            return
 
         self._clients.add(websocket)
         logger.info("UI WebSocket connected (%d clients) user=%s", len(self._clients), user.label)
@@ -127,7 +144,10 @@ class DashboardWSAdapter:
         )
         image = data.get("image")
         if image and len(image) > 1_400_000:
-            await ws.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
+            await ws.send_json({
+                "type": "error", "kind": "invalid_payload",
+                "event_id": event_id, "message": "Image too large (max 1MB). Image was not attached.",
+            })
             image = None
         user_turn = ConversationTurn(
             turn=1,
@@ -151,20 +171,34 @@ class DashboardWSAdapter:
         message = data.get("message", "")
         image = data.get("image")
         if image and len(image) > 1_400_000:
-            await ws.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
+            await ws.send_json({
+                "type": "error", "kind": "invalid_payload",
+                "event_id": event_id, "message": "Image too large (max 1MB). Image was not attached.",
+            })
             image = None
         if not event_id or not message:
             return
         event = await self._blackboard.get_event(event_id)
         if not event:
+            await ws.send_json({
+                "type": "error", "kind": "not_found",
+                "event_id": event_id, "message": f"Event {event_id} not found",
+            })
             return
-        if event.created_by_email != user.email:
+        if not can_append_message(event.created_by_email, user.email, auth_enabled=self._auth_enabled):
             logger.warning(
-                "Denied WS append to event %s: caller %s is not the owner",
-                event_id, user.email,
+                "[Audit] Denied WS append: event_id=%s caller_email=%s owner_email=%s",
+                event_id, user.email, event.created_by_email,
             )
-            await ws.send_json({"type": "error", "message": "Not authorized to post to this event"})
+            await ws.send_json({
+                "type": "error", "kind": "auth_rejected",
+                "event_id": event_id, "message": "Not authorized to post to this event",
+            })
             return
+        logger.info(
+            "[Audit] Allowed WS append: event_id=%s caller_email=%s owner_email=%s",
+            event_id, user.email, event.created_by_email,
+        )
         turn = ConversationTurn(
             turn=len(event.conversation) + 1,
             actor="user",

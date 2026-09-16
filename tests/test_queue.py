@@ -692,3 +692,115 @@ async def test_headhunter_pending_merges_and_sorts_queued_prs_and_issues():
     # queue_position is numbered independently per platform list (both start at 1)
     assert data[0]["queue_position"] == 1
     assert data[1]["queue_position"] == 1
+
+@pytest.mark.asyncio
+async def test_approve_event_ignores_ownership(monkeypatch):
+    """approve_event has no ownership check today and must NOT gain one."""
+    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
+    
+    event = _make_event_document("evt-appr0002")
+    event.created_by_email = "owner@example.com"
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock()
+    
+    mock_brain = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=True)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        from src import dependencies
+        from src.main import app
+
+        app.dependency_overrides[dependencies.get_blackboard] = lambda: mock_bb
+        app.dependency_overrides[dependencies.get_brain] = lambda: mock_brain
+        
+        from httpx import ASGITransport, AsyncClient
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/queue/evt-appr0002/approve",
+                headers={"Authorization": "Bearer valid-jwt"}
+            )
+            
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+
+@pytest.mark.asyncio
+async def test_reject_event_ignores_ownership(monkeypatch):
+    """reject_event has no ownership check today and must NOT gain one."""
+    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
+    
+    event = _make_event_document("evt-rej0002")
+    event.created_by_email = "owner@example.com"
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock()
+    
+    mock_brain = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=True)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        from src import dependencies
+        from src.main import app
+
+        app.dependency_overrides[dependencies.get_blackboard] = lambda: mock_bb
+        app.dependency_overrides[dependencies.get_brain] = lambda: mock_brain
+        
+        from httpx import ASGITransport, AsyncClient
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/queue/evt-rej0002/reject",
+                json={"reason": "no"},
+                headers={"Authorization": "Bearer valid-jwt"}
+            )
+            
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+
+@pytest.mark.asyncio
+async def test_close_event_by_user_ignores_ownership(monkeypatch):
+    """close_event_by_user has no ownership check today and must NOT gain one."""
+    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+    monkeypatch.setattr("src.auth._validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
+    
+    event = _make_event_document("evt-close0002")
+    event.created_by_email = "owner@example.com"
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock()
+    
+    mock_brain = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=True)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        from src import dependencies
+        from src.main import app
+
+        app.dependency_overrides[dependencies.get_blackboard] = lambda: mock_bb
+        app.dependency_overrides[dependencies.get_brain] = lambda: mock_brain
+        
+        from httpx import ASGITransport, AsyncClient
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/queue/evt-close0002/close",
+                headers={"Authorization": "Bearer valid-jwt"}
+            )
+            
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200

@@ -10,6 +10,9 @@
 # 8. [Gotcha]: TRUSTED_PROXY_ENABLED and TRUSTED_PROXY_SECRET are read at import time. Tests must patch module constants directly, not env vars.
 # 9. [Pattern]: require_obs_admin layers a group-membership check on top of require_auth for
 #    irreversible/global-scope mutation endpoints. Fails closed (403) if OBS_ADMIN_GROUPS is unset.
+# 10. [Pattern]: can_append_message / can_override_domain are PURE boolean predicates -- zero side effects,
+#     zero logging. Callers (dashboard_ws.py, chat.py, queue.py) own all structured audit/rejection logging.
+# 11. [Pattern]: can_append_message accepts explicit auth_enabled param; when None, falls back to module globals.
 """User identity domain -- pure JWT validation and UserContext abstraction.
 
 When dex.enabled=false (default): returns anonymous UserContext for Dashboard users.
@@ -210,3 +213,67 @@ async def require_obs_admin(request: Request) -> UserContext:
         )
         raise HTTPException(status_code=403, detail="Observation-admin group membership required")
     return user
+
+
+# =============================================================================
+# Pure Boolean Ownership Predicates
+# =============================================================================
+
+
+def _normalize_email(email: str | None) -> str | None:
+    if not email or not isinstance(email, str):
+        return None
+    s = email.strip().lower()
+    return s if s else None
+
+
+def can_append_message(
+    created_by_email: str | None,
+    user_email: str | None,
+    auth_enabled: bool | None = None,
+) -> bool:
+    """Decide whether a caller may append a message to an event.
+
+    Pure boolean -- zero side effects, zero logging.  Callers own all
+    structured audit logging (event_id, caller_email, owner_email).
+
+    Rules:
+    - Owned event (created_by_email is not None): unconditional ownership
+      match required (created_by_email == user_email), regardless of auth mode.
+    - Unowned/automated event (created_by_email is None):
+        * auth_enabled=True  -> caller MUST be authenticated (bool(user_email)).
+        * auth_enabled=False -> open to all (dev/local, no auth configured).
+    - auth_enabled=None falls back to module-global DEX_ENABLED | TRUSTED_PROXY_ENABLED.
+    """
+    if auth_enabled is None:
+        auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+
+    norm_created = _normalize_email(created_by_email)
+    norm_user = _normalize_email(user_email)
+
+    if norm_created is not None:
+        return norm_created == norm_user
+
+    # Unowned / automated event
+    if auth_enabled:
+        return norm_user is not None
+    return True
+
+
+def can_override_domain(
+    created_by_email: str | None,
+    user_email: str | None,
+) -> bool:
+    """Decide whether a caller may force-override an event's domain (enforce-casual).
+
+    Strictly deny-by-default for unowned events:
+    unconditionally requires created_by_email is not None AND created_by_email == user_email.
+    Observer/automated events can NEVER be forced to casual.
+
+    Pure boolean -- zero side effects, zero logging.
+    """
+    norm_created = _normalize_email(created_by_email)
+    norm_user = _normalize_email(user_email)
+    if norm_created is None:
+        return False
+    return norm_created == norm_user

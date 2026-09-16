@@ -961,6 +961,9 @@ if static_dir.exists():
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(path: str):
+        if path.startswith("api/"):
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         file_path = static_dir / path
         if file_path.is_file():
             from starlette.responses import FileResponse

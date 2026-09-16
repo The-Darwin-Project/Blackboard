@@ -1,6 +1,6 @@
 ---
 description: "Dex OIDC authentication, user identity, and adapter architecture"
-globs: ["src/auth.py", "src/ports.py", "src/adapters/**", "src/routes/dex_proxy.py", "src/main.py", "ui/src/contexts/Auth*", "ui/src/components/LoginPage*", "helm/templates/dex-*", "helm/templates/cert-manager*"]
+globs: "**/src/auth.py,**/src/ports.py,**/src/adapters/**,**/src/routes/dex_proxy.py,**/src/main.py,**/ui/src/contexts/Auth*,**/ui/src/components/LoginPage*,**/helm/templates/dex-*,**/helm/templates/cert-manager*"
 alwaysApply: false
 ---
 
@@ -60,7 +60,7 @@ Darwin uses **Dex OIDC** for Dashboard user authentication, bundled in the Helm 
 ## Conventions
 
 - All user-facing actions (chat, approve, reject, feedback) must pass `UserContext` to `ConversationTurn(user_name=...)`.
-- When `DEX_ENABLED=true`, anonymous WS connections are rejected (4001) before `websocket.accept()`.
+- When `DEX_ENABLED=true` or `TRUSTED_PROXY_ENABLED=true`, anonymous WS connections are accepted and immediately closed (4001) so ASGI transmits a clean WebSocket Close Frame to the client.
 - `UserContext.roles` is populated from JWT `groups` claim but NOT enforced in v1. RBAC is scaffolded for v2.
 - `get_user_from_request` and `get_user_from_slack` are forward-looking scaffolding (RBAC v2, Slack identity wiring).
 - The `/config` endpoint exposes `auth.enabled`, `auth.issuerUrl`, `auth.clientId` for Dashboard discovery. No secrets.

@@ -658,6 +658,27 @@ class TestEnforceCasualRoute:
         assert resp.status_code == 403
         mock_brain_route.enforce_domain_override.assert_not_awaited()
 
+    def test_allows_owner_despite_case_and_whitespace_differences(
+        self, authed_client, mock_blackboard_route, mock_brain_route,
+    ):
+        """Ownership check now goes through can_override_domain (auth.py), which
+        case-folds and strips both emails before comparing -- unlike the old raw
+        `event.created_by_email != user.email` string check this replaced. authed_client
+        authenticates as the exact string "alice@example.com"; the event's recorded
+        owner email is deliberately stored padded/mixed-case (e.g. as typed into an
+        upstream form or from a differently-cased JWT claim) to prove the comparison
+        is genuinely normalized end-to-end through the route, not just in the pure
+        predicate's own unit tests."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="chat",
+                created_by_email="  Alice@Example.com  ",
+            ),
+        )
+        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 200
+        mock_brain_route.enforce_domain_override.assert_awaited_once()
+
     def test_404_for_missing_event(self, authed_client, mock_blackboard_route):
         mock_blackboard_route.get_event = AsyncMock(return_value=None)
         resp = authed_client.post("/queue/evt-missing/enforce-casual")
