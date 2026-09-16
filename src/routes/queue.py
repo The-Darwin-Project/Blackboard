@@ -61,7 +61,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
-from ..auth import UserContext, require_auth
+from ..auth import UserContext, can_override_domain, require_auth
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
 
@@ -464,12 +464,14 @@ async def enforce_casual_domain(
     if event.status == EventStatus.CLOSED:
         raise HTTPException(status_code=409, detail="Cannot modify a closed event")
     # Ownership check (codereview finding: auth-rbac) -- require_auth only proves the
-    # caller is *someone*, not that they own this event. created_by_email is the same
-    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events).
-    # Deny-by-default: an event with no recorded owner (legacy/automated -- optional for
-    # backward compat per EventDocument.created_by_email) can't be verified as belonging
-    # to this caller, so it is treated the same as an owner mismatch, not left open.
-    if event.created_by_email != user.email:
+    # caller is *someone*, not that they own this event. can_override_domain is strictly
+    # deny-by-default: unowned/automated events (created_by_email=None) can NEVER be
+    # forced to casual. Only the event creator can override domain.
+    if not can_override_domain(event.created_by_email, user.email):
+        logger.warning(
+            "[Audit] Denied domain override: event_id=%s caller_email=%s owner_email=%s",
+            event_id, user.email, event.created_by_email,
+        )
         raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
     if event.source not in ("chat", "slack"):
         raise HTTPException(status_code=400, detail="Casual domain override is only valid for chat/slack events")
