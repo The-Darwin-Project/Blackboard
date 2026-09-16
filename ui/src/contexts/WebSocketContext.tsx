@@ -3,11 +3,16 @@
 // 1. [Pattern]: Single shared WS connection via React context. All consumers use hooks.
 // 2. [Pattern]: Reconnect signal fires on onopen when retryRef > 0 (not initial connect).
 // 3. [Gotcha]: subscribersRef and reconnectSubscribersRef are Sets -- never recreate, only mutate.
-// 4. [Pattern]: onclose code 4001 = auth rejection -- triggers logout via getWSAuthFailureCallback(), skips reconnect.
-// 5. [Pattern]: 5 consecutive close events without onopen = pre-handshake auth rejection (403 upgrade fail). Triggers re-auth.
-// 6. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections. Heartbeat cleared on unmount.
-// 7. [Pattern]: Visibility change listener reconnects immediately when tab regains focus.
-// 8. [Constraint]: Max backoff is 5s (not 30s) for fast recovery.
+// 4. [Pattern]: connect is useCallback(..., []) with stable empty-deps identity. Auth state/callbacks
+//    mirrored into refs (getAccessTokenRef, renewTokenRef, isAuthRenewingRef) to avoid dep churn.
+// 5. [Pattern]: 4001 = real auth rejection. Cap at 3 consecutive before triggering logout.
+//    consecutiveAuthRejectionsRef reset ONLY on onmessage or 1500ms stable timer, NEVER raw onopen.
+// 6. [Pattern]: Non-4001 closes (1006 transport drops) retry indefinitely with exponential backoff
+//    capped at 5s. Network disconnects NEVER log out the operator.
+// 7. [Pattern]: At retry 6 (~30s), surfaces connectionDegraded + reconnect() for UI banner.
+// 8. [Pattern]: 1006 trusted-proxy backstop: 10 consecutive immediate 1006 drops triggers renewToken().
+// 9. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections.
+// 10. [Pattern]: isConnectingRef released on socket onopen/onclose, not synchronous finally.
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -19,7 +24,7 @@
  *   </WebSocketProvider>
  *
  * Consumers:
- *   const { connected, reconnecting, send } = useWSConnection();
+ *   const { connected, reconnecting, connectionDegraded, send, reconnect } = useWSConnection();
  *   useWSMessage((msg) => { ... }); // subscribe to messages
  *   useWSReconnect(() => { ... });  // called once per reconnect (not initial connect)
  */
@@ -34,13 +39,17 @@ type ReconnectHandler = () => void;
 interface WSConnectionState {
   connected: boolean;
   reconnecting: boolean;
+  connectionDegraded: boolean;
   send: (data: object) => void;
+  reconnect: () => void;
 }
 
 const WSConnectionContext = createContext<WSConnectionState>({
   connected: false,
   reconnecting: false,
+  connectionDegraded: false,
   send: () => {},
+  reconnect: () => {},
 });
 
 const WSSubscribersContext = createContext<{
@@ -51,21 +60,60 @@ const WSSubscribersContext = createContext<{
   subscribeReconnect: () => () => {},
 });
 
+const AUTH_REJECTION_CAP = 3;
+const IMMEDIATE_1006_BACKSTOP = 10;
+const STABLE_CONNECTION_MS = 1500;
+const MAX_BACKOFF_MS = 5000;
+const DEGRADED_RETRY_THRESHOLD = 6;
+
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [connectionDegraded, setConnectionDegraded] = useState(false);
   const retryRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMessageTimeRef = useRef<number>(Date.now());
-  const { getAccessToken } = useAuth();
+
+  // Reentrancy guards
+  const isConnectingRef = useRef(false);
+  const isRenewingRef = useRef(false);
+
+  // Auth rejection tracking (4001)
+  const consecutiveAuthRejectionsRef = useRef(0);
+  const pendingAuthCheckRef = useRef(false);
+  const stableTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Trusted-proxy 1006 backstop
+  const consecutive1006DropsRef = useRef(0);
+
+  // Mirror auth state/callbacks into refs for stable connect identity
+  const { getAccessToken, renewToken, isRenewing: isAuthRenewing } = useAuth();
   const getAccessTokenRef = useRef(getAccessToken);
   getAccessTokenRef.current = getAccessToken;
+  const renewTokenRef = useRef(renewToken);
+  renewTokenRef.current = renewToken;
+  const isAuthRenewingRef = useRef(isAuthRenewing);
+  isAuthRenewingRef.current = isAuthRenewing;
+
+  // connectRef lets effects call the latest connect without adding it as a dep
+  const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
+    // Entry guards: prevent parallel connects and defer during auth renewal
+    if (isConnectingRef.current) return;
+    if (isRenewingRef.current) return;
+    if (isAuthRenewingRef.current) {
+      console.log('[WS] Deferring connect -- auth renewal in progress');
+      return;
+    }
+
+    isConnectingRef.current = true;
+    pendingAuthCheckRef.current = true;
+
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${protocol}//${location.host}/ws`;
     const token = getAccessTokenRef.current();
@@ -78,11 +126,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        isConnectingRef.current = false;
+
         // Clear any pending reconnect timer (prevents double-connect)
         if (reconnectTimerRef.current) {
           clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
         }
+
         // Fire reconnect signal BEFORE resetting retryRef so consumers
         // can distinguish reconnect from initial connect.
         if (retryRef.current > 0) {
@@ -91,10 +142,22 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             try { handler(); } catch (e) { console.error('[WS] Reconnect handler error:', e); }
           });
         }
+
         setConnected(true);
         setReconnecting(false);
+        setConnectionDegraded(false);
         retryRef.current = 0;
         lastMessageTimeRef.current = Date.now();
+
+        // DO NOT reset consecutiveAuthRejectionsRef here (A-13).
+        // An accepted-then-immediately-closed(4001) fires onopen before onclose.
+        // Instead, start a 1500ms stable timer to confirm the connection is real.
+        pendingAuthCheckRef.current = true;
+        if (stableTimerRef.current) clearTimeout(stableTimerRef.current);
+        stableTimerRef.current = setTimeout(() => {
+          pendingAuthCheckRef.current = false;
+          consecutiveAuthRejectionsRef.current = 0;
+        }, STABLE_CONNECTION_MS);
 
         // Start heartbeat -- detects HAProxy idle drops
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
@@ -114,6 +177,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
       ws.onmessage = (event) => {
         lastMessageTimeRef.current = Date.now();
+        // Confirmed healthy traffic -- reset ALL rejection counters
+        pendingAuthCheckRef.current = false;
+        consecutiveAuthRejectionsRef.current = 0;
+        consecutive1006DropsRef.current = 0;
+        if (stableTimerRef.current) {
+          clearTimeout(stableTimerRef.current);
+          stableTimerRef.current = null;
+        }
         try {
           const msg = JSON.parse(event.data) as WSMessage;
           subscribersRef.current.forEach((handler) => {
@@ -131,28 +202,91 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       ws.onclose = (event) => {
         setConnected(false);
         wsRef.current = null;
+        isConnectingRef.current = false;
+
+        // Clear stable timer on close
+        if (stableTimerRef.current) {
+          clearTimeout(stableTimerRef.current);
+          stableTimerRef.current = null;
+        }
+        pendingAuthCheckRef.current = false;
+
+        // Clear heartbeat on close
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+
         if (event.code === 4001) {
-          console.warn('[WS] Auth rejected (4001) -- triggering logout');
-          getWSAuthFailureCallback()?.();
+          // Real auth rejection (server accepted then closed with 4001)
+          consecutiveAuthRejectionsRef.current++;
+          console.warn(`[WS] Auth rejected (4001) -- consecutive: ${consecutiveAuthRejectionsRef.current}/${AUTH_REJECTION_CAP}`);
+          if (consecutiveAuthRejectionsRef.current >= AUTH_REJECTION_CAP) {
+            console.warn('[WS] Auth rejection cap reached -- triggering logout');
+            getWSAuthFailureCallback()?.();
+            return;
+          }
+          // Retry after backoff (may succeed after token refresh)
+          const delay = Math.min(1000 * Math.pow(2, consecutiveAuthRejectionsRef.current), MAX_BACKOFF_MS);
+          setReconnecting(true);
+          reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
           return;
         }
+
+        // Non-4001 closure (transport drop, network blip, etc.)
+        // NEVER trigger logout for transport failures.
         retryRef.current++;
-        if (retryRef.current > 5) {
-          console.warn('[WS] 5 consecutive failures without connecting -- likely auth issue, triggering re-auth');
-          getWSAuthFailureCallback()?.();
-          return;
+
+        if (event.code === 1006) {
+          consecutive1006DropsRef.current++;
+          // Trusted-proxy backstop: 10 consecutive immediate 1006 drops
+          if (consecutive1006DropsRef.current >= IMMEDIATE_1006_BACKSTOP) {
+            console.warn('[WS] 1006 backstop reached -- triggering auth verification via renewToken');
+            consecutive1006DropsRef.current = 0;
+            handleAuthRenewal();
+            return;
+          }
         }
-        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 5000);
+
+        // Surface degraded state at retry 6 (~30s of backoff)
+        if (retryRef.current >= DEGRADED_RETRY_THRESHOLD) {
+          setConnectionDegraded(true);
+        }
+
+        const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
         setReconnecting(true);
         console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
-        reconnectTimerRef.current = setTimeout(connect, delay);
+        reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
       };
 
       ws.onerror = (err) => {
         console.error('[WS] Error:', err);
       };
     } catch (e) {
+      isConnectingRef.current = false;
       console.error('[WS] Connect failed:', e);
+    }
+  }, []);
+
+  connectRef.current = connect;
+
+  const handleAuthRenewal = useCallback(async () => {
+    if (isRenewingRef.current) return;
+    isRenewingRef.current = true;
+    try {
+      const result = await renewTokenRef.current();
+      if (result) {
+        // Token refreshed -- reconnect with new token
+        connectRef.current();
+      } else {
+        // Renewal failed -- surface degraded, don't logout
+        setConnectionDegraded(true);
+        setReconnecting(true);
+        const delay = Math.min(1000 * Math.pow(2, retryRef.current), MAX_BACKOFF_MS);
+        reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
+      }
+    } finally {
+      isRenewingRef.current = false;
     }
   }, []);
 
@@ -167,6 +301,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      if (stableTimerRef.current) {
+        clearTimeout(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -179,21 +317,39 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       if (document.visibilityState === 'visible' && !wsRef.current) {
         console.log('[WS] Tab visible -- reconnecting');
         retryRef.current = 0;
+        consecutive1006DropsRef.current = 0;
+        setConnectionDegraded(false);
         if (reconnectTimerRef.current) {
           clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
         }
-        connect();
+        connectRef.current();
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [connect]);
+  }, []);
 
   const send = useCallback((data: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
     }
+  }, []);
+
+  const reconnect = useCallback(() => {
+    // Manual reconnect from UI -- reset counters and connect immediately
+    retryRef.current = 0;
+    consecutive1006DropsRef.current = 0;
+    consecutiveAuthRejectionsRef.current = 0;
+    setConnectionDegraded(false);
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    connectRef.current();
   }, []);
 
   const subscribe = useCallback((handler: MessageHandler) => {
@@ -210,7 +366,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const connectionValue = useMemo(() => ({ connected, reconnecting, send }), [connected, reconnecting, send]);
+  const connectionValue = useMemo(
+    () => ({ connected, reconnecting, connectionDegraded, send, reconnect }),
+    [connected, reconnecting, connectionDegraded, send, reconnect],
+  );
   const subscriberValue = useMemo(() => ({ subscribe, subscribeReconnect }), [subscribe, subscribeReconnect]);
 
   return (
@@ -222,7 +381,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** Get WS connection state (connected, reconnecting, send). */
+/** Get WS connection state (connected, reconnecting, connectionDegraded, send, reconnect). */
 export function useWSConnection() {
   return useContext(WSConnectionContext);
 }
