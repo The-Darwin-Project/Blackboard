@@ -6,6 +6,7 @@
 # 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
 # 5. [Pattern]: EventDocument.slack_* fields and ConversationTurn.source are Optional for backward compat with existing Redis data (pre-Slack events have None).
 # 6. [Pattern]: EventDocument.created_by_email is Optional[str] for backward compat -- existing Redis events deserialize with None.
+# 7. [Pattern]: EventDocument.created_by_email validator normalizes non-string/empty/whitespace values to None (defense against garbage data corrupting the None-vs-string ownership check in auth.py).
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -433,6 +434,21 @@ class EventDocument(BaseModel):
         None,
         description="Email of the user who created this event (stable identity for multi-tenant filtering)"
     )
+
+    @field_validator("created_by_email", mode="before")
+    @classmethod
+    def _normalize_created_by_email(cls, v: Any) -> str | None:
+        """Normalize non-string, empty, or whitespace-only values to None.
+
+        Defense against garbage data corrupting the None-vs-string ownership
+        check in auth.can_append_message / can_override_domain.
+        """
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return None
+        stripped = v.strip()
+        return stripped if stripped else None
     # Sticky notes (FRIDAY-to-FRIDAY via JARVIS close phase)
     sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
     unread_notes: int = Field(0, description="Count of unread sticky notes")
