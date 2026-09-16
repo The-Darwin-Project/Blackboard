@@ -214,3 +214,45 @@ class TestAuthPredicates:
     def test_can_override_domain_unowned_always_false(self):
         assert auth.can_override_domain(None, "user@example.com") is False
         assert auth.can_override_domain(None, None) is False
+
+
+class TestNormalizeEmail:
+    """Tests for auth._normalize_email -- case-folding and whitespace-stripping.
+
+    Existing can_append_message/can_override_domain tests above only ever pass
+    already-lowercased, unpadded emails, so they never actually exercise
+    _normalize_email's transformation behavior (only its None/empty short-circuits
+    indirectly). These tests hit the function directly with mixed-case and
+    padded input, matching what a real OIDC `email` claim or user-typed address
+    can look like.
+    """
+
+    def test_lowercases_mixed_case_email(self):
+        assert auth._normalize_email("User@Example.COM") == "user@example.com"
+
+    def test_strips_surrounding_whitespace(self):
+        assert auth._normalize_email("  user@example.com  ") == "user@example.com"
+
+    def test_strips_and_lowercases_together(self):
+        assert auth._normalize_email("  User@Example.COM\n") == "user@example.com"
+
+    def test_none_returns_none(self):
+        assert auth._normalize_email(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert auth._normalize_email("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert auth._normalize_email("   ") is None
+
+    def test_non_string_input_returns_none(self):
+        assert auth._normalize_email(12345) is None  # type: ignore[arg-type]
+
+    def test_can_override_domain_matches_despite_case_and_whitespace_differences(self):
+        """End-to-end: a predicate consumer must not require pre-normalized input --
+        an owner email stored as-typed and a caller email from a JWT claim with
+        different case/whitespace must still be treated as the same identity."""
+        assert auth.can_override_domain("Dev@RedHat.com", "  dev@redhat.com  ") is True
+
+    def test_can_append_message_matches_despite_case_and_whitespace_differences(self):
+        assert auth.can_append_message(" Dev@RedHat.com ", "dev@redhat.com") is True
