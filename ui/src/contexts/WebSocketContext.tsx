@@ -13,6 +13,13 @@
 // 8. [Pattern]: 1006 trusted-proxy backstop: 10 consecutive immediate 1006 drops triggers renewToken().
 // 9. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections.
 // 10. [Pattern]: isConnectingRef released on socket onopen/onclose, not synchronous finally.
+// 11. [Gotcha]: isMountedRef is reset to `true` at the top of the mount effect (not just at
+//     declaration) -- otherwise a remount after unmount (StrictMode double-invoke, or any real
+//     remount) leaves it `false` forever and every socket callback early-returns permanently.
+// 12. [Gotcha]: handleAuthRenewal races renewTokenRef.current() against AUTH_RENEWAL_TIMEOUT_MS --
+//     this manual path isn't covered by AuthContext's own 20s safety timeout, so a hung
+//     signinSilent() would otherwise leave isRenewingRef stuck `true` and permanently block
+//     connect()'s entry guard (including the manual reconnect button).
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -65,6 +72,7 @@ const IMMEDIATE_1006_BACKSTOP = 10;
 const STABLE_CONNECTION_MS = 1500;
 const MAX_BACKOFF_MS = 5000;
 const DEGRADED_RETRY_THRESHOLD = 6;
+const AUTH_RENEWAL_TIMEOUT_MS = 20_000;
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -283,7 +291,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     if (isRenewingRef.current) return;
     isRenewingRef.current = true;
     try {
-      const result = await renewTokenRef.current();
+      // Unlike the OIDC-event-driven renewal path (AuthContext's own 20s safety
+      // timeout), this manual path has no backstop of its own -- race against a
+      // timeout so a hung signinSilent() can't leave isRenewingRef stuck `true`
+      // forever, which would permanently block connect()'s entry guard.
+      const result = await Promise.race([
+        renewTokenRef.current(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), AUTH_RENEWAL_TIMEOUT_MS)),
+      ]);
       // Reset isRenewingRef BEFORE calling connect so connect entry guard is not tripped
       isRenewingRef.current = false;
       if (result) {
@@ -308,6 +323,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
     connect();
     return () => {
       isMountedRef.current = false;
