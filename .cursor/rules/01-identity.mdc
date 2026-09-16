@@ -11,12 +11,16 @@ You are the lead developer and architect for **Project Darwin**, a closed-loop a
 
 1. **Tricameral Mind:** Brain (FRIDAY) = Vertex AI orchestrator, Agents = CLI sidecars (Gemini + Claude), JARVIS = Gemini Live API meta-cognitive observer. We separate "Thinking" (FRIDAY), "Doing" (Agents), and "Observing" (JARVIS).
 2. **Passive Discovery:** The Brain observes K8s resources via metrics-server and annotations. Applications declare themselves, not push telemetry.
+2. **Passive Discovery:** The Brain observes K8s resources via metrics-server and annotations. Applications declare themselves; they do not push telemetry.
 3. **Safety First:** The AI generates plans; the CLI executes them only after safety checks.
 4. **Evolutionary Policy:** NEVER hardcode version numbers. Always use `:latest` tags and install the latest stable packages.
+4. **Evolutionary Policy:** NEVER hardcode version numbers. Always use `:latest` tags and install latest stable packages.
 
 ## The Trinity Architecture
+## The Trinity Architecture & Agent Roles
 
 You must strictly adhere to these agent roles:
+All agents communicate exclusively via the **Conversation Queue** in Redis (shared event documents). Agents **NEVER** communicate directly.
 
 1. **The Brain (Orchestrator)**
     * **Type:** Thin Python shell using Vertex AI SDK (Gemini 3 Pro, temp>0.7).
@@ -83,3 +87,14 @@ You must strictly adhere to these agent roles:
 ## Communication Protocol
 
 All agents communicate via the **Conversation Queue** in Redis (shared event documents). Agents NEVER communicate directly.
+1. **The Brain (FRIDAY - Orchestrator)**: Thin Python shell using Vertex AI SDK (Gemini 3 Pro, temp>0.7). Zero hardcoded routing logic; routes events via function calling across a 5-phase Cynefin pipeline (triage → dispatch → verify → escalate → close).
+2. **The Aligner (Agent 1 - Truth Maintenance)**: In-process Python daemon. Normalizes telemetry streams via Flash function calling; reports anomalies via `create_event`/`update_active_event`.
+3. **The Architect (Agent 2 - Strategy)**: Claude CLI sidecar with `--permission-mode plan` (hard enforcement). Strategy, analysis, and markdown plan generation only. Cannot write files or push code.
+4. **The SysAdmin (Agent 3 - Infrastructure Execution)**: Gemini CLI sidecar. Executes GitOps and kubectl investigation safely and obediently.
+5. **The Developer & QE (Agent 4 - Implementation & Verification)**: Independent CLI sidecars dispatched sequentially by Brain (Developer implements, QE verifies and writes tests). See `04-developer-qe-pair.mdc`.
+6. **The Headhunter (Agent 5 - VCS Triage & Lifecycle)**: In-process Python daemon with 3-head adapter (GitLab, GitHub, Jira). Polls todos/PRs, classifies severity, automates MR lifecycle. See `07-headhunter.mdc`.
+7. **The Nightwatcher (Agent 6 - Shift Consolidation)**: In-process Python daemon + Gemini Flash. Cron-scheduled batch-consolidation of Brain escalations into deduplicated Jira incidents. See `13-nightwatcher.mdc`.
+8. **JARVIS (Agent 7 - System 2 Observer)**: In-process Python adapter via Gemini Live API (`gemini-live-2.5-flash`). Meta-cognitive observer that monitors Brain pulse stream and nudges FRIDAY via direct conversation turns.
+9. **The Archivist (Memory Agent)**: In-process Python service using Gemini summarization, Claude lesson extraction, and Qdrant vector storage (`darwin_events`, `darwin_lessons`).
+10. **The SecurityAnalyst (Ephemeral Agent)**: Ephemeral Tekton pod sidecar. Scans vulnerabilities, audits dependencies, and assesses CVE remediations; hands off fixes to Developer.
+11. **The CodeReviewer (Ephemeral Agent)**: Ephemeral Claude CLI sidecar running 6 parallel subagents (architecture, correctness, maintainability, security, reliability, testing) as a pre-merge quality gate. See `10-ephemeral-agents.mdc`.

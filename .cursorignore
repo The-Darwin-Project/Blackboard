@@ -1,0 +1,41 @@
+# Cursor semantic indexing and codebase search ignore file
+# Shields background embedding workers from large non-code assets and historical dumps
+
+# Binary and media assets
+*.pdf
+*.glb
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.ico
+*.mp4
+*.webm
+
+# Large historical docs & incident transcripts
+When-Worlds-Colide.md
+evt-*.md
+docs/evt-*.md
+docs/events/
+
+# Web mockups and marketing assets
+TheDarwinSwarmTrinity.html
+trailer.html
+promo.html
+mockups/
+
+# Cursor local plans, chat history, and backups
+.cursor/plans/**
+.cursor/rules.bak/**
+BlackBoard/.cursor/plans/**
+
+# Virtual environments, cache, build artifacts
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/

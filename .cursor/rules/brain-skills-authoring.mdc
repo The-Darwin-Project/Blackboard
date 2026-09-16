@@ -1,0 +1,87 @@
+---
+description: Authoring conventions for Brain system instruction skill files in brain_skills/
+globs: "**/src/agents/brain_skills/**/*.md"
+alwaysApply: false
+---
+
+# Brain Skills Authoring Guide
+
+Brain skills are `.md` files that compose FRIDAY's system instruction at runtime via `BrainSkillLoader`. Each file is wrapped in a semantic XML tag and injected into the SI based on event phase, domain, and source.
+
+## Frontmatter Schema
+
+Every skill file MAY declare YAML frontmatter between `---` delimiters:
+
+```yaml
+---
+description: What this skill teaches FRIDAY
+requires:
+  - path/to/dependency.md
+tag_type: skill
+tools:
+  - tool_name_1
+  - tool_name_2
+---
+```
+
+- `description`: Human-readable purpose (not sent to LLM).
+- `requires`: Dependencies resolved via BFS. Supports `{event.source}` template vars.
+- `tag_type`: Override for the semantic tag. If omitted, folder default applies.
+- `tools`: Maps this skill to specific tool names. `BrainSkillLoader.build_skill_refs()` builds reverse map and injects `<skill id>` pointers into conversation turns at replay-time.
+
+## Tag Type Gradient
+
+Tag types encode a compliance gradient. Higher compliance = more rigid adherence expected by the LLM.
+
+| Tag Type | Compliance | Folder Default | When to Use |
+|---|---|---|---|
+| `rule` | Highest | `always/`, `source/` | Hard constraints, invariants, safety |
+| `skill` | High | (default fallback) | Behavioral principles, domain knowledge |
+| `protocol` | Medium | — | Multi-step procedures, coordination |
+| `context` | Low-medium | `context/` | Situational data, environment state |
+| `navigation` | Lowest | `domain/` | Decision steering, domain-specific routing |
+
+Set `tag_type` in frontmatter when the file's content mismatches its folder's default.
+
+## Folder Semantics
+
+- `always/` — loaded for every event. Tag: `rule`. Core behavioral constraints.
+- `source/` — loaded when `event.source` matches filename. Tag: `rule`.
+- `domain/` — loaded when Cynefin domain matches. Tag: `navigation`.
+- `context/` — loaded on context flags. Tag: `context`.
+- `gated/` — auto-discovered but NEVER auto-loaded by `_match_phases()`. Injected exclusively via `find_paths_by_tag()` in `_build_system_prompt()` with explicit flag conditions. Requires explicit `tag_type` frontmatter (lost folder default).
+- Phase folders (`triage/`, `dispatch/`, `close/`, etc.) — loaded when Brain declares that phase via `set_phase`.
+
+## Content Grammar: WHY → WHAT-THIS-MEANS
+
+Skills should lead with WHY (the principle/mechanism/cause) then WHAT-THIS-MEANS (the relational reasoning — what the situation implies). Actions follow naturally from understanding.
+
+The tag-type gradient scales WHY depth:
+- `rule` — brief WHY, clear constraint
+- `skill` — deep WHY, behavioral principle
+- `protocol` — medium WHY, procedural rationale
+- `context`/`navigation` — situational framing
+
+## What NOT to Include
+
+- **Tool names**: Describe the DATA or TASK needed, never list explicit function names. Tool descriptions are behavioral priors — the LLM discovers tools from its schema.
+- **Negative examples**: Models learn patterns from ALL examples, including undesired ones. Describe what TO DO, never what NOT to do using production phrasing.
+- **Prescriptive timing**: Hardcoded numbers become strong LLM attractors. Use calibration principles instead.
+- **Per-source recipes**: "If headhunter, do X" creates classification biases. Use principle-based guidance that lets the LLM derive actions from context.
+- **Numbered decision trees**: Bypass the LLM's contextual reasoning. Use behavioral principles or Mermaid diagrams instead.
+
+## _phase.yaml
+
+Each phase folder MAY contain `_phase.yaml`:
+
+```yaml
+thinking_level: medium
+temperature: 1.0
+priority: 10
+terminal_prompts:
+  default: "prompt text"
+  casual: "casual domain prompt text"
+```
+
+Priority-wins across phases (mirrors `_resolve_llm_params`). `terminal_prompts` resolve via `_resolve_terminal_prompt()` with domain cross-reference and fallback.
+

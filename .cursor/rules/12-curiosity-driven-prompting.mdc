@@ -1,6 +1,7 @@
 ---
 description: "Prompt design principle: Brain and agent skills must demand proof via probing, not accept assumptions as evidence. Applies when authoring or reviewing skills, tool schemas, and agent instructions."
 globs: "BlackBoard/gemini-sidecar/**/*.md,BlackBoard/helm/files/*.md,BlackBoard/src/agents/brain_skills/**/*.md,BlackBoard/src/agents/llm/types.py"
+globs: "**/gemini-sidecar/**/*.md,**/helm/files/*.md,**/src/agents/brain_skills/**/*.md,**/src/agents/llm/types.py"
 alwaysApply: false
 ---
 

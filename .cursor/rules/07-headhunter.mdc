@@ -1,6 +1,8 @@
 ---
 description: Headhunter agent -- GitLab todo poller, MR lifecycle automation, maintainer resolution
 alwaysApply: true
+globs: "**/headhunter*.py,**/headhunter_skills/**"
+alwaysApply: false
 ---
 
 # Headhunter Agent (Agent 5)

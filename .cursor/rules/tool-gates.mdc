@@ -1,0 +1,68 @@
+---
+description: Tool gate system architecture — GATE_REGISTRY, modes, diagnostics, phase exemptions
+globs: "**/src/agents/tool_gates.py,**/src/agents/llm/types.py"
+alwaysApply: false
+---
+
+# Tool Gates System
+
+Tool gates control which tools FRIDAY can access in any given Brain state. `GATE_REGISTRY` in `tool_gates.py` is the **single source of truth** for both tool stripping and rejection diagnostics.
+
+## Architecture
+
+- **Pure evaluation**: No I/O, no async, no Redis, no LLM calls, no sibling imports.
+- **`GateContext`**: Built once per LLM call. Contains phase, source, domain, conversation state, iteration count, and context flags.
+- **`GateDefinition`**: Frozen dataclass with `gate_id`, `mode`, `predicate`, `tools_affected`, `message`, and optional `hint`.
+- **`evaluate_gates()`**: Applies all gates in order, returns `list[dict]` (not set — preserves tool schema dicts).
+
+## Gate Modes
+
+| Mode | Count | Behavior | Example Gates |
+|---|---|---|---|
+| `strip` | 25 | Removes listed tools when predicate is true | PHASE_CLOSE, DOMAIN_COMPLEX, NO_KARGO, OBS_PLATEAU |
+| `allow` | 4 | Keeps ONLY listed tools, strips everything else | INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL |
+
+Allow-mode gates are more restrictive — they define a whitelist. When an allow-mode gate fires, only the listed tools survive.
+
+## Gate Ordering
+
+Gates are ordered in `GATE_REGISTRY` and compose sequentially. A tool removed by an earlier gate cannot be restored by a later one. This means:
+
+- **Order matters**: A broad strip gate early in the list can remove tools that a later, more specific gate would have preserved.
+- **Allow-mode gates dominate**: When an allow-mode gate fires, it overrides all prior strip decisions.
+- When adding a new gate, consider where in the sequence it should apply.
+
+## Phase Exemptions
+
+Some gates must exempt certain phases to avoid blocking necessary actions:
+
+- DOMAIN_COMPLEX gate must exempt the `close` phase from `close_event` stripping — otherwise Complex-domain events cannot close.
+- Phase-specific tool availability is the primary mechanism for FRIDAY's workflow progression.
+
+## Diagnostic Conventions
+
+When FRIDAY attempts to use a tool that was gated out, the diagnostics system provides structured rejection messages:
+
+| Prefix | Meaning |
+|---|---|
+| `[GATE]` | Tool was stripped by a known gate. Includes State/Prerequisite/Constraint fields + optional Hint. |
+| `[UNKNOWN]` | Tool name was hallucinated (not in any schema). |
+| `[UNKNOWN GATE]` | Undocumented gate condition (fallback). |
+
+## Tool Descriptions as Behavioral Priors
+
+Tool descriptions in `llm/types.py` act as the most proximate LLM instruction. They are behavioral priors, not documentation.
+
+- Prescriptive gates in tool descriptions ("Not justified for...", "3+ events required") act as LLM repellents — the model avoids the tool entirely.
+- Describe WHAT the tool produces. Keep decision gates in the system instruction where the LLM weighs evidence.
+- Numbers in tool descriptions become hard thresholds; numbers in SI become calibration signals.
+- When correcting behavioral drift, fix tool descriptions FIRST (most proximate), then skills (attention anchoring), then gates (hard enforcement).
+
+## Key Invariants
+
+- `GATE_REGISTRY` length = 29 (25 strip + 4 allow; verify: `len(GATE_REGISTRY)` in code).
+- Gate predicates are named functions (not lambdas) for per-gate unit testing.
+- `context_flags` is always a dict by the time it reaches `GateContext` (`build_gate_context` normalizes `None` → `{}`).
+- `UNEVALUATED_CLOSE` gate strips `close_event` when unevaluated `jarvis.message` or `user.message` turns exist — prevents closing over unread interventions.
+- `evaluate_gates()` enforces a structural post-loop invariant: once `WAIT_LOOP` fires (4+ epoch waits), `defer_event` is force-restored if any gate (or combination of gates — `HARD_STRIP_DEFER`, `DEFER_WAKE_ITER0`, an allow-mode gate whose allow-set omits it, or any future gate) stripped it — the emergency flange never removes both escape tools at once, regardless of WHICH gate did the stripping. `INTERMEDIATE_TOOLS` (frozenset) and `is_defer_event_available()` are the shared single-source-of-truth exports `brain.py` reuses for its empty-toolset fallback and post-gate leak-detector; `is_defer_event_available()` mirrors `evaluate_gates()`'s exact two-part rule (per-gate exclusion, then the same escape-valve invariant) so the two cannot drift apart.
+

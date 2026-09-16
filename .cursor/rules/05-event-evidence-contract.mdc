@@ -1,6 +1,9 @@
 ---
 description: Event evidence contract -- all event sources MUST provide structured EventEvidence
 alwaysApply: true
+description: Event evidence contract -- all event sources MUST provide structured EventEvidence with Cynefin domain and metrics
+globs: "**/blackboard.py,**/models.py,**/event_types.py,**/observers/**,**/headhunter*.py,**/aligner*.py,**/timekeeper*.py,**/jenkins*.py,**/slack*.py,**/routes/events*.py"
+alwaysApply: false
 ---
 
 # Event Evidence Contract

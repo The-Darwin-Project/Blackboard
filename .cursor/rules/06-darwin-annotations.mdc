@@ -1,6 +1,8 @@
 ---
 description: ArgoCD Application-based service discovery (replaces K8s Observer annotation scanning)
 alwaysApply: true
+globs: "**/argocd*.py,**/observers/**,**/service_discovery*.py,**/k8s*.py,helm/**"
+alwaysApply: false
 ---
 
 # ArgoCD-Based Service Discovery

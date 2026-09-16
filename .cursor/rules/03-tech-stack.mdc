@@ -1,6 +1,9 @@
 ---
 description: Tech stack and standards -- Python backend, Node.js sidecars, OpenShift infrastructure
 alwaysApply: true
+description: Tech stack standards -- Python 3.11+ backend, FastAPI, google-genai SDK, Node.js sidecars, OpenShift, and Helm
+globs: "**/*.py,**/*.ts,**/*.tsx,**/*.yaml,**/*.yml,Dockerfile*,package.json,requirements*.txt"
+alwaysApply: false
 ---
 
 # Tech Stack & Standards
@@ -31,3 +34,5 @@ alwaysApply: true
 |---|---|---|---|---|
 | `pyyaml>=6.0` | SafeConstructor.flatten_mapping DoS (PR [#916](https://github.com/yaml/pyyaml/pull/916)) | Unpatched as of 6.0.3 | LOW -- inputs are LLM-generated or our own YAML files, not user-supplied | Bump to 6.1+ once released |
 | `gemini-live-2.5-flash` | JARVIS Live API model | Awaiting Vertex AI availability of `gemini-3.1-flash-live` | N/A -- current model works | Upgrade when 3.1-live lands on Vertex AI ([blog](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-live/)) |
+| `gemini-live-2.5-flash` | JARVIS Live API model | Awaiting Vertex AI availability of `gemini-3.1-flash-live` | N/A -- current model works | Upgrade when 3.1-live lands on Vertex AI |
+| `@kud/mcp-jenkins` | Unpinned `@latest` install, community-maintained, 38-tool admin API | Unpinned as of 2026-09-01 | MEDIUM -- admin capability; `MCP_JENKINS_ALLOW_TOOLS` narrows client-side tool exposure | Monitor upstream releases; run `npm audit` in CI |

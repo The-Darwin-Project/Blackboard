@@ -1,6 +1,8 @@
 ---
 description: Ephemeral agent architecture -- Dispatcher, Tekton lifecycle, dynamic role switching, queue discipline
 alwaysApply: true
+globs: "**/dispatcher*.py,**/provisioner*.py,**/tekton*.py,**/agent_registry.py,**/ephemeral*.py,**/ws-client.js,**/cli-setup.js"
+alwaysApply: false
 ---
 
 # Ephemeral Agents (On-Call)

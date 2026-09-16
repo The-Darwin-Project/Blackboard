@@ -1,34 +1,62 @@
 ---
 description: Developer + QE pair programming protocol, invariants, and code contract
 globs: "**/agents/developer.py,**/rules/developer.md,**/rules/qe.md,**/files/developer.md,**/files/qe.md"
+description: Developer + QE dispatch protocol and code contract (Phase A -- sequential dispatch)
+globs: "**/agents/developer.py,**/rules/developer.md,**/rules/qe.md,**/files/developer.md,**/files/qe.md,**/agents/brain.py"
 alwaysApply: false
 ---
 
 # Developer + QE Pair Programming Protocol
+# Developer + QE Dispatch Protocol (Phase A)
 
 ## The Pair Architecture
+## Architecture
 
 The Developer agent is NOT a single agent. It is a **pair programming team** managed by `developer.py`:
+Developer and QE are **first-class agents** dispatched by the Brain via `select_agent`:
 
 - **Developer sidecar** (Claude Opus): Implements source code changes
 - **QE sidecar** (Gemini Pro): Independently verifies quality, writes tests
 - **Flash Manager** (Gemini Flash, in-process): Moderates the pair, reviews outputs, triggers fix/verify rounds
+- **Developer** (`select_agent("developer")`): Implements code changes, manages branches, opens PRs.
+- **QE** (`select_agent("qe")`): Verifies quality, runs tests, validates deployments via Playwright.
 
 When Brain routes to "developer", the Developer Manager (`src/agents/developer.py`) fires BOTH sidecars concurrently via `asyncio.gather()`. The Flash Manager reviews outputs and may trigger follow-up rounds.
+Brain dispatches them **sequentially** (Developer first, then QE for verification). No Manager LLM layer.
 
 ## Critical Invariants -- DO NOT BREAK
+## Agent Communication
 
 1. **No file-based coordination between agents.** The agents do NOT communicate via `./huddle/` directories, status files, or any file-polling protocol. The Developer Manager handles all coordination via WebSocket results and Flash API calls.
+Agents communicate with the Brain via `team_huddle`:
 
 2. **No `[HUDDLE]` tag.** There is no "standalone" vs "huddle" mode. QE is enabled automatically when `QE_SIDECAR_URL` is set. The rules files must NOT reference `[HUDDLE]`, `dev-status.md`, `qe-status.md`, or polling loops.
+1. Agent calls `team_huddle(message)` -- sends `huddle_message` to Brain via WS
+2. Brain's scan enqueues the event; `_process_with_llm` runs with intermediate tool gate + coordination phase
+3. Brain replies via `reply_to_agent(agent_id, message)` -- direct WS send
+4. Agent unblocks and continues
 
 3. **Both agents receive the same task.** The Developer Manager sends the same `event_md_path` and `task` to both sidecars. Both work independently on the same shared workspace.
+## Critical Invariants
 
 4. **Brain is unaware of QE.** Brain calls `developer.process()` as a single unit. The pair coordination is invisible to Brain. Brain's system prompt describes the pair but never routes to "qe" directly.
+1. **Brain dispatches Developer and QE independently.** Brain calls `select_agent("developer")` or `select_agent("qe")`. No intermediate Manager layer.
+2. **Sequential dispatch for implement mode.** Developer works first, Brain evaluates, then QE verifies. No concurrent fan-out in Phase A.
+3. **Shared workspace.** Both Dev and QE mount the same PVC subPath (`developer`). QE sees Dev's code changes in real-time. Helm deployment mounts `subPath: developer` at both `/data/gitops-developer` and `/data/gitops-qe`.
+4. **Huddles go to Brain.** `team_huddle` sends to Brain (not a Manager). Brain replies via `reply_to_agent`. The intermediate phase uses `reply_to_agent` and `message_agent` tools only when huddle turns are present.
+5. **Agent rules describe WHAT, not HOW.** Rules files describe the agent's role and capabilities. No literal CLI commands, polling loops, or coordination protocols.
 
 5. **Shared workspace, not separate directories.** Both Dev and QE mount the same PVC subPath (`developer`). QE sees Dev's code changes in real-time. The Helm deployment mounts `subPath: developer` at both `/data/gitops-developer` and `/data/gitops-qe`.
+## Code Contract
 
 6. **Agent rules describe WHAT, not HOW.** Rules files (`helm/files/developer.md`, `helm/files/qe.md`) describe the agent's role and capabilities. They must NOT contain literal CLI commands, polling loops, or coordination protocols. The CLI agents are smart enough to figure out HOW.
+```
+brain.py:
+  - select_agent enum: ["architect", "sysadmin", "developer", "qe"]
+  - QE has no Python agent class -- reverse-WS gate allows dispatch without one
+  - intermediate tool gate: {reply_to_agent, message_agent, wait_for_agent, respond_to_jarvis} (fail-closed)
+  - _active_agent_for_event: one agent per event (Phase A)
+  - on_huddle callback in _run_agent_task appends ConversationTurn(action="huddle")
 
 ## Code Contract
 
@@ -40,17 +68,25 @@ developer.py:
   - Returns: "## Developer Result\n...\n## QE Assessment\n..."
   - Cancel: CancelledError propagates to both dev_task + qe_task
   - Followup: Developer.followup() routes through Flash Manager internally
+  - DEPRECATED: process() and _flash_decide() are legacy-only (non-reverse-WS mode)
+  - In reverse-WS mode, Brain dispatches developer directly via dispatch_to_agent
 
 brain.py:
   - Routes to "developer" only (never "qe")
   - progress callback passes actor field through: progress_data.get("actor", agent_name)
   - _archivist_memory registered in agents dict for deep memory
   - consult_deep_memory tool in _build_brain_tools()
+dispatch.py:
+  - on_huddle parameter receives callback from brain.py
+  - dispatch_to_agent unchanged -- stateless message broker
 
 deployment.yaml:
   - QE sidecar: subPath: developer (shared workspace)
   - Brain env: QE_SIDECAR_URL, QDRANT_URL
   - Strategy: Recreate (Qdrant WAL exclusive lock)
+types.py:
+  - BRAIN_TOOL_SCHEMAS includes reply_to_agent and message_agent
+  - MANAGER_TOOL_SCHEMAS deleted
 ```
 
 ## Rules Files Location

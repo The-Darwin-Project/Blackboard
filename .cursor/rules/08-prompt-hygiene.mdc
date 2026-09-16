@@ -1,6 +1,7 @@
 ---
 description: Authoring principles for agent skills, rules, and prompt files. Prevents regression of hardcoded values and non-neutral patterns.
 globs: "BlackBoard/gemini-sidecar/**/*.md,BlackBoard/helm/files/*.md,BlackBoard/src/agents/brain_skills/**/*.md"
+globs: "**/gemini-sidecar/**/*.md,**/helm/files/*.md,**/src/agents/brain_skills/**/*.md"
 alwaysApply: false
 ---
 
