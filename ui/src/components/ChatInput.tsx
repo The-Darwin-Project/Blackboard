@@ -5,8 +5,10 @@
 // 2. [Pattern]: Image paste via clipboard -> resizeImage -> pendingImage state.
 // 3. [Constraint]: wsSend is optional; falls back to useChat REST when not available.
 // 4. [Pattern]: Per-event draft isolation via draftsRef Map<string, string>. On eventId change,
-//    saves current message to the old event's draft and restores the new event's draft using
-//    functional updater setMessage(curr => curr.trim() ? curr : draft) to never clobber in-flight typing.
+//    saves current message to the old event's draft and unconditionally sets the new event's draft
+//    (or empty string if none). The save-and-restore runs synchronously in one effect after the
+//    eventId prop commits, so `message` state at that point is provably the stale previous value
+//    (already archived), not new user input — an unconditional setMessage(draft) is correct.
 /**
  * Event-aware chat input with image paste support.
  * Handles both "reply to event" (WS) and "create new event" (REST) modes.
@@ -48,9 +50,11 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
       }
     }
 
-    // Restore draft for the new event (functional updater: never clobber in-flight typing)
+    // Restore draft for the new event (or empty if no draft saved).
+    // Unconditional set is correct: at effect-run time, message state is provably the stale
+    // previous-event value we just archived above, not new user input.
     const draft = eventId ? (draftsRef.current.get(eventId) ?? '') : '';
-    setMessage(curr => curr.trim() ? curr : draft);
+    setMessage(draft);
     prevEventIdRef.current = eventId;
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- message read intentionally excluded
   const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel<HTMLFormElement>({
