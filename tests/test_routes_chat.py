@@ -206,3 +206,36 @@ async def test_chat_append_allowed_when_no_recorded_owner():
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "appended"
+
+@pytest.mark.asyncio
+async def test_chat_append_unowned_event_with_authenticated_operator(monkeypatch):
+    """An authenticated operator posting to /chat/ with event_id pointing to an unowned event succeeds."""
+    monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+    monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+    monkeypatch.setattr("src.auth.decode_jwt", lambda token: {"email": "operator@example.com", "name": "Op"})
+    
+    event = _make_event_document("evt-anon0002", created_by_email=None)
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+    mock_bb.append_turn = AsyncMock(return_value=1)
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        from src import dependencies
+        from src.main import app
+
+        app.dependency_overrides[dependencies.get_blackboard] = lambda: mock_bb
+        
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat/",
+                json={"message": "reply", "event_id": "evt-anon0002"},
+                headers={"Authorization": "Bearer valid-jwt"}
+            )
+            
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "appended"

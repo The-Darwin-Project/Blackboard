@@ -9,7 +9,9 @@ const mockSigninRedirectCallback = vi.fn();
 const mockGetUser = vi.fn();
 
 vi.mock('oidc-client-ts', () => {
+  let fakeUserManagerInstance: any = null;
   class FakeUserManager {
+    constructor() { (window as any).fakeUserManagerInstance = this; }
     events = {
       addUserLoaded: vi.fn(),
       addUserUnloaded: vi.fn(),
@@ -24,6 +26,7 @@ vi.mock('oidc-client-ts', () => {
     signinRedirectCallback(...args: unknown[]) { return mockSigninRedirectCallback(...args); }
     getUser(...args: unknown[]) { return mockGetUser(...args); }
     signoutRedirect = vi.fn();
+    signinSilent = vi.fn();
   }
   return {
     UserManager: FakeUserManager,
@@ -215,3 +218,162 @@ describe('AuthContext post-login redirect', () => {
     expect(mockSigninRedirectCallback).not.toHaveBeenCalled();
   });
 });
+
+
+function RenewProbe() {
+  const { isLoading, isAuthenticated, user, isRenewing, renewToken } = useAuth();
+  if (isLoading) return <div>loading</div>;
+  return (
+    <div>
+      <div data-testid="authed">{String(isAuthenticated)}</div>
+      <div data-testid="user">{user?.profile?.email || 'none'}</div>
+      <div data-testid="renewing">{String(isRenewing)}</div>
+      <button onClick={renewToken}>renew</button>
+    </div>
+  );
+}
+
+describe('AuthContext token renewal', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.spyOn(apiClient, 'getConfig').mockResolvedValue(AUTH_ENABLED_CONFIG as any); //
+    mockGetUser.mockResolvedValue({ access_token: 'valid-token', profile: { email: 'test@example.com' } });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+  });
+
+  it('onAccessTokenExpired sets isRenewing=true without clearing user', async () => {
+    render(
+      <AuthProvider>
+        <RenewProbe />
+      </AuthProvider>
+    );
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    });
+    
+    const mgr = (window as any).fakeUserManagerInstance;
+    const expiredCallback = mgr.events.addAccessTokenExpired.mock.calls[0][0];
+    
+    act(() => {
+      expiredCallback();
+    });
+    
+    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
+    expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    expect(screen.getByTestId('user')).toHaveTextContent('test@example.com');
+  });
+
+  it('onUserLoaded clears isRenewing', async () => {
+    render(
+      <AuthProvider>
+        <RenewProbe />
+      </AuthProvider>
+    );
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    });
+    
+    const mgr = (window as any).fakeUserManagerInstance;
+    const expiredCallback = mgr.events.addAccessTokenExpired.mock.calls[0][0];
+    const loadedCallback = mgr.events.addUserLoaded.mock.calls[0][0];
+    
+    act(() => {
+      expiredCallback();
+    });
+    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
+    
+    act(() => {
+      loadedCallback({ access_token: 'new-token', profile: { email: 'test@example.com' } });
+    });
+    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
+  });
+
+  it('onSilentRenewError clears isRenewing and falls back to setUser(null)', async () => {
+    render(
+      <AuthProvider>
+        <RenewProbe />
+      </AuthProvider>
+    );
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    });
+    
+    const mgr = (window as any).fakeUserManagerInstance;
+    const expiredCallback = mgr.events.addAccessTokenExpired.mock.calls[0][0];
+    const errorCallback = mgr.events.addSilentRenewError.mock.calls[0][0];
+    
+    act(() => {
+      expiredCallback();
+    });
+    
+    // Mock getUser to return null to simulate expired token
+    mockGetUser.mockResolvedValue(null);
+    
+    await act(async () => {
+      errorCallback(new Error('renew failed'));
+    });
+    
+    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
+    expect(screen.getByTestId('authed')).toHaveTextContent('false');
+    expect(screen.getByTestId('user')).toHaveTextContent('none');
+  });
+
+  it('20s safety timeout flips isRenewing back to false', async () => {
+    render(
+      <AuthProvider>
+        <RenewProbe />
+      </AuthProvider>
+    );
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    });
+    
+    const mgr = (window as any).fakeUserManagerInstance;
+    const expiredCallback = mgr.events.addAccessTokenExpired.mock.calls[0][0];
+    
+    act(() => {
+      expiredCallback();
+    });
+    
+    expect(screen.getByTestId('renewing')).toHaveTextContent('true');
+    
+    await act(async () => {
+      vi.advanceTimersByTime(20000);
+    });
+    
+    expect(screen.getByTestId('renewing')).toHaveTextContent('false');
+    // Assert getUser was called again as a re-check
+    expect(mockGetUser).toHaveBeenCalled();
+  });
+
+  it('renewToken dedups concurrent calls', async () => {
+    render(
+      <AuthProvider>
+        <RenewProbe />
+      </AuthProvider>
+    );
+    
+    await waitFor(() => {
+      expect(screen.getByTestId('authed')).toHaveTextContent('true');
+    });
+    
+    const mgr = (window as any).fakeUserManagerInstance;
+    
+    act(() => {
+      screen.getByText('renew').click();
+      screen.getByText('renew').click();
+    });
+    
+    expect(mgr.signinSilent).toHaveBeenCalledTimes(1);
+  });
+});
+

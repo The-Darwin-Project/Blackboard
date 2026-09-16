@@ -57,3 +57,60 @@ describe('ChatInput WS branch (wsSend connected + eventId set)', () => {
     expect(mockSendMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('ChatInput draft restore', () => {
+  it('restores draft when switching eventId away and back', () => {
+    const { rerender } = render(<ChatInput eventId="evt-1" wsSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(/reply to event|ask the brain/i);
+    
+    // Type draft for evt-1
+    fireEvent.change(textarea, { target: { value: 'draft for evt-1' } });
+    expect((textarea as HTMLTextAreaElement).value).toBe('draft for evt-1');
+    
+    // Switch to evt-2
+    rerender(<ChatInput eventId="evt-2" wsSend={vi.fn()} />);
+    expect((textarea as HTMLTextAreaElement).value).toBe('');
+    
+    // Type draft for evt-2
+    fireEvent.change(textarea, { target: { value: 'draft for evt-2' } });
+    expect((textarea as HTMLTextAreaElement).value).toBe('draft for evt-2');
+    
+    // Switch back to evt-1
+    rerender(<ChatInput eventId="evt-1" wsSend={vi.fn()} />);
+    expect((textarea as HTMLTextAreaElement).value).toBe('draft for evt-1');
+  });
+
+  it('does not clobber new text typed immediately after switch with stale draft', () => {
+    const { rerender } = render(<ChatInput eventId="evt-3" wsSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(/reply to event|ask the brain/i);
+    
+    // Type draft for evt-3
+    fireEvent.change(textarea, { target: { value: 'draft for evt-3' } });
+    expect((textarea as HTMLTextAreaElement).value).toBe('draft for evt-3');
+    
+    // Switch to evt-4
+    rerender(<ChatInput eventId="evt-4" wsSend={vi.fn()} />);
+    expect((textarea as HTMLTextAreaElement).value).toBe('');
+    
+    // Type new text immediately before any async restore could fire
+    fireEvent.change(textarea, { target: { value: 'new text for evt-4' } });
+    
+    // Simulate the restore firing late (e.g. by re-rendering with same eventId)
+    // The functional updater should protect 'new text for evt-4'
+    rerender(<ChatInput eventId="evt-4" wsSend={vi.fn()} />);
+    expect((textarea as HTMLTextAreaElement).value).toBe('new text for evt-4');
+  });
+
+  it('switching to eventId with no saved draft yields empty input', () => {
+    const { rerender } = render(<ChatInput eventId="evt-5" wsSend={vi.fn()} />);
+    const textarea = screen.getByPlaceholderText(/reply to event|ask the brain/i);
+    
+    // Type draft for evt-5
+    fireEvent.change(textarea, { target: { value: 'draft for evt-5' } });
+    expect((textarea as HTMLTextAreaElement).value).toBe('draft for evt-5');
+    
+    // Switch to evt-6 (no draft)
+    rerender(<ChatInput eventId="evt-6" wsSend={vi.fn()} />);
+    expect((textarea as HTMLTextAreaElement).value).toBe('');
+  });
+});

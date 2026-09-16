@@ -154,3 +154,21 @@ async def test_create_event_without_email_defaults_none():
     retrieved = await bb.get_event(event_id)
     assert retrieved is not None
     assert retrieved.created_by_email is None
+
+def test_event_document_created_by_email_validator():
+    """EventDocument.created_by_email validator normalizes whitespace to None."""
+    # valid email
+    event = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="user@example.com")
+    assert event.created_by_email == "user@example.com"
+    
+    # whitespace
+    event2 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="   ")
+    assert event2.created_by_email is None
+    
+    # empty string
+    event3 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email="")
+    assert event3.created_by_email is None
+    
+    # None
+    event4 = EventDocument(source="chat", service="general", event=EventInput(reason="test"), created_by_email=None)
+    assert event4.created_by_email is None
