@@ -110,6 +110,11 @@ async def create_chat_event(
                 "Chat event_id %s not found; creating a new event instead", request.event_id
             )
 
+        display_label = (
+            user.label.split("@")[0]
+            if getattr(user, "label", None) and user.label != "anonymous"
+            else "dashboard"
+        )
         event_id = await blackboard.create_event(
             source="chat",
             service=request.service,
@@ -117,7 +122,7 @@ async def create_chat_event(
             evidence=EventEvidence(
                 display_text=request.message,
                 source_type="chat",
-                triggered_by="dashboard",
+                triggered_by=display_label,
                 domain="disorder",
                 severity="info",
             ),

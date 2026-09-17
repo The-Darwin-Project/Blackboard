@@ -19,11 +19,21 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _make_ctx() -> AsyncMock:
-    """Build a minimal ToolContext mock matching the Protocol in tool_router.py."""
+    """Build a minimal ToolContext mock matching the Protocol in tool_router.py.
+
+    get_blackboard() is synchronous per the real Protocol (see
+    tests/test_loop_breaker.py's _make_ctx, which this mirrors) and its
+    get_event() resolves to None so handle_ask_release_ai's ancestry check
+    takes the non-reentrant human-caller path used by every test in this file.
+    """
     ctx = AsyncMock()
     ctx.next_turn_number = AsyncMock(return_value=1)
     ctx.append_and_broadcast = AsyncMock(return_value=1)
     ctx.emit_pulse = AsyncMock()
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=None)
+    ctx.get_blackboard = MagicMock(return_value=mock_bb)
     return ctx
 
 
