@@ -630,7 +630,7 @@ spec:
               value: {{ .Values.obsAdmin.groups | quote }}
             {{- end }}
             {{- if .Values.trustedProxy.existingSecret }}
-            # Trusted Proxy (Release Console BFF auth)
+            # Trusted Proxy (Generic WS Clients / External BFF auth)
             - name: TRUSTED_PROXY_ENABLED
               value: "true"
             - name: TRUSTED_PROXY_SECRET

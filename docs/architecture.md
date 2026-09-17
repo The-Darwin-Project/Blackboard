@@ -6,7 +6,7 @@
 -->
 # Architecture
 
-The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard, Slack, and Release Console.
+The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard, Slack, and Generic WS Clients (External Portals/BFFs).
 
 ## System Topology
 
@@ -43,7 +43,7 @@ graph TD
     subgraph ui [Clients]
         Dashboard["React Dashboard"]
         SlackApp["Slack /darwin"]
-        Console["Release Console BFF"]
+        Console["Generic WS Clients / BFF"]
     end
 
     Brain <-->|state| Redis
@@ -118,14 +118,20 @@ Full bidirectional Slack integration via Socket Mode (`src/channels/slack.py`):
 - **Thinking indicators** -- Custom emoji shown while the Brain processes, replaced with the final result
 - **Thread ownership guard** -- Prevents notification DMs from hijacking existing event threads
 
-## Release Console Integration
+## Generic WebSocket / Trusted Proxy Interface
 
-Trusted-proxy WebSocket auth for the Release Console BFF. The BFF authenticates via `X-Forwarded-Email` + `X-BFF-Token` headers on the WebSocket upgrade. See [Darwin-Release-Console-Integration-Contract.md](Darwin-Release-Console-Integration-Contract.md) for the full API contract.
+Darwin provides a generic, multi-tenant WebSocket interface (`/ws`) allowing external portals and Backend-for-Frontend (BFF) services to integrate as first-class chat and control clients.
+
+Trusted-proxy WebSocket authentication allows an in-cluster BFF or gateway to proxy user sessions by passing authenticated identity headers on the WebSocket upgrade request:
+- `X-Forwarded-Email`: The authenticated end-user email address
+- `X-BFF-Token`: Shared authentication secret verified using constant-time HMAC comparison
+
+For the concrete BFF integration contract, see [Darwin-Release-Console-Integration-Contract.md](Darwin-Release-Console-Integration-Contract.md).
 
 | Env Var | Default | Purpose |
 | --- | --- | --- |
-| `TRUSTED_PROXY_ENABLED` | `"false"` | Must be `"true"` to enable |
-| `TRUSTED_PROXY_SECRET` | `""` | Shared secret (inject via K8s Secret) |
+| `TRUSTED_PROXY_ENABLED` | `"false"` | Must be `"true"` to enable trusted proxy authentication |
+| `TRUSTED_PROXY_SECRET` | `""` | Shared secret (inject via K8s Secret `trustedProxy.existingSecret`) |
 
 ## Google Search Grounding
 

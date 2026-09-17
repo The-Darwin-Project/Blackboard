@@ -16,7 +16,7 @@ The central nervous system of Darwin -- an autonomous closed-loop cloud operatio
 
 ## Architecture
 
-The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard, Slack, and Release Console:
+The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard, Slack, and Generic WS Clients (External Portals/BFFs):
 
 ```mermaid
 graph TD
@@ -50,7 +50,7 @@ graph TD
     subgraph ui [Clients]
         Dashboard["React Dashboard"]
         SlackApp["Slack /darwin"]
-        Console["Release Console"]
+        Console["Generic WS Clients<br/>(External Portals/BFFs)"]
     end
 
     Brain <-->|state| Redis
@@ -75,7 +75,7 @@ graph TD
     Dashboard <-->|WebSocket| Brain
     SlackApp <-->|Socket Mode| Slack
     Slack <-->|events| Brain
-    Console <-->|trusted-proxy| Brain
+    Console <-->|trusted-proxy WS| Brain
 ```
 
 > **Full architecture details:** [docs/architecture.md](docs/architecture.md) -- WebSocket protocol, safety model, SDK table, integrations
@@ -123,7 +123,7 @@ graph TD
 
 ### Integration and UX
 
-- **Cross-Platform Chat** -- Dashboard, Slack, and Release Console as unified event interfaces
+- **Cross-Platform Chat** -- Dashboard, Slack, and Generic WS Clients as unified event interfaces
 - **Agent Streaming Cards** -- Real-time per-agent CLI stdout in dedicated UI cards with floating windows
 - **AI Transparency** -- Generated content tagged in Slack and Dashboard; user guide and feedback mechanism
 - **Multimodal Chat** -- Image upload/paste processed via Gemini multimodal API
@@ -179,7 +179,7 @@ structured results as a workflow artifact retained for 7 days. The check is advi
 | [docs/ai-review.md](docs/ai-review.md) | AI code review workflow: setup, secrets, tuning variables |
 | [helm/README.md](helm/README.md) | Helm chart installation, values, integrations |
 | [ui/README.md](ui/README.md) | Dashboard pages, components, development |
-| [docs/README.md](docs/README.md) | External service access (ArgoCD, Kargo) |
+| [docs/README.md](docs/README.md) | External service access (9 integrations, RBAC, MCPs) |
 
 ## Project Structure
 

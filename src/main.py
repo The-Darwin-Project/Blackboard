@@ -15,7 +15,7 @@ Darwin Blackboard (Brain) - FastAPI Application
 The central nervous system of Darwin, hosting:
 - Blackboard state (Redis-backed)
 - 9 agents: Brain, Aligner, Archivist, Architect, SysAdmin, Developer, QE, Headhunter, Nightwatcher
-- React Dashboard, Slack integration, Release Console BFF
+- React Dashboard, Slack integration, Generic WS Clients (External Portals/BFFs)
 """
 from __future__ import annotations
 
