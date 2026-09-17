@@ -129,6 +129,11 @@ class DashboardWSAdapter:
     async def _handle_chat(self, ws: WebSocket, data: dict, user) -> None:
         message = data.get("message", "")
         service = data.get("service", "general")
+        display_label = (
+            user.label.split("@")[0]
+            if getattr(user, "label", None) and user.label != "anonymous"
+            else user.source
+        )
         event_id = await self._blackboard.create_event(
             source="chat",
             service=service,
@@ -136,7 +141,7 @@ class DashboardWSAdapter:
             evidence=EventEvidence(
                 display_text=message,
                 source_type="chat",
-                triggered_by=user.email or user.source,
+                triggered_by=display_label,
                 domain="disorder",
                 severity="info",
             ),

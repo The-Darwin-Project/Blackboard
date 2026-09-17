@@ -210,7 +210,7 @@ class TestAncestryLoopGuard:
         assert turn.waitingFor == "ask_release_ai"
         assert "Cannot invoke ask_release_ai" in (turn.thoughts or "")
         assert "re-entrant call prevented" in (turn.thoughts or "")
-        assert "evt-abc12345@darwin-project.io" in (turn.thoughts or "")
+        assert "[redacted-email]" in (turn.thoughts or "")
 
     async def test_ancestry_loop_guard_blocks_custom_domain_evt_prefix(self):
         """Dynamic caller identities on custom domains (e.g. evt-xxx@redhat.com) trigger loop guard."""
@@ -621,8 +621,8 @@ class TestUIHeaderUserEmail:
         call_kwargs = mock_blackboard.create_event.call_args.kwargs
         evidence: EventEvidence = call_kwargs["evidence"]
 
-        # Critical assertion: triggered_by displays human user email in Darwin UI header
-        assert evidence.triggered_by == "thason@redhat.com"
+        # Critical assertion: triggered_by displays human user label (non-PII) in Darwin UI header
+        assert evidence.triggered_by == "thason"
         assert call_kwargs["created_by_email"] == "thason@redhat.com"
 
     async def test_handle_chat_falls_back_to_user_source_when_email_missing(self):
@@ -653,3 +653,27 @@ class TestUIHeaderUserEmail:
         evidence: EventEvidence = mock_blackboard.create_event.call_args.kwargs["evidence"]
 
         assert evidence.triggered_by == "dashboard"
+
+    async def test_create_chat_event_maps_user_label_to_triggered_by(self):
+        """When user.label is provided, chat endpoint sets evidence.triggered_by to user.label."""
+        from src.routes.chat import create_chat_event, ChatEventRequest
+
+        mock_blackboard = AsyncMock()
+        mock_blackboard.create_event = AsyncMock(return_value="evt-chat-003")
+        mock_blackboard.append_turn = AsyncMock()
+
+        user = MagicMock()
+        user.email = "thason@redhat.com"
+        user.label = "thason"
+
+        req = ChatEventRequest(message="Test chat message", service="general")
+        mock_request = MagicMock()
+
+        with patch("src.routes.chat.get_user_from_request", return_value=user):
+            await create_chat_event(req, http_request=mock_request, blackboard=mock_blackboard)
+
+        mock_blackboard.create_event.assert_called_once()
+        call_kwargs = mock_blackboard.create_event.call_args.kwargs
+        evidence: EventEvidence = call_kwargs["evidence"]
+        assert evidence.triggered_by == "thason"
+        assert call_kwargs["created_by_email"] == "thason@redhat.com"

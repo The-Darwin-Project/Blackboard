@@ -1072,8 +1072,10 @@ def _is_darwin_reentrant_caller(created_by_email: str | None, base_email_lower: 
     avoids bare substring matching on "darwin" or the darwin-project.io domain suffix,
     since real human chat users can legitimately have either in their email address.
     """
+    import unicodedata
+
     created_by = created_by_email if isinstance(created_by_email, str) else ""
-    created_by_lower = created_by.strip().lower()
+    created_by_lower = unicodedata.normalize("NFKC", created_by).strip().lower()
     if not created_by_lower:
         return False, created_by
     is_reentrant = (
@@ -1122,10 +1124,10 @@ async def handle_ask_release_ai(
             getattr(event_doc, "created_by_email", None), base_email.strip().lower()
         )
         if is_reentrant:
-            reentrant_reason = f"parent {created_by}"
+            reentrant_reason = f"parent {redact_pii(created_by)}"
 
     if is_reentrant:
-        result_text = (
+        result_text = redact_pii(
             f"Cannot invoke ask_release_ai: this investigation event was initiated from "
             f"{reentrant_reason} (re-entrant call prevented). "
             f"Analyze using direct cluster/test tools instead."
