@@ -241,6 +241,15 @@ Uses the same `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` credentials as Headhunt
 
 Helm block: `ephemeralAgents.spawnDeadlineSec`, `ephemeralAgents.pollIntervalSec`, `ephemeralAgents.stallTimeoutSec`, `ephemeralAgents.infraDeferSec`.
 
+### Trusted Proxy (Generic WebSocket / BFF)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `TRUSTED_PROXY_ENABLED` | Enable trusted-proxy WebSocket auth | `false` |
+| `TRUSTED_PROXY_SECRET` | Shared secret for `X-BFF-Token` HMAC validation | (empty) |
+
+Helm block: `trustedProxy.existingSecret` (expects only the `secret` key; `TRUSTED_PROXY_ENABLED` is hardcoded `"true"` whenever `existingSecret` is set, not read from a secret key). See [Darwin-Release-Console-Integration-Contract.md](Darwin-Release-Console-Integration-Contract.md) and [architecture.md](architecture.md).
+
 ## Passive Service Discovery
 
 Darwin discovers services via Kubernetes annotations on Deployments:
@@ -270,3 +279,22 @@ GitHub Actions workflows handle the build pipeline:
 | `ai-review.yaml` | PRs targeting `main`/`master` | AI code review comments + artifact (advisory, non-blocking) |
 
 After image builds, the workflow auto-commits the new SHA tag to `helm/values.yaml` (with `[skip ci]`), which ArgoCD detects and syncs.
+
+## External Service Credentials & Secrets
+
+Darwin sidecars and Brain components consume credentials via standard Kubernetes Secrets mounted under `/secrets/<service>`. Below is the complete reference table for production configuration. This table additionally covers Trusted Proxy and Jira (Brain-only, not sidecar-mounted); it omits the Internal Blackboard MCPs (TeamChat, DarwinBlackboard, DarwinJournal), which are zero-credential localhost daemons documented in [README.md](README.md)'s integrations list rather than Kubernetes Secrets:
+
+| Integration | Helm Value | Secret Type / Key(s) | Mount Path | Target Containers |
+| :--- | :--- | :--- | :--- | :--- |
+| **GitHub App** | `github.existingSecret` | `app-id`, optional `installation-id`, `*.pem` | `/secrets/github` | Brain, Sidecars, Ephemeral |
+| **GitLab PAT** | `gitlab.existingSecret` | `token`, `host` | `/secrets/gitlab` | Brain, Sidecars, Ephemeral |
+| **ArgoCD** | `argocd.existingSecret` | `server`, `auth-token` | `/secrets/argocd` | Architect, SysAdmin, Ephemeral |
+| **Kargo** | `kargo.existingSecret` | `server`, `auth-token` | `/secrets/kargo` | Architect, SysAdmin, Ephemeral |
+| **Remote K8s Clusters** | `remoteClusters.<name>.existingSecret` | `kubeconfig` | `/secrets/remote-clusters/<name>` | Sidecars, Ephemeral |
+| **Jenkins** | `jenkinsObserver.jenkins.existingSecret` | `username`, `api-token` (URL via `JENKINS_URL` env var) | `/secrets/jenkins` | SysAdmin, Developer, Ephemeral |
+| **Container Registry** | `registry.existingSecret` | `kubernetes.io/dockerconfigjson` | `/secrets/registry` | Brain, Sidecars, Ephemeral |
+| **Trusted Proxy (BFF)** | `trustedProxy.existingSecret` | `secret` | Env (`TRUSTED_PROXY_*`) | Brain |
+| **Jira (Headhunter)** | `jira.existingSecret` | `email`, `api-token`, `bot-account-id` | Env (`JIRA_*`) | Brain |
+
+For detailed information on authentication flows, MCP registrations, and the sidecar credential lifecycle, see [External Service Access & MCP Architecture](README.md).
+

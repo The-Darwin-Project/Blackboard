@@ -444,7 +444,7 @@ obsAdmin:
   groups: "" # CSV of OCP group names (Dex "groups" claim) -- set in GitOps overlay.
   # require_obs_admin fails closed (403) while this is empty.
 # =============================================================================
-# Trusted Proxy (Release Console BFF → Darwin Brain WS auth)
+# Trusted Proxy (Generic WS Clients / External BFF → Darwin Brain WS auth)
 # =============================================================================
 trustedProxy:
   existingSecret: "" # K8s Secret with keys "enabled" and "secret". Set in GitOps overlay.
