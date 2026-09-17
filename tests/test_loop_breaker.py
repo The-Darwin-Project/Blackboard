@@ -237,13 +237,66 @@ class TestAncestryLoopGuard:
         assert turn.waitingFor == "ask_release_ai"
         assert "re-entrant call prevented" in (turn.thoughts or "")
 
-    async def test_ancestry_loop_guard_blocks_chat_source_darwin_domain(self):
-        """Events created via chat from a darwin-project.io identity trigger loop guard."""
+    async def test_chat_source_darwin_domain_human_like_email_is_not_blocked(self):
+        """Regression test for the false-positive HIGH finding on PR #251: a
+        chat-sourced event whose created_by_email merely contains "darwin" or
+        sits on the darwin-project.io domain -- but does not exactly match the
+        configured service account identity, nor a known Darwin-owned prefix --
+        must NOT be treated as re-entrant. The previous bare substring/suffix
+        check silently and permanently blocked legitimate human chat users
+        whose real email happened to contain "darwin"."""
         from src.agents.handlers_integration import handle_ask_release_ai
 
         event_id = "evt-subtask-003"
         event_doc = self._make_event_doc(
             created_by_email="bot@darwin-project.io",
+            source="chat",
+        )
+        ctx = _make_ctx(event_doc=event_doc)
+
+        mock_init_resp = MagicMock()
+        mock_init_resp.status_code = 200
+        mock_init_resp.json.return_value = {"data": {"sessionId": "s-3"}}
+        mock_stream = _make_mock_stream(['data: {"type":"done","usage":{}}'])
+
+        with (
+            patch("src.agents.handlers_integration.httpx.AsyncClient") as MockClient,
+            patch.dict("os.environ", {
+                "RELEASE_AI_URL": "https://release-ai.example.com",
+                # Configured service account differs from created_by_email above --
+                # only an exact match (or an evt-/darwin-evt-/darwin-agent@ prefix)
+                # should ever be treated as re-entrant.
+                "RELEASE_AI_EMAIL": "test@darwin-project.io",
+                "RELEASE_AI_BFF_TOKEN": "token",
+            }),
+        ):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_init_resp)
+            mock_client.stream = MagicMock(return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_stream),
+                __aexit__=AsyncMock(return_value=False),
+            ))
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await handle_ask_release_ai(ctx, event_id, {"question": "Why?"}, None)
+
+        assert result is True
+        # Not blocked: Release AI must be called since this caller is not the
+        # exact configured service-account identity.
+        assert mock_client.post.call_count == 1
+        turn = _captured_turn(ctx)
+        assert "Cannot invoke ask_release_ai" not in (turn.thoughts or "")
+
+    async def test_ancestry_loop_guard_blocks_exact_match_to_configured_service_account(self):
+        """A chat-sourced event whose created_by_email is an EXACT match to the
+        configured RELEASE_AI_EMAIL service account is the genuine re-entrant
+        case (Darwin calling itself) and must still be blocked."""
+        from src.agents.handlers_integration import handle_ask_release_ai
+
+        event_id = "evt-subtask-003b"
+        event_doc = self._make_event_doc(
+            created_by_email="test@darwin-project.io",
             source="chat",
         )
         ctx = _make_ctx(event_doc=event_doc)
@@ -263,6 +316,34 @@ class TestAncestryLoopGuard:
 
         turn = _captured_turn(ctx)
         assert "Cannot invoke ask_release_ai" in (turn.thoughts or "")
+        assert "re-entrant call prevented" in (turn.thoughts or "")
+
+    async def test_ancestry_loop_guard_blocks_darwin_agent_prefix(self):
+        """created_by_email starting with the darwin-agent@ fallback service
+        account prefix is blocked regardless of the configured RELEASE_AI_EMAIL."""
+        from src.agents.handlers_integration import handle_ask_release_ai
+
+        event_id = "evt-subtask-003c"
+        event_doc = self._make_event_doc(
+            created_by_email="darwin-agent@darwin-project.io",
+            source="chat",
+        )
+        ctx = _make_ctx(event_doc=event_doc)
+
+        with (
+            patch("src.agents.handlers_integration.httpx.AsyncClient") as MockClient,
+            patch.dict("os.environ", {
+                "RELEASE_AI_URL": "https://release-ai.example.com",
+                "RELEASE_AI_EMAIL": "someone-else@enterprise.com",
+                "RELEASE_AI_BFF_TOKEN": "token",
+            }),
+        ):
+            result = await handle_ask_release_ai(ctx, event_id, {"question": "Why?"}, None)
+
+        assert result is True
+        MockClient.assert_not_called()
+
+        turn = _captured_turn(ctx)
         assert "re-entrant call prevented" in (turn.thoughts or "")
 
     async def test_ancestry_loop_guard_blocks_darwin_evt_prefix(self):
