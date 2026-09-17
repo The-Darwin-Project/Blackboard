@@ -5,10 +5,12 @@
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: notify_user_slack uses _resolve_slack_user (extracted as standalone helper).
+# 6. [Constraint]: handle_ask_release_ai enforces ancestry loop guard and dynamic caller identity ({event_id}@{domain}) with PII redaction on all error streams.
 """Group D: 12 external integration tool handlers."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -1067,19 +1069,77 @@ async def handle_ask_release_ai(
 ) -> bool:
     question = args.get("question", "")
     release_ai_url = os.getenv("RELEASE_AI_URL", "")
-    release_ai_email = os.getenv("RELEASE_AI_EMAIL", "")
     release_ai_token = os.getenv("RELEASE_AI_BFF_TOKEN", "")
+
+    raw_email = (os.getenv("RELEASE_AI_EMAIL") or "").strip()
+    base_email = raw_email if ("@" in raw_email and len(raw_email.split("@")[1]) > 0) else "darwin-agent@darwin-project.io"
+    domain = base_email.split("@")[1]
+    caller_email = f"{event_id}@{domain}"
+
+    # Ancestry loop guard: break distributed recursion if event originated from Darwin / Release AI
+    is_reentrant = False
+    reentrant_reason = ""
+    try:
+        bb = ctx.get_blackboard()
+        if inspect.iscoroutine(bb):
+            bb = await bb
+        event_doc = await bb.get_event(event_id) if hasattr(bb, "get_event") else None
+    except Exception as e:
+        logger.warning("Failed to fetch event_doc for ancestry check on %s: %s", event_id, e)
+        # Fail closed if event_id is a Darwin event format
+        if str(event_id).lower().startswith(("evt-", "darwin-evt-")):
+            is_reentrant = True
+            reentrant_reason = f"event {event_id} (database unavailable during ancestry check)"
+        event_doc = None
+
+    if event_doc and not is_reentrant:
+        created_by = getattr(event_doc, "created_by_email", None)
+        event_source = getattr(event_doc, "source", None)
+        created_by_lower = (created_by or "").strip().lower()
+        base_email_lower = base_email.strip().lower()
+        if (
+            created_by_lower.startswith(("evt-", "darwin-evt-"))
+            or (base_email_lower and created_by_lower == base_email_lower)
+            or "darwin-agent" in created_by_lower
+            or created_by_lower.endswith("@darwin-project.io")
+            or (event_source == "chat" and "darwin" in created_by_lower)
+        ):
+            is_reentrant = True
+            reentrant_reason = f"parent {created_by}"
+
+    if is_reentrant:
+        result_text = (
+            f"Cannot invoke ask_release_ai: this investigation event was initiated from "
+            f"{reentrant_reason} (re-entrant call prevented). "
+            f"Analyze using direct cluster/test tools instead."
+        )
+        turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain",
+            action="tool_result",
+            waitingFor="ask_release_ai",
+            thoughts=result_text,
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    result_text = ""
     if not release_ai_url:
         result_text = "Release AI not configured (RELEASE_AI_URL missing). Proceed without RCA context."
-    elif not release_ai_email:
-        result_text = "Release AI not configured (RELEASE_AI_EMAIL missing). Proceed without RCA context."
     elif not release_ai_token:
         result_text = "Release AI not configured (RELEASE_AI_BFF_TOKEN missing). Proceed without RCA context."
     elif not question:
         result_text = "Missing required parameter: question."
     else:
         try:
-            headers = {"X-Forwarded-Email": release_ai_email, "X-BFF-Token": release_ai_token}
+            headers = {
+                "X-Forwarded-Email": caller_email,
+                "X-BFF-Token": release_ai_token,
+                "X-Darwin-Caller": "brain",
+                "X-Calling-Agent": "darwin-blackboard",
+                "X-Darwin-Event-Id": event_id,
+            }
             async with httpx.AsyncClient(timeout=_RELEASE_AI_TIMEOUT) as client:
                 init_resp = await client.post(
                     f"{release_ai_url}/api/chat/init",
@@ -1106,29 +1166,36 @@ async def handle_ask_release_ai(
                                 json={"sessionId": session_id, "text": question},
                                 headers=headers,
                             ) as stream:
-                                async for line in stream.aiter_lines():
-                                    if not line.startswith("data: "):
-                                        continue
-                                    raw = line[6:]
-                                    try:
-                                        chunk = json.loads(raw)
-                                    except (ValueError, TypeError):
-                                        continue
-                                    chunk_type = chunk.get("type", "")
-                                    if chunk_type == "text":
-                                        accumulated.append(chunk.get("text", ""))
-                                    elif chunk_type == "error":
-                                        error_msg = chunk.get("error", "Unknown error")
-                                        break
-                                    elif chunk_type == "done":
-                                        break
-                    if error_msg:
-                        result_text = f"Release AI error: {error_msg}. Proceed without RCA context."
-                    elif accumulated:
-                        answer = redact_pii("".join(accumulated)[:8000])
-                        result_text = f"Release AI response:\n\n{answer}"
-                    else:
-                        result_text = "Release AI returned an empty response. Proceed without RCA context."
+                                stream_status = getattr(stream, "status_code", 200)
+                                if isinstance(stream_status, int) and stream_status >= 400:
+                                    raw_err = (await stream.aread()).decode(errors="replace")[:500]
+                                    error_body = redact_pii(raw_err)
+                                    result_text = f"Release AI stream failed (HTTP {stream_status}): {error_body}. Proceed without RCA context."
+                                else:
+                                    async for line in stream.aiter_lines():
+                                        if not line.startswith("data: "):
+                                            continue
+                                        raw = line[6:]
+                                        try:
+                                            chunk = json.loads(raw)
+                                        except (ValueError, TypeError):
+                                            continue
+                                        chunk_type = chunk.get("type", "")
+                                        if chunk_type == "text" and not chunk.get("deferred"):
+                                            accumulated.append(chunk.get("text") or "")
+                                        elif chunk_type == "error":
+                                            error_msg = redact_pii(str(chunk.get("error", "Unknown error")))
+                                            break
+                                        elif chunk_type == "done":
+                                            break
+                    if not result_text:
+                        if error_msg:
+                            result_text = f"Release AI error: {error_msg}. Proceed without RCA context."
+                        elif accumulated:
+                            answer = redact_pii("".join(accumulated)[:8000])
+                            result_text = f"Release AI response:\n\n{answer}"
+                        else:
+                            result_text = "Release AI returned an empty response. Proceed without RCA context."
         except Exception as e:
             result_text = (
                 f"Release AI unavailable: {e}. Proceed without RCA context."

@@ -136,7 +136,7 @@ class DashboardWSAdapter:
             evidence=EventEvidence(
                 display_text=message,
                 source_type="chat",
-                triggered_by=user.source,
+                triggered_by=user.email or user.source,
                 domain="disorder",
                 severity="info",
             ),
