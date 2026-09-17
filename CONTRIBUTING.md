@@ -162,14 +162,14 @@ When changing code, update the corresponding living doc:
 | New brain skill phase or file | `docs/brain-skills.md` |
 | New Dashboard page | `ui/README.md` |
 
-See [docs/TABLE-OF-CONTENTS.md](../docs/TABLE-OF-CONTENTS.md) for the full doc index.
+See [docs/TABLE-OF-CONTENTS.md](docs/TABLE-OF-CONTENTS.md) for the full doc index.
 
 ## Documentation Structure
 
 | Document | Content |
 | :--- | :--- |
 | [README.md](README.md) | Project overview and quick start |
-| [docs/TABLE-OF-CONTENTS.md](../docs/TABLE-OF-CONTENTS.md) | Full documentation index |
+| [docs/TABLE-OF-CONTENTS.md](docs/TABLE-OF-CONTENTS.md) | Full documentation index |
 | [docs/architecture.md](docs/architecture.md) | Architecture, WebSocket protocol, Cortex/JARVIS, safety model |
 | [docs/agents.md](docs/agents.md) | Agent system (9 specialists), sidecars, skills, MCP servers |
 | [docs/api-reference.md](docs/api-reference.md) | All REST and WebSocket API endpoints |

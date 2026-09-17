@@ -59,9 +59,9 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Cortex / JARVIS | `cortex.system2.enabled: true` | Pulse tracking via `cortex.pulseTracking`; shadow via `cortex.system2.shadow` |
 | Registry Pull (runtime) | `registry.enabled: true` | `registry.existingSecret` (dockerconfigjson for agent CLIs) |
 | Remote Clusters (MCP) | `remoteClusters.<name>.enabled: true` | Per-cluster kubeconfig Secret |
-| Trusted Proxy (Generic WS / BFF) | Set `trustedProxy.existingSecret` | `trustedProxy.existingSecret` (keys `enabled`, `secret` -- see [deployment.md](../docs/deployment.md)) |
+| Trusted Proxy (Generic WS / BFF) | Set `trustedProxy.existingSecret` | `trustedProxy.existingSecret` (key `secret` -- see [deployment.md](../docs/deployment.md)) |
 | ArgoCD Observer | `argocdObserver.enabled: true` | Requires `observer.enabled: true` (shared RBAC) |
-| Jenkins Observer & MCP | `jenkinsObserver.enabled: true` | `jenkinsObserver.jenkins.existingSecret` (keys `url`, `user`, `token` / `api-token`) |
+| Jenkins Observer & MCP | `jenkinsObserver.enabled: true` | `jenkinsObserver.jenkins.existingSecret` (keys `username`, `api-token`; URL via `JENKINS_URL` env var) |
 
 ## Networking
 

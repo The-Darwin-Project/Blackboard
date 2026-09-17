@@ -40,7 +40,7 @@ flowchart TD
         S5["Initial setupCLILogins()"]
     end
 
-    subgraph Background ["Phase 3: Periodic Refresh (setInterval 50m)"]
+    subgraph Background ["Phase 3: Periodic Refresh (setInterval 5m)"]
         R1["GitHub App: Generate JWT & map org tokens to /tmp/gh-token-map.json"]
         R2["ArgoCD: CLI login --username admin --password &lt;pass&gt; --insecure --grpc-web"]
         R3["Kargo: CLI login https://&lt;server&gt; --admin --password &lt;pass&gt; --insecure-skip-tls-verify"]
@@ -59,13 +59,13 @@ flowchart TD
 ### Lifecycle Phases
 - **Phase 1: Boot**: When the sidecar container boots, `cli-setup.js` initializes the configuration files (`~/.claude.json` and `~/.gemini/settings.json`) registering all available MCP servers for Gemini and Claude Code CLIs.
 - **Phase 2: Startup**: `server.js` executes `setupCredentials()` to copy registry credentials, register multi-cluster Kubernetes MCPs, acquire the initial ArgoCD REST Session JWT, and spin up role-gated internal MCP daemons.
-- **Phase 3: Periodic Refresh**: A 50-minute background interval (`CLI_LOGIN_INTERVAL_MS = 50 * 60 * 1000`) continuously runs `setupCLILogins()` to renew CLI sessions and JWT maps before tokens expire, preventing task interruption.
+- **Phase 3: Periodic Refresh**: A 5-minute background interval (`CLI_LOGIN_INTERVAL_MS = 5 * 60 * 1000`) continuously runs `setupCLILogins()` to renew CLI sessions and JWT maps before tokens expire, preventing task interruption.
 
 ---
 
 ## 3. The 9 Production Integrations
 
-Darwin natively integrates with 9 external services and tools across source control, GitOps, CI/CD, and cluster runtimes:
+Darwin natively integrates with 9 external services and tools across source control, GitOps, CI/CD, and cluster runtimes. This section covers sidecar-facing integrations only; it intentionally omits Trusted Proxy and Jira (Brain-only, documented in [deployment.md](deployment.md)'s credentials table), which is why that table's row set differs from this one:
 
 ### 3.1 GitHub App (Multi-Org Dynamic Discovery)
 - **Purpose**: Authenticates Git operations (`git clone`, `git commit`, `git push`) and GitHub CLI (`gh`) commands across multiple GitHub organizations.
@@ -74,19 +74,19 @@ Darwin natively integrates with 9 external services and tools across source cont
 - **Helm Value**: `github.existingSecret`
 - **Secret Keys**: `app-id`, optional `installation-id`, and private key file (`*.pem` or `private-key`).
 - **Mount Path**: `/secrets/github`
-- **Target Containers**: Brain, Headhunter, Architect, SysAdmin, Developer, QE, Ephemeral.
+- **Target Containers**: Brain, Architect, SysAdmin, Developer, QE, Ephemeral. (Headhunter runs in-process inside Brain, not as a separate container -- see [agents.md](agents.md).)
 
 ### 3.2 GitLab (PAT & Official MCP)
 - **Purpose**: MR triage, automated reviews, commenting, and Git repository operations for GitLab-hosted codebases.
-- **Auth Flow**: Static Personal Access Token (PAT). Configures the official `@modelcontextprotocol/server-gitlab` MCP server in agent CLI settings.
+- **Auth Flow**: Static Personal Access Token (PAT). Configures `glab mcp serve` (the GitLab CLI's built-in MCP server) in agent CLI settings; the deprecated `@modelcontextprotocol/server-gitlab` package (broken schemas) is no longer used.
 - **Helm Value**: `gitlab.existingSecret`
 - **Secret Keys**: `token`, `host` (e.g. `gitlab.example.com`).
 - **Mount Path**: `/secrets/gitlab`
-- **Target Containers**: Brain, Headhunter, Architect, SysAdmin, Developer, QE, Ephemeral.
+- **Target Containers**: Brain, Architect, SysAdmin, Developer, QE, Ephemeral. (Headhunter runs in-process inside Brain, not as a separate container -- see [agents.md](agents.md).)
 
 ### 3.3 ArgoCD (REST Session JWT & Official MCP)
 - **Purpose**: Inspection of ArgoCD Applications, ApplicationSets, sync status, and GitOps rollouts.
-- **Auth Flow**: `setupArgoCDMCP()` performs a REST call to `POST /api/v1/session` exchanging admin credentials for an ArgoCD Session JWT. Configures `@modelcontextprotocol/server-argocd` for agent tool calls. `setupCLILogins()` simultaneously maintains an active `argocd login` CLI session.
+- **Auth Flow**: `setupArgoCDMCP()` performs a REST call to `POST /api/v1/session` exchanging admin credentials for an ArgoCD Session JWT. Configures the standalone `argocd-mcp` npm package for agent tool calls. `setupCLILogins()` simultaneously maintains an active `argocd login` CLI session.
 - **Helm Value**: `argocd.existingSecret`
 - **Secret Keys**: `server`, `auth-token` (admin password).
 - **Mount Path**: `/secrets/argocd`
@@ -119,7 +119,7 @@ Darwin natively integrates with 9 external services and tools across source cont
 - **Purpose**: Test job inspection, build status monitoring, and build re-triggering for CI failure remediation.
 - **Auth Flow**: Managed via `/app/jenkins-mcp.js`, a zero-external-dependency Node.js MCP server using standard library `node:http`/`node:https` and Basic Auth (`user:token`). Role-gated: only started for `sysadmin`, `developer`, and `ephemeral` agents.
 - **Helm Value**: `jenkinsObserver.jenkins.existingSecret`
-- **Secret Keys**: `url`, `user`, `token` (or `api-token`).
+- **Secret Keys**: `username`, `api-token`. The Jenkins URL is supplied separately via the `JENKINS_URL` env var, not a secret key.
 - **Mount Path**: `/secrets/jenkins`
 - **Target Containers**: SysAdmin, Developer, Ephemeral (omitted from Architect and QE).
 
@@ -147,7 +147,7 @@ Darwin natively integrates with 9 external services and tools across source cont
 | External Service / Tool | Protocol / Type | Brain | Architect | SysAdmin | Developer | QE | Ephemeral (Tekton) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **GitHub App** | Git Helper + Token Map | Yes | Yes | Yes | Yes | Yes | Yes |
-| **GitLab PAT** | MCP (`server-gitlab`) | Yes | Yes | Yes | Yes | Yes | Yes |
+| **GitLab PAT** | MCP (`glab mcp serve`) | Yes | Yes | Yes | Yes | Yes | Yes |
 | **ArgoCD CLI & MCP** | REST JWT + MCP | No | Yes | Yes | **No** | **No** | Yes |
 | **Kargo CLI** | CLI Login (`https://`) | No | Yes | Yes | **No** | **No** | Yes |
 | **Remote K8s** | MCP (`kubernetes-mcp`) | No | Yes | Yes | Yes | Yes | Yes |
