@@ -1064,6 +1064,26 @@ async def handle_greenwave(
 # ---------------------------------------------------------------------------
 _RELEASE_AI_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
 
+
+def _is_darwin_reentrant_caller(created_by_email: str | None, base_email_lower: str) -> tuple[bool, str]:
+    """Check whether an event's creator is a known Darwin/Release-AI identity, not a human.
+
+    Exact-match / prefix-only against actual Darwin-owned identities -- deliberately
+    avoids bare substring matching on "darwin" or the darwin-project.io domain suffix,
+    since real human chat users can legitimately have either in their email address.
+    """
+    created_by = created_by_email if isinstance(created_by_email, str) else ""
+    created_by_lower = created_by.strip().lower()
+    if not created_by_lower:
+        return False, created_by
+    is_reentrant = (
+        created_by_lower.startswith(("evt-", "darwin-evt-"))
+        or (bool(base_email_lower) and created_by_lower == base_email_lower)
+        or created_by_lower.startswith("darwin-agent@")
+    )
+    return is_reentrant, created_by
+
+
 async def handle_ask_release_ai(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -1072,7 +1092,12 @@ async def handle_ask_release_ai(
     release_ai_token = os.getenv("RELEASE_AI_BFF_TOKEN", "")
 
     raw_email = (os.getenv("RELEASE_AI_EMAIL") or "").strip()
-    base_email = raw_email if ("@" in raw_email and len(raw_email.split("@")[1]) > 0) else "darwin-agent@darwin-project.io"
+    _raw_email_parts = raw_email.split("@")
+    base_email = (
+        raw_email
+        if (len(_raw_email_parts) == 2 and _raw_email_parts[0] and _raw_email_parts[1])
+        else "darwin-agent@darwin-project.io"
+    )
     domain = base_email.split("@")[1]
     caller_email = f"{event_id}@{domain}"
 
@@ -1093,22 +1118,10 @@ async def handle_ask_release_ai(
         event_doc = None
 
     if event_doc and not is_reentrant:
-        created_by = getattr(event_doc, "created_by_email", None)
-        if not isinstance(created_by, str):
-            created_by = ""
-        event_source = getattr(event_doc, "source", None)
-        if not isinstance(event_source, str):
-            event_source = ""
-        created_by_lower = created_by.strip().lower()
-        base_email_lower = base_email.strip().lower()
-        if created_by_lower and (
-            created_by_lower.startswith(("evt-", "darwin-evt-"))
-            or (base_email_lower and created_by_lower == base_email_lower)
-            or "darwin-agent" in created_by_lower
-            or created_by_lower.endswith("@darwin-project.io")
-            or (event_source == "chat" and "darwin" in created_by_lower)
-        ):
-            is_reentrant = True
+        is_reentrant, created_by = _is_darwin_reentrant_caller(
+            getattr(event_doc, "created_by_email", None), base_email.strip().lower()
+        )
+        if is_reentrant:
             reentrant_reason = f"parent {created_by}"
 
     if is_reentrant:
@@ -1202,7 +1215,7 @@ async def handle_ask_release_ai(
                             result_text = "Release AI returned an empty response. Proceed without RCA context."
         except Exception as e:
             result_text = (
-                f"Release AI unavailable: {e}. Proceed without RCA context."
+                f"Release AI unavailable: {redact_pii(str(e))}. Proceed without RCA context."
             )
             logger.warning("ask_release_ai failed for %s: %s", event_id, e)
 
