@@ -1094,10 +1094,14 @@ async def handle_ask_release_ai(
 
     if event_doc and not is_reentrant:
         created_by = getattr(event_doc, "created_by_email", None)
+        if not isinstance(created_by, str):
+            created_by = ""
         event_source = getattr(event_doc, "source", None)
-        created_by_lower = (created_by or "").strip().lower()
+        if not isinstance(event_source, str):
+            event_source = ""
+        created_by_lower = created_by.strip().lower()
         base_email_lower = base_email.strip().lower()
-        if (
+        if created_by_lower and (
             created_by_lower.startswith(("evt-", "darwin-evt-"))
             or (base_email_lower and created_by_lower == base_email_lower)
             or "darwin-agent" in created_by_lower
