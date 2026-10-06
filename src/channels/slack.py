@@ -540,7 +540,7 @@ class SlackChannel:
             thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
 
             from ..models import ConversationTurn
-            from ..auth import get_user_from_slack, can_approve_event
+            from ..auth import get_user_from_slack, can_approve_event, resolve_approval_identity, DEX_ENABLED, TRUSTED_PROXY_ENABLED
             from ..utils.vcs_approval import resolve_live_head_sha
 
             event_doc = await self._blackboard.get_event(event_id)
@@ -550,15 +550,18 @@ class SlackChannel:
             email = self._get_cached_email(user)
             display_name = await self._resolve_display_name(client, user)
             user_ctx = get_user_from_slack(user, display_name, email or "")
-            if not can_approve_event(user_ctx, event_doc):
+            # auth_enabled passed explicitly (matching queue.py/dashboard_ws.py) rather than
+            # relying on can_approve_event's bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED) default --
+            # Slack identity is always named regardless of Dex, but the APPROVER_GROUPS RBAC
+            # gate this call enforces must still apply whenever either auth mode is on.
+            auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+            if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
                 logger.warning(f"Slack approve forbidden on {event_id} by {user} ({email})")
                 return
 
             mr_id, mr_sha = await resolve_live_head_sha(event_doc)
 
-            approved_ident = email or display_name or user
-            clean_name = str(display_name) if display_name is not None else None
-            clean_ident = str(approved_ident) if approved_ident is not None else None
+            clean_ident, clean_name = resolve_approval_identity(email, display_name, fallback=user)
 
             stamp_res = self._blackboard.stamp_event(
                 event_id,
@@ -602,9 +605,28 @@ class SlackChannel:
             thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
 
             from ..models import ConversationTurn
+            from ..auth import get_user_from_slack, can_approve_event, DEX_ENABLED, TRUSTED_PROXY_ENABLED
             event_doc = await self._blackboard.get_event(event_id)
             if not event_doc:
                 return
+
+            email = self._get_cached_email(user)
+            display_name = await self._resolve_display_name(client, user)
+            user_ctx = get_user_from_slack(user, display_name, email or "")
+            auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+            if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
+                logger.warning(f"Slack reject forbidden on {event_id} by {user} ({email})")
+                return
+
+            # A rejection supersedes any prior approval stamp (see queue.py reject_event) --
+            # otherwise GET /{event_id}/approval keeps reporting a stale approved_mr_sha.
+            if event_doc.approved_by or event_doc.approved_mr_id or event_doc.approved_mr_sha:
+                clear_res = self._blackboard.stamp_event(
+                    event_id, approved_by=None, approved_mr_id=None, approved_mr_sha=None,
+                )
+                if inspect.isawaitable(clear_res):
+                    await clear_res
+
             turn = ConversationTurn(
                 turn=len(event_doc.conversation) + 1,
                 actor="user",

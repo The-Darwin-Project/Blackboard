@@ -6,7 +6,7 @@
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
-# 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
+# 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is NOT deleted on event close -- delete_slack_mapping() sets a 14-day archival-retention TTL (SLACK_MAPPING_TTL) instead, so follow-up replies in the thread can still resolve to the closed event for smart continuation routing.
 # 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 # 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag) and atomic observation rename-and-reindex.

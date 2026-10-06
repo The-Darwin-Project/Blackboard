@@ -356,9 +356,15 @@ class TestQueueRouteIngestionEnqueues:
         brain.resume_if_parked = AsyncMock(return_value=True)
         brain.enqueue_for_processing = MagicMock()
 
+        # DEX disabled in test env -> get_user_from_request never touches headers, so a
+        # bare stand-in with a `.headers` dict is sufficient (request is now a required
+        # param: approve_event resolves identity from it instead of an implicit-body param).
+        fake_request = MagicMock()
+        fake_request.headers = {}
+
         with patch.object(queue_routes, "get_brain", AsyncMock(return_value=brain)):
             result = await queue_routes.approve_event(
-                event_id="evt-sync-1", blackboard=blackboard
+                event_id="evt-sync-1", request=fake_request, blackboard=blackboard
             )
 
         assert result["status"] == "approved"
@@ -377,9 +383,12 @@ class TestQueueRouteIngestionEnqueues:
         brain.resume_if_parked = AsyncMock(return_value=True)
         brain.enqueue_for_processing = MagicMock()
 
+        fake_request = MagicMock()
+        fake_request.headers = {}
+
         with patch.object(queue_routes, "get_brain", AsyncMock(return_value=brain)):
             result = await queue_routes.reject_event(
-                event_id="evt-sync-1", blackboard=blackboard
+                event_id="evt-sync-1", request=fake_request, blackboard=blackboard
             )
 
         assert result["status"] == "rejected"

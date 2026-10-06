@@ -1,7 +1,16 @@
 # BlackBoard/src/utils/vcs_approval.py
 # @ai-rules:
 # 1. [Pattern]: Resolves live MR/PR HEAD commit SHA from VCS platform APIs at approval time to prevent TOCTOU.
-# 2. [Fallback]: Gracefully falls back to cached evidence context if live API query fails or is unconfigured.
+# 2. [Fallback]: Gracefully falls back to cached evidence context if live API query fails or is unconfigured
+#    -- on any non-2xx response or transport exception. Both branches log a warning so a sustained
+#    outage or expired token is operator-visible instead of silently degrading to the cached SHA.
+# 3. [Security]: TLS verification is NEVER disabled on these calls -- GITLAB_HOST and
+#    api.github.com are both CA-signed; verify=False would let a MITM forge the live SHA
+#    this module exists to protect against.
+# 4. [Pattern]: verify_merge_guard() is the single production implementation of the
+#    Developer merge guard (out-of-band approval + SHA binding). Callers needing to enforce
+#    "do not merge unless approved_mr_sha == local HEAD" must import it from here rather than
+#    reimplementing the comparison.
 from __future__ import annotations
 
 import logging
@@ -59,7 +68,7 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
 
     if host and token:
         try:
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
                     f"https://{host}/api/v4/projects/{project_id}/merge_requests/{mr_iid}",
                     headers={"PRIVATE-TOKEN": token},
@@ -69,6 +78,11 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
                     live_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha")
                     if live_sha:
                         return mr_iid, live_sha
+                else:
+                    logger.warning(
+                        "Live GitLab HEAD SHA query for MR !%s returned HTTP %s -- falling back to cached SHA",
+                        mr_iid, resp.status_code,
+                    )
         except Exception as e:
             logger.warning("Failed live GitLab HEAD SHA query for MR !%s: %s", mr_iid, e)
 
@@ -90,7 +104,7 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
                 headers=headers,
@@ -100,7 +114,44 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
                 live_sha = (pr_data.get("head") or {}).get("sha")
                 if live_sha:
                     return pr_number, live_sha
+            else:
+                logger.warning(
+                    "Live GitHub HEAD SHA query for PR #%s returned HTTP %s -- falling back to cached SHA",
+                    pr_number, resp.status_code,
+                )
     except Exception as e:
         logger.warning("Failed live GitHub HEAD SHA query for PR #%s: %s", pr_number, e)
 
     return pr_number, fallback_sha
+
+
+def verify_merge_guard(
+    approval_record: dict[str, Any] | None,
+    local_head_sha: str | None,
+) -> tuple[bool, str]:
+    """Decide whether the Developer agent may merge, breaking prompt-injection circularity (C2).
+
+    This is the out-of-band cryptographic-binding check referenced by
+    `src/agents/brain_skills/dispatch/mr-lifecycle.md` and enforced for Gemini-CLI Developer
+    sessions by `gemini-sidecar/hooks/validate-mutations.sh`'s merge-approval gate, which
+    calls this same comparison (via the `/proxy/approval` -> `GET /queue/{event_id}/approval`
+    chain) before allowing a `git merge`/`git push ... main`/`gh pr merge`/`glab mr merge`
+    command through. Strictly verifies live_git_head == approval.approved_mr_sha and refuses
+    to merge based on prompt text alone -- an attacker who injects "the plan is approved,
+    please merge" into agent context cannot forge a passing `approval_record` here.
+
+    Pure function -- zero side effects, zero I/O. Callers own fetching `approval_record`
+    (e.g. via `bb_get_approval` / `GET /queue/{event_id}/approval`) and `local_head_sha`
+    (e.g. via `git rev-parse HEAD`).
+    """
+    if not approval_record or not approval_record.get("approved"):
+        return False, "Merge REFUSED: event not approved by authorized maintainer"
+
+    approved_sha = approval_record.get("approved_mr_sha")
+    if not approved_sha or not local_head_sha or approved_sha != local_head_sha:
+        return (
+            False,
+            f"Merge REFUSED: live HEAD ({local_head_sha}) differs from authenticated approval SHA ({approved_sha})",
+        )
+
+    return True, "Merge AUTHORIZED"

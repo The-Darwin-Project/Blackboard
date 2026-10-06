@@ -51,9 +51,12 @@ OBS_ADMIN_GROUPS = frozenset(
 )
 
 # Dex groups allowed to approve unowned automation events when DEX is enabled. Comma-separated.
+# Fails closed like OBS_ADMIN_GROUPS: unset means deny-all, NOT a permissive built-in default --
+# generic names like "admin"/"maintainer" risk silently granting approval rights if they
+# collide with pre-existing corporate IdP groups once Dex is enabled.
 APPROVER_GROUPS = frozenset(
     g.strip().lower()
-    for g in os.getenv("APPROVER_GROUPS", "maintainer,maintainers,admin,admins,darwin-maintainers,darwin-admins").split(",")
+    for g in os.getenv("APPROVER_GROUPS", "").split(",")
     if g.strip()
 )
 
@@ -326,4 +329,29 @@ def can_approve_event(
 
     # Unowned / automated event requires maintainer or admin group membership
     return has_approver_role
+
+
+def resolve_approval_identity(
+    email: str | None,
+    label: str | None,
+    fallback: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Normalize (approved_by, display_name) for approval stamping and turn logging.
+
+    Single source of truth for the REST, WebSocket, and Slack approval handlers. Each
+    previously inlined its own copy of this logic and the copies had already drifted --
+    Slack's never applied the "anonymous" placeholder filter the REST/WS copies do, so an
+    unauthenticated Slack approval could stamp the literal string "anonymous" as approved_by.
+
+    Priority for the identity value: email, then label, then fallback (e.g. a Slack user id).
+    The literal string "anonymous" is treated as "no identity" and stripped from both outputs.
+    """
+    raw_identity = email if (isinstance(email, str) and email) else (label or fallback)
+    clean_identity = (
+        str(raw_identity)
+        if raw_identity is not None and str(raw_identity) != "anonymous"
+        else (str(email) if email else None)
+    )
+    clean_label = str(label) if label is not None and str(label) != "anonymous" else None
+    return clean_identity, clean_label
 

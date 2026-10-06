@@ -1,16 +1,28 @@
 #!/bin/bash
 # gemini-sidecar/hooks/validate-mutations.sh
 # @ai-rules:
-# 1. [Pattern]: Gemini CLI BeforeTool hook — blocks shell mutations for read-only roles.
+# 1. [Pattern]: Gemini CLI BeforeTool hook — blocks shell mutations for read-only roles,
+#    PLUS (regardless of role) enforces the out-of-band merge-approval guard below.
 # 2. [Contract]: Defense-in-depth flange. Primary enforcement is behavioral (agent rules).
 #    No normalization pipeline — trusted Darwin prompts, not untrusted external code.
 #    Known accepted gap: a naive regex denylist over the raw command string cannot catch
 #    indirection (eval, process substitution, variable-split commands). Closing that
 #    requires a tool-allowlist / engine permissions.deny layer, out of scope here.
 # 3. [Constraint]: Fail-OPEN always. Exit 0 with JSON. Never exit non-zero (blocks agent).
+#    "Fail-open" is about this script's own exit code only -- the merge-approval guard
+#    below still emits decision:"block" (a normal, successful JSON response) whenever
+#    approval cannot be positively confirmed; it fails CLOSED on the merge decision itself.
 # 4. [Constraint]: Single-responsibility — validation ONLY. Context injection stays in AfterTool.
 # 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
 #    have AGENT_ROLE="" — real role arrives via WS, exposed by /hook-status endpoint.
+# 6. [Security]: Merge-approval guard is the server-side backstop for the Developer merge
+#    guard described in src/agents/brain_skills/dispatch/mr-lifecycle.md (breaking prompt
+#    injection circularity, C2) -- same approved/approved_mr_sha comparison as
+#    src/utils/vcs_approval.py's verify_merge_guard(), reached here via the sidecar's own
+#    /proxy/approval route. Applies to EVERY role (including "developer", who is
+#    intentionally absent from READONLY_ROLES below since Developer must be able to git
+#    push/commit) -- git mutations in general are allowed for Developer, but a merge
+#    specifically now requires server-confirmed approval bound to the current commit.
 
 # Read-only roles (Gemini-CLI roles only — Claude roles have their own enforcement)
 READONLY_ROLES="explorer security_analyst"
@@ -21,15 +33,8 @@ ROLE_DATA=$(curl -sf --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-s
 ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
 [ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
 
-# Fast exit: if role is not read-only, allow everything.
-# Explicit empty check first -- don't rely on grep -w's empty-pattern behavior,
-# which is not consistently specified across grep implementations.
-if [ -z "$ROLE" ] || ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
-    echo '{"decision":"allow"}'
-    exit 0
-fi
-
-# Read stdin (BeforeTool JSON payload)
+# Read stdin (BeforeTool JSON payload) once, before any role-based fast exit -- the
+# merge-approval guard below must run for every role, not just READONLY_ROLES.
 INPUT=$(cat 2>/dev/null) || { echo '{"decision":"allow"}'; exit 0; }
 
 # Parse tool name and command via node (same pattern as validate-reviewer-bash.sh)
@@ -49,9 +54,52 @@ PARSED=$(printf '%s' "$INPUT" | timeout 3 node -e "
 TOOL_NAME="${PARSED%%|||*}"
 COMMAND="${PARSED#*|||}"
 
-# Early exit: non-shell tools don't need mutation checking
 # run_shell_command is Gemini CLI's actual built-in shell tool name.
 SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command"
+
+# --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
+if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
+    MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
+    MERGE_PATTERN='\bgit\s+merge\b|\bgit\s+push\b[^&|;]*\bmain\b|\bgh\s+pr\s+merge\b|\bglab\s+mr\s+merge\b'
+    if printf '%s\n' "$MERGE_CMD" | grep -qiE "$MERGE_PATTERN"; then
+        APPROVAL_JSON=$(curl -sf --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+        LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
+        GUARD_DECISION=$(node -e "
+          let raw = process.argv[1] || '';
+          let localSha = process.argv[2] || '';
+          let approval = null;
+          try { approval = JSON.parse(raw); } catch { approval = null; }
+          if (!approval || !approval.approved) {
+            process.stdout.write('BLOCK|||Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).');
+          } else if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
+            process.stdout.write('BLOCK|||Merge REFUSED: live HEAD (' + localSha + ') differs from authenticated approval SHA (' + approval.approved_mr_sha + ').');
+          } else {
+            process.stdout.write('ALLOW|||');
+          }
+        " "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+        GUARD_RESULT="${GUARD_DECISION%%|||*}"
+        GUARD_REASON="${GUARD_DECISION#*|||}"
+        # Empty GUARD_DECISION means the node subprocess itself failed (not a parse outcome,
+        # since the script above always writes BLOCK||| or ALLOW|||) -- fail CLOSED here too,
+        # this is the one check in this file where "unable to verify" must mean "refuse".
+        if [ "$GUARD_RESULT" != "ALLOW" ]; then
+            [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
+            node -e "process.stdout.write(JSON.stringify({decision:'block', reason: process.argv[1]}))" "$GUARD_REASON"
+            exit 0
+        fi
+        # Approved and SHA matches -- fall through to the role-based mutation checks below.
+    fi
+fi
+
+# Fast exit: if role is not read-only, allow everything else.
+# Explicit empty check first -- don't rely on grep -w's empty-pattern behavior,
+# which is not consistently specified across grep implementations.
+if [ -z "$ROLE" ] || ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
+    echo '{"decision":"allow"}'
+    exit 0
+fi
+
+# Early exit: non-shell tools don't need mutation checking
 if ! echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME"; then
     echo '{"decision":"allow"}'
     exit 0

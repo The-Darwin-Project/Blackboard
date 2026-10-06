@@ -1,7 +1,7 @@
 # BlackBoard/src/routes/queue.py
 # @ai-rules:
 # 1. [Gotcha]: GET /closed/list MUST stay before GET /{event_id} to avoid "closed" matching as event_id.
-# 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() for Slack cleanup (Brain path uses _close_and_broadcast instead).
+# 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() to set the 14-day archival-retention TTL on the Slack thread mapping (Brain path uses _close_and_broadcast instead). delete_slack_mapping() no longer deletes the key.
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 # 4. [Pattern]: GET /{event_id}/report uses event_to_markdown from src/utils/event_markdown.
 # 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
@@ -68,8 +68,7 @@ from ..auth import (
     can_override_domain,
     require_auth,
     get_user_from_request,
-    DEX_ENABLED,
-    TRUSTED_PROXY_ENABLED,
+    resolve_approval_identity,
 )
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
@@ -344,27 +343,32 @@ async def get_event_approval(
 @router.post("/{event_id}/approve")
 async def approve_event(
     event_id: str,
-    request: Request = None,
+    request: Request,
     blackboard: BlackboardState = Depends(get_blackboard),
-    user: Optional[UserContext] = None,
 ):
-    """Approve a pending plan in an event conversation."""
+    """Approve a pending plan in an event conversation.
+
+    `user` is intentionally NOT a function parameter: FastAPI has no way to recognize a
+    plain dataclass like UserContext as anything other than a request-body model when it
+    lacks a Depends()/Body() marker, so declaring it here would let a caller POST
+    {"email": "...", "roles": [...]} and self-assign identity/roles, bypassing auth and
+    the RBAC gate below entirely. Identity is always resolved server-side from the request.
+    """
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
-    from .. import auth
-    if user is None or not isinstance(user, UserContext):
-        if request is not None:
-            user = auth.get_user_from_request(request)
-        else:
-            user = UserContext()
+    from .. import auth  # module reference (not the stale module-level DEX_ENABLED/
+    # TRUSTED_PROXY_ENABLED import above) so tests monkeypatching src.auth.DEX_ENABLED
+    # are observed -- `from ..auth import DEX_ENABLED` at module load time freezes the
+    # value at import time and would never see a later monkeypatch.
+    user = get_user_from_request(request)
 
     auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
     if auth_enabled and not user.email:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    if not auth.can_approve_event(user, event, auth_enabled=auth_enabled):
+    if not can_approve_event(user, event, auth_enabled=auth_enabled):
         logger.warning(
             "Forbidden approval attempt on event %s by user %s (roles=%s)",
             event_id, user.email, user.roles,
@@ -373,11 +377,7 @@ async def approve_event(
 
     mr_id, mr_sha = await resolve_live_head_sha(event)
 
-    user_email = getattr(user, "email", None)
-    user_label = getattr(user, "label", None)
-    raw_approved = user_email if (isinstance(user_email, str) and user_email) else user_label
-    clean_by = str(raw_approved) if raw_approved is not None and str(raw_approved) != "anonymous" else (str(user_email) if user_email is not None else None)
-    clean_name = str(user_label) if user_label is not None and str(user_label) != "anonymous" else None
+    clean_by, clean_name = resolve_approval_identity(user.email, user.label)
 
     # Stamp approval metadata onto EventDocument
     stamp_res = blackboard.stamp_event(
@@ -428,17 +428,48 @@ async def approve_event(
 @router.post("/{event_id}/reject")
 async def reject_event(
     event_id: str,
+    request: Request,
     body: RejectRequest = RejectRequest(),
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
-    """Reject a pending plan in an event conversation."""
+    """Reject a pending plan in an event conversation.
+
+    Gated by the same can_approve_event() check as approve_event: rejecting a plan is the
+    same state transition (brain.resume_if_parked / enqueue_for_processing) that approval
+    requires authorization for, so an unauthenticated/unauthorized caller must not be able
+    to reject another user's pending plan either.
+    """
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
+    from .. import auth  # see approve_event -- module reference so monkeypatched
+    # src.auth.DEX_ENABLED/TRUSTED_PROXY_ENABLED are observed, not the frozen import above.
+    user = get_user_from_request(request)
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if auth_enabled and not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if not can_approve_event(user, event, auth_enabled=auth_enabled):
+        logger.warning(
+            "Forbidden rejection attempt on event %s by user %s (roles=%s)",
+            event_id, user.email, user.roles,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden: User not authorized to reject this event")
+
     # Server-side image size guard (~1MB)
     if body.image and len(body.image) > 1_400_000:
         raise HTTPException(status_code=413, detail="Image too large (max 1MB)")
+
+    # A rejection supersedes any prior approval stamp on this event -- otherwise
+    # GET /{event_id}/approval keeps reporting approved=true with a stale approved_mr_sha
+    # from an earlier (now-superseded) plan revision at the same commit SHA.
+    if event.approved_by or event.approved_mr_id or event.approved_mr_sha:
+        clear_res = blackboard.stamp_event(
+            event_id, approved_by=None, approved_mr_id=None, approved_mr_sha=None,
+        )
+        if inspect.isawaitable(clear_res):
+            await clear_res
 
     turn = ConversationTurn(
         turn=len(event.conversation) + 1,

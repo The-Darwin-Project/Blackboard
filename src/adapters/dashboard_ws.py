@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ..auth import can_append_message, can_approve_event, get_user_from_websocket
+from ..auth import can_append_message, can_approve_event, get_user_from_websocket, resolve_approval_identity
 from ..models import ConversationTurn, EventEvidence
 from ..utils.vcs_approval import resolve_live_head_sha
 
@@ -248,11 +248,9 @@ class DashboardWSAdapter:
 
         mr_id, mr_sha = await resolve_live_head_sha(event)
 
-        user_email = getattr(user, "email", None)
-        user_label = getattr(user, "label", None)
-        raw_approved = user_email if (isinstance(user_email, str) and user_email) else user_label
-        clean_by = str(raw_approved) if raw_approved is not None and str(raw_approved) != "anonymous" else (str(user_email) if user_email is not None else None)
-        clean_name = str(user_label) if user_label is not None and str(user_label) != "anonymous" else None
+        clean_by, clean_name = resolve_approval_identity(
+            getattr(user, "email", None), getattr(user, "label", None)
+        )
 
         stamp_res = self._blackboard.stamp_event(
             event_id,

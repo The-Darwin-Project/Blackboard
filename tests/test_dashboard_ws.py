@@ -116,6 +116,9 @@ async def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
     """_handle_approve enforces RBAC under VMER-1949: unprivileged stranger is rejected, maintainer or owner succeeds."""
     monkeypatch.setattr(auth, "DEX_ENABLED", True)
     monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
+    # APPROVER_GROUPS fails closed (empty) by default; opt in explicitly for the
+    # maintainer-override assertion below, same as a real operator would via env var.
+    monkeypatch.setattr(auth, "APPROVER_GROUPS", frozenset({"maintainers"}))
 
     mock_event = EventDocument(
         id="evt-123",
