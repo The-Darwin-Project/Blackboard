@@ -30,6 +30,16 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'bb_get_approval',
+    description: 'Get out-of-band approval status and live stamped metadata (approved_by, approved_mr_id, approved_mr_sha) for the current event. Use to verify authorization before merging code or executing critical operations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        event_id: { type: 'string', description: 'Optional: specific event ID (defaults to current task event)' },
+      },
+    },
+  },
+  {
     name: 'bb_update_plan_step',
     description: 'Mark a plan step as in_progress, completed, or blocked. Call this when you start or finish a step from the plan on the blackboard. The update is visible to the Brain, other agents, and the dashboard in real time.',
     inputSchema: {
@@ -107,6 +117,10 @@ async function handleToolCall(name, args) {
   }
   if (name === 'bb_get_active_events') {
     return await httpGet(SIDECAR_PORT, '/proxy/active-events');
+  }
+  if (name === 'bb_get_approval') {
+    const q = args.event_id ? `?eventId=${encodeURIComponent(args.event_id)}` : '';
+    return await httpGet(SIDECAR_PORT, `/proxy/approval${q}`);
   }
   if (name === 'bb_update_plan_step') {
     return await httpPost(SIDECAR_PORT, '/proxy/plan-step', {

@@ -292,10 +292,12 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
             text = f"[FRIDAY {turn.action}]: {text}" if text else f"[FRIDAY {turn.action}]"
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
+        action_suffix = f" ({turn.action})" if turn.action and turn.action != "message" else ""
         if turn.user_name:
-            text = f"[USER {turn.user_name}]: {raw}"
+            prefix = f"[USER {turn.user_name}{action_suffix}]"
         else:
-            text = f"[USER]: {raw}"
+            prefix = f"[USER{action_suffix}]"
+        text = f"{prefix}: {raw}" if raw else prefix
     elif turn.actor == "jarvis" and turn.action == "message":
         text = (
             f"[AGENT jarvis]: {turn.thoughts or turn.result or ''}\n\n"

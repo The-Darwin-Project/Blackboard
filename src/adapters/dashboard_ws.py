@@ -17,14 +17,16 @@
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ..auth import can_append_message, get_user_from_websocket
+from ..auth import can_append_message, can_approve_event, get_user_from_websocket, resolve_approval_identity
 from ..models import ConversationTurn, EventEvidence
+from ..utils.vcs_approval import resolve_live_head_sha
 
 if TYPE_CHECKING:
     from ..agents.brain import Brain
@@ -230,12 +232,48 @@ class DashboardWSAdapter:
         event = await self._blackboard.get_event(event_id)
         if not event:
             return
+
+        if not can_approve_event(user, event, auth_enabled=self._auth_enabled):
+            logger.warning(
+                "WS approval rejected for event %s by user %s (roles=%s)",
+                event_id, getattr(user, "email", user.label), getattr(user, "roles", []),
+            )
+            await ws.send_json({
+                "type": "error",
+                "kind": "auth_rejected",
+                "event_id": event_id,
+                "message": "Forbidden: User not authorized to approve this event",
+            })
+            return
+
+        mr_id, mr_sha = await resolve_live_head_sha(event)
+
+        clean_by, clean_name = resolve_approval_identity(
+            getattr(user, "email", None), getattr(user, "label", None)
+        )
+
+        stamp_res = self._blackboard.stamp_event(
+            event_id,
+            approved_by=clean_by,
+            approved_mr_id=mr_id,
+            approved_mr_sha=mr_sha,
+        )
+        if inspect.isawaitable(stamp_res):
+            await stamp_res
+
+        thought_msg = "User approved the plan."
+        if mr_id and mr_sha:
+            thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
+
         turn = ConversationTurn(
             turn=len(event.conversation) + 1,
             actor="user",
             action="approve",
-            thoughts="User approved the plan.",
-            user_name=user.label if user.label != "anonymous" else None,
+            thoughts=thought_msg,
+            user_name=clean_name,
+            approved_by=clean_by,
+            approved_mr_id=mr_id,
+            approved_mr_sha=mr_sha,
         )
         await self._blackboard.append_turn(event_id, turn)
         self._brain.clear_waiting(event_id)
@@ -246,7 +284,7 @@ class DashboardWSAdapter:
             "event_id": event_id,
             "turn": turn.model_dump(),
         })
-        logger.info("WS approval for event: %s", event_id)
+        logger.info("WS approval for event: %s by %s (mr_id=%s, sha=%s)", event_id, user.label, mr_id, mr_sha)
 
     async def _handle_emergency_stop(self, ws: WebSocket) -> None:
         cancelled = await self._brain.emergency_stop()

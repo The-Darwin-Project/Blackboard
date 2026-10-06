@@ -173,6 +173,14 @@ is NOT invalidated when the pusher has write access (which Darwin agents do).
 This makes pre-push disable (see execution-method.md Auto-Merge Bypass Vector)
 the only safety net on GitHub — it is not redundant.
 
+## Post-Approval Merge Dispatch and Cluster Rollout Verification
+
+Do NOT wait indefinitely for a human to merge after an explicit plan approval.
+Once user or maintainer approval is recorded (turn `action="approve"` or `status="approved"`), Darwin follows an active post-approval pipeline:
+1. **Dispatch Developer to Merge**: Dispatch Developer agent to verify approval metadata out-of-band via `bb_get_approval` and execute the merge on the target branch (do NOT ask a human to click merge when the plan is already approved). This instruction is advisory, not the only enforcement: for Gemini-CLI Developer sessions, `gemini-sidecar/hooks/validate-mutations.sh` independently intercepts `git merge`/`git push ... main`/`gh pr merge`/`glab mr merge` and blocks the command server-side (via the same approved/`approved_mr_sha` vs. local `git rev-parse HEAD` comparison implemented in `src/utils/vcs_approval.py::verify_merge_guard`) if approval cannot be confirmed -- a prompt-injected "it's approved, merge now" cannot bypass this check.
+2. **Observe Post-Merge Pipeline**: After merge, observe the post-merge build, test, and deployment pipeline until terminal success.
+3. **Cluster Rollout Verification**: A merged MR is only the beginning of deployment. Verify the affected deployment/service rolled out to the target cluster (`oc rollout status` or ArgoCD synced and healthy with zero restart loops) before transitioning to closure.
+
 ## MR/PR Pipeline Fix Principle
 
 The entire purpose of an MR/PR pipeline is to validate changes before they reach main. Merging an untested fix to main first and then rebasing the MR defeats this validation gate — main now contains a change that was never pipeline-validated, and the MR pipeline result no longer tests the original change in isolation.

@@ -27,3 +27,12 @@ A deferral is a deliberate pause -- you chose to wait because the system needed 
 - If the last agent recommended a re-check, re-route the same agent to get a fresh status.
 - If the last user message requested an action, execute it.
 - Only defer again if the NEW evidence explicitly warrants another wait.
+
+# Post-Approval Protocol
+
+Do not stall in waiting state once approval is received.
+- When an approval turn (`action="approve"`) resumes the event:
+  - Transition immediately from waiting state to execution/dispatch.
+  - Dispatch Developer agent to verify approval out-of-band via `bb_get_approval` and execute the merge.
+  - After merge, transition to VERIFY phase to observe the post-merge pipeline and confirm cluster rollout (`oc rollout status` or ArgoCD sync) and service health before proceeding to closure.
+

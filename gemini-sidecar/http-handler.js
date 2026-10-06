@@ -521,6 +521,25 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (url.pathname === '/proxy/approval' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    const eventId = url.searchParams.get('eventId') || task?.eventId;
+    if (!eventId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No active event or eventId parameter provided' }));
+      return;
+    }
+    try {
+      const data = await proxyGet(`/queue/${eventId}/approval`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
   if (url.pathname === '/proxy/active-events' && req.method === 'GET') {
     try {
       const data = await proxyGet('/queue/active');

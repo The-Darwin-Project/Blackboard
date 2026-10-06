@@ -113,12 +113,15 @@ async def test_dashboard_ws_handle_user_message_mismatched_owner(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
-    """_handle_approve has no ownership check today and must NOT gain one."""
+    """_handle_approve enforces RBAC under VMER-1949: unprivileged stranger is rejected, maintainer or owner succeeds."""
     monkeypatch.setattr(auth, "DEX_ENABLED", True)
     monkeypatch.setattr(auth, "TRUSTED_PROXY_ENABLED", False)
-    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op"})
-    
+    # APPROVER_GROUPS fails closed (empty) by default; opt in explicitly for the
+    # maintainer-override assertion below, same as a real operator would via env var.
+    monkeypatch.setattr(auth, "APPROVER_GROUPS", frozenset({"maintainers"}))
+
     mock_event = EventDocument(
+        id="evt-123",
         event_id="evt-123",
         source="chat",
         service="test",
@@ -126,31 +129,61 @@ async def test_dashboard_ws_handle_approve_ignores_ownership(monkeypatch):
         created_by_email="owner@example.com",
         status="waiting_approval"
     )
-    
+
     mock_blackboard = MagicMock()
     mock_blackboard.get_event = AsyncMock(return_value=mock_event)
     mock_blackboard.append_turn = AsyncMock()
-    
+    mock_blackboard.stamp_event = AsyncMock()
+
     mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
     mock_brain.resume_if_parked = AsyncMock(return_value=True)
     mock_brain.enqueue_for_processing = MagicMock()
-    
+
     adapter = DashboardWSAdapter(brain=mock_brain, blackboard=mock_blackboard, auth_enabled=True)
-    
-    ws = AsyncMock()
-    ws.headers = {}
-    ws.query_params = {"token": "valid-jwt"}
-    
-    ws.receive_json = AsyncMock(side_effect=[
-        {
-            "type": "approve",
-            "event_id": "evt-123"
-        },
+
+    # 1. Unprivileged stranger (roles=[]) -> rejected, append_turn not awaited
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op", "groups": []})
+    ws_stranger = AsyncMock()
+    ws_stranger.headers = {}
+    ws_stranger.query_params = {"token": "valid-jwt"}
+    ws_stranger.receive_json = AsyncMock(side_effect=[
+        {"type": "approve", "event_id": "evt-123"},
         Exception("disconnect")
     ])
-    
-    await adapter.websocket_handler(ws)
-    
+    await adapter.websocket_handler(ws_stranger)
+    mock_blackboard.append_turn.assert_not_awaited()
+    ws_stranger.send_json.assert_called_with({
+        "type": "error",
+        "kind": "auth_rejected",
+        "event_id": "evt-123",
+        "message": "Forbidden: User not authorized to approve this event",
+    })
+
+    # 2. Maintainer (roles=["maintainers"]) -> approved, append_turn awaited
+    mock_blackboard.append_turn.reset_mock()
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u1", "email": "other@example.com", "name": "Op", "groups": ["maintainers"]})
+    ws_maintainer = AsyncMock()
+    ws_maintainer.headers = {}
+    ws_maintainer.query_params = {"token": "valid-jwt"}
+    ws_maintainer.receive_json = AsyncMock(side_effect=[
+        {"type": "approve", "event_id": "evt-123"},
+        Exception("disconnect")
+    ])
+    await adapter.websocket_handler(ws_maintainer)
+    mock_blackboard.append_turn.assert_awaited()
+
+    # 3. Owner (roles=[]) -> approved, append_turn awaited
+    mock_blackboard.append_turn.reset_mock()
+    monkeypatch.setattr(auth, "_validate_jwt", lambda token: {"sub": "u2", "email": "owner@example.com", "name": "Owner", "groups": []})
+    ws_owner = AsyncMock()
+    ws_owner.headers = {}
+    ws_owner.query_params = {"token": "valid-jwt"}
+    ws_owner.receive_json = AsyncMock(side_effect=[
+        {"type": "approve", "event_id": "evt-123"},
+        Exception("disconnect")
+    ])
+    await adapter.websocket_handler(ws_owner)
     mock_blackboard.append_turn.assert_awaited()
 
 @pytest.mark.asyncio
