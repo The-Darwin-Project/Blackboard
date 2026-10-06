@@ -89,6 +89,61 @@ class TestContentStructure:
                 return
         pytest.fail("PRE_CLASSIFICATION allow row not found")
 
+    def test_ooda_overlay_rendered(self):
+        """T-1: OODA tables rendered into markdown body."""
+        from src.skill_reconciler.generate_map import _PHASE_OODA_MAP, _DOMAIN_OODA_MAP
+        body = self.data["body"]
+        assert "## OODA Loop Overlay" in body
+        for phase in _PHASE_OODA_MAP:
+            assert f"| {phase} |" in body
+        for domain in _DOMAIN_OODA_MAP:
+            assert f"| {domain} |" in body
+
+    def test_frontmatter_tags_ooda(self):
+        """T-2: Frontmatter tag indexing."""
+        tags = self.data["frontmatter"].get("tags", [])
+        assert "ooda" in tags
+
+
+class TestOODASymmetryGuard:
+    """T-3, T-4, T-7: OODA mapping symmetry and alignment guards."""
+
+    def test_phase_symmetry_guard_missing_key(self):
+        with patch.dict("src.skill_reconciler.generate_map._PHASE_OODA_MAP", {}, clear=True):
+            with pytest.raises(RuntimeError, match="OODA mapping phase mismatch"):
+                generate_phase_tool_map()
+
+    def test_phase_symmetry_guard_extra_key(self):
+        from src.skill_reconciler.generate_map import _PHASE_OODA_MAP
+        extra_map = _PHASE_OODA_MAP.copy()
+        extra_map["UNKNOWN_PHASE_123"] = ("Stage", "Purpose")
+        with patch.dict("src.skill_reconciler.generate_map._PHASE_OODA_MAP", extra_map, clear=True):
+            with pytest.raises(RuntimeError, match="OODA mapping phase mismatch"):
+                generate_phase_tool_map()
+
+    def test_domain_symmetry_guard_missing_key(self):
+        with patch.dict("src.skill_reconciler.generate_map._DOMAIN_OODA_MAP", {}, clear=True):
+            with pytest.raises(RuntimeError, match="OODA mapping domain mismatch"):
+                generate_phase_tool_map()
+
+    def test_domain_symmetry_guard_extra_key(self):
+        from src.skill_reconciler.generate_map import _DOMAIN_OODA_MAP
+        extra_map = _DOMAIN_OODA_MAP.copy()
+        extra_map["UNKNOWN_DOMAIN_123"] = ("Stage", "Purpose")
+        with patch.dict("src.skill_reconciler.generate_map._DOMAIN_OODA_MAP", extra_map, clear=True):
+            with pytest.raises(RuntimeError, match="OODA mapping domain mismatch"):
+                generate_phase_tool_map()
+
+    def test_cross_module_ground_truth_alignment(self):
+        from src.models import _CANONICAL_DOMAINS, _CANONICAL_PHASES
+        from src.skill_reconciler.generate_map import _PHASE_OODA_MAP, _DOMAIN_OODA_MAP
+        
+        domain_keys_lower = set(k.lower() for k in _DOMAIN_OODA_MAP.keys())
+        assert domain_keys_lower == set(_CANONICAL_DOMAINS)
+        
+        phase_keys_lower = set(k.lower() for k in _PHASE_OODA_MAP.keys())
+        assert set(_CANONICAL_PHASES).issubset(phase_keys_lower)
+
 
 class TestIdempotency:
     """Consecutive calls must produce identical output."""

@@ -1,3 +1,4 @@
+<!-- docs/brain-skills.md -->
 <!-- @ai-rules:
 1. [Constraint]: Phase list must match actual directories under src/agents/brain_skills/.
 2. [Pattern]: Each phase's description must match its _phase.yaml and the skills within it.
@@ -90,7 +91,7 @@ src/agents/brain_skills/
   intermediate/     # Active dispatch awareness, user messages during agent work
 ```
 
-Note: Triage/Cynefin classification skills are in `always/` (loaded every call) rather than a separate `triage/` directory. Domain-specific behavior is in `domain/` (loaded after `classify_event`). The `set_phase` tool gating table below uses "triage" as a phase name, which controls tool availability -- not a filesystem directory.
+Note: Triage/Cynefin classification skills are in `always/` (loaded every call) rather than a separate `triage/` directory. Domain-specific behavior is in `domain/` (loaded after `classify_event`). The phase-tool gating is dynamically derived from `GATE_REGISTRY` and rendered into the `always/phase-tool-map.md` skill, which controls tool availability based on phase and domain.
 
 ## Phase Details
 
@@ -112,6 +113,7 @@ Loaded on every Brain invocation. Contains the core identity and decision framew
 | `10-observations.md` | Observation series naming, trajectory data, deferral outlier boundary |
 | `11-subject-semantics.md` | Subject line semantics for event titles |
 | `12-actor-responses.md` | Actor response conventions and formatting |
+| `phase-tool-map.md` | Dynamically generated from GATE_REGISTRY via src/skill_reconciler/generate_map.py; includes OODA loop overlay |
 
 ### `source/` (Priority 90)
 
@@ -194,18 +196,14 @@ Files in `gated/` are auto-discovered by `BrainSkillLoader` but NEVER auto-loade
 
 ## Phase-Driven Tool Gating
 
-The `set_phase` tool controls which Brain tools are available at each lifecycle stage:
+Phase-tool gating is dynamically generated directly from the single source of truth (`GATE_REGISTRY` in `src/agents/tool_gates.py`) into the `always/phase-tool-map.md` skill.
 
-| Phase | Available Tools |
-| --- | --- |
-| `triage` | `classify_event`, `consult_deep_memory`, `refresh_gitlab_context`, web search |
-| `investigate` | `select_agent` (investigate mode), web search |
-| `execute` | `select_agent` (execute/implement mode) |
-| `verify` | `select_agent` (investigate mode), `close_event` |
-| `escalate` | `report_incident`, `notify_user_slack` |
-| `close` | `close_event` |
+This dynamic skill provides the Brain with:
+1. **Capability Topology**: A Mermaid diagram mapping states to allowed transitions.
+2. **Conditional Gates**: The definitive list of available tools per phase/domain.
+3. **OODA Loop Overlay**: Boyd's OODA loop (Observe → Orient → Decide → Act) mapped to phases, and re-weighted dynamically by Cynefin domain classification at the Orient pivot (`classify_event`).
 
-This prevents the Brain from, for example, calling `close_event` during triage or `classify_event` after dispatch -- structural enforcement of the event lifecycle.
+This prevents the Brain from, for example, calling `close_event` during triage or `classify_event` after dispatch — structurally enforcing the event lifecycle.
 
 ## Security Prerequisites
 
