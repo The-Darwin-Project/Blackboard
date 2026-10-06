@@ -24,12 +24,31 @@ CORPUS_KEY = "always/phase-tool-map.md"
 
 _FRONTMATTER: dict = {
     "description": "Phase x domain navigation map -- generated from GATE_REGISTRY",
-    "tags": ["navigation", "phases", "domains", "gates"],
+    "tags": ["navigation", "phases", "domains", "gates", "ooda"],
     "tag_type": "navigation",
     "tools": [
         "classify_event", "set_phase", "select_agent",
         "close_event", "defer_event", "report_incident",
     ],
+}
+
+_PHASE_OODA_MAP: dict[str, tuple[str, str]] = {
+    "PRE_CLASSIFICATION": ("**Observe → Orient**", "Gather initial context and consult deep memory; classify before acting"),
+    "TRIAGE": ("**Observe + Orient**", "Sense-making, baseline PV gathering, and Cynefin domain classification"),
+    "DISPATCH": ("**Decide → Act**", "Determine controller action, formulate plan, and route specialized agent"),
+    "VERIFY": ("**Feedback → Observe**", "Loop re-entry; evaluate agent findings against baseline PV; assess Ts deferral"),
+    "ESCALATE": ("**Act (Human Gate)**", "Autonomous control exhausted; notify maintainers and file incident"),
+    "CLOSE": ("**Act (Terminal)**", "Deliver final result, notify users, and terminate loop"),
+    "INTERMEDIATE": ("**Loop Suspended**", "Agent actively working; no phase progression until execution returns"),
+}
+
+_DOMAIN_OODA_MAP: dict[str, tuple[str, str]] = {
+    "CLEAR": ("Sense → Categorize → Respond", "**Observe → Fast Orient → Act** (skip deep Decide; route directly)"),
+    "COMPLICATED": ("Sense → Analyze → Respond", "**Observe → Orient → Decide (analyze) → Act** (full OODA loop)"),
+    "COMPLEX": ("Probe → Sense → Respond", "**Act (small probe) → Observe → Orient → Decide** (iterative safe-to-fail cycles; ≥4 rounds)"),
+    "CHAOTIC": ("Act → Sense → Respond", "**Act (stabilize) first → Observe → Orient** (inverted OODA; stabilize before root-cause)"),
+    "CASUAL": ("Respond → Wait", "**Observe → Act (conversational) → Loop Hold** (no dispatch/escalate; wait for user)"),
+    "DISORDER": ("Sense → Orient", "**Observe → Orient** (unassessed domain; classification required before any Act)"),
 }
 
 _CONDITION_SUMMARIES: dict[str, str] = {
@@ -203,6 +222,34 @@ def _enumerate_gates(registry: list, gate_context_cls: type) -> list[_GateInfo]:
     return gates
 
 
+def _render_ooda_overlay() -> str:
+    """Format the OODA loop overlay tables."""
+    lines = [
+        "## OODA Loop Overlay (Adaptive Control Cycle)",
+        "",
+        "The phase pipeline implements John Boyd's OODA loop (Observe → Orient → Decide → Act) with VERIFY functioning as the feedback arc:",
+        "",
+        "| Brain Phase / State | OODA Stage | Capability & Purpose |",
+        "|---|---|---|",
+    ]
+    for phase, (stage, purpose) in _PHASE_OODA_MAP.items():
+        lines.append(f"| {phase} | {stage} | {purpose} |")
+    
+    lines.extend([
+        "",
+        "### Cynefin Domain Re-Weighting (Orient Pivot)",
+        "",
+        "Cynefin domain classification at the Orient pivot (`classify_event`) re-orders the OODA cycle:",
+        "",
+        "| Cynefin Domain | Natural Flow | OODA Cycle Behavior |",
+        "|---|---|---|",
+    ])
+    for domain, (flow, behavior) in _DOMAIN_OODA_MAP.items():
+        lines.append(f"| {domain} | {flow} | {behavior} |")
+    
+    return "\n".join(lines)
+
+
 def _render_markdown(gates: list[_GateInfo]) -> str:
     """Render the full phase-tool-map markdown document."""
     lines = [
@@ -231,6 +278,8 @@ def _render_markdown(gates: list[_GateInfo]) -> str:
         lines.append(f"| {g.gate_id} | {g.mode} | {tools_str} | {g.condition} |")
     lines.extend([
         "",
+        _render_ooda_overlay(),
+        "",
         "## Behavioral Annotations",
         "",
         _BEHAVIORAL_ANNOTATIONS,
@@ -244,6 +293,17 @@ def generate_phase_tool_map() -> tuple[str, str]:
     missing = [g.gate_id for g in registry if g.gate_id not in _CONDITION_SUMMARIES]
     if missing:
         raise RuntimeError(f"GATE_REGISTRY has gates without condition summaries: {missing}")
+
+    expected_phases = {"PRE_CLASSIFICATION", "INTERMEDIATE", "TRIAGE", "DISPATCH", "VERIFY", "ESCALATE", "CLOSE"}
+    if set(expected_phases) != set(_PHASE_OODA_MAP.keys()):
+        diff = set(expected_phases) ^ set(_PHASE_OODA_MAP.keys())
+        raise RuntimeError(f"OODA mapping phase mismatch: {diff}")
+
+    canonical_domains = {"CLEAR", "COMPLICATED", "COMPLEX", "CHAOTIC", "CASUAL", "DISORDER"}
+    if set(canonical_domains) != set(_DOMAIN_OODA_MAP.keys()):
+        diff = set(canonical_domains) ^ set(_DOMAIN_OODA_MAP.keys())
+        raise RuntimeError(f"OODA mapping domain mismatch: {diff}")
+
     gates = _enumerate_gates(registry, gate_ctx_cls)
     body = _render_markdown(gates)
     value = json.dumps(
