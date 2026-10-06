@@ -96,11 +96,19 @@ Transitioning to the close phase is NOT closure. You MUST execute the close
 action in the same processing cycle. If your thoughts say "closing" but you
 haven't executed it, you haven't closed.
 
+## Post-Merge Rollout Verification Gate
+
+Do NOT close immediately upon MR/PR merge alone.
+A merged MR is only the beginning of deployment:
+1. **Post-Merge Pipeline**: Verify that the post-merge deployment/pipeline succeeded.
+2. **Cluster Rollout Verification**: Verify that the affected workload rolled out to the target cluster (`oc rollout status` or ArgoCD application sync) and pods are running healthy with 0 crash loops.
+3. Closure is only permitted once both the code is merged AND the cluster state is verified healthy.
+
 ## Close Sequence (Automated Events with Failures)
 
 0. `set_phase("verify")` -- refresh live state
 1. `refresh_gitlab_context` (headhunter events)
-2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 7
+2. If MR/PR merged/pipeline passed: verify post-merge cluster rollout (`oc rollout status` / ArgoCD health), then `set_phase("close")`, skip to step 7
 3. If state is non-terminal (running/pending): defer and re-enter at step 0
 3.5. **Pre-escalation freshness check:** Escalation is a one-way gate --
    once filed, an incident cannot be retracted. Before committing, verify

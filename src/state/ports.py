@@ -335,7 +335,7 @@ class CortexRepository(Protocol):
 class EventRepository(Protocol):
     """Port for the core event lifecycle: creation, conversation, queue, and closure.
 
-    42 methods. The largest domain — all WATCH/MULTI operations on EventDocument stay here.
+    43 methods. The largest domain — all WATCH/MULTI operations on EventDocument stay here.
     Cross-domain: close_event interacts with Topology (get_service),
     Observations (cleanup), and Reports (persist_report) — resolved
     at BlackboardState facade level.
@@ -430,6 +430,10 @@ class EventRepository(Protocol):
     ) -> None: ...
 
     # --- Slack thread mapping ---
+
+    async def set_slack_mapping(
+        self, channel_id: str, thread_ts: str, event_id: str,
+    ) -> None: ...
 
     async def get_event_by_slack_thread(
         self, channel_id: str, thread_ts: str,

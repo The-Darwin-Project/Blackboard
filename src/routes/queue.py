@@ -50,6 +50,7 @@ Provides endpoints for the unified group chat UI to:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -57,13 +58,22 @@ import time
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
-from ..auth import UserContext, can_override_domain, require_auth
+from ..auth import (
+    UserContext,
+    can_approve_event,
+    can_override_domain,
+    require_auth,
+    get_user_from_request,
+    DEX_ENABLED,
+    TRUSTED_PROXY_ENABLED,
+)
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
+from ..utils.vcs_approval import resolve_live_head_sha
 
 
 class RejectRequest(BaseModel):
@@ -310,21 +320,88 @@ async def get_event_document(
     return event
 
 
+@router.get("/{event_id}/approval")
+async def get_event_approval(
+    event_id: str,
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Return approval status and live stamped metadata for Developer sidecar verification."""
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    is_approved = bool(event.approved_by)
+    return {
+        "approved": is_approved,
+        "approved_by": event.approved_by,
+        "approved_mr_id": event.approved_mr_id,
+        "approved_mr_sha": event.approved_mr_sha,
+        "event_id": event.id,
+        "status": event.status.value if hasattr(event.status, "value") else str(event.status),
+    }
+
+
 @router.post("/{event_id}/approve")
 async def approve_event(
     event_id: str,
+    request: Request = None,
     blackboard: BlackboardState = Depends(get_blackboard),
+    user: Optional[UserContext] = None,
 ):
     """Approve a pending plan in an event conversation."""
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
+    from .. import auth
+    if user is None or not isinstance(user, UserContext):
+        if request is not None:
+            user = auth.get_user_from_request(request)
+        else:
+            user = UserContext()
+
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if auth_enabled and not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if not auth.can_approve_event(user, event, auth_enabled=auth_enabled):
+        logger.warning(
+            "Forbidden approval attempt on event %s by user %s (roles=%s)",
+            event_id, user.email, user.roles,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden: User not authorized to approve this event")
+
+    mr_id, mr_sha = await resolve_live_head_sha(event)
+
+    user_email = getattr(user, "email", None)
+    user_label = getattr(user, "label", None)
+    raw_approved = user_email if (isinstance(user_email, str) and user_email) else user_label
+    clean_by = str(raw_approved) if raw_approved is not None and str(raw_approved) != "anonymous" else (str(user_email) if user_email is not None else None)
+    clean_name = str(user_label) if user_label is not None and str(user_label) != "anonymous" else None
+
+    # Stamp approval metadata onto EventDocument
+    stamp_res = blackboard.stamp_event(
+        event_id,
+        approved_by=clean_by,
+        approved_mr_id=mr_id,
+        approved_mr_sha=mr_sha,
+    )
+    if inspect.isawaitable(stamp_res):
+        await stamp_res
+
+    thought_msg = "User approved the plan."
+    if mr_id and mr_sha:
+        thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
+
     turn = ConversationTurn(
         turn=len(event.conversation) + 1,
         actor="user",
         action="approve",
-        thoughts="User approved the plan.",
+        thoughts=thought_msg,
+        user_name=clean_name,
+        approved_by=clean_by,
+        approved_mr_id=mr_id,
+        approved_mr_sha=mr_sha,
     )
     await blackboard.append_turn(event_id, turn)
 
@@ -338,8 +415,14 @@ async def approve_event(
     except RuntimeError:
         pass  # Brain not initialized (unlikely in normal operation)
 
-    logger.info(f"User approved event {event_id}")
-    return {"status": "approved", "event_id": event_id}
+    logger.info(f"User {user.label} approved event {event_id} (mr_id={mr_id}, sha={mr_sha})")
+    return {
+        "status": "approved",
+        "event_id": event_id,
+        "approved_by": user.email or user.label,
+        "approved_mr_id": mr_id,
+        "approved_mr_sha": mr_sha,
+    }
 
 
 @router.post("/{event_id}/reject")

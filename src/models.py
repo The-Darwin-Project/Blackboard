@@ -354,6 +354,9 @@ class ConversationTurn(BaseModel):
     status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
     source: Optional[str] = Field(None, description="Origin channel: 'dashboard' | 'slack' | None (legacy)")
     user_name: Optional[str] = Field(None, description="Display name for multi-user conversations (e.g., 'Albert O.')")
+    approved_by: Optional[str] = Field(None, description="Authenticated user who approved")
+    approved_mr_id: Optional[str] = Field(None, description="Approved MR IID or PR number")
+    approved_mr_sha: Optional[str] = Field(None, description="Live HEAD SHA captured at approval time")
     timestamp: float = Field(default_factory=time.time)
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
     batch_size: Optional[int] = Field(None, description="Number of parallel FCs in this batch (set on first turn only)")
@@ -434,6 +437,10 @@ class EventDocument(BaseModel):
         None,
         description="Email of the user who created this event (stable identity for multi-tenant filtering)"
     )
+    # Approval metadata
+    approved_by: Optional[str] = Field(None, description="Authenticated user who approved")
+    approved_mr_id: Optional[str] = Field(None, description="Approved MR IID or PR number")
+    approved_mr_sha: Optional[str] = Field(None, description="Live HEAD SHA captured at approval time")
 
     @field_validator("created_by_email", mode="before")
     @classmethod

@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -227,9 +228,9 @@ class SlackChannel:
                 domain="disorder",
                 severity="info",
             ),
-        )
-        await self._blackboard.update_event_slack_context(
-            new_event_id, channel, thread_ts, user_id,
+            slack_channel_id=channel,
+            slack_thread_ts=thread_ts,
+            slack_user_id=user_id,
         )
         await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
         ctx_turn = ConversationTurn(
@@ -539,22 +540,56 @@ class SlackChannel:
             thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
 
             from ..models import ConversationTurn
+            from ..auth import get_user_from_slack, can_approve_event
+            from ..utils.vcs_approval import resolve_live_head_sha
+
             event_doc = await self._blackboard.get_event(event_id)
             if not event_doc:
                 return
+
+            email = self._get_cached_email(user)
+            display_name = await self._resolve_display_name(client, user)
+            user_ctx = get_user_from_slack(user, display_name, email or "")
+            if not can_approve_event(user_ctx, event_doc):
+                logger.warning(f"Slack approve forbidden on {event_id} by {user} ({email})")
+                return
+
+            mr_id, mr_sha = await resolve_live_head_sha(event_doc)
+
+            approved_ident = email or display_name or user
+            clean_name = str(display_name) if display_name is not None else None
+            clean_ident = str(approved_ident) if approved_ident is not None else None
+
+            stamp_res = self._blackboard.stamp_event(
+                event_id,
+                approved_by=clean_ident,
+                approved_mr_id=mr_id,
+                approved_mr_sha=mr_sha,
+            )
+            if inspect.isawaitable(stamp_res):
+                await stamp_res
+
+            thought_msg = "User approved the plan."
+            if mr_id and mr_sha:
+                thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
+
             turn = ConversationTurn(
                 turn=len(event_doc.conversation) + 1,
                 actor="user",
                 action="approve",
-                thoughts="User approved the plan.",
+                thoughts=thought_msg,
                 source="slack",
+                user_name=clean_name,
+                approved_by=clean_ident,
+                approved_mr_id=mr_id,
+                approved_mr_sha=mr_sha,
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
             await self._brain.resume_if_parked(event_id)
             self._brain.enqueue_for_processing(event_id)
             await self._safe_react(client, channel, thread_ts, "white_check_mark")
-            logger.info(f"Slack approve on {event_id} by {user}")
+            logger.info(f"Slack approve on {event_id} by {user} (mr_id={mr_id}, sha={mr_sha})")
 
         @self._app.action("darwin_reject")
         async def handle_reject(ack: Any, body: dict, client: Any) -> None:

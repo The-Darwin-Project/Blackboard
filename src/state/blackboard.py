@@ -1222,6 +1222,9 @@ return 1
                     event.conversation.append(turn)
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
+                    if event.slack_channel_id and event.slack_thread_ts:
+                        slack_key = f"{self.SLACK_THREAD_PREFIX}{event.slack_channel_id}:{event.slack_thread_ts}"
+                        pipe.expire(slack_key, self.SLACK_MAPPING_TTL)
                     await pipe.execute()
                     break
                 except WatchError:
@@ -1483,6 +1486,9 @@ return 1
                         str(defer_until),
                         ex=delay + 60,
                     )
+                    if event.slack_channel_id and event.slack_thread_ts:
+                        slack_key = f"{self.SLACK_THREAD_PREFIX}{event.slack_channel_id}:{event.slack_thread_ts}"
+                        pipe.expire(slack_key, self.SLACK_MAPPING_TTL)
                     await pipe.execute()
                     return True
                 except WatchError:
@@ -2030,6 +2036,9 @@ return 1
                     pipe.set(key, json.dumps(event.model_dump()))
                     pipe.srem(self.EVENT_ACTIVE, event_id)
                     pipe.sadd(self.EVENT_WAITING_APPROVAL, event_id)
+                    if event.slack_channel_id and event.slack_thread_ts:
+                        slack_key = f"{self.SLACK_THREAD_PREFIX}{event.slack_channel_id}:{event.slack_thread_ts}"
+                        pipe.set(slack_key, event_id, ex=self.SLACK_MAPPING_TTL)
                     await pipe.execute()
                     break
                 except WatchError:
@@ -2280,7 +2289,7 @@ return 1
                     continue
         logger.debug(f"Sticky notes updated on event {event_id}: {unread_notes} unread")
 
-    SLACK_MAPPING_TTL = 86400  # 24h safety net (cleaned explicitly on event close)
+    SLACK_MAPPING_TTL = 1209600  # 14 days safety net (archival retention post-close)
 
     async def set_slack_mapping(
         self, channel_id: str, thread_ts: str, event_id: str,
@@ -2293,17 +2302,80 @@ return 1
     async def get_event_by_slack_thread(
         self, channel_id: str, thread_ts: str,
     ) -> Optional[str]:
-        """Reverse-lookup event_id from a Slack thread_ts. Returns None if not found."""
+        """Reverse-lookup event_id from a Slack thread_ts. Returns None if not found.
+
+        Performs direct GET on mapping key. On cache miss, executes atomic SUNION
+        across EVENT_ACTIVE and EVENT_WAITING_APPROVAL sets, pipelined GETs candidate
+        event documents, filters active non-closed events matching channel_id and thread_ts,
+        disambiguates, and self-heals the mapping key via SET NX EX.
+        """
         key = f"{self.SLACK_THREAD_PREFIX}{channel_id}:{thread_ts}"
-        return await self.redis.get(key)
+        event_id = await self.redis.get(key)
+        if event_id:
+            return event_id.decode() if isinstance(event_id, bytes) else event_id
+
+        # Mapping key expired or missing -- atomic fallback across active & waiting_approval sets
+        active_ids = await self.redis.sunion(self.EVENT_ACTIVE, self.EVENT_WAITING_APPROVAL)
+        if not active_ids:
+            return None
+
+        clean_ids = [
+            eid.decode() if isinstance(eid, bytes) else eid
+            for eid in active_ids
+            if eid
+        ]
+        if not clean_ids:
+            return None
+
+        # Pipelined GET for candidate docs
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for eid in clean_ids:
+                pipe.get(f"{self.EVENT_PREFIX}{eid}")
+            raw_docs = await pipe.execute()
+
+        candidates: list[EventDocument] = []
+        for raw in raw_docs:
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+                doc = EventDocument(**data)
+                if (
+                    doc.status != EventStatus.CLOSED
+                    and doc.slack_channel_id == channel_id
+                    and doc.slack_thread_ts == thread_ts
+                ):
+                    candidates.append(doc)
+            except Exception as e:
+                logger.warning(f"Error parsing candidate event document during Slack lookup: {e}")
+                continue
+
+        if not candidates:
+            return None
+
+        # Disambiguate if multiple: pick newest by queued_at / id
+        selected = max(candidates, key=lambda d: (d.queued_at or 0.0, d.id))
+        selected_id = selected.id
+
+        await self.redis.set(key, selected_id, ex=self.SLACK_MAPPING_TTL, nx=True)
+        logger.info(
+            f"Self-healed expired Slack thread mapping: {channel_id}:{thread_ts} -> {selected_id}"
+        )
+        return selected_id
 
     async def delete_slack_mapping(
         self, channel_id: str, thread_ts: str,
     ) -> None:
-        """Remove Slack thread mapping on event close (TTL cleanup)."""
+        """Set post-closure archival retention TTL (14 days) on Slack thread mapping.
+
+        Retains the mapping so follow-up replies in the Slack thread can resolve
+        the closed event context for smart continuation rather than creating orphan threads.
+        """
+        if not channel_id or not thread_ts:
+            return
         key = f"{self.SLACK_THREAD_PREFIX}{channel_id}:{thread_ts}"
-        await self.redis.delete(key)
-        logger.debug(f"Slack mapping deleted: {channel_id}:{thread_ts}")
+        await self.redis.expire(key, self.SLACK_MAPPING_TTL)
+        logger.debug(f"Slack mapping retained with archival TTL ({self.SLACK_MAPPING_TTL}s): {channel_id}:{thread_ts}")
 
     # =========================================================================
     # Report Persistence (90-day TTL snapshots)

@@ -34,8 +34,11 @@ Before acting on a deployment, assess how the application is deployed:
 - Check if the application has auto-sync, selfHeal, or webhook-triggered pipelines
 - **NEVER** run `kubectl rollout restart` or `kubectl scale` without first understanding who manages the deployment
 - After pushing a GitOps change, report: "Change committed and pushed. The CD controller will handle the rollout."
-- When asked to verify a deployment, check the running pod's image tag against the expected commit SHA
-- If the cluster state doesn't match git after a reasonable sync interval, report the drift
+- When asked to verify a deployment:
+  - Check the running pod's image tag against the expected commit SHA.
+  - **Cluster Rollout Verification Gate**: Run `oc rollout status deployment/<name> -n <namespace> --timeout=120s` (or `kubectl rollout status`) and assert rollout completes successfully.
+  - **Zero Restarts Assertion**: Check `oc get pods -n <namespace> -l <selector>` and verify that all pods are `Running` and have `RESTARTS: 0` (zero container crash loops or restarts).
+- If the cluster state doesn't match git after a reasonable sync interval, or if the rollout fails/restarts, report the failure immediately to FRIDAY.
 
 ## Developer Git Workflow
 

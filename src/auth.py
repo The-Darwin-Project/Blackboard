@@ -50,6 +50,13 @@ OBS_ADMIN_GROUPS = frozenset(
     g.strip() for g in os.getenv("OBS_ADMIN_GROUPS", "").split(",") if g.strip()
 )
 
+# Dex groups allowed to approve unowned automation events when DEX is enabled. Comma-separated.
+APPROVER_GROUPS = frozenset(
+    g.strip().lower()
+    for g in os.getenv("APPROVER_GROUPS", "maintainer,maintainers,admin,admins,darwin-maintainers,darwin-admins").split(",")
+    if g.strip()
+)
+
 _oidc_adapter: OIDCKeyAdapter | None = None
 
 
@@ -277,3 +284,46 @@ def can_override_domain(
     if norm_created is None:
         return False
     return norm_created == norm_user
+
+
+def can_approve_event(
+    user: UserContext,
+    event: Any,
+    auth_enabled: bool | None = None,
+) -> bool:
+    """Decide whether a caller may approve an event.
+
+    Pure boolean -- zero side effects, zero logging. Callers own audit logging.
+
+    Rules:
+    - auth_enabled=False (dev/local): open to all.
+    - auth_enabled=True:
+        * Caller MUST have authenticated identity (non-empty email).
+        * Owned event (created_by_email is set): creator may approve, OR users with approver/admin role.
+        * Unowned/automation event (created_by_email is None): requires maintainer/admin role in APPROVER_GROUPS (or OBS_ADMIN_GROUPS).
+    """
+    if auth_enabled is None:
+        auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+
+    if not auth_enabled:
+        return True
+
+    norm_user = _normalize_email(user.email)
+    if not norm_user:
+        return False
+
+    user_roles = set(user.roles or [])
+    user_roles_lower = {r.strip().lower() for r in user_roles}
+    approver_groups_lower = {g.strip().lower() for g in APPROVER_GROUPS}
+    has_approver_role = bool(
+        user_roles_lower & approver_groups_lower
+        or (OBS_ADMIN_GROUPS and not OBS_ADMIN_GROUPS.isdisjoint(user_roles))
+    )
+
+    norm_created = _normalize_email(getattr(event, "created_by_email", None))
+    if norm_created is not None:
+        return norm_created == norm_user or has_approver_role
+
+    # Unowned / automated event requires maintainer or admin group membership
+    return has_approver_role
+
