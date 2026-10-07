@@ -62,6 +62,8 @@ def test_claude_5_omits_temperature_regardless_of_value(temp_value: float) -> No
         "claude-3-5-sonnet-20241022",
         "claude-3-5-haiku",
         "claude-haiku-4-5",
+        "claude-sonnet-4-5",
+        "claude-opus-4-5",
     ],
 )
 def test_legacy_claude_models_include_temperature(model_name: str) -> None:

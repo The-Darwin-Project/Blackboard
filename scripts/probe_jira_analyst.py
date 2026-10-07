@@ -7,7 +7,7 @@
 """
 Probe: Jira Issue -> Claude Sonnet Business Analyst Analysis
 
-Fetches a CNV Jira issue, feeds it to Claude Sonnet 4 via Vertex AI
+Fetches a CNV Jira issue, feeds it to Claude Sonnet 5.5 via Vertex AI
 with the kubevirt-ui Business Analyst rules as system prompt, and
 prints the structured validation plan output.
 

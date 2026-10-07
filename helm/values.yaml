@@ -150,7 +150,7 @@ gcp:
   # Per-component LLM configuration
   llm:
     brain:
-      model: "gemini-3.1-pro-preview-customtools" # If provider=claude, set to "claude-opus-4-6"
+      model: "gemini-3.1-pro-preview-customtools" # If provider=claude, set to "claude-opus-5-5"
       temperature: "1.5"
       maxOutputTokens: "65000"
     aligner:
@@ -462,7 +462,7 @@ ephemeralAgents:
   permissionMode: "bypassPermissions"
   # Per-role model/effort -- Brain reads these via EPHEMERAL_MODEL_*/EPHEMERAL_EFFORT_* env vars
   # (injected in deployment.yaml) to resolve the model/effort for each ephemeral dispatch.
-  # Neither claude-sonnet-5-5 nor claude-opus-5-5 use the "[1m]" context-window suffix on Vertex AI.
+  # Vertex AI rejects "[1m]" suffix for claude-opus-5-5 (model not found). Standard ID is "claude-opus-5-5".
   roleModels:
     architect: "claude-opus-5-5" # Architect keeps Opus for deep strategic planning
     sysadmin: "claude-sonnet-5-5"
