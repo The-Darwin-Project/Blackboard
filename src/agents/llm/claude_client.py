@@ -91,7 +91,7 @@ class ClaudeAdapter:
             "messages": messages,
         }
         # Claude 5.x models (Sonnet 5, Sonnet 5.5, Opus 5, Opus 5.5, etc.) deprecate temperature (returns 400)
-        if not any(pat in self._model_name for pat in ("-5", "sonnet-5", "opus-5")):
+        if not any(pat in self._model_name for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5")):
             kwargs["temperature"] = temperature
         if system_prompt:
             kwargs["system"] = system_prompt
