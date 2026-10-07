@@ -88,7 +88,7 @@ Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supp
 
 ```bash
 --set sidecars.architect.cliType=claude
---set sidecars.architect.modelName=claude-opus-4-6
+--set sidecars.architect.modelName=claude-opus-5-5
 ```
 
 ## Observers

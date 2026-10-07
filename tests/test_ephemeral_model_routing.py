@@ -88,12 +88,12 @@ class TestEphemeralHappyPath:
                 routing_turn_num=1, mode="plan", effort="",
             )
 
-        assert mock_dispatch.call_args.kwargs["model"] == "claude-opus-4-8[1m]"
+        assert mock_dispatch.call_args.kwargs["model"] == "claude-opus-5-5"
         assert mock_dispatch.call_args.kwargs["effort"] == "high"
         assert mock_dispatch.call_args.kwargs["agent_id"] == "agent-architect-1"
 
         ensure_kwargs = brain._ephemeral_provisioner.ensure_agent.call_args.kwargs
-        assert ensure_kwargs["model"] == "claude-opus-4-8[1m]"
+        assert ensure_kwargs["model"] == "claude-opus-5-5"
 
     @pytest.mark.asyncio
     async def test_effort_override_beats_role_default(self, registry_and_bridge):
@@ -138,7 +138,7 @@ class TestEphemeralHappyPath:
                 routing_turn_num=1, mode="execute", effort="",
             )
 
-        assert mock_dispatch.call_args.kwargs["model"] == "claude-sonnet-5"
+        assert mock_dispatch.call_args.kwargs["model"] == "claude-sonnet-5-5"
         assert mock_dispatch.call_args.kwargs["effort"] == "medium"
 
 
@@ -206,7 +206,7 @@ class TestCodeReviewerRouting:
     @pytest.mark.asyncio
     async def test_code_reviewer_gets_sonnet_and_high_effort(self, registry_and_bridge):
         """T-1: agent_id_override is not None -> code_reviewer resolves via _ROLE_MODEL_MAP/
-        _ROLE_EFFORT_MAP to claude-sonnet-5/high (EPHEMERAL_MODEL_CODE_REVIEWER/
+        _ROLE_EFFORT_MAP to claude-sonnet-5-5/high (EPHEMERAL_MODEL_CODE_REVIEWER/
         EPHEMERAL_EFFORT_CODE_REVIEWER env defaults, per plan Step 2/18)."""
         brain = _make_brain()
         brain._ephemeral_provisioner = AsyncMock()
@@ -226,7 +226,7 @@ class TestCodeReviewerRouting:
                 routing_turn_num=1, mode="review", effort="",
             )
 
-        assert mock_dispatch.call_args.kwargs["model"] == "claude-sonnet-5"
+        assert mock_dispatch.call_args.kwargs["model"] == "claude-sonnet-5-5"
         assert mock_dispatch.call_args.kwargs["effort"] == "high"
         assert mock_dispatch.call_args.kwargs["agent_id"] == "agent-code_reviewer-1"
 
