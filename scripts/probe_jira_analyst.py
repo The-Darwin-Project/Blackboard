@@ -7,7 +7,7 @@
 """
 Probe: Jira Issue -> Claude Sonnet Business Analyst Analysis
 
-Fetches a CNV Jira issue, feeds it to Claude Sonnet 4 via Vertex AI
+Fetches a CNV Jira issue, feeds it to Claude Sonnet 5.5 via Vertex AI
 with the kubevirt-ui Business Analyst rules as system prompt, and
 prints the structured validation plan output.
 
@@ -34,7 +34,7 @@ JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
 GCP_PROJECT = os.getenv("GCP_PROJECT", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "global")
 os.environ.setdefault("CLOUD_ML_REGION", GCP_LOCATION)
-MODEL = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-4-6")
+MODEL = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-5-5")
 
 BUSINESS_ANALYST_SYSTEM_PROMPT = """You are a QE Business Analyst for the KubeVirt OpenShift Console Plugin test automation team.
 

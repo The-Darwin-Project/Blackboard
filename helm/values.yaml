@@ -88,7 +88,7 @@ sidecars:
     cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
-    modelName: "claude-opus-4-8" # Claude Opus 4.8 via Vertex AI
+    modelName: "claude-opus-5-5" # Claude Opus 5.5 via Vertex AI
     effortLevel: "high" # Claude Code effort: low|medium|high|max (deep planning needs high)
     permissionMode: "bypassPermissions" # No hard restriction -- soft rules via architect.md + skills
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
@@ -98,7 +98,7 @@ sidecars:
     cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
-    modelName: "claude-sonnet-5" # Claude Sonnet 5 via Vertex AI
+    modelName: "claude-sonnet-5-5" # Claude Sonnet 5.5 via Vertex AI
     effortLevel: "medium" # Execution tasks are well-scoped; higher effort rarely helps
     permissionMode: "bypassPermissions" # Full access (implements plans)
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
@@ -108,7 +108,7 @@ sidecars:
     cliType: "claude" # Claude Code for code generation
     gitUserName: "Darwin Developer"
     gitUserEmail: "darwin-developer@darwin-project.io"
-    modelName: "claude-sonnet-5" # Claude Sonnet 5 via Vertex AI
+    modelName: "claude-sonnet-5-5" # Claude Sonnet 5.5 via Vertex AI
     effortLevel: "high" # Claude Code effort: low|medium|high|max
     permissionMode: "bypassPermissions" # Skip permission prompts for autonomous code changes
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
@@ -118,7 +118,7 @@ sidecars:
     cliType: "claude"
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
-    modelName: "claude-sonnet-5"
+    modelName: "claude-sonnet-5-5" # Claude Sonnet 5.5 via Vertex AI
     effortLevel: "high" # QE needs deep reasoning to find edge cases and write thorough tests
     permissionMode: "bypassPermissions"
     gcpSecret: ""
@@ -150,7 +150,7 @@ gcp:
   # Per-component LLM configuration
   llm:
     brain:
-      model: "gemini-3.1-pro-preview-customtools" # If provider=claude, set to "claude-opus-4-6"
+      model: "gemini-3.1-pro-preview-customtools" # If provider=claude, set to "claude-opus-5-5"
       temperature: "1.5"
       maxOutputTokens: "65000"
     aligner:
@@ -166,7 +166,7 @@ gcp:
       maxOutputTokensClaude: "16384" # Claude archive + lesson extraction calls
       maxOutputTokensDigest: "4096" # Gemini field-notes digest call
     lessonExtractor:
-      model: "claude-sonnet-5" # Claude via Vertex AI for lesson extraction from documents
+      model: "claude-sonnet-5-5" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
       model: "gemini-3.8-flash" # MR triage and plan generation
       temperature: "0.3"
@@ -457,20 +457,19 @@ ephemeralAgents:
   idleTimeoutMs: "3600000" # 1h -- agent self-terminates after no tasks
   taskRunTimeout: "24h0m0s" # Hard ceiling. Must exceed idleTimeoutMs.
   cli: "claude" # CLI binary for ephemeral agents
-  model: "claude-sonnet-5" # TriggerTemplate spawn-time default (safe fallback; per-role model below overrides via Brain)
+  model: "claude-sonnet-5-5" # TriggerTemplate spawn-time default (safe fallback; per-role model below overrides via Brain)
   effortLevel: "medium" # Spawn-time default; FRIDAY's select_agent effort param overrides per-task
   permissionMode: "bypassPermissions"
   # Per-role model/effort -- Brain reads these via EPHEMERAL_MODEL_*/EPHEMERAL_EFFORT_* env vars
   # (injected in deployment.yaml) to resolve the model/effort for each ephemeral dispatch.
-  # claude-sonnet-5 does NOT use the "[1m]" context-window suffix -- that modifier is Opus/Vertex-specific;
-  # Sonnet 5 has native 200K context.
+  # Vertex AI rejects "[1m]" suffix for claude-opus-5-5 (model not found). Standard ID is "claude-opus-5-5".
   roleModels:
-    architect: "claude-opus-4-8" # Architect keeps Opus for deep strategic planning
-    sysadmin: "claude-sonnet-5"
-    developer: "claude-sonnet-5"
-    qe: "claude-sonnet-5"
-    security_analyst: "claude-sonnet-5"
-    code_reviewer: "claude-sonnet-5"
+    architect: "claude-opus-5-5" # Architect keeps Opus for deep strategic planning
+    sysadmin: "claude-sonnet-5-5"
+    developer: "claude-sonnet-5-5"
+    qe: "claude-sonnet-5-5"
+    security_analyst: "claude-sonnet-5-5"
+    code_reviewer: "claude-sonnet-5-5"
     explorer: "gemini-3.8-flash"
   roleEffort:
     architect: "high"
@@ -529,7 +528,7 @@ jira:
   existingSecret: "" # e.g., "darwin-jira-creds" (keys: email, api-token, bot-account-id)
   url: ""
   label: "darwin"
-  model: "claude-sonnet-5"
+  model: "claude-sonnet-5-5"
   skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
   # --- Jira Incident Tracking (Nightwatcher + Brain escalation) ---
   incident:

@@ -699,12 +699,12 @@ _CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 # Use .get(agent_name, default) everywhere -- never bracket access -- so an
 # out-of-vocabulary agent_name degrades to the safe default instead of KeyError.
 _ROLE_MODEL_MAP = {
-    "architect": os.getenv("EPHEMERAL_MODEL_ARCHITECT", "claude-opus-4-8[1m]"),
-    "sysadmin": os.getenv("EPHEMERAL_MODEL_SYSADMIN", "claude-sonnet-5"),
-    "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5"),
-    "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
-    "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
-    "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
+    "architect": os.getenv("EPHEMERAL_MODEL_ARCHITECT", "claude-opus-5-5"),
+    "sysadmin": os.getenv("EPHEMERAL_MODEL_SYSADMIN", "claude-sonnet-5-5"),
+    "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5-5"),
+    "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5-5"),
+    "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5-5"),
+    "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5-5"),
     "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.7-flash"),
 }
 _ROLE_EFFORT_MAP = {
@@ -4065,7 +4065,7 @@ class Brain:
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
                         provision_result = await self._ephemeral_provisioner.ensure_agent(
                             event_id, _install_id,
-                            model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5"),
+                            model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
                             cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
                         )
                         if provision_result is None:
@@ -4158,7 +4158,7 @@ class Brain:
                     # dispatch is genuinely ephemeral). agent_id_override is only set
                     # above on successful ephemeral registration.
                     if agent_id_override is not None:
-                        dispatch_model = _ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5")
+                        dispatch_model = _ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5")
                         dispatch_effort = effort or _ROLE_EFFORT_MAP.get(agent_name, "")
                     else:
                         dispatch_model = ""
