@@ -186,3 +186,31 @@ class TestErrorHandling:
                     "issue_type": "Incident",
                     "summary": "test",
                 })
+
+
+@pytest.mark.asyncio
+async def test_jira_open_incident_jql_excludes_closed(monkeypatch):
+    adapter = JiraIncidentAdapter("https://jira.example.com", "test@example.com", "secret", "INC")
+    mock_resp = MagicMock()
+    mock_resp.is_success = True
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"issues": []}
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock()
+
+    mock_client_class = MagicMock(return_value=mock_client)
+    monkeypatch.setattr("httpx.AsyncClient", mock_client_class)
+
+    monkeypatch.setenv("JIRA_INCIDENT_CLOSED_STATUSES", "Closed,Done,Resolved")
+
+    await adapter.search_open_incidents()
+
+    mock_client.get.assert_called_once()
+    kwargs = mock_client.get.call_args[1]
+    params = kwargs.get("params", {})
+    jql = params.get("jql", "")
+    assert 'status NOT IN ("Closed", "Done", "Resolved")' in jql
+    assert 'project = "INC"' in jql

@@ -1,4 +1,4 @@
-# BlackBoard/src/agents/handlers_verification.py
+# src/agents/handlers_verification.py
 # @ai-rules:
 # 1. [Pattern]: Verification and phase transition handlers.
 # 2. [Constraint]: No Brain import. All state access via ToolContext protocol.
@@ -26,6 +26,31 @@ async def handle_set_phase(
     reasoning = args.get("reasoning", "")
     bb = ctx.get_blackboard()
     event_doc = await bb.get_event(event_id)
+    
+    if phase == "close":
+        evidence = event_doc.event.evidence if event_doc and event_doc.event else None
+        domain = getattr(evidence, "brain_domain", None) or getattr(evidence, "domain", "disorder") if evidence else "disorder"
+        if domain in ("complicated", "complex"):
+            has_verify = False
+            for t in event_doc.conversation:
+                actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+                action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+                thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
+                if actor == "brain" and action == "phase" and (thoughts or "").upper().startswith("PHASE: VERIFY"):
+                    has_verify = True
+                    break
+            if not has_verify:
+                reject_msg = f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."
+                turn = ConversationTurn(
+                    turn=(await ctx.next_turn_number(event_id)),
+                    actor="system",
+                    action="error",
+                    result=reject_msg,
+                    timestamp=time.time(),
+                )
+                await ctx.append_and_broadcast(event_id, turn)
+                return True
+
     current_phase = _resolve_phase(event_doc.brain_phase) if event_doc else None
     if current_phase is not None and phase == current_phase:
         logger.debug(f"set_phase: confirmed {phase} for {event_id}")

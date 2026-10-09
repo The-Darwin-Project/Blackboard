@@ -4,7 +4,10 @@
   "description": "HTTP wrapper for Gemini/Claude Code CLIs with GitHub/GitLab authentication",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js tests/*.js",
+    "check-agy": "bash scripts/update-agy.sh --check",
+    "update-agy": "bash scripts/update-agy.sh"
   },
   "dependencies": {
     "adm-zip": "^0.6.0",

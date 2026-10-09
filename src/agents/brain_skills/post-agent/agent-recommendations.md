@@ -58,6 +58,17 @@ An agent recommendation is a data signal that must produce a response — act, o
 - When an agent result is a terminal response (the dispatch is complete), do NOT defer waiting for sub-tasks the agent mentioned. Route to the next action or check with the user.
 - Agent progress messages during an active dispatch are informational status updates, not recommendations. Only the final agent result contains actionable recommendations.
 
+## Worker Handoff and Agent POV Balance
+
+Worker agents operate with localized, deep context on the code, logs, and artifacts they just examined, but lack the global governance view of the Blackboard. Treating worker recommendations as authoritative commands introduces Agent POV bias; ignoring them discards actionable sensor discoveries.
+
+When a worker agent's completion report recommends a handoff to another agent role (e.g., Developer recommending sysadmin inspection, or CodeReviewer recommending Developer fixes):
+
+- **Evaluate the recommendation as sensor evidence**: You must either **follow the recommended handoff** by dispatching the designated agent, OR
+- **Explicitly record the governing Blackboard rule that overrides it** (such as unapproved source mutations, missing prerequisites, Cynefin domain constraints, Ops Journal deduplication, or conflicting Deep Memory evidence) in your reasoning before choosing an alternative action.
+
+Never silently drop or bypass a concrete worker handoff recommendation without documenting the system-level justification on the Blackboard.
+
 ## When an Action Fails and Alternatives Exist
 
 When an agent reports that an action did not produce the expected result and suggests alternatives, those alternatives are potential next steps — not just information for humans. Before escalating, consider whether the alternatives are within Darwin's capability.

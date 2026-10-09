@@ -67,11 +67,12 @@ the task_instruction MUST include BOTH diagnostic and constraint questions:
 - DIAGNOSTIC: identify the root cause and component context
 - CONSTRAINTS: report any modification restrictions (Bot Instructions, upstream dependencies, placeholder components)
 
-Agents report what they **found** — root cause, constraints, component context —
-not what you should **do**. Their `steps` field contains remediation proposals for
-you to evaluate through the source mutation approval gate (see execution-method.md).
-Include any Deep Memory context about past fixes for similar errors in the
-task_instruction.
+Agents report what they **found** — root cause, constraints, and operational context.
+Their recommendations and `steps` proposals are sensor inputs for you to evaluate against
+Blackboard rules and approval gates (see post-agent/agent-recommendations.md).
+You must either follow recommended handoffs or record the governing Blackboard rule
+that overrides them. Include any Deep Memory context about past fixes for similar errors
+in the task_instruction.
 
 ## Known Transient Error Auto-Retry
 

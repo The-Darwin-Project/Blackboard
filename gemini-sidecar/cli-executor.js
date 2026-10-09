@@ -19,16 +19,25 @@
 //     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
 //     here (not a hardcoded role check) when a future role needs its own permission boundary.
 
-const { spawn } = require('child_process');
+const cp = require('child_process');
+const spawn = (...args) => cp.spawn(...args);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+function resolveModel(options, agentCli) {
+  const effectiveRole = (options.role || AGENT_ROLE || (agentCli === 'claude' ? 'planner' : 'triage')).toLowerCase();
+  if (options.model) return options.model;
+  if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
+    return process.env.EPHEMERAL_MODEL_EXPLORER;
+  }
+  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-opus-4-6' : 'gemini-3.7-flash');
+}
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
 // Only roles listed here get --settings; all other roles are unaffected.
@@ -129,14 +138,49 @@ function writeThinkingConfig(effort, model) {
 }
 
 function buildCLICommand(prompt, options = {}) {
+    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
+
+    if (AGENT_CLI === 'agy') {
+        const args = [];
+        const binary = AGY_CLI;
+
+        // Enforce read-only defense-in-depth: read-only roles or plan mode run under --mode plan
+        if (permissionMode === 'plan' || ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst'].includes(effectiveRole)) {
+            args.push('--mode', 'plan');
+        } else if (options.autoApprove) {
+            args.push('--dangerously-skip-permissions');
+        }
+        args.push('--output-format', 'stream-json');
+        // NOTE: Never pass --input-format stream-json; it conflicts with command-line -p prompt!
+
+        // Model & effort normalization to prevent CLI conflict errors
+        let model = resolveModel(options, AGENT_CLI);
+        let effort = options.effort || AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT;
+
+        let suffixMatch;
+        while ((suffixMatch = model.match(/^(.+)-(low|medium|high|xhigh|max)$/))) {
+            model = suffixMatch[1];
+            effort = suffixMatch[2];
+        }
+        effort = effort || 'high'; // agy requires explicit --effort for flash/pro models
+
+        if (model) args.push('--model', model);
+        if (effort) args.push('--effort', effort);
+        if (options.conversationId || options.sessionId) {
+            args.push('--conversation', options.conversationId || options.sessionId);
+        }
+
+        args.push('-p', prompt);
+        return { binary, args };
+    }
+
     if (AGENT_CLI === 'claude') {
         const args = [];
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const effectiveRoleForSettings = options.role || AGENT_ROLE;
-        const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
+        const settingsFile = ROLE_SETTINGS_FILE[effectiveRole];
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
@@ -155,7 +199,7 @@ function buildCLICommand(prompt, options = {}) {
                 settingsValid = false;
             }
             if (!settingsValid) {
-                const msg = `Expected --settings file missing or invalid for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
+                const msg = `Expected --settings file missing or invalid for role '${effectiveRole}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
                 console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
                 throw new Error(msg);
             }
@@ -167,7 +211,7 @@ function buildCLICommand(prompt, options = {}) {
             args.push('--dangerously-skip-permissions');
         }
         args.push('--output-format', 'stream-json', '--verbose');
-        const model = options.model || AGENT_MODEL || 'claude-opus-4-6';
+        const model = resolveModel(options, AGENT_CLI);
         args.push('--model', model);
         const effort = options.effort || AGENT_EFFORT_LEVEL;
         if (effort) {
@@ -176,7 +220,6 @@ function buildCLICommand(prompt, options = {}) {
         if (options.sessionId) {
             args.push('--resume', options.sessionId);
         }
-        const effectiveRole = options.role || AGENT_ROLE;
         const ultrathinkPrefix = effectiveRole === 'architect' ? 'ultrathink ' : '';
         args.push('-p', ultrathinkPrefix + prompt);
         return { binary: 'claude', args };
@@ -184,13 +227,12 @@ function buildCLICommand(prompt, options = {}) {
     const args = [];
     if (options.autoApprove) args.push('--yolo');
     args.push('-o', 'stream-json');
-    const model = options.model || AGENT_MODEL || 'gemini-3.7-flash';
+    const model = resolveModel(options, AGENT_CLI);
     args.push('--model', model);
     if (options.sessionId) {
         args.push('--resume', options.sessionId);
     }
     const effort = options.effort || AGENT_EFFORT_LEVEL;
-    const effectiveRole = options.role || AGENT_ROLE;
     const resolvedEffort = effort || (effectiveRole === 'architect' ? 'high' : '');
     writeThinkingConfig(resolvedEffort || 'none', model);
     args.push('-p', prompt);
@@ -380,6 +422,8 @@ async function executeCLI(prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            sessionId: options.sessionId,
+            conversationId: options.conversationId,
         });
 
         console.log(`[${new Date().toISOString()}] Executing: ${AGENT_CLI} (prompt length: ${prompt.length})`);
@@ -400,12 +444,17 @@ async function executeCLI(prompt, options = {}) {
 
         let stdout = '';
         let stderr = '';
+        let lineBuffer = '';
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
             const text = data.toString();
             stdout += text;
-            for (const line of text.split('\n')) {
+            lineBuffer += text;
+
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop();
+            for (const line of lines) {
                 if (!line.trim()) continue;
                 const parsed = parseStreamLine(line);
                 if (parsed?.text) streamTextAccum += parsed.text;
@@ -418,6 +467,14 @@ async function executeCLI(prompt, options = {}) {
 
         child.on('close', (code) => {
             watch.close();
+
+            if (lineBuffer.trim()) {
+                const parsed = parseStreamLine(lineBuffer);
+                if (parsed?.text) streamTextAccum += parsed.text;
+                const task = state.getCurrentTask();
+                if (parsed?.sessionId && task) task.sessionId = parsed.sessionId;
+            }
+
             const effectiveOutput = streamTextAccum || stdout;
 
             console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
@@ -426,10 +483,12 @@ async function executeCLI(prompt, options = {}) {
                 console.log(`[${new Date().toISOString()}] stderr: ${stderr}`);
             }
 
+            const usedModel = resolveModel(options, AGENT_CLI);
+
             if (code === 0) {
                 try {
                     const result = JSON.parse(effectiveOutput);
-                    resolve({ status: 'success', exitCode: code, output: result, source: 'stdout' });
+                    resolve({ status: 'success', exitCode: code, output: result, source: 'stdout', usedModel });
                     return;
                 } catch (e) {}
 
@@ -443,13 +502,31 @@ async function executeCLI(prompt, options = {}) {
                     autoApprove: options.autoApprove !== false,
                     effectiveOutput,
                 }).then(({ output, source }) => {
-                    resolve({ status: 'success', exitCode: code, output, source });
+                    resolve({ status: 'success', exitCode: code, output, source, usedModel });
                 }).catch((err) => {
                     console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
-                    resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout' });
+                    resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
                 });
             } else {
-                resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
+                if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(code, stderr, effectiveOutput)) {
+                    console.log(`[${new Date().toISOString()}] agy session error detected, retrying without --conversation`);
+                    executeCLI(prompt, {
+                        ...options,
+                        conversationId: null,
+                        sessionId: null,
+                        _retryWithoutSession: true,
+                    }).then(resolve).catch(reject);
+                    return;
+                }
+                const lowerStderr = (stderr || '').toLowerCase();
+                if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
+                    const fallbackModel = AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash';
+                    console.log(`[${new Date().toISOString()}] Invalid model error, retrying with ${fallbackModel}`);
+                    executeCLI(prompt, { ...options, model: fallbackModel, _retriedModel: true })
+                        .then(resolve).catch(reject);
+                    return;
+                }
+                resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
             }
         });
 
@@ -470,6 +547,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
             sessionId: options.sessionId,
+            conversationId: options.conversationId,
             model: options.model,
             effort: options.effort,
             role: options.role,
@@ -504,11 +582,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             existing.child = child;
             existing.model = options.model || '';
             existing.role = options.role || '';
+            existing.sessionId = options.sessionId || options.conversationId || null;
         } else {
             if (existing) {
                 console.error(`[${new Date().toISOString()}] WARNING: replacing in-flight task state for event ${existing.eventId} with unrelated task ${eventId} -- an upstream busy-guard was missed`);
             }
-            state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '' });
+            state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '', sessionId: options.sessionId || options.conversationId || null });
         }
 
         let stdout = '';
@@ -594,6 +673,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     executeCLIStreaming(ws, eventId, prompt, {
                         ...options,
                         sessionId: null,
+                        conversationId: null,
                         _retryWithoutSession: true,
                     }).then(resolve).catch(reject);
                     return;
@@ -603,11 +683,30 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     executeCLIStreaming(ws, eventId, prompt, {
                         ...options,
                         sessionId: null,
+                        conversationId: null,
                         _retryWithoutSession: true,
                     }).then(resolve).catch(reject);
                     return;
                 }
-                resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
+                if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(code, stderr, effectiveOutput)) {
+                    console.log(`[${new Date().toISOString()}] [${eventId}] agy session error detected, retrying without --conversation`);
+                    executeCLIStreaming(ws, eventId, prompt, {
+                        ...options,
+                        conversationId: null,
+                        sessionId: null,
+                        _retryWithoutSession: true,
+                    }).then(resolve).catch(reject);
+                    return;
+                }
+                const lowerStderr = (stderr || '').toLowerCase();
+                if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
+                    const fallbackModel = AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash';
+                    console.log(`[${new Date().toISOString()}] [${eventId}] Invalid model error, retrying with ${fallbackModel}`);
+                    executeCLIStreaming(ws, eventId, prompt, { ...options, model: fallbackModel, _retriedModel: true })
+                        .then(resolve).catch(reject);
+                    return;
+                }
+                resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel: resolveModel(options, AGENT_CLI) });
             }
         });
 
@@ -641,6 +740,11 @@ function isGeminiSessionNotFound(exitCode, stderr) {
     return lower.includes('no previous sessions found') || lower.includes('session not found');
 }
 
+function isAgySessionError(exitCode, stderr, output) {
+    const combined = ((output || '') + (stderr || '') + (typeof exitCode === 'string' ? exitCode : '')).toLowerCase();
+    return combined.includes('conversation') && (combined.includes('not found') || combined.includes('corrupt') || combined.includes('invalid'));
+}
+
 module.exports = {
     buildCLICommand,
     executeCLI,
@@ -652,6 +756,9 @@ module.exports = {
     prepareResultsDir,
     is429Error,
     is400SessionError,
+    isGeminiSessionNotFound,
+    isAgySessionError,
+    resolveModel,
     writeThinkingConfig,
     GEMINI_SETTINGS_PATH,
     EFFORT_THINKING_BUDGET,

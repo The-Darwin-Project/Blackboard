@@ -52,6 +52,7 @@ _DOMAIN_OODA_MAP: dict[str, tuple[str, str]] = {
 }
 
 _CONDITION_SUMMARIES: dict[str, str] = {
+    "DISPATCH_DEFER_GATE": "dispatch phase without dispatcher backpressure",
     "DEFER_WAKE_ITER0": "first cycle after defer wake",
     "INTERMEDIATE": "agent actively working (is_intermediate flag)",
     "PHASE_ESCALATE": "phase is not escalate",

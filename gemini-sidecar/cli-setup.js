@@ -39,6 +39,7 @@ function resolveCommand(name) {
 }
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+const AGY_MCP_PATH = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
 
 /**
  * Write an MCP server config into ~/.claude.json (the file Claude Code reads).
@@ -59,9 +60,46 @@ function writeClaudeMcpServer(name, config) {
 }
 
 /**
+ * Write an MCP server config into ~/.gemini/config/mcp_config.json (the file agy reads).
+ * Read-modify-write: preserves existing keys.
+ * Uses 0o600 mode permissions and atomic write via temporary file.
+ * @param {string} name - Server name (e.g. 'TeamChat', 'GitHub')
+ * @param {object} config - { command, args, env }
+ */
+function writeAgyMcpServer(name, config) {
+    if (name === '__proto__' || name === 'constructor') return;
+    const agyMcpPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+    const dir = path.dirname(agyMcpPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let data = {};
+    if (fs.existsSync(agyMcpPath)) {
+        try { data = JSON.parse(fs.readFileSync(agyMcpPath, 'utf8')); } catch { /* fresh */ }
+    }
+    data.mcpServers = data.mcpServers || {};
+    data.mcpServers[name] = config;
+
+    const tmpPath = `${agyMcpPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, agyMcpPath);
+
+    try {
+        const fallbackDir = path.join(os.homedir(), '.gemini', 'antigravity');
+        const fallbackLink = path.join(fallbackDir, 'mcp_config.json');
+        if (fs.existsSync(fallbackDir)) {
+            if (!fs.existsSync(fallbackLink)) {
+                try {
+                    fs.symlinkSync(agyMcpPath, fallbackLink);
+                } catch { /* ignore */ }
+            }
+        }
+    } catch { /* ignore */ }
+}
+
+/**
  * Register TeamChat MCP server + inbox hooks into a CLI settings object.
- * @param {object} settings - The settings object to modify (gemini or claude)
- * @param {string} cli - 'gemini' or 'claude'
+ * @param {object} settings - The settings object to modify (gemini, claude, or agy)
+ * @param {string} cli - 'gemini', 'claude', or 'agy'
  */
 function registerMCPsAndHooks(settings, cli) {
     const role = process.env.AGENT_ROLE || '';
@@ -94,6 +132,13 @@ function registerMCPsAndHooks(settings, cli) {
         settings.mcpServers.DarwinBlackboard = blackboardConfig;
         settings.mcpServers.DarwinJournal = journalConfig;
         settings.mcpServers.Playwright = playwrightConfig;
+    } else if (cli === 'agy') {
+        writeAgyMcpServer('TeamChat', teamChatConfig);
+        writeAgyMcpServer('DarwinBlackboard', blackboardConfig);
+        writeAgyMcpServer('DarwinJournal', journalConfig);
+        writeAgyMcpServer('Playwright', playwrightConfig);
+        console.log(`MCPs (TeamChat + Blackboard + Journal) registered for agy (role=${role}, peer=${peerPort || 'none'})`);
+        return;
     } else {
         writeClaudeMcpServer('TeamChat', teamChatConfig);
         writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
@@ -216,6 +261,12 @@ function initializeCLISettings() {
         console.log('Claude settings.json updated (MCPs + HTTP hooks registered)');
     } catch (err) {
         console.error(`Claude TeamChat registration error: ${err.message}`);
+    }
+    // Antigravity (agy) MCP registration (MCP goes to ~/.gemini/config/mcp_config.json via writeAgyMcpServer)
+    try {
+        registerMCPsAndHooks({}, 'agy');
+    } catch (err) {
+        console.error(`agy MCP registration error: ${err.message}`);
     }
     // Trusted folders: JSON object format (path -> trust level), not array.
     // Even with trust disabled, an invalid file causes a warning on every run.
@@ -371,4 +422,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };

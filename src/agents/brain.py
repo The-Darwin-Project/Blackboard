@@ -277,6 +277,7 @@ class ContextFlags(TypedDict, total=False):
     is_first_human_turn: bool
     is_operational_chat: bool
     _cached_active_ids: list[str]
+    has_dispatch_backpressure: bool
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
 
@@ -2345,7 +2346,16 @@ class Brain:
             and flags.get("brain_has_classified", False)
             and flags.get("event_domain") != "casual"
         )
-
+        threshold_str = os.getenv("DARWIN_DISPATCH_BACKPRESSURE_THRESHOLD", "10")
+        try:
+            threshold = int(threshold_str)
+        except (ValueError, TypeError):
+            threshold = 10
+            
+        flags["has_dispatch_backpressure"] = any(
+            t.actor == "dispatcher" and any(k in (t.thoughts or "").lower() for k in ("busy", "circuit", "deferred", "unavailable", "full", "queue"))
+            for t in event.conversation[-5:]
+        ) or len(flags.get("_cached_active_ids", [])) >= threshold
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:

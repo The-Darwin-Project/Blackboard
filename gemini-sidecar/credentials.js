@@ -21,7 +21,7 @@
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
-const { resolveCommand, writeClaudeMcpServer } = require('./cli-setup');
+const { resolveCommand, writeClaudeMcpServer, writeAgyMcpServer } = require('./cli-setup');
 
 // --- GitHub App ---
 const SECRETS_PATH = '/secrets/github';
@@ -413,6 +413,17 @@ function setupGitHubTooling(tokenMap) {
     console.error(`[${new Date().toISOString()}] GitHub MCP config (Claude) failed: ${err.message}`);
   }
 
+  // 4. Configure GitHub MCP server for Antigravity (agy) (writes to ~/.gemini/config/mcp_config.json)
+  try {
+    writeAgyMcpServer('GitHub', {
+      command: ghMcpBin, args: ['stdio'],
+      env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
+    });
+    console.log(`[${new Date().toISOString()}] GitHub MCP configured for agy`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] GitHub MCP config (agy) failed: ${err.message}`);
+  }
+
   console.log(`[${new Date().toISOString()}] gh CLI + GitHub MCP server ready`);
 }
 
@@ -525,6 +536,14 @@ function setupGitLabTooling(token) {
     console.error(`[${new Date().toISOString()}] GitLab MCP config (Claude) failed: ${err.message}`);
   }
 
+  // 4. Configure GitLab MCP for Antigravity (agy) (writes to ~/.gemini/config/mcp_config.json)
+  try {
+    writeAgyMcpServer('GitLab', mcpConfig);
+    console.log(`[${new Date().toISOString()}] GitLab MCP configured for agy (glab mcp serve)`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] GitLab MCP config (agy) failed: ${err.message}`);
+  }
+
   console.log(`[${new Date().toISOString()}] glab CLI + GitLab MCP ready (${GITLAB_HOST})`);
 }
 
@@ -600,6 +619,14 @@ async function setupArgoCDMCP() {
     console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for Claude Code${readOnly ? ' (read-only)' : ''}`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Claude) failed: ${err.message}`);
+  }
+
+  // Configure ArgoCD MCP for Antigravity (agy) (writes to ~/.gemini/config/mcp_config.json)
+  try {
+    writeAgyMcpServer('ArgoCD', mcpConfig);
+    console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for agy${readOnly ? ' (read-only)' : ''}`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ArgoCD MCP config (agy) failed: ${err.message}`);
   }
 }
 
@@ -713,6 +740,12 @@ function setupRemoteK8sMCPs() {
       console.error(`[${new Date().toISOString()}] ${mcpName} MCP config (Claude) failed: ${err.message}`);
     }
 
+    try {
+      writeAgyMcpServer(mcpName, mcpConfig);
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] ${mcpName} MCP config (agy) failed: ${err.message}`);
+    }
+
     const metaPath = `/config/remote-clusters/${name}.json`;
     let meta = {};
     try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { }
@@ -758,6 +791,12 @@ function setupRemoteK8sMCPs() {
           writeClaudeMcpServer(kaMcpName, kaMcpConfig);
         } catch (err) {
           console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (Claude) failed: ${err.message}`);
+        }
+
+        try {
+          writeAgyMcpServer(kaMcpName, kaMcpConfig);
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (agy) failed: ${err.message}`);
         }
 
         console.log(`[${new Date().toISOString()}] ${kaMcpName} MCP configured (${meta.kubearchiveUrl})`);
@@ -882,6 +921,13 @@ async function setupJenkinsMCP() {
     console.log(`[${new Date().toISOString()}] Jenkins MCP configured for Claude Code`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Jenkins MCP config (Claude) failed: ${err.message}`);
+  }
+
+  try {
+    writeAgyMcpServer('Jenkins', mcpConfig);
+    console.log(`[${new Date().toISOString()}] Jenkins MCP configured for agy`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Jenkins MCP config (agy) failed: ${err.message}`);
   }
 }
 

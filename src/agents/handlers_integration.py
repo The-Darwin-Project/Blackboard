@@ -816,11 +816,13 @@ async def handle_search_open_incidents(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
     adapter = ctx.get_incident_adapter()
+    success = False
     if not adapter:
         result_text = "Incident tracking not configured."
     else:
         try:
             open_incidents = await adapter.search_open_incidents()
+            success = True
             if not open_incidents:
                 result_text = "No open incidents found."
             else:
@@ -845,7 +847,7 @@ async def handle_search_open_incidents(
         response_parts=response_parts,
     )
     await ctx.append_and_broadcast(event_id, turn)
-    await ctx.emit_pulse(event_id, [("tool:search_open_incidents", "tool", 1.0 if "Found" in result_text else 0.3)])
+    await ctx.emit_pulse(event_id, [("tool:search_open_incidents", "tool", 1.0 if success else 0.0)])
     return True
 
 

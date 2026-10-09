@@ -205,3 +205,66 @@ class TestPhase3_5:
             "list_observations not associated with"
             " always/06-decision-guidelines.md in the tool->skill map"
         )
+
+
+def test_skill_probe_confirms_stall_detection():
+    from pathlib import Path
+    base_dir = Path("src/agents/brain_skills/always")
+
+    guidelines_path = base_dir / "06-decision-guidelines.md"
+    assert guidelines_path.exists()
+    content = " ".join(guidelines_path.read_text().split())
+    assert "Stall Detection" in content
+
+    flow_path = base_dir / "08-flow-engineering.md"
+    assert flow_path.exists()
+    content = " ".join(flow_path.read_text().split())
+    assert "missing circuit breaker" in content
+
+
+class TestDeflectionClosureGateProbe:
+    def test_deflection_gate_principles_present(self, loader):
+        body, _ = loader.get_with_meta("close/when-to-close.md")
+        assert "deflection closure gate" in body.lower()
+        assert "verified resolution" in body.lower()
+        assert "closed-loop accountability" in body.lower()
+        assert "specialized agent" in body.lower()
+
+    def test_deflection_gate_no_negative_production_phrasing(self, loader):
+        body, _ = loader.get_with_meta("close/when-to-close.md")
+        # Enforce AGENTS.md rule: positive-only guidance, no quoting bad output
+        assert "feel free to ask" not in body.lower()
+        assert "someone else's problem" not in body.lower()
+
+    def test_deflection_closure_gate_positive_invariants(self, loader):
+        body, _ = loader.get_with_meta("close/when-to-close.md")
+        body_lower = body.lower()
+        # Verify Deflection Closure Gate, required evidence / handoff, and question / clarification gates
+        assert "deflection closure gate" in body_lower
+        assert ("evidence" in body_lower and "handoff" in body_lower) or "required evidence handoff" in body_lower
+        assert ("clarif" in body_lower or "open question gate" in body_lower) or "clarification gate" in body_lower
+        # Verify bad deflection strings are ABSENT
+        for bad_phrase in ["feel free to ask", "someone else's problem", "out of scope, closing"]:
+            assert bad_phrase not in body_lower
+
+
+class TestWorkerHandoffBalanceProbe:
+    def test_handoff_balance_principles_present(self, loader):
+        body, _ = loader.get_with_meta("post-agent/agent-recommendations.md")
+        assert "worker handoff and agent pov balance" in body.lower()
+        assert "sensor evidence" in body.lower()
+        assert "governing blackboard rule" in body.lower()
+
+    def test_decision_routing_harmonized(self, loader):
+        body, _ = loader.get_with_meta("dispatch/decision-routing.md")
+        assert "sensor inputs for you to evaluate" in body.lower()
+        assert "not what you should do" not in body.lower()
+
+    def test_post_agent_recommendations_skill(self, loader):
+        body, _ = loader.get_with_meta("post-agent/agent-recommendations.md")
+        body_lower = body.lower()
+        # Verifies Worker Recommendation and Agent POV Balance, sensor evidence / autonomous verification, and governing rule / decision authority
+        assert "worker handoff and agent pov balance" in body_lower or "worker recommendation and agent pov balance" in body_lower
+        assert ("sensor evidence" in body_lower or "autonomous verification" in body_lower or "verification" in body_lower)
+        assert ("governing blackboard rule" in body_lower or "decision authority" in body_lower or "authority" in body_lower)
+
