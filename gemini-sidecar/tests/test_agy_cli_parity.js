@@ -390,6 +390,34 @@ describe('writeAgyMcpServer MCP configuration', () => {
   });
 });
 
+describe('writeClaudeMcpServer MCP configuration', () => {
+  it('writes valid 0600 .claude.json under HOME and tightens existing weaker permissions', () => {
+    withTempHome((home, cliSetup) => {
+      const claudePath = path.join(home, '.claude.json');
+      fs.writeFileSync(claudePath, JSON.stringify({ mcpServers: { Existing: { command: 'prev' } } }), { mode: 0o644 });
+      assert.equal(fs.statSync(claudePath).mode & 0o777, 0o644);
+
+      cliSetup.writeClaudeMcpServer('TestClaudeMCP', { command: 'node', args: ['/path/to/server.js'] });
+
+      assert.equal(fs.existsSync(claudePath), true);
+      const content = JSON.parse(fs.readFileSync(claudePath, 'utf8'));
+      assert.equal(content.mcpServers.Existing.command, 'prev');
+      assert.equal(content.mcpServers.TestClaudeMCP.command, 'node');
+      assert.equal(fs.statSync(claudePath).mode & 0o777, 0o600, '.claude.json must be 0600 mode');
+    });
+  });
+
+  it('rejects prototype-polluting server names for Claude', () => {
+    withTempHome((home, cliSetup) => {
+      const claudePath = path.join(home, '.claude.json');
+      cliSetup.writeClaudeMcpServer('__proto__', { command: 'x' });
+      assert.equal(fs.existsSync(claudePath), false);
+      cliSetup.writeClaudeMcpServer('constructor', { command: 'x' });
+      assert.equal(fs.existsSync(claudePath), false);
+    });
+  });
+});
+
 // =============================================================================
 // 8. resolveModel routing and role fallback
 // =============================================================================

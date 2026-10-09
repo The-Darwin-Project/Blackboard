@@ -53,13 +53,21 @@ const AGY_MCP_PATH = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.js
  * @param {object} config - { command, args, env }
  */
 function writeClaudeMcpServer(name, config) {
+    if (name === '__proto__' || name === 'constructor') return;
+    const dir = path.dirname(CLAUDE_JSON_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
     let data = {};
     if (fs.existsSync(CLAUDE_JSON_PATH)) {
         try { data = JSON.parse(fs.readFileSync(CLAUDE_JSON_PATH, 'utf8')); } catch { /* fresh */ }
     }
     data.mcpServers = data.mcpServers || {};
     data.mcpServers[name] = config;
-    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
+
+    const tmpPath = `${CLAUDE_JSON_PATH}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, CLAUDE_JSON_PATH);
+    try { fs.chmodSync(CLAUDE_JSON_PATH, 0o600); } catch { /* ignore */ }
 }
 
 /**
