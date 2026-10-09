@@ -230,6 +230,8 @@ class JiraIncidentAdapter:
                     logger.warning("Jira search_open_incidents JQL failed: %d", resp.status_code)
                     raise RuntimeError(f"Jira search_open_incidents JQL failed: {resp.status_code}")
                 data = resp.json()
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.exception("Jira search_open_incidents error")
             raise RuntimeError(f"Jira search_open_incidents error: {e}") from e

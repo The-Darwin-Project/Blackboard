@@ -9,7 +9,7 @@
 """
 Generate brain_skills/always/phase-tool-map.md from GATE_REGISTRY.
 
-Produces a navigation skill with Mermaid diagram, 29-gate table, skill pointers,
+Produces a navigation skill with Mermaid diagram, 30-gate table, skill pointers,
 and behavioral annotations — derived from the single source of truth in tool_gates.py.
 """
 from __future__ import annotations

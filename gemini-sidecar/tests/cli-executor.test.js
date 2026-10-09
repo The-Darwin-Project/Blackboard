@@ -238,6 +238,19 @@ describe('agy read-only roles (plan mode is the only enforcement layer)', () => 
         }
     });
 
+    it('unnormalized role with whitespace or compound name falls back to --mode plan', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined });
+        try {
+            for (const r of ['  code_reviewer \n', 'security-analyst', 'qa_reviewer_agent', 'ARCHITECT_LEAD']) {
+                const { args } = mod.buildCLICommand('p', { role: r, autoApprove: true });
+                assert.equal(args[args.indexOf('--mode') + 1], 'plan', `Role ${r} should get --mode plan`);
+                assert.equal(args.includes('--dangerously-skip-permissions'), false, `Role ${r} must not get --dangerously-skip-permissions`);
+            }
+        } finally {
+            restore();
+        }
+    });
+
     it('a mutating role still gets --dangerously-skip-permissions with autoApprove', () => {
         const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined, AGENT_ROLE: undefined });
         try {

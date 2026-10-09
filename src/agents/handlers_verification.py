@@ -32,13 +32,17 @@ async def handle_set_phase(
         domain = getattr(evidence, "brain_domain", None) or getattr(evidence, "domain", "disorder") if evidence else "disorder"
         if domain in ("complicated", "complex"):
             has_verify = False
-            for t in event_doc.conversation:
+            for t in reversed(event_doc.conversation or []):
                 actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
                 action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
                 thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
-                if actor == "brain" and action == "phase" and (thoughts or "").upper().startswith("PHASE: VERIFY"):
-                    has_verify = True
-                    break
+                if actor == "brain" and action == "phase":
+                    thoughts_upper = str(thoughts or "").upper()
+                    if thoughts_upper.startswith("PHASE: VERIFY"):
+                        has_verify = True
+                        break
+                    elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
+                        break
             if not has_verify:
                 reject_msg = f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."
                 turn = ConversationTurn(

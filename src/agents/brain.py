@@ -4085,11 +4085,15 @@ class Brain:
                         _ctx = (getattr(evidence, "github_context", None)
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
-                        provision_result = await self._ephemeral_provisioner.ensure_agent(
-                            event_id, _install_id,
-                            model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
-                            cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
-                        )
+                        try:
+                            provision_result = await self._ephemeral_provisioner.ensure_agent(
+                                event_id, _install_id,
+                                model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
+                                cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
+                            )
+                        except Exception as e:
+                            logger.exception("ensure_agent raised exception for %s: %s", event_id, e)
+                            provision_result = None
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:
                                 self._ephemeral_provisioner.record_dispatch_circuit_break()

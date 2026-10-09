@@ -36,7 +36,7 @@ const { wsSend } = require('./ws-utils');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveModel(options, agentCli) {
-  const effectiveRole = (options.role || AGENT_ROLE || (agentCli === 'claude' ? 'planner' : 'triage')).toLowerCase();
+  const effectiveRole = String(options.role || AGENT_ROLE || (agentCli === 'claude' ? 'planner' : 'triage')).trim().toLowerCase();
   if (options.model) return options.model;
   if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
     return process.env.EPHEMERAL_MODEL_EXPLORER;
@@ -170,7 +170,8 @@ function splitModelEffortSuffix(model, effort) {
 }
 
 function buildCLICommand(prompt, options = {}) {
-    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
+    const rawRole = options.role || AGENT_ROLE || '';
+    const effectiveRole = String(rawRole).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
 
     if (AGENT_CLI === 'agy') {
@@ -179,7 +180,13 @@ function buildCLICommand(prompt, options = {}) {
 
         // Read-only roles or plan mode run under --mode plan, and plan always wins over
         // autoApprove: a read-only role must never get --dangerously-skip-permissions.
-        if (permissionMode === 'plan' || AGY_READ_ONLY_ROLES.has(effectiveRole)) {
+        const isReadOnlyRole = AGY_READ_ONLY_ROLES.has(effectiveRole) ||
+            effectiveRole.includes('review') ||
+            effectiveRole.includes('analyst') ||
+            effectiveRole.includes('explorer') ||
+            effectiveRole.includes('architect');
+
+        if (permissionMode === 'plan' || isReadOnlyRole) {
             args.push('--mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');
@@ -773,7 +780,7 @@ function getRetryOptions(options, exitCode, stderr) {
         };
     }
     if (!options._retriedModel && isInvalidModelError(stderr)) {
-        const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
+        const effectiveRole = String(options.role || AGENT_ROLE || '').trim().toLowerCase();
         // Explorer always falls back to flash, whichever CLI is configured.
         const fallbackModel = effectiveRole === 'explorer' ? 'gemini-2.5-flash' : FALLBACK_MODEL[AGENT_CLI];
         // Retrying the model that just failed (e.g. claude already on the default) is pointless.
