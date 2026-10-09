@@ -13,11 +13,14 @@
 //    - MCP: team-chat-mcp.js notInModes on tools/list — e.g. message mode drops team_send_results + team_huddle.
 //    - Stop hook: http-handler.js allows exit without team_send_results when task.mode === message.
 //    Wake tryWake uses mode implement so pair-programming skills + full MCP apply.
+// 10. [Constraint]: writeAgyMcpServer is a no-op unless AGENT_CLI === 'agy' (it writes a plaintext credential store).
+//    Gate new agy writes there, not at call sites.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { AGENT_CLI } = require('./config');
 
 /**
  * Resolve a command name to its absolute path via `which`.
@@ -68,7 +71,11 @@ function writeClaudeMcpServer(name, config) {
  */
 function writeAgyMcpServer(name, config) {
     if (name === '__proto__' || name === 'constructor') return;
-    const agyMcpPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+    // Single chokepoint for every agy MCP write (cli-setup + all credentials.js call sites):
+    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude or
+    // gemini sidecar must not create it at all.
+    if (AGENT_CLI !== 'agy') return;
+    const agyMcpPath = AGY_MCP_PATH;
     const dir = path.dirname(agyMcpPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
@@ -263,10 +270,13 @@ function initializeCLISettings() {
         console.error(`Claude TeamChat registration error: ${err.message}`);
     }
     // Antigravity (agy) MCP registration (MCP goes to ~/.gemini/config/mcp_config.json via writeAgyMcpServer)
-    try {
-        registerMCPsAndHooks({}, 'agy');
-    } catch (err) {
-        console.error(`agy MCP registration error: ${err.message}`);
+    // Only for AGENT_CLI=agy sidecars -- see the credential note on writeAgyMcpServer.
+    if (AGENT_CLI === 'agy') {
+        try {
+            registerMCPsAndHooks({}, 'agy');
+        } catch (err) {
+            console.error(`agy MCP registration error: ${err.message}`);
+        }
     }
     // Trusted folders: JSON object format (path -> trust level), not array.
     // Even with trust disabled, an invalid file causes a warning on every run.

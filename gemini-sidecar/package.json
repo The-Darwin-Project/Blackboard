@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test tests/*.test.js tests/*.js",
+    "test": "node --test tests/*.js",
     "check-agy": "bash scripts/update-agy.sh --check",
     "update-agy": "bash scripts/update-agy.sh"
   },

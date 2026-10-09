@@ -7,6 +7,11 @@
 #    (shared utils layer is allowed; still do NOT import from routes -- hexagonal boundary).
 # 5. [Constraint]: create_incident uses marklassian for Markdown→ADF conversion.
 # 6. [Pattern]: Platform stored as Jira label; extracted on read via VALID_PLATFORMS intersection.
+# 7. [Constraint]: All JQL string interpolation goes through the module-level _escape_jql_string -- never
+#    define a local copy (they drift).
+# 8. [Gotcha]: search_open_incidents RAISES RuntimeError on HTTP/transport failure (callers such as
+#    nightwatcher are fail-closed); list_incidents still returns [] on error. An empty/","-only
+#    JIRA_INCIDENT_CLOSED_STATUSES falls back to the legacy single-status clause.
 """
 Jira incident adapter -- create, list, search, and extend incidents.
 
@@ -191,15 +196,13 @@ class JiraIncidentAdapter:
 
     async def search_open_incidents(self) -> list[dict]:
         """Search for open (non-closed) incidents. No cache -- always live."""
-        def _escape_jql_string(val: str) -> str:
-            if not val:
-                return ""
-            return val.replace("\\", "\\\\").replace('"', '\\"')
-
         label_filter = os.getenv("JIRA_INCIDENT_LABEL_FILTER", "")
         closed_statuses_env = os.getenv("JIRA_INCIDENT_CLOSED_STATUSES", "")
-        if closed_statuses_env:
-            closed_statuses = [s.strip() for s in closed_statuses_env.split(",") if s.strip()]
+        # Filter empties BEFORE choosing the branch: a value like "," or " , " strips to an
+        # empty list, and `NOT IN ()` is invalid JQL (would fail every call). Fall back to the
+        # legacy single-status clause instead.
+        closed_statuses = [s.strip() for s in closed_statuses_env.split(",") if s.strip()]
+        if closed_statuses:
             status_clause = "status NOT IN (" + ", ".join(f'"{_escape_jql_string(s)}"' for s in closed_statuses) + ")"
         else:
             closed_status = os.getenv("JIRA_INCIDENT_STATUSES", "New,Closed").split(",")[-1].strip()

@@ -214,3 +214,89 @@ async def test_jira_open_incident_jql_excludes_closed(monkeypatch):
     jql = params.get("jql", "")
     assert 'status NOT IN ("Closed", "Done", "Resolved")' in jql
     assert 'project = "INC"' in jql
+
+
+# --- search_open_incidents: JQL edge cases and failure contract ---
+
+def _mock_search(monkeypatch, *, success=True, status=200, raise_exc=None):
+    resp = MagicMock()
+    resp.is_success = success
+    resp.status_code = status
+    resp.json.return_value = {"issues": []}
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=raise_exc) if raise_exc else AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("httpx.AsyncClient", MagicMock(return_value=client))
+    return client
+
+
+def _jql_of(client) -> str:
+    return client.get.call_args[1]["params"]["jql"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [",", " , ", ",,  ,"])
+async def test_closed_statuses_that_strip_to_empty_fall_back_to_legacy_clause(monkeypatch, raw):
+    """`NOT IN ()` is invalid JQL and would fail every call; fall back to the legacy clause."""
+    client = _mock_search(monkeypatch)
+    monkeypatch.setenv("JIRA_INCIDENT_CLOSED_STATUSES", raw)
+    monkeypatch.setenv("JIRA_INCIDENT_STATUSES", "New,Closed")
+    adapter = JiraIncidentAdapter("https://jira.example.com", "e@x.com", "t", "INC")
+
+    await adapter.search_open_incidents()
+
+    jql = _jql_of(client)
+    assert "NOT IN" not in jql
+    assert 'status != "Closed"' in jql
+
+
+@pytest.mark.asyncio
+async def test_closed_statuses_ignore_empty_entries(monkeypatch):
+    client = _mock_search(monkeypatch)
+    monkeypatch.setenv("JIRA_INCIDENT_CLOSED_STATUSES", "Closed,, Done ,")
+    adapter = JiraIncidentAdapter("https://jira.example.com", "e@x.com", "t", "INC")
+
+    await adapter.search_open_incidents()
+
+    assert 'status NOT IN ("Closed", "Done")' in _jql_of(client)
+
+
+@pytest.mark.asyncio
+async def test_jql_values_are_escaped_via_module_level_helper(monkeypatch):
+    """Quotes/backslashes in project, label and statuses must not break out of the JQL string."""
+    client = _mock_search(monkeypatch)
+    monkeypatch.setenv("JIRA_INCIDENT_LABEL_FILTER", 'lab"el\\x')
+    monkeypatch.setenv("JIRA_INCIDENT_CLOSED_STATUSES", 'Do"ne')
+    adapter = JiraIncidentAdapter("https://jira.example.com", "e@x.com", "t", 'IN"C')
+
+    await adapter.search_open_incidents()
+
+    jql = _jql_of(client)
+    assert 'project = "IN\\"C"' in jql
+    assert 'labels = "lab\\"el\\\\x"' in jql
+    assert 'status NOT IN ("Do\\"ne")' in jql
+
+
+def test_escape_jql_string_is_defined_once():
+    """A nested copy inside search_open_incidents drifts from the module-level helper."""
+    import inspect
+    from src.adapters import jira_incident
+    src = inspect.getsource(jira_incident.JiraIncidentAdapter.search_open_incidents)
+    assert "def _escape_jql_string" not in src
+
+
+@pytest.mark.asyncio
+async def test_search_open_incidents_raises_on_http_error(monkeypatch):
+    _mock_search(monkeypatch, success=False, status=500)
+    adapter = JiraIncidentAdapter("https://jira.example.com", "e@x.com", "t", "INC")
+    with pytest.raises(RuntimeError, match="500"):
+        await adapter.search_open_incidents()
+
+
+@pytest.mark.asyncio
+async def test_search_open_incidents_raises_on_transport_error(monkeypatch):
+    _mock_search(monkeypatch, raise_exc=ConnectionError("boom"))
+    adapter = JiraIncidentAdapter("https://jira.example.com", "e@x.com", "t", "INC")
+    with pytest.raises(RuntimeError, match="boom"):
+        await adapter.search_open_incidents()

@@ -34,8 +34,11 @@ if [[ ! "${LATEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ ! "${LATEST_URL}" =~ ^https://storage\.googleapis\.com/ ]]; then
-  echo "Error: Invalid URL origin '${LATEST_URL}', must start with https://storage.googleapis.com/" >&2
+# Pin the exact bucket + path prefix and allow only plain path characters (no whitespace,
+# newlines, quotes, '&', '|' or '\\'), so the URL can be written into the Dockerfile verbatim.
+AGY_URL_RE='^https://storage\.googleapis\.com/antigravity-public/antigravity-cli/[A-Za-z0-9._/-]+\.tar\.gz$'
+if [[ ! "${LATEST_URL}" =~ ${AGY_URL_RE} ]]; then
+  echo "Error: Invalid URL '${LATEST_URL}', must be https://storage.googleapis.com/antigravity-public/antigravity-cli/<path>.tar.gz" >&2
   exit 1
 fi
 
@@ -44,7 +47,11 @@ if [[ ! "${LATEST_SHA512}" =~ ^[a-fA-F0-9]{128}$ ]]; then
   exit 1
 fi
 
-CURRENT_VERSION=$(grep -E '^ARG AGY_VERSION=' "${DOCKERFILE}" | cut -d'"' -f2)
+CURRENT_VERSION=$(grep -E '^ARG AGY_VERSION=' "${DOCKERFILE}" | cut -d'"' -f2 || true)
+if [[ -z "${CURRENT_VERSION}" ]]; then
+  echo "Error: could not read 'ARG AGY_VERSION=\"...\"' from ${DOCKERFILE} (was the ARG line reformatted?)" >&2
+  exit 1
+fi
 
 echo "Current pinned version: ${CURRENT_VERSION}"
 echo "Latest upstream version: ${LATEST_VERSION}"
@@ -82,15 +89,30 @@ if [[ ! -x "${TMP_DIR}/antigravity" ]]; then
   exit 1
 fi
 
-# Atomically update Dockerfile
-TMP_DOCKERFILE="${TMP_DIR}/Dockerfile.tmp"
-SAFE_URL="${LATEST_URL//&/\\&}"
-sed -E \
-  -e "s|^ARG AGY_VERSION=\".*\"|ARG AGY_VERSION=\"${LATEST_VERSION}\"|" \
-  -e "s|^ARG AGY_URL=\".*\"|ARG AGY_URL=\"${SAFE_URL}\"|" \
-  -e "s|^ARG AGY_SHA512=\".*\"|ARG AGY_SHA512=\"${LATEST_SHA512}\"|" \
-  "${DOCKERFILE}" > "${TMP_DOCKERFILE}"
+# Rewrite the three ARG lines without sed: every value was validated above, but a bash
+# line loop never interprets the replacement text (no delimiter/flag/newline injection).
+# The temp file lives next to the Dockerfile so the final mv is an atomic same-filesystem rename.
+TMP_DOCKERFILE=$(mktemp "${DOCKERFILE}.XXXXXX")
+trap 'rm -rf "${TMP_DIR}" "${TMP_DOCKERFILE}"' EXIT
+FOUND_ARGS=0
+while IFS= read -r line || [[ -n "${line}" ]]; do
+  case "${line}" in
+    'ARG AGY_VERSION="'*) line="ARG AGY_VERSION=\"${LATEST_VERSION}\""; FOUND_ARGS=$((FOUND_ARGS + 1)) ;;
+    'ARG AGY_URL="'*)     line="ARG AGY_URL=\"${LATEST_URL}\"";         FOUND_ARGS=$((FOUND_ARGS + 1)) ;;
+    'ARG AGY_SHA512="'*)  line="ARG AGY_SHA512=\"${LATEST_SHA512}\"";   FOUND_ARGS=$((FOUND_ARGS + 1)) ;;
+  esac
+  printf '%s\n' "${line}"
+done < "${DOCKERFILE}" > "${TMP_DOCKERFILE}"
 
+if [[ "${FOUND_ARGS}" -ne 3 ]]; then
+  echo "Error: expected to rewrite 3 AGY_* ARG lines in ${DOCKERFILE}, rewrote ${FOUND_ARGS}; Dockerfile left unchanged" >&2
+  exit 1
+fi
+
+chmod --reference="${DOCKERFILE}" "${TMP_DOCKERFILE}"
 mv "${TMP_DOCKERFILE}" "${DOCKERFILE}"
 
 echo "Successfully updated Dockerfile to agy ${LATEST_VERSION}."
+# The SHA512 and URL come from the same unauthenticated manifest, so the hash only guards
+# against corruption, not a compromised publisher. A human must confirm it out of band.
+echo "NOTE: verify AGY_SHA512 (${LATEST_SHA512}) against an independent source before merging."

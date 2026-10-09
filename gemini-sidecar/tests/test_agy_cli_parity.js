@@ -275,88 +275,118 @@ describe('agy buildCLICommand: conversation session tracking', () => {
 
 describe('agy buildCLICommand: settings.json immutability', () => {
   it('never mutates settings.json when running with agy', () => {
-    setEnv('AGENT_CLI', 'agy');
-    const { buildCLICommand, GEMINI_SETTINGS_PATH } = freshModules();
+    // Own HOME + a pre-seeded file: node --test runs files concurrently, so a shared
+    // ~/.gemini/settings.json is raced by the gemini parity tests, and an absent file made
+    // this assertion vacuous.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-settings-'));
+    try {
+      setEnv('HOME', home);
+      setEnv('AGENT_CLI', 'agy');
+      fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
+      const { buildCLICommand, GEMINI_SETTINGS_PATH } = freshModules();
+      assert.ok(GEMINI_SETTINGS_PATH.startsWith(home), 'settings path must resolve inside the sandbox HOME');
 
-    let initialMtime = null;
-    let initialContent = null;
-    if (fs.existsSync(GEMINI_SETTINGS_PATH)) {
-      initialMtime = fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs;
-      initialContent = fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8');
-    }
+      const seeded = JSON.stringify({ mcpServers: { Keep: { command: 'x' } } }, null, 2);
+      fs.writeFileSync(GEMINI_SETTINGS_PATH, seeded);
+      const initialMtime = fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs;
 
-    buildCLICommand('do work with agy', { effort: 'high', model: 'gemini-3.7-flash' });
+      buildCLICommand('do work with agy', { effort: 'high', model: 'gemini-3.7-flash' });
 
-    if (fs.existsSync(GEMINI_SETTINGS_PATH)) {
-      const currentMtime = fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs;
-      const currentContent = fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8');
-      assert.equal(currentMtime, initialMtime, 'settings.json mtime should not change under agy');
-      assert.equal(currentContent, initialContent, 'settings.json content should not change under agy');
+      assert.equal(fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs, initialMtime, 'settings.json mtime should not change under agy');
+      assert.equal(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8'), seeded, 'settings.json content should not change under agy');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });
 
 // =============================================================================
-// 6. Session Recovery: isAgySessionError
+// 6. Session Recovery: isAgySessionError (agy only, stderr only)
 // =============================================================================
 
 describe('isAgySessionError recovery logic', () => {
-  it('matches conversation not found warnings in stderr and output', (t) => {
-    const modules = freshModules();
-    if (typeof modules.isAgySessionError !== 'function') {
-      t.skip('isAgySessionError not yet exported from cli-executor.js by parallel executor');
-      return;
-    }
-    const { isAgySessionError } = modules;
-    assert.equal(isAgySessionError(1, 'Warning: conversation not found', ''), true);
-    assert.equal(isAgySessionError(1, '', 'Error: Conversation corrupt: invalid format'), true);
-    assert.equal(isAgySessionError(1, 'conversation invalid', ''), true);
-    assert.equal(isAgySessionError(0, '', 'All clear'), false);
-    assert.equal(isAgySessionError(1, 'Rate limit 429 exceeded', ''), false);
+  it('matches conversation not found / corrupt / invalid in STDERR under agy', () => {
+    setEnv('AGENT_CLI', 'agy');
+    const { isAgySessionError } = freshModules();
+    assert.equal(isAgySessionError(1, 'Warning: conversation not found'), true);
+    assert.equal(isAgySessionError(1, 'Error: Conversation corrupt: invalid format'), true);
+    assert.equal(isAgySessionError(1, 'conversation invalid'), true);
+    assert.equal(isAgySessionError(0, ''), false);
+    assert.equal(isAgySessionError(1, 'Rate limit 429 exceeded'), false);
+  });
+
+  it('ignores model output: a third `output` argument can no longer trigger a match', () => {
+    setEnv('AGENT_CLI', 'agy');
+    const { isAgySessionError } = freshModules();
+    assert.equal(isAgySessionError(1, '', 'Error: Conversation corrupt: invalid format'), false);
+  });
+
+  it('is false outside agy', () => {
+    setEnv('AGENT_CLI', 'claude');
+    const { isAgySessionError } = freshModules();
+    assert.equal(isAgySessionError(1, 'conversation not found'), false);
   });
 });
 
 // =============================================================================
-// 7. MCP Configuration: writeAgyMcpServer
+// 7. MCP Configuration: writeAgyMcpServer (isolated HOME, gated on AGENT_CLI=agy)
 // =============================================================================
 
-describe('writeAgyMcpServer MCP configuration', () => {
-  let tmpHome = null;
-  const originalHome = process.env.HOME;
+function withTempHome(fn) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-'));
+  setEnv('HOME', home);
+  try {
+    // cli-setup computes AGY_MCP_PATH from os.homedir() at load -- drop caches so it sees the temp HOME.
+    delete require.cache[require.resolve(CONFIG_PATH)];
+    delete require.cache[require.resolve(CLI_SETUP_PATH)];
+    return fn(home, require(CLI_SETUP_PATH));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
 
-  afterEach(() => {
-    process.env.HOME = originalHome;
-    if (tmpHome && fs.existsSync(tmpHome)) {
-      try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}
-      tmpHome = null;
-    }
+describe('writeAgyMcpServer MCP configuration', () => {
+  it('writes valid 0600 mcp_config.json under ~/.gemini/config when AGENT_CLI=agy', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      const testConfig = { command: 'node', args: ['/path/to/server.js'], env: { FOO: 'bar' } };
+      cliSetup.writeAgyMcpServer('TestDarwinMCP', testConfig);
+
+      const mcpPath = path.join(home, '.gemini', 'config', 'mcp_config.json');
+      assert.equal(fs.existsSync(mcpPath), true, 'mcp_config.json must exist');
+      const content = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+      assert.deepEqual(content.mcpServers.TestDarwinMCP, testConfig);
+      assert.equal(fs.statSync(mcpPath).mode & 0o777, 0o600);
+    });
   });
 
-  it('writes valid mcp_config.json at ~/.gemini/config/mcp_config.json in isolated HOME', (t) => {
-    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-'));
-    process.env.HOME = tmpHome;
+  it('preserves existing servers when adding another', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      cliSetup.writeAgyMcpServer('A', { command: 'a' });
+      cliSetup.writeAgyMcpServer('B', { command: 'b' });
+      const content = JSON.parse(fs.readFileSync(path.join(home, '.gemini', 'config', 'mcp_config.json'), 'utf8'));
+      assert.deepEqual(Object.keys(content.mcpServers).sort(), ['A', 'B']);
+    });
+  });
 
-    delete require.cache[require.resolve(CLI_SETUP_PATH)];
-    const cliSetup = require(CLI_SETUP_PATH);
-    if (typeof cliSetup.writeAgyMcpServer !== 'function') {
-      t.skip('writeAgyMcpServer not yet implemented in cli-setup.js by parallel executor');
-      return;
-    }
+  for (const cli of ['claude', 'gemini']) {
+    it(`writes NOTHING (no plaintext credential file) when AGENT_CLI=${cli}`, () => {
+      setEnv('AGENT_CLI', cli);
+      withTempHome((home, cliSetup) => {
+        cliSetup.writeAgyMcpServer('GitHub', { command: 'gh-mcp', env: { GITHUB_TOKEN: 'secret' } });
+        assert.equal(fs.existsSync(path.join(home, '.gemini', 'config', 'mcp_config.json')), false);
+        assert.equal(fs.existsSync(path.join(home, '.gemini', 'config')), false);
+      });
+    });
+  }
 
-    const testServerName = 'TestDarwinMCP';
-    const testConfig = { command: 'node', args: ['/path/to/server.js'], env: { FOO: 'bar' } };
-
-    cliSetup.writeAgyMcpServer(testServerName, testConfig);
-
-    const mcpPath = path.join(tmpHome, '.gemini', 'config', 'mcp_config.json');
-    assert.equal(fs.existsSync(mcpPath), true, 'mcp_config.json must exist');
-
-    const content = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
-    assert.notEqual(content.mcpServers, undefined);
-    assert.deepEqual(content.mcpServers[testServerName], testConfig);
-
-    const stats = fs.statSync(mcpPath);
-    assert.ok((stats.mode & 0o600) === 0o600, 'mcp_config.json must be read/write by owner');
+  it('rejects prototype-polluting server names', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      cliSetup.writeAgyMcpServer('__proto__', { command: 'x' });
+      assert.equal(fs.existsSync(path.join(home, '.gemini', 'config', 'mcp_config.json')), false);
+    });
   });
 });
 

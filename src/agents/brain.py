@@ -367,6 +367,23 @@ def _safe_int_env(name: str, default: int) -> int:
         logger.warning("Invalid %s (non-integer value, len=%d), using default %d", name, len(val), default)
         return default
 
+def compute_dispatch_backpressure(conversation, active_event_count: int, threshold: int) -> bool:
+    """True when the dispatcher last reported it could not place work, or load is at threshold.
+
+    Structured signal, not text matching: Brain's dispatcher turns:
+    ``action="paused"`` when it defers for capacity/circuit-breaker/infra reasons and
+    ``action="connected"`` once an agent registers. The LATEST of those two decides, so the
+    signal neither flips on a wording change nor expires after N unrelated turns.
+    ``active_event_count`` is a coarse system-load proxy kept as a secondary trigger.
+    """
+    for t in reversed(conversation):
+        if getattr(t, "actor", None) == "dispatcher" and getattr(t, "action", None) in ("paused", "connected"):
+            if t.action == "paused":
+                return True
+            break
+    return active_event_count >= threshold
+
+
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
@@ -2346,16 +2363,11 @@ class Brain:
             and flags.get("brain_has_classified", False)
             and flags.get("event_domain") != "casual"
         )
-        threshold_str = os.getenv("DARWIN_DISPATCH_BACKPRESSURE_THRESHOLD", "10")
-        try:
-            threshold = int(threshold_str)
-        except (ValueError, TypeError):
-            threshold = 10
-            
-        flags["has_dispatch_backpressure"] = any(
-            t.actor == "dispatcher" and any(k in (t.thoughts or "").lower() for k in ("busy", "circuit", "deferred", "unavailable", "full", "queue"))
-            for t in event.conversation[-5:]
-        ) or len(flags.get("_cached_active_ids", [])) >= threshold
+        flags["has_dispatch_backpressure"] = compute_dispatch_backpressure(
+            event.conversation,
+            len(flags.get("_cached_active_ids", [])),
+            _safe_int_env("DARWIN_DISPATCH_BACKPRESSURE_THRESHOLD", 10),
+        )
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:

@@ -207,64 +207,127 @@ class TestPhase3_5:
         )
 
 
-def test_skill_probe_confirms_stall_detection():
-    from pathlib import Path
-    base_dir = Path("src/agents/brain_skills/always")
+# ---------------------------------------------------------------------------
+# Content-contract tests for prompt files.
+#
+# Skill files are prompts, so there is no runtime behavior to execute here. What CAN be pinned
+# without being tautological: (a) the loader wiring (tool -> skill, frontmatter), and (b) that
+# each load-bearing statement lives inside the SECTION that owns it -- a bare "phrase in file"
+# check still passes when the phrase sits in an unrelated or contradictory paragraph, and an
+# `a or b or c` chain passes on almost any governance text. Every assertion below is
+# section-scoped and names one specific statement; there are no `or` fallbacks.
+# ---------------------------------------------------------------------------
 
-    guidelines_path = base_dir / "06-decision-guidelines.md"
-    assert guidelines_path.exists()
-    content = " ".join(guidelines_path.read_text().split())
-    assert "Stall Detection" in content
+def _section(body: str, heading: str) -> str:
+    """Return whitespace-normalised text of the section starting at `heading` (exact line match).
 
-    flow_path = base_dir / "08-flow-engineering.md"
-    assert flow_path.exists()
-    content = " ".join(flow_path.read_text().split())
-    assert "missing circuit breaker" in content
+    Runs to the next heading of the same or higher level, so sub-sections are included.
+    Raises AssertionError (not ValueError) so a renamed heading fails with a clear message.
+    """
+    lines = body.splitlines()
+    level = len(heading) - len(heading.lstrip("#"))
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == heading)
+    except StopIteration:
+        raise AssertionError(f"heading {heading!r} not found")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if ln.startswith("#") and (len(ln) - len(ln.lstrip("#"))) <= level and ln.lstrip("#").startswith(" "):
+            end = i
+            break
+    return " ".join(" ".join(lines[start:end]).split())
+
+
+def _skill(loader, path: str) -> str:
+    result = loader.get_with_meta(path)
+    assert result is not None, f"{path} not found"
+    return result[0]
+
+
+class TestSectionScopedHelper:
+    """The helper is the instrument for every test below -- prove it can actually fail."""
+
+    BODY = "# T\n## A\nalpha\n### A1\nnested\n## B\nbeta\n"
+
+    def test_includes_subsections_and_stops_at_peer_heading(self):
+        sec = _section(self.BODY, "## A")
+        assert "alpha" in sec and "nested" in sec
+        assert "beta" not in sec
+
+    def test_missing_heading_fails_loudly(self):
+        with pytest.raises(AssertionError, match="not found"):
+            _section(self.BODY, "## Missing")
+
+
+class TestStallDetectionContract:
+    def test_both_stall_triggers_and_escalation_live_in_stall_section(self, skill_06_body):
+        sec = _section(skill_06_body, "### Stall Detection (Emergency Flange)").lower()
+        assert "repeated same-reason deferrals" in sec
+        assert "elapsed ceiling" in sec
+        assert "mandatory escalation" in sec
+        assert "never defer on stale state" in sec
+
+    def test_unbounded_waiting_is_framed_as_missing_circuit_breaker(self, loader):
+        sec = _section(_skill(loader, "always/08-flow-engineering.md"), "## Two Kinds of Deferral").lower()
+        assert "missing circuit breaker" in sec
+
+    def test_stall_section_is_not_duplicated_in_other_always_skills(self, loader):
+        """The rule has one owner (always/06); a second copy would drift."""
+        owners = [
+            p for p in (loader.get_all_paths_for_phase("always") or [])
+            if "### Stall Detection" in _skill(loader, p)
+        ]
+        assert owners == ["always/06-decision-guidelines.md"]
 
 
 class TestDeflectionClosureGateProbe:
-    def test_deflection_gate_principles_present(self, loader):
-        body, _ = loader.get_with_meta("close/when-to-close.md")
-        assert "deflection closure gate" in body.lower()
-        assert "verified resolution" in body.lower()
-        assert "closed-loop accountability" in body.lower()
-        assert "specialized agent" in body.lower()
+    PATH = "close/when-to-close.md"
 
-    def test_deflection_gate_no_negative_production_phrasing(self, loader):
-        body, _ = loader.get_with_meta("close/when-to-close.md")
-        # Enforce AGENTS.md rule: positive-only guidance, no quoting bad output
-        assert "feel free to ask" not in body.lower()
-        assert "someone else's problem" not in body.lower()
+    def test_close_event_tool_loads_this_skill(self, loader):
+        assert self.PATH in loader.get_tool_skills("close_event")
 
-    def test_deflection_closure_gate_positive_invariants(self, loader):
-        body, _ = loader.get_with_meta("close/when-to-close.md")
-        body_lower = body.lower()
-        # Verify Deflection Closure Gate, required evidence / handoff, and question / clarification gates
-        assert "deflection closure gate" in body_lower
-        assert ("evidence" in body_lower and "handoff" in body_lower) or "required evidence handoff" in body_lower
-        assert ("clarif" in body_lower or "open question gate" in body_lower) or "clarification gate" in body_lower
-        # Verify bad deflection strings are ABSENT
-        for bad_phrase in ["feel free to ask", "someone else's problem", "out of scope, closing"]:
-            assert bad_phrase not in body_lower
+    def test_gate_states_resolution_standard_and_both_source_rules(self, loader):
+        sec = _section(_skill(loader, self.PATH), "## Deflection Closure Gate").lower()
+        assert "requires verified resolution, an active external tracking link, or explicit user consensus" in sec
+        assert "user-facing conversations (chat / slack)" in sec
+        assert "automated events (aligner / pr / ci)" in sec
+        assert "never terminate an automated event without recording verified root cause evidence" in sec
+
+    def test_gate_precedes_domain_gated_criteria(self, loader):
+        body = _skill(loader, self.PATH)
+        assert body.index("## Deflection Closure Gate") < body.index("## Domain-Gated Close Criteria")
+
+    def test_chaotic_and_casual_cannot_close_directly(self, loader):
+        sec = _section(_skill(loader, self.PATH), "## Domain-Gated Close Criteria")
+        assert "**CHAOTIC**: NEVER close from CHAOTIC" in sec
+        assert "**CASUAL**: NEVER close from CASUAL directly" in sec
+
+    @pytest.mark.parametrize("bad_phrase", ["feel free to ask", "someone else's problem", "out of scope, closing"])
+    def test_no_negative_production_phrasing(self, loader, bad_phrase):
+        # AGENTS.md rule: positive-only guidance, never quote bad output in a skill.
+        assert bad_phrase not in _skill(loader, self.PATH).lower()
 
 
 class TestWorkerHandoffBalanceProbe:
-    def test_handoff_balance_principles_present(self, loader):
-        body, _ = loader.get_with_meta("post-agent/agent-recommendations.md")
-        assert "worker handoff and agent pov balance" in body.lower()
-        assert "sensor evidence" in body.lower()
-        assert "governing blackboard rule" in body.lower()
+    REC = "post-agent/agent-recommendations.md"
 
-    def test_decision_routing_harmonized(self, loader):
-        body, _ = loader.get_with_meta("dispatch/decision-routing.md")
-        assert "sensor inputs for you to evaluate" in body.lower()
+    def test_handoff_section_requires_follow_or_recorded_override(self, loader):
+        sec = _section(_skill(loader, self.REC), "## Worker Handoff and Agent POV Balance").lower()
+        assert "follow the recommended handoff" in sec
+        assert "explicitly record the governing blackboard rule that overrides it" in sec
+        assert "never silently drop or bypass a concrete worker handoff recommendation" in sec
+
+    def test_handoff_override_rules_include_unapproved_source_mutations(self, loader):
+        """The override list is what keeps a worker handoff from outranking the approval gate."""
+        sec = _section(_skill(loader, self.REC), "## Worker Handoff and Agent POV Balance").lower()
+        assert "unapproved source mutations" in sec
+
+    def test_decision_routing_ties_recommendations_to_approval_gates(self, loader):
+        body = _skill(loader, "dispatch/decision-routing.md")
         assert "not what you should do" not in body.lower()
-
-    def test_post_agent_recommendations_skill(self, loader):
-        body, _ = loader.get_with_meta("post-agent/agent-recommendations.md")
-        body_lower = body.lower()
-        # Verifies Worker Recommendation and Agent POV Balance, sensor evidence / autonomous verification, and governing rule / decision authority
-        assert "worker handoff and agent pov balance" in body_lower or "worker recommendation and agent pov balance" in body_lower
-        assert ("sensor evidence" in body_lower or "autonomous verification" in body_lower or "verification" in body_lower)
-        assert ("governing blackboard rule" in body_lower or "decision authority" in body_lower or "authority" in body_lower)
-
+        # Both statements must be in ONE passage: recommendations are sensor input AND are
+        # evaluated against approval gates -- not merely both mentioned somewhere in the file.
+        flat = " ".join(body.split())
+        i = flat.index("sensor inputs for you to evaluate against")
+        assert "approval gates" in flat[i:i + 160]

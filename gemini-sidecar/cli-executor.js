@@ -18,6 +18,11 @@
 // 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
 //     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
 //     here (not a hardcoded role check) when a future role needs its own permission boundary.
+// 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
+//     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
+//     model-line-only, and match stderr only (stdout is model text and can mention these phrases).
+// 12. [Gotcha]: agy skips ROLE_SETTINGS_FILE and the validate-* hooks; `--mode plan` is its only read-only layer.
+//     Add read-only roles to AGY_READ_ONLY_ROLES (ROLE_SETTINGS_FILE keys are folded in automatically).
 
 const cp = require('child_process');
 const spawn = (...args) => cp.spawn(...args);
@@ -43,6 +48,22 @@ function resolveModel(options, agentCli) {
 // Only roles listed here get --settings; all other roles are unaffected.
 const ROLE_SETTINGS_FILE = {
     code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+};
+
+// Roles that must never run with write/approve-all permissions on the agy path. agy skips the
+// ROLE_SETTINGS_FILE deny layer and validate-* hooks, so `--mode plan` is the ONLY read-only
+// enforcement there. Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is
+// read-only by definition, so it is folded in here rather than maintained as a second list.
+const AGY_READ_ONLY_ROLES = new Set([
+    'architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst',
+    ...Object.keys(ROLE_SETTINGS_FILE),
+]);
+
+// Fallback model per CLI for the invalid-model retry (see getRetryOptions).
+const FALLBACK_MODEL = {
+    claude: 'claude-opus-4-6',
+    gemini: 'gemini-2.5-flash',
+    agy: 'gemini-2.5-flash',
 };
 
 // Minimum load-bearing deny rules the settings-validity check requires (below) --
@@ -137,6 +158,17 @@ function writeThinkingConfig(effort, model) {
     }
 }
 
+// agy rejects a model name that already carries an effort suffix alongside --effort, so
+// peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.
+function splitModelEffortSuffix(model, effort) {
+    let m;
+    while ((m = model.match(/^(.+)-(low|medium|high|xhigh|max)$/))) {
+        model = m[1];
+        effort = m[2];
+    }
+    return { model, effort };
+}
+
 function buildCLICommand(prompt, options = {}) {
     const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
@@ -145,8 +177,9 @@ function buildCLICommand(prompt, options = {}) {
         const args = [];
         const binary = AGY_CLI;
 
-        // Enforce read-only defense-in-depth: read-only roles or plan mode run under --mode plan
-        if (permissionMode === 'plan' || ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst'].includes(effectiveRole)) {
+        // Read-only roles or plan mode run under --mode plan, and plan always wins over
+        // autoApprove: a read-only role must never get --dangerously-skip-permissions.
+        if (permissionMode === 'plan' || AGY_READ_ONLY_ROLES.has(effectiveRole)) {
             args.push('--mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');
@@ -158,11 +191,7 @@ function buildCLICommand(prompt, options = {}) {
         let model = resolveModel(options, AGENT_CLI);
         let effort = options.effort || AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT;
 
-        let suffixMatch;
-        while ((suffixMatch = model.match(/^(.+)-(low|medium|high|xhigh|max)$/))) {
-            model = suffixMatch[1];
-            effort = suffixMatch[2];
-        }
+        ({ model, effort } = splitModelEffortSuffix(model, effort));
         effort = effort || 'high'; // agy requires explicit --effort for flash/pro models
 
         if (model) args.push('--model', model);
@@ -508,25 +537,10 @@ async function executeCLI(prompt, options = {}) {
                     resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
                 });
             } else {
-                if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(code, stderr, effectiveOutput)) {
-                    console.log(`[${new Date().toISOString()}] agy session error detected, retrying without --conversation`);
-                    executeCLI(prompt, {
-                        ...options,
-                        conversationId: null,
-                        sessionId: null,
-                        _retryWithoutSession: true,
-                    }).then(resolve).catch(reject);
-                    return;
-                }
-                const lowerStderr = (stderr || '').toLowerCase();
-                if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
-                    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
-                    const fallbackModel = effectiveRole === 'explorer'
-                        ? 'gemini-2.5-flash'
-                        : (AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash');
-                    console.log(`[${new Date().toISOString()}] Invalid model error, retrying with ${fallbackModel}`);
-                    executeCLI(prompt, { ...options, model: fallbackModel, _retriedModel: true })
-                        .then(resolve).catch(reject);
+                const retry = getRetryOptions(options, code, stderr);
+                if (retry) {
+                    console.log(`[${new Date().toISOString()}] ${retry.reason}`);
+                    executeCLI(prompt, retry.options).then(resolve).catch(reject);
                     return;
                 }
                 resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
@@ -691,25 +705,10 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     }).then(resolve).catch(reject);
                     return;
                 }
-                if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(code, stderr, effectiveOutput)) {
-                    console.log(`[${new Date().toISOString()}] [${eventId}] agy session error detected, retrying without --conversation`);
-                    executeCLIStreaming(ws, eventId, prompt, {
-                        ...options,
-                        conversationId: null,
-                        sessionId: null,
-                        _retryWithoutSession: true,
-                    }).then(resolve).catch(reject);
-                    return;
-                }
-                const lowerStderr = (stderr || '').toLowerCase();
-                if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
-                    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
-                    const fallbackModel = effectiveRole === 'explorer'
-                        ? 'gemini-2.5-flash'
-                        : (AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash');
-                    console.log(`[${new Date().toISOString()}] [${eventId}] Invalid model error, retrying with ${fallbackModel}`);
-                    executeCLIStreaming(ws, eventId, prompt, { ...options, model: fallbackModel, _retriedModel: true })
-                        .then(resolve).catch(reject);
+                const retry = getRetryOptions(options, code, stderr);
+                if (retry) {
+                    console.log(`[${new Date().toISOString()}] [${eventId}] ${retry.reason}`);
+                    executeCLIStreaming(ws, eventId, prompt, retry.options).then(resolve).catch(reject);
                     return;
                 }
                 resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel: resolveModel(options, AGENT_CLI) });
@@ -746,9 +745,46 @@ function isGeminiSessionNotFound(exitCode, stderr) {
     return lower.includes('no previous sessions found') || lower.includes('session not found');
 }
 
-function isAgySessionError(exitCode, stderr, output) {
-    const combined = ((output || '') + (stderr || '') + (typeof exitCode === 'string' ? exitCode : '')).toLowerCase();
-    return combined.includes('conversation') && (combined.includes('not found') || combined.includes('corrupt') || combined.includes('invalid'));
+// agy only, stderr only: stdout carries the model's own text, so matching it would re-run
+// (and repeat any mutating tool calls of) a task that merely *talked about* a missing
+// conversation. `agentCli` is a parameter so the predicate stays testable.
+function isAgySessionError(exitCode, stderr, agentCli = AGENT_CLI) {
+    if (agentCli !== 'agy') return false;
+    const lower = (stderr || '').toLowerCase();
+    return lower.includes('conversation') && (lower.includes('not found') || lower.includes('corrupt') || lower.includes('invalid'));
+}
+
+// A model-selection failure names the model on the same stderr line as the error marker.
+// Bare `invalid_argument` also covers bad --effort flags, MCP errors and oversized context,
+// none of which a model swap can fix -- so require the line to mention the model.
+function isInvalidModelError(stderr) {
+    return (stderr || '').toLowerCase().split('\n').some((line) =>
+        line.includes('model') && (line.includes('not found') || line.includes('invalid_argument') || line.includes('invalid model')));
+}
+
+// Shared by executeCLI and executeCLIStreaming: decide whether a failed run gets ONE retry
+// and with which options. Returns { reason, options } or null. Both retries re-run the whole
+// prompt, so each is bounded by its own flag and gated as narrowly as the evidence allows.
+function getRetryOptions(options, exitCode, stderr) {
+    if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(exitCode, stderr)) {
+        return {
+            reason: 'agy session error detected, retrying without --conversation',
+            options: { ...options, conversationId: null, sessionId: null, _retryWithoutSession: true },
+        };
+    }
+    if (!options._retriedModel && isInvalidModelError(stderr)) {
+        const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
+        // Explorer always falls back to flash, whichever CLI is configured.
+        const fallbackModel = effectiveRole === 'explorer' ? 'gemini-2.5-flash' : FALLBACK_MODEL[AGENT_CLI];
+        // Retrying the model that just failed (e.g. claude already on the default) is pointless.
+        if (fallbackModel && fallbackModel !== resolveModel(options, AGENT_CLI)) {
+            return {
+                reason: `Invalid model error, retrying with ${fallbackModel}`,
+                options: { ...options, model: fallbackModel, _retriedModel: true },
+            };
+        }
+    }
+    return null;
 }
 
 module.exports = {
@@ -764,6 +800,8 @@ module.exports = {
     is400SessionError,
     isGeminiSessionNotFound,
     isAgySessionError,
+    isInvalidModelError,
+    getRetryOptions,
     resolveModel,
     writeThinkingConfig,
     GEMINI_SETTINGS_PATH,

@@ -18,6 +18,7 @@ from src.agents.tool_gates import (
     evaluate_gates,
     diagnose_rejection,
     _pred_unevaluated_close,
+    has_unevaluated_close_blocker,
 )
 from src.models import MessageStatus
 
@@ -266,11 +267,48 @@ class TestOnlyCloseEventAffected:
         result = evaluate_gates(CLOSE_SCHEMAS, ctx)
         assert "select_agent" in _names(result) or "classify_event" in _names(result)
 
-# T-1: Brain response turn resolves unevaluated blocker (returns False).
-def test_brain_response_turn_resolves_blocker():
-    turn = SimpleNamespace(actor="brain", action="response", status=MessageStatus.SENT, thoughts="test")
-    ctx = _ctx(conversation=[turn])
-    assert _pred_unevaluated_close(ctx) is False
+# T-1: a brain `response` / `respond_jarvis` turn AFTER an unevaluated message answers it.
+# (A conversation holding only the brain turn passes on the old code too -- the message must
+# be present for the break to matter. Each case below fails if its `break` is removed.)
+def _msg(actor, status=MessageStatus.SENT, thoughts="what is the status?"):
+    return SimpleNamespace(actor=actor, action="message", status=status, thoughts=thoughts, result=None)
+
+
+def _brain(action, thoughts="test"):
+    return SimpleNamespace(actor="brain", action=action, status=MessageStatus.SENT, thoughts=thoughts)
+
+
+def test_brain_response_after_user_message_resolves_blocker():
+    assert has_unevaluated_close_blocker([_msg("user"), _brain("response")]) is False
+
+
+def test_brain_respond_jarvis_after_jarvis_message_resolves_blocker():
+    assert has_unevaluated_close_blocker([_msg("jarvis", thoughts="alert: disk 91%"), _brain("respond_jarvis")]) is False
+
+
+def test_message_after_brain_response_blocks_again():
+    """A response only answers what precedes it -- a NEW message re-arms the blocker."""
+    assert has_unevaluated_close_blocker([_msg("user"), _brain("response"), _msg("user", thoughts="and now?")]) is True
+
+
+def test_non_close_phase_transition_does_not_resolve_blocker():
+    """Narrowed `phase` break: a dispatch/verify phase change is not an answer to the user."""
+    turns = [_msg("user"), _brain("phase", thoughts="Phase: DISPATCH. Routing to developer.")]
+    assert has_unevaluated_close_blocker(turns) is True
+
+
+def test_close_phase_transition_resolves_blocker():
+    turns = [_msg("user"), _brain("phase", thoughts="PHASE: CLOSE. Wrapping up.")]
+    assert has_unevaluated_close_blocker(turns) is False
+
+
+def test_blocker_handles_dict_turns_for_response_and_phase():
+    user = {"actor": "user", "action": "message", "status": "sent", "thoughts": "status?"}
+    assert has_unevaluated_close_blocker([user, {"actor": "brain", "action": "response"}]) is False
+    assert has_unevaluated_close_blocker(
+        [user, {"actor": "brain", "action": "phase", "thoughts": "Phase: DISPATCH"}]
+    ) is True
+
 
 # T-2: JARVIS idle-ack text (thoughts="watching." or "ok") does not block event closure (returns False).
 def test_jarvis_idle_ack_text_does_not_block():
