@@ -520,7 +520,10 @@ async function executeCLI(prompt, options = {}) {
                 }
                 const lowerStderr = (stderr || '').toLowerCase();
                 if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
-                    const fallbackModel = AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash';
+                    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
+                    const fallbackModel = effectiveRole === 'explorer'
+                        ? 'gemini-2.5-flash'
+                        : (AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash');
                     console.log(`[${new Date().toISOString()}] Invalid model error, retrying with ${fallbackModel}`);
                     executeCLI(prompt, { ...options, model: fallbackModel, _retriedModel: true })
                         .then(resolve).catch(reject);
@@ -700,7 +703,10 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                 }
                 const lowerStderr = (stderr || '').toLowerCase();
                 if (!options._retriedModel && (lowerStderr.includes('invalid_argument') || (lowerStderr.includes('model') && lowerStderr.includes('not found')))) {
-                    const fallbackModel = AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash';
+                    const effectiveRole = (options.role || AGENT_ROLE || '').toLowerCase();
+                    const fallbackModel = effectiveRole === 'explorer'
+                        ? 'gemini-2.5-flash'
+                        : (AGENT_CLI === 'claude' ? 'claude-opus-4-6' : 'gemini-2.5-flash');
                     console.log(`[${new Date().toISOString()}] [${eventId}] Invalid model error, retrying with ${fallbackModel}`);
                     executeCLIStreaming(ws, eventId, prompt, { ...options, model: fallbackModel, _retriedModel: true })
                         .then(resolve).catch(reject);

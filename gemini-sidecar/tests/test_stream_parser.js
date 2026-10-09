@@ -315,6 +315,57 @@ describe('stream-parser: Antigravity CLI (agy) format', () => {
       done: true,
     });
   });
+
+  it('event: "result" with CANCELLED status returns [error] CANCELLED', () => {
+    const line = JSON.stringify({
+      event: 'result',
+      result: {
+        conversation_id: 'agy-conv-789',
+        status: 'CANCELLED',
+      },
+    });
+    const res = parseStreamLine(line);
+    assert.deepEqual(res, {
+      text: '[error] CANCELLED',
+      sessionId: 'agy-conv-789',
+      toolCalls: null,
+      done: true,
+    });
+  });
+
+  it('event: "result" handles missing .result payload safely', () => {
+    const line = JSON.stringify({
+      event: 'result',
+    });
+    const res = parseStreamLine(line);
+    assert.deepEqual(res, {
+      text: '[error] Execution failed',
+      sessionId: null,
+      toolCalls: null,
+      done: true,
+    });
+  });
+
+  it('event: "step_update" with simultaneous text_delta and tool_info assembles parts joined by newline', () => {
+    const line = JSON.stringify({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'agy-conv-789',
+        text_delta: 'I will now run the command.',
+        tool_info: {
+          name: 'run_command',
+          parameters: { CommandLine: 'ls -la' },
+        },
+      },
+    });
+    const res = parseStreamLine(line);
+    assert.deepEqual(res, {
+      text: 'I will now run the command.\n[tool] run_command: ls -la',
+      sessionId: 'agy-conv-789',
+      toolCalls: 1,
+      done: false,
+    });
+  });
 });
 
 describe('stream-parser: raw fallback & wrapper', () => {

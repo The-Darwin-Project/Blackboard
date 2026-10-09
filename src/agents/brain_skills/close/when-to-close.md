@@ -34,6 +34,8 @@ Close is forbidden until ONE of:
 3. You explicitly retract the question with a terminal statement ("Let me know
    if you need anything else" without a question mark is terminal)
 
+If clarification does not converge after 2 rounds, present a best-effort summary of verified findings, state what remains unresolved without the requested information, and park or close with explicit system rationale.
+
 This gate applies to all user-facing sources (chat, slack). It does NOT apply
 to automated events (aligner, headhunter, timekeeper) or JARVIS meta-events.
 

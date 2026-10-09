@@ -193,6 +193,16 @@ describe('agy buildCLICommand: role security & permissions', () => {
     assert.equal(args.includes('--dangerously-skip-permissions'), false);
   });
 
+  it('enforces --mode plan regardless of role casing (e.g. Code_Reviewer)', () => {
+    setEnv('AGENT_CLI', 'agy');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('review code changes', { role: 'Code_Reviewer', autoApprove: true });
+
+    assert.equal(args.includes('--mode'), true);
+    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
+    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+  });
+
   it('enforces --dangerously-skip-permissions for mutating roles when autoApprove is true', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_PERMISSION_MODE', undefined);
@@ -227,6 +237,35 @@ describe('agy buildCLICommand: conversation session tracking', () => {
     const convIdx = args.indexOf('--conversation');
     assert.notEqual(convIdx, -1);
     assert.equal(args[convIdx + 1], 'sess-abc-123');
+  });
+
+  it('executeCLIStreaming forwards conversationId to buildCLICommand', async (t) => {
+    setEnv('AGENT_CLI', 'agy');
+    const cp = require('child_process');
+    const { EventEmitter } = require('events');
+    const modules = freshModules();
+    const { executeCLIStreaming } = modules;
+
+    let capturedArgs = null;
+    t.mock.method(cp, 'spawn', (cmd, args) => {
+      capturedArgs = args;
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      setTimeout(() => {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { status: 'SUCCESS' } }) + '\n'));
+        child.emit('close', 0);
+      }, 10);
+      return child;
+    });
+
+    const mockWs = { send: () => {} };
+    await executeCLIStreaming(mockWs, 'evt-123', 'hello agy', { conversationId: 'conv-fwd-456' });
+
+    assert.ok(capturedArgs, 'spawn must be called');
+    const convIdx = capturedArgs.indexOf('--conversation');
+    assert.notEqual(convIdx, -1, '--conversation must be passed to spawned CLI');
+    assert.equal(capturedArgs[convIdx + 1], 'conv-fwd-456');
   });
 });
 
@@ -282,7 +321,22 @@ describe('isAgySessionError recovery logic', () => {
 // =============================================================================
 
 describe('writeAgyMcpServer MCP configuration', () => {
-  it('writes valid mcp_config.json at ~/.gemini/config/mcp_config.json', (t) => {
+  let tmpHome = null;
+  const originalHome = process.env.HOME;
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    if (tmpHome && fs.existsSync(tmpHome)) {
+      try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}
+      tmpHome = null;
+    }
+  });
+
+  it('writes valid mcp_config.json at ~/.gemini/config/mcp_config.json in isolated HOME', (t) => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-'));
+    process.env.HOME = tmpHome;
+
+    delete require.cache[require.resolve(CLI_SETUP_PATH)];
     const cliSetup = require(CLI_SETUP_PATH);
     if (typeof cliSetup.writeAgyMcpServer !== 'function') {
       t.skip('writeAgyMcpServer not yet implemented in cli-setup.js by parallel executor');
@@ -294,7 +348,7 @@ describe('writeAgyMcpServer MCP configuration', () => {
 
     cliSetup.writeAgyMcpServer(testServerName, testConfig);
 
-    const mcpPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+    const mcpPath = path.join(tmpHome, '.gemini', 'config', 'mcp_config.json');
     assert.equal(fs.existsSync(mcpPath), true, 'mcp_config.json must exist');
 
     const content = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
@@ -303,6 +357,32 @@ describe('writeAgyMcpServer MCP configuration', () => {
 
     const stats = fs.statSync(mcpPath);
     assert.ok((stats.mode & 0o600) === 0o600, 'mcp_config.json must be read/write by owner');
+  });
+});
+
+// =============================================================================
+// 8. resolveModel routing and role fallback
+// =============================================================================
+
+describe('resolveModel routing and role fallback', () => {
+  it('picks up EPHEMERAL_MODEL_EXPLORER when process.env.AGENT_ROLE is explorer', () => {
+    setEnv('AGENT_CLI', 'agy');
+    setEnv('AGENT_ROLE', 'explorer');
+    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-2.5-flash-explorer-custom');
+    const { resolveModel } = freshModules();
+
+    const selected = resolveModel({}, 'agy');
+    assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
+  });
+
+  it('picks up EPHEMERAL_MODEL_EXPLORER when options.role is Explorer (case-insensitive)', () => {
+    setEnv('AGENT_CLI', 'agy');
+    setEnv('AGENT_ROLE', undefined);
+    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-2.5-flash-explorer-custom');
+    const { resolveModel } = freshModules();
+
+    const selected = resolveModel({ role: 'Explorer' }, 'agy');
+    assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
   });
 });
 
