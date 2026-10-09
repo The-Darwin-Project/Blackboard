@@ -50,3 +50,32 @@ async def test_close_permitted_after_verify():
     
     # Check that bb.update_event_phase was called with close
     bb.update_event_phase.assert_called_once_with("evt-1", "close")
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_when_reclassified_after_verify():
+    ctx = MagicMock()
+    bb = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.next_turn_number = AsyncMock(return_value=3)
+    ctx.append_and_broadcast = AsyncMock()
+
+    verify_turn = ConversationTurn(
+        turn=1, actor="brain", action="phase", thoughts="Phase: VERIFY", waitingFor="set_phase"
+    )
+    triage_turn = ConversationTurn(
+        turn=2, actor="brain", action="triage", thoughts="Cynefin: COMPLICATED."
+    )
+    event_doc = MagicMock()
+    event_doc.brain_phase = "triage"
+    event_doc.event.evidence.brain_domain = "complicated"
+    event_doc.conversation = [verify_turn, triage_turn]
+    bb.get_event = AsyncMock(return_value=event_doc)
+
+    await handle_set_phase(ctx, "evt-1", {"phase": "close"}, None)
+
+    ctx.append_and_broadcast.assert_called_once()
+    appended_turn = ctx.append_and_broadcast.call_args[0][1]
+    assert appended_turn.actor == "system"
+    assert "Cannot transition to 'close'" in appended_turn.result
+

@@ -753,18 +753,18 @@ def _msg_hard_strip_wait_user(tool: str, ctx: GateContext) -> str:
 
 GATE_REGISTRY: list[GateDefinition] = [
     GateDefinition(
-        gate_id="DISPATCH_DEFER_GATE",
-        mode="strip",
-        predicate=_pred_dispatch_defer,
-        tools_affected=_tools_defer_event,
-        message=lambda tool, _ctx: f"[GATE] {tool} blocked. Cannot defer in dispatch phase unless dispatcher reports backpressure.",
-    ),
-    GateDefinition(
         gate_id="DEFER_WAKE_ITER0",
         mode="strip",
         predicate=_pred_defer_wake_iter0,
         tools_affected=_tools_defer_event,
         message=_msg_defer_wake_iter0,
+    ),
+    GateDefinition(
+        gate_id="DISPATCH_DEFER_GATE",
+        mode="strip",
+        predicate=_pred_dispatch_defer,
+        tools_affected=_tools_defer_event,
+        message=lambda tool, _ctx: f"[GATE] {tool} blocked. Cannot defer in dispatch phase unless dispatcher reports backpressure.",
     ),
     GateDefinition(
         gate_id="INTERMEDIATE",

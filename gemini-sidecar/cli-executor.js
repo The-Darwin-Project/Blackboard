@@ -765,11 +765,12 @@ function isGeminiSessionNotFound(exitCode, stderr) {
 
 // agy only, stderr only: stdout carries the model's own text, so matching it would re-run
 // (and repeat any mutating tool calls of) a task that merely *talked about* a missing
-// conversation. `agentCli` is a parameter so the predicate stays testable.
+// conversation. Matches per-line to avoid spurious retries when unrelated lines combine.
+// `agentCli` is a parameter so the predicate stays testable.
 function isAgySessionError(exitCode, stderr, agentCli = AGENT_CLI) {
     if (agentCli !== 'agy') return false;
-    const lower = (stderr || '').toLowerCase();
-    return lower.includes('conversation') && (lower.includes('not found') || lower.includes('corrupt') || lower.includes('invalid'));
+    return (stderr || '').toLowerCase().split('\n').some((line) =>
+        line.includes('conversation') && (line.includes('not found') || line.includes('corrupt') || line.includes('invalid')));
 }
 
 // A model-selection failure names the model on the same stderr line as the error marker.

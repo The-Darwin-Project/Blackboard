@@ -35,12 +35,19 @@ async def handle_set_phase(
                 actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
                 action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
                 thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
-                if actor == "brain" and action == "phase":
-                    thoughts_upper = str(thoughts or "").upper()
-                    if thoughts_upper.startswith("PHASE: VERIFY"):
-                        has_verify = True
-                        break
-                    elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
+                waiting_for = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+                if actor == "brain":
+                    if action == "phase":
+                        thoughts_upper = str(thoughts or "").upper()
+                        if thoughts_upper.startswith("PHASE: VERIFY"):
+                            has_verify = True
+                            break
+                        elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
+                            break
+                    elif action in ("triage", "route") or waiting_for == "classify_event":
+                        # Domain reclassification (classify_event) or new agent dispatch
+                        # marks a work cycle boundary; any earlier PHASE: VERIFY is stale and
+                        # cannot satisfy verification for this cycle.
                         break
             if not has_verify:
                 reject_msg = f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."

@@ -59,7 +59,7 @@ function writeClaudeMcpServer(name, config) {
     }
     data.mcpServers = data.mcpServers || {};
     data.mcpServers[name] = config;
-    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(data, null, 2));
+    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
 /**

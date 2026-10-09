@@ -154,6 +154,7 @@ describe('agy session retry (shared getRetryOptions)', () => {
             assert.equal(mod.isAgySessionError(1, 'Conversation corrupt'), true);
             assert.equal(mod.isAgySessionError(1, 'conversation invalid'), true);
             assert.equal(mod.isAgySessionError(1, 'Rate limit 429 exceeded'), false);
+            assert.equal(mod.isAgySessionError(1, 'conversation\nsome unrelated error not found'), false);
             assert.equal(mod.isAgySessionError(1, ''), false);
             // explicit CLI argument overrides the ambient one (predicate stays unit-testable)
             assert.equal(mod.isAgySessionError(1, 'conversation not found', 'claude'), false);
