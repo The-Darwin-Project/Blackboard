@@ -36,6 +36,12 @@ fi
 
 # Pin the exact bucket + path prefix and allow only plain path characters (no whitespace,
 # newlines, quotes, '&', '|' or '\\'), so the URL can be written into the Dockerfile verbatim.
+# Path traversal (..) is explicitly forbidden.
+if [[ "${LATEST_URL}" =~ \.\. ]]; then
+  echo "Error: Path traversal (..) in URL is forbidden: '${LATEST_URL}'" >&2
+  exit 1
+fi
+
 AGY_URL_RE='^https://storage\.googleapis\.com/antigravity-public/antigravity-cli/[A-Za-z0-9._/-]+\.tar\.gz$'
 if [[ ! "${LATEST_URL}" =~ ${AGY_URL_RE} ]]; then
   echo "Error: Invalid URL '${LATEST_URL}', must be https://storage.googleapis.com/antigravity-public/antigravity-cli/<path>.tar.gz" >&2

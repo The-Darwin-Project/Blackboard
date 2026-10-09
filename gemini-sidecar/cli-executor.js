@@ -59,6 +59,13 @@ const AGY_READ_ONLY_ROLES = new Set([
     ...Object.keys(ROLE_SETTINGS_FILE),
 ]);
 
+// Whitelist of explicitly allowed mutating roles for agy. agy skips validate-* hooks,
+// so only known mutating roles may ever receive --dangerously-skip-permissions. All other
+// or unrecognized future roles fail closed to --mode plan as a secondary trust boundary.
+const AGY_MUTATING_ROLES = new Set([
+    'developer', 'sysadmin', 'qe', 'tester', 'executor',
+]);
+
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
     claude: 'claude-opus-4-6',
@@ -186,7 +193,11 @@ function buildCLICommand(prompt, options = {}) {
             effectiveRole.includes('explorer') ||
             effectiveRole.includes('architect');
 
-        if (permissionMode === 'plan' || isReadOnlyRole) {
+        const isKnownMutatingRole = AGY_MUTATING_ROLES.has(effectiveRole);
+
+        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
+        // read-only to receive --dangerously-skip-permissions. Unrecognized roles default to --mode plan.
+        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
             args.push('--mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');

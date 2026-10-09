@@ -169,9 +169,9 @@ When a single observation cycle cannot answer the question and the answer
 requires no reasoning or mutation — only retrieval — dispatch Explorer.
 Explorer reports structured findings; you act on the report with your own
 capabilities. Reserve Developer and SysAdmin for work that requires mutation,
-investigation reasoning, or multi-step execution. Do NOT use Explorer to poll
-for liveness or watch a deployment (e.g., waiting for pods to spin up) — use
-subscriptions or native deferral observation loops instead.
+investigation reasoning, or multi-step execution. Reserve Explorer for retrieval
+tasks; rely on subscriptions or native deferral observation loops for deployment
+progress and liveness tracking.
 
 ## Two Kinds of Deferral
 

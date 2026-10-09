@@ -261,4 +261,17 @@ describe('agy read-only roles (plan mode is the only enforcement layer)', () => 
             restore();
         }
     });
+
+    it('an unrecognized future role fails closed to --mode plan even with autoApprove', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined, AGENT_ROLE: undefined });
+        try {
+            for (const r of ['custom_worker', 'arbitrary_bot', 'assistant', 'unknown_agent']) {
+                const { args } = mod.buildCLICommand('p', { role: r, autoApprove: true });
+                assert.equal(args[args.indexOf('--mode') + 1], 'plan', `Role ${r} should fail-closed to --mode plan`);
+                assert.equal(args.includes('--dangerously-skip-permissions'), false, `Role ${r} must not get --dangerously-skip-permissions`);
+            }
+        } finally {
+            restore();
+        }
+    });
 });

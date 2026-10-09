@@ -11,7 +11,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from ..models import ConversationTurn, _resolve_phase
+from ..models import ConversationTurn, _resolve_phase, resolve_event_domain
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -28,8 +28,7 @@ async def handle_set_phase(
     event_doc = await bb.get_event(event_id)
     
     if phase == "close":
-        evidence = event_doc.event.evidence if event_doc and event_doc.event else None
-        domain = getattr(evidence, "brain_domain", None) or getattr(evidence, "domain", "disorder") if evidence else "disorder"
+        domain = resolve_event_domain(event_doc)
         if domain in ("complicated", "complex"):
             has_verify = False
             for t in reversed(event_doc.conversation or []):
