@@ -43,6 +43,7 @@ function resolveCommand(name) {
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 const AGY_MCP_PATH = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+const AGY_HOOKS_PATH = path.join(os.homedir(), '.gemini', 'config', 'hooks.json');
 
 /**
  * Write an MCP server config into ~/.claude.json (the file Claude Code reads).
@@ -102,13 +103,76 @@ function writeAgyMcpServer(name, config) {
         const fallbackDir = path.join(os.homedir(), '.gemini', 'antigravity');
         const fallbackLink = path.join(fallbackDir, 'mcp_config.json');
         if (fs.existsSync(fallbackDir)) {
-            if (!fs.existsSync(fallbackLink)) {
-                try {
+            try {
+                const stat = fs.lstatSync(fallbackLink);
+                if (stat.isSymbolicLink()) {
+                    const target = fs.readlinkSync(fallbackLink);
+                    if (target !== agyMcpPath) {
+                        fs.unlinkSync(fallbackLink);
+                        fs.symlinkSync(agyMcpPath, fallbackLink);
+                    }
+                } else {
+                    fs.unlinkSync(fallbackLink);
                     fs.symlinkSync(agyMcpPath, fallbackLink);
-                } catch { /* ignore */ }
+                }
+            } catch (e) {
+                if (e.code === 'ENOENT') {
+                    try { fs.symlinkSync(agyMcpPath, fallbackLink); } catch { /* ignore */ }
+                }
             }
         }
     } catch { /* ignore */ }
+}
+
+/**
+ * Write hooks for Antigravity (agy) CLI into ~/.gemini/config/hooks.json.
+ * Provides defense-in-depth:
+ * - PreToolUse hook for validate-mutations.sh (merge-approval guard for all roles, mutation denylist for read-only roles)
+ * - Stop hook for require-results.sh (ensures team_send_results is called before exiting)
+ */
+function writeAgyHooks() {
+    if (AGENT_CLI !== 'agy') return;
+    const agyHooksPath = AGY_HOOKS_PATH;
+    const dir = path.dirname(agyHooksPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let data = {};
+    if (fs.existsSync(agyHooksPath)) {
+        try { data = JSON.parse(fs.readFileSync(agyHooksPath, 'utf8')); } catch { /* fresh start */ }
+    }
+
+    data['validate-mutations'] = {
+        PreToolUse: [
+            {
+                matcher: 'run_command',
+                hooks: [
+                    {
+                        name: 'validate-mutations',
+                        type: 'command',
+                        command: '/app/hooks/validate-mutations.sh',
+                        timeout: 5,
+                        description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
+                    },
+                ],
+            },
+        ],
+    };
+    data['require-results'] = {
+        Stop: [
+            {
+                name: 'require-results',
+                type: 'command',
+                command: '/app/hooks/require-results.sh',
+                timeout: 5,
+                description: 'Block exit if team_send_results not called',
+            },
+        ],
+    };
+
+    const tmpPath = `${agyHooksPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, agyHooksPath);
+    try { fs.chmodSync(agyHooksPath, 0o600); } catch { /* ignore */ }
 }
 
 /**
@@ -152,7 +216,8 @@ function registerMCPsAndHooks(settings, cli) {
         writeAgyMcpServer('DarwinBlackboard', blackboardConfig);
         writeAgyMcpServer('DarwinJournal', journalConfig);
         writeAgyMcpServer('Playwright', playwrightConfig);
-        console.log(`MCPs (TeamChat + Blackboard + Journal) registered for agy (role=${role}, peer=${peerPort || 'none'})`);
+        writeAgyHooks();
+        console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for agy (role=${role}, peer=${peerPort || 'none'})`);
         return;
     } else {
         writeClaudeMcpServer('TeamChat', teamChatConfig);
@@ -440,4 +505,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };

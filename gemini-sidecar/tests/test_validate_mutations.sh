@@ -137,12 +137,18 @@ run_test \
   "explorer" \
   "allow"
 
-# --- Test 4: role bypass — sysadmin not gated ---
+# --- Test 4: role bypass — sysadmin not gated by denylist ---
 run_test \
-  "T4: sysadmin bypasses denylist (git push)" \
-  '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' \
+  "T4: sysadmin bypasses denylist (git push feature branch)" \
+  '{"tool_name":"Bash","tool_input":{"command":"git push origin feature-branch"}}' \
   "sysadmin" \
   "allow"
+
+# --- Test 4b: merge guard applies to mutating roles on unapproved push to main ---
+run_test_block_with_reason \
+  "T4b: sysadmin blocked on unapproved push to main by merge guard" \
+  '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' \
+  "sysadmin"
 
 # --- Test 5: filesystem mutation — rm -rf (security_analyst) ---
 run_test_block_with_reason \
@@ -200,6 +206,27 @@ run_test \
 run_test_unset_role \
   "T13: empty/unset AGENT_ROLE allows all" \
   '{"tool_name":"Bash","tool_input":{"command":"kubectl delete pod foo"}}' \
+  "allow"
+
+# --- Test 14: agy format — denylist match with deny decision (explorer) ---
+run_test \
+  "T14: agy explorer blocked with decision=deny on kubectl delete" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kubectl delete pod foo"}}}' \
+  "explorer" \
+  "deny"
+
+# --- Test 15: agy format — merge guard with deny decision (sysadmin) ---
+run_test \
+  "T15: agy sysadmin blocked with decision=deny on push to main" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin main"}}}' \
+  "sysadmin" \
+  "deny"
+
+# --- Test 16: agy format — allowed tool call (developer) ---
+run_test \
+  "T16: agy developer allowed on benign command" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}}' \
+  "developer" \
   "allow"
 
 echo ""

@@ -388,6 +388,24 @@ describe('writeAgyMcpServer MCP configuration', () => {
       assert.equal(fs.existsSync(path.join(home, '.gemini', 'config', 'mcp_config.json')), false);
     });
   });
+
+  it('corrects a swapped or rogue fallback symlink in ~/.gemini/antigravity', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      const fallbackDir = path.join(home, '.gemini', 'antigravity');
+      fs.mkdirSync(fallbackDir, { recursive: true });
+      const fallbackLink = path.join(fallbackDir, 'mcp_config.json');
+      const rogueTarget = path.join(home, 'rogue_mcp.json');
+      fs.writeFileSync(rogueTarget, '{}');
+      fs.symlinkSync(rogueTarget, fallbackLink);
+
+      cliSetup.writeAgyMcpServer('SafeServer', { command: 'node' });
+
+      assert.equal(fs.lstatSync(fallbackLink).isSymbolicLink(), true);
+      const target = fs.readlinkSync(fallbackLink);
+      assert.equal(target, path.join(home, '.gemini', 'config', 'mcp_config.json'));
+    });
+  });
 });
 
 describe('writeClaudeMcpServer MCP configuration', () => {
@@ -443,4 +461,111 @@ describe('resolveModel routing and role fallback', () => {
     assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
   });
 });
+
+// =============================================================================
+// 9. writeAgyHooks Hook Configuration
+// =============================================================================
+
+describe('writeAgyHooks Hook configuration', () => {
+  it('writes valid 0600 hooks.json under ~/.gemini/config with PreToolUse and Stop hooks', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      cliSetup.writeAgyHooks();
+
+      const hooksPath = path.join(home, '.gemini', 'config', 'hooks.json');
+      assert.equal(fs.existsSync(hooksPath), true, 'hooks.json must exist');
+      const content = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+
+      assert.equal(Array.isArray(content['validate-mutations']?.PreToolUse), true);
+      assert.equal(content['validate-mutations'].PreToolUse[0].matcher, 'run_command');
+      assert.equal(content['validate-mutations'].PreToolUse[0].hooks[0].command, '/app/hooks/validate-mutations.sh');
+
+      assert.equal(Array.isArray(content['require-results']?.Stop), true);
+      assert.equal(content['require-results'].Stop[0].command, '/app/hooks/require-results.sh');
+
+      assert.equal(fs.statSync(hooksPath).mode & 0o777, 0o600, 'hooks.json must be 0600 mode');
+    });
+  });
+
+  it('preserves existing hooks when updating', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      const hooksPath = path.join(home, '.gemini', 'config', 'hooks.json');
+      fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+      fs.writeFileSync(hooksPath, JSON.stringify({ customHook: { PreToolUse: [] } }), { mode: 0o600 });
+
+      cliSetup.writeAgyHooks();
+
+      const content = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+      assert.notEqual(content.customHook, undefined);
+      assert.notEqual(content['validate-mutations'], undefined);
+      assert.notEqual(content['require-results'], undefined);
+    });
+  });
+
+  for (const cli of ['claude', 'gemini']) {
+    it(`does not write agy hooks.json when AGENT_CLI=${cli}`, () => {
+      setEnv('AGENT_CLI', cli);
+      withTempHome((home, cliSetup) => {
+        cliSetup.writeAgyHooks();
+        assert.equal(fs.existsSync(path.join(home, '.gemini', 'config', 'hooks.json')), false);
+      });
+    });
+  }
+
+  it('registerMCPsAndHooks registers hooks when cli === "agy"', () => {
+    setEnv('AGENT_CLI', 'agy');
+    withTempHome((home, cliSetup) => {
+      cliSetup.registerMCPsAndHooks({}, 'agy');
+      const hooksPath = path.join(home, '.gemini', 'config', 'hooks.json');
+      assert.equal(fs.existsSync(hooksPath), true);
+    });
+  });
+});
+
+// =============================================================================
+// 10. getRetryOptions model fallback and retry bounds
+// =============================================================================
+
+describe('getRetryOptions retry bounding and model fallback', () => {
+  it('returns null if _retryCount is >= 1 (bounded to 1 retry)', () => {
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      { _retriedModel: true, _retryCount: 1, role: 'explorer' },
+      1,
+      'Model not found: gemini-custom',
+      'gemini'
+    );
+    assert.equal(result, null);
+  });
+
+  it('falls back to claude-opus-4-6 under claude CLI even for explorer role', () => {
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      { role: 'explorer', model: 'invalid-model' },
+      1,
+      'Model not found: invalid-model',
+      'claude'
+    );
+    assert.notEqual(result, null);
+    assert.equal(result.options.model, 'claude-opus-4-6');
+    assert.equal(result.options._retriedModel, true);
+    assert.equal(result.options._retryCount, 1);
+  });
+
+  it('falls back to gemini-2.5-flash under gemini CLI for explorer role', () => {
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      { role: 'explorer', model: 'invalid-model' },
+      1,
+      'Model not found: invalid-model',
+      'gemini'
+    );
+    assert.notEqual(result, null);
+    assert.equal(result.options.model, 'gemini-2.5-flash');
+    assert.equal(result.options._retriedModel, true);
+    assert.equal(result.options._retryCount, 1);
+  });
+});
+
 

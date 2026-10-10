@@ -377,8 +377,10 @@ def compute_dispatch_backpressure(conversation, active_event_count: int, thresho
     ``active_event_count`` is a coarse system-load proxy kept as a secondary trigger.
     """
     for t in reversed(conversation):
-        if getattr(t, "actor", None) == "dispatcher" and getattr(t, "action", None) in ("paused", "connected"):
-            if t.action == "paused":
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        if actor == "dispatcher" and action in ("paused", "connected"):
+            if action == "paused":
                 return True
             break
     return active_event_count >= threshold

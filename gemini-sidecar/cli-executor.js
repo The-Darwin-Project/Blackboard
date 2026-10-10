@@ -21,7 +21,8 @@
 // 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
 //     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
 //     model-line-only, and match stderr only (stdout is model text and can mention these phrases).
-// 12. [Gotcha]: agy skips ROLE_SETTINGS_FILE and the validate-* hooks; `--mode plan` is its only read-only layer.
+// 12. [Gotcha]: agy uses ~/.gemini/config/hooks.json for PreToolUse (validate-mutations.sh) and Stop (require-results.sh);
+//     `--mode plan` is its primary read-only layer backed by hook enforcement.
 //     Add read-only roles to AGY_READ_ONLY_ROLES (ROLE_SETTINGS_FILE keys are folded in automatically).
 
 const cp = require('child_process');
@@ -50,18 +51,19 @@ const ROLE_SETTINGS_FILE = {
     code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
 };
 
-// Roles that must never run with write/approve-all permissions on the agy path. agy skips the
-// ROLE_SETTINGS_FILE deny layer and validate-* hooks, so `--mode plan` is the ONLY read-only
-// enforcement there. Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is
-// read-only by definition, so it is folded in here rather than maintained as a second list.
+// Roles that must never run with write/approve-all permissions on the agy path. agy runs
+// `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
+// Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is read-only by definition,
+// so it is folded in here rather than maintained as a second list.
 const AGY_READ_ONLY_ROLES = new Set([
     'architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst',
     ...Object.keys(ROLE_SETTINGS_FILE),
 ]);
 
-// Whitelist of explicitly allowed mutating roles for agy. agy skips validate-* hooks,
-// so only known mutating roles may ever receive --dangerously-skip-permissions. All other
-// or unrecognized future roles fail closed to --mode plan as a secondary trust boundary.
+// Whitelist of explicitly allowed mutating roles for agy. Mutating roles receive
+// --dangerously-skip-permissions but remain subject to the server-side merge-approval guard
+// via validate-mutations.sh. All other or unrecognized future roles fail closed to --mode plan
+// as a secondary trust boundary.
 const AGY_MUTATING_ROLES = new Set([
     'developer', 'sysadmin', 'qe', 'tester', 'executor',
 ]);
@@ -784,22 +786,27 @@ function isInvalidModelError(stderr) {
 // Shared by executeCLI and executeCLIStreaming: decide whether a failed run gets ONE retry
 // and with which options. Returns { reason, options } or null. Both retries re-run the whole
 // prompt, so each is bounded by its own flag and gated as narrowly as the evidence allows.
-function getRetryOptions(options, exitCode, stderr) {
-    if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(exitCode, stderr)) {
+function getRetryOptions(options, exitCode, stderr, agentCli = AGENT_CLI) {
+    const retryCount = options._retryCount || 0;
+    if (retryCount >= 1) return null;
+
+    if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(exitCode, stderr, agentCli)) {
         return {
             reason: 'agy session error detected, retrying without --conversation',
-            options: { ...options, conversationId: null, sessionId: null, _retryWithoutSession: true },
+            options: { ...options, conversationId: null, sessionId: null, _retryWithoutSession: true, _retryCount: retryCount + 1 },
         };
     }
     if (!options._retriedModel && isInvalidModelError(stderr)) {
         const effectiveRole = String(options.role || AGENT_ROLE || '').trim().toLowerCase();
-        // Explorer always falls back to flash, whichever CLI is configured.
-        const fallbackModel = effectiveRole === 'explorer' ? 'gemini-2.5-flash' : FALLBACK_MODEL[AGENT_CLI];
+        // Explorer falls back to flash on Gemini/Agy, or claude default on Claude CLI
+        const fallbackModel = (effectiveRole === 'explorer' && agentCli !== 'claude')
+            ? 'gemini-2.5-flash'
+            : FALLBACK_MODEL[agentCli];
         // Retrying the model that just failed (e.g. claude already on the default) is pointless.
-        if (fallbackModel && fallbackModel !== resolveModel(options, AGENT_CLI)) {
+        if (fallbackModel && fallbackModel !== resolveModel(options, agentCli)) {
             return {
                 reason: `Invalid model error, retrying with ${fallbackModel}`,
-                options: { ...options, model: fallbackModel, _retriedModel: true },
+                options: { ...options, model: fallbackModel, _retriedModel: true, _retryCount: retryCount + 1 },
             };
         }
     }

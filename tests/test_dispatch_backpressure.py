@@ -61,3 +61,11 @@ def test_active_event_count_threshold_boundary(active, expected):
 def test_connected_does_not_mask_load_threshold():
     conv = [_t("dispatcher", "connected")]
     assert compute_dispatch_backpressure(conv, 12, 10) is True
+
+
+def test_dict_shaped_turns_are_supported():
+    conv = [{"actor": "dispatcher", "action": "paused"}]
+    assert compute_dispatch_backpressure(conv, 0, 10) is True
+
+    conv = [{"actor": "dispatcher", "action": "paused"}, {"actor": "dispatcher", "action": "connected"}]
+    assert compute_dispatch_backpressure(conv, 0, 10) is False
