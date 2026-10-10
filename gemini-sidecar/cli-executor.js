@@ -203,6 +203,10 @@ function buildCLICommand(prompt, options = {}) {
             args.push('--mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');
+        } else {
+            // In non-interactive sidecar piped stdio, if autoApprove is not granted,
+            // default to --mode plan rather than unhandled interactive TTY prompts.
+            args.push('--mode', 'plan');
         }
         args.push('--output-format', 'stream-json');
         // NOTE: Never pass --input-format stream-json; it conflicts with command-line -p prompt!

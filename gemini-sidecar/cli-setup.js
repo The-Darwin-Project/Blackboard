@@ -130,7 +130,7 @@ function writeAgyMcpServer(name, config) {
  * - PreToolUse hook for validate-mutations.sh (merge-approval guard for all roles, mutation denylist for read-only roles)
  * - Stop hook for require-results.sh (ensures team_send_results is called before exiting)
  */
-function writeAgyHooks() {
+function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
     if (AGENT_CLI !== 'agy') return;
     const agyHooksPath = AGY_HOOKS_PATH;
     const dir = path.dirname(agyHooksPath);
@@ -141,6 +141,9 @@ function writeAgyHooks() {
         try { data = JSON.parse(fs.readFileSync(agyHooksPath, 'utf8')); } catch { /* fresh start */ }
     }
 
+    const validateHook = path.join(hooksDir, 'validate-mutations.sh');
+    const requireHook = path.join(hooksDir, 'require-results.sh');
+
     data['validate-mutations'] = {
         PreToolUse: [
             {
@@ -149,7 +152,7 @@ function writeAgyHooks() {
                     {
                         name: 'validate-mutations',
                         type: 'command',
-                        command: '/app/hooks/validate-mutations.sh',
+                        command: validateHook,
                         timeout: 5,
                         description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
                     },
@@ -162,7 +165,7 @@ function writeAgyHooks() {
             {
                 name: 'require-results',
                 type: 'command',
-                command: '/app/hooks/require-results.sh',
+                command: requireHook,
                 timeout: 5,
                 description: 'Block exit if team_send_results not called',
             },

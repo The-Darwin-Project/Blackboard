@@ -23,6 +23,13 @@
 #    intentionally absent from READONLY_ROLES below since Developer must be able to git
 #    push/commit) -- git mutations in general are allowed for Developer, but a merge
 #    specifically now requires server-confirmed approval bound to the current commit.
+# 7. [Contract]: PreToolUse / BeforeTool decision enum contract parity across engines:
+#    - Antigravity (agy) PreToolUse schema strictly requires `decision: "deny"` to hard-block
+#      execution immediately (ref: agy-customizations/docs/hooks.md § PreToolUse). Verified
+#      against agy 1.3.2 binary: `decision: "deny"` halts tool execution with
+#      "tool call denied by pre-tool hook: <reason>" even under --dangerously-skip-permissions.
+#    - Gemini CLI BeforeTool schema strictly requires `decision: "block"`.
+#    Returning "block" to agy or "deny" to Gemini fails to trigger the respective engine's blocker.
 
 # Read-only roles (Gemini-CLI and agy roles)
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
@@ -91,7 +98,10 @@ if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
             [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
             node -e "
               const isAgy = process.argv[2] === 'yes' || process.env.AGENT_CLI === 'agy';
-              process.stdout.write(JSON.stringify({decision: isAgy ? 'deny' : 'block', reason: process.argv[1]}));
+              // Antigravity (agy) PreToolUse schema strictly requires 'deny' to hard block.
+              // Gemini CLI BeforeTool schema strictly requires 'block'.
+              const decision = isAgy ? 'deny' : 'block';
+              process.stdout.write(JSON.stringify({decision, reason: process.argv[1]}));
             " "$GUARD_REASON" "$IS_AGY"
             exit 0
         fi
@@ -172,8 +182,11 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE '\bcurl\b.*((-X|--request)\s*(POST|PUT
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "
       const isAgy = process.argv[3] === 'yes' || process.env.AGENT_CLI === 'agy';
+      // Antigravity (agy) PreToolUse schema strictly requires 'deny' to hard block.
+      // Gemini CLI BeforeTool schema strictly requires 'block'.
+      const decision = isAgy ? 'deny' : 'block';
       process.stdout.write(JSON.stringify({
-        decision: isAgy ? 'deny' : 'block',
+        decision,
         reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
                 process.argv[2].slice(0, 120)
       }));

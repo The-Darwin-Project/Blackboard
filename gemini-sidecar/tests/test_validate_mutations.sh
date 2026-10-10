@@ -229,6 +229,21 @@ run_test \
   "developer" \
   "allow"
 
+# --- Test 17: Antigravity PreToolUse protocol compliance ---
+# Verify output schema strictly adheres to Antigravity hook specification:
+# 'decision' must be strictly 'deny' (never 'block') when blocked, with non-empty 'reason'.
+RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test"}}}' | AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK")
+DECISION=$(echo "$RES" | jq -r '.decision // empty')
+REASON=$(echo "$RES" | jq -r '.reason // empty')
+if [ "$DECISION" = "deny" ] && [ -n "$REASON" ]; then
+  PASS=$((PASS + 1))
+  echo "PASS [T17: Antigravity PreToolUse protocol schema compliance (decision=deny, non-empty reason)]"
+else
+  FAIL=$((FAIL + 1))
+  ERRORS+=("T17 failed: decision=$DECISION reason=$REASON, expected decision=deny with non-empty reason")
+  echo "FAIL [T17: Antigravity PreToolUse protocol schema compliance]"
+fi
+
 echo ""
 echo "=== Results ==="
 echo "Passed: $PASS"

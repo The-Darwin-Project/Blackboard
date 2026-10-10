@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
 const CONFIG_PATH = path.resolve(__dirname, '..', 'config.js');
 const CLI_EXECUTOR_PATH = path.resolve(__dirname, '..', 'cli-executor.js');
@@ -211,6 +212,17 @@ describe('agy buildCLICommand: role security & permissions', () => {
 
     assert.equal(args.includes('--dangerously-skip-permissions'), true);
     assert.equal(args.includes('--mode'), false);
+  });
+
+  it('defaults to --mode plan for mutating roles when autoApprove is false', () => {
+    setEnv('AGENT_CLI', 'agy');
+    setEnv('AGENT_PERMISSION_MODE', undefined);
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('apply fix', { role: 'developer', autoApprove: false });
+
+    assert.equal(args.includes('--mode'), true);
+    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
+    assert.equal(args.includes('--dangerously-skip-permissions'), false);
   });
 });
 
@@ -567,5 +579,114 @@ describe('getRetryOptions retry bounding and model fallback', () => {
     assert.equal(result.options._retryCount, 1);
   });
 });
+
+// =============================================================================
+// 11. Antigravity PreToolUse and Stop hook protocol contract validation
+// =============================================================================
+
+describe('Antigravity PreToolUse and Stop hook protocol contract validation', () => {
+  const hooksDir = path.resolve(__dirname, '..', 'hooks');
+
+  it('validate-mutations.sh emits decision: "deny" (not "block") for agy on prohibited tool calls', () => {
+    const hookPath = path.join(hooksDir, 'validate-mutations.sh');
+    const input = JSON.stringify({
+      toolCall: {
+        name: 'run_command',
+        args: { CommandLine: 'rm -rf /tmp/important_data' }
+      }
+    });
+
+    const res = spawnSync('bash', [hookPath], {
+      input,
+      env: { ...process.env, AGENT_ROLE: 'explorer', AGENT_CLI: 'agy' },
+      encoding: 'utf8'
+    });
+
+    assert.equal(res.status, 0, 'hook script must exit 0');
+    const payload = JSON.parse(res.stdout);
+    // Antigravity PreToolUse contract: decision must be 'deny' | 'allow' | 'ask' | 'force_ask'
+    assert.equal(payload.decision, 'deny', 'agy requires decision: "deny", never "block"');
+    assert.notEqual(payload.decision, 'block', 'Gemini "block" string breaks agy parser');
+    assert.ok(payload.reason && payload.reason.length > 0, 'reason string must be non-empty');
+  });
+
+  it('validate-mutations.sh emits decision: "deny" for unapproved merge attempts regardless of role', () => {
+    const hookPath = path.join(hooksDir, 'validate-mutations.sh');
+    const input = JSON.stringify({
+      toolCall: {
+        name: 'run_command',
+        args: { CommandLine: 'git push origin main' }
+      }
+    });
+
+    const res = spawnSync('bash', [hookPath], {
+      input,
+      env: { ...process.env, AGENT_ROLE: 'developer', AGENT_CLI: 'agy' },
+      encoding: 'utf8'
+    });
+
+    assert.equal(res.status, 0);
+    const payload = JSON.parse(res.stdout);
+    assert.equal(payload.decision, 'deny', 'unapproved merge attempt must be denied');
+    assert.ok(payload.reason.includes('Merge REFUSED'), 'reason must state merge refusal');
+  });
+
+  it('require-results.sh emits decision: "continue" (not "block") for agy Stop hook when results missing', () => {
+    const hookPath = path.join(hooksDir, 'require-results.sh');
+    const input = JSON.stringify({
+      type: 'Stop',
+      messages: [{ content: 'just wrapping up' }]
+    });
+
+    const res = spawnSync('bash', [hookPath], {
+      input,
+      env: { ...process.env, AGENT_CLI: 'agy' },
+      encoding: 'utf8'
+    });
+
+    assert.equal(res.status, 0);
+    const payload = JSON.parse(res.stdout);
+    // Antigravity Stop hook contract: decision must be 'continue' to keep agent running
+    assert.equal(payload.decision, 'continue', 'agy Stop hook requires decision: "continue"');
+    assert.notEqual(payload.decision, 'block', 'Gemini "block" string breaks agy parser');
+  });
+
+  const hasAgy = Boolean(process.env.AGY_INTEGRATION_TEST) && (() => {
+    try {
+      const res = spawnSync('which', ['agy']);
+      return res.status === 0;
+    } catch {
+      return false;
+    }
+  })();
+
+  (hasAgy ? it : it.skip)('real agy binary enforces decision: deny and halts command execution under --dangerously-skip-permissions', () => {
+    withTempHome((home, cliSetup) => {
+      cliSetup.writeAgyHooks(hooksDir);
+      const targetFile = path.join(home, 'should_never_be_created.txt');
+      const env = {
+        ...process.env,
+        HOME: home,
+        AGENT_ROLE: 'explorer',
+        AGENT_CLI: 'agy'
+      };
+      const res = spawnSync('agy', ['--dangerously-skip-permissions', '-p', `run_command to create file with touch ${targetFile}`], {
+        env,
+        cwd: home,
+        timeout: 15000,
+        encoding: 'utf8'
+      });
+      assert.equal(fs.existsSync(targetFile), false, 'target file must NOT be created when hook returns decision: deny');
+      assert.ok(
+        (res.stdout || '').includes('tool call denied by pre-tool hook') ||
+        (res.stdout || '').includes('denied') ||
+        (res.stdout || '').includes('blocked'),
+        'agy stdout should reflect hook denial'
+      );
+    });
+  });
+});
+
+
 
 
