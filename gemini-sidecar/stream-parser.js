@@ -28,6 +28,66 @@ function parseStreamLine(line) {
     try {
         const obj = JSON.parse(line);
 
+        // --- Antigravity CLI (agy) stream-json format ---
+        if (obj.event === 'init') {
+            return {
+                text: null,
+                sessionId: obj.conversation_id || null,
+                toolCalls: null,
+                done: false,
+            };
+        }
+
+        if (obj.event === 'step_update' && obj.step_update) {
+            const update = obj.step_update;
+            const toolInfo = update.tool_info;
+            const parts = [];
+            let toolCalls = null;
+
+            if (update.text_delta) {
+                parts.push(update.text_delta);
+            }
+            if (toolInfo) {
+                toolCalls = 1;
+                const rawHint = toolInfo.parameters?.file_path || toolInfo.parameters?.path || toolInfo.parameters?.AbsolutePath || toolInfo.parameters?.CommandLine || toolInfo.parameters?.command || toolInfo.parameters?.query || '';
+                const hint = String(rawHint).slice(0, 2000);
+                const toolName = toolInfo.name || toolInfo.tool_name || 'tool';
+                let toolText = `[tool] ${toolName}${hint ? `: ${hint}` : ''}`;
+                if (toolInfo.output) {
+                    const preview = String(toolInfo.output).slice(0, 500).replace(/\n/g, ' ');
+                    toolText += ` → ${preview}`;
+                }
+                parts.push(toolText);
+            }
+            if (update.error) {
+                parts.push(`[error] ${update.error}`);
+            }
+
+            const text = parts.length > 0 ? parts.join('\n') : null;
+
+            return {
+                text,
+                sessionId: update.conversation_id || null,
+                toolCalls,
+                done: false,
+            };
+        }
+
+        if (obj.event === 'result') {
+            const res = obj.result || {};
+            // CRITICAL: Return text: null on success to prevent output doubling!
+            // Full response is already captured via incremental text_delta stream.
+            const status = String(res.status || '').toUpperCase();
+            const isSuccess = status === 'SUCCESS' || status === 'OK';
+            const errorMsg = res.error || (status && status !== 'ERROR' ? res.status : null) || 'Execution failed';
+            return {
+                text: isSuccess ? null : `[error] ${errorMsg}`,
+                sessionId: res.conversation_id || null,
+                toolCalls: res.num_turns ?? null,
+                done: true,
+            };
+        }
+
         // --- Init events (both CLIs emit session_id) ---
         if (obj.type === 'init' || (obj.type === 'system' && obj.subtype === 'init')) {
             return { text: null, sessionId: obj.session_id || null, toolCalls: null, done: false };

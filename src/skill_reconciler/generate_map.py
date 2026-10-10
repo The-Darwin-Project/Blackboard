@@ -9,7 +9,7 @@
 """
 Generate brain_skills/always/phase-tool-map.md from GATE_REGISTRY.
 
-Produces a navigation skill with Mermaid diagram, 29-gate table, skill pointers,
+Produces a navigation skill with Mermaid diagram, 30-gate table, skill pointers,
 and behavioral annotations — derived from the single source of truth in tool_gates.py.
 """
 from __future__ import annotations
@@ -52,6 +52,7 @@ _DOMAIN_OODA_MAP: dict[str, tuple[str, str]] = {
 }
 
 _CONDITION_SUMMARIES: dict[str, str] = {
+    "DISPATCH_DEFER_GATE": "dispatch phase without dispatcher backpressure",
     "DEFER_WAKE_ITER0": "first cycle after defer wake",
     "INTERMEDIATE": "agent actively working (is_intermediate flag)",
     "PHASE_ESCALATE": "phase is not escalate",

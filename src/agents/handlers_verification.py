@@ -1,4 +1,4 @@
-# BlackBoard/src/agents/handlers_verification.py
+# src/agents/handlers_verification.py
 # @ai-rules:
 # 1. [Pattern]: Verification and phase transition handlers.
 # 2. [Constraint]: No Brain import. All state access via ToolContext protocol.
@@ -11,7 +11,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from ..models import ConversationTurn, _resolve_phase
+from ..models import ConversationTurn, _resolve_phase, resolve_event_domain
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -26,6 +26,41 @@ async def handle_set_phase(
     reasoning = args.get("reasoning", "")
     bb = ctx.get_blackboard()
     event_doc = await bb.get_event(event_id)
+    
+    if phase == "close":
+        domain = resolve_event_domain(event_doc)
+        if domain in ("complicated", "complex"):
+            has_verify = False
+            for t in reversed(event_doc.conversation or []):
+                actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+                action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+                thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
+                waiting_for = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+                if actor == "brain":
+                    if action == "phase":
+                        thoughts_upper = str(thoughts or "").upper()
+                        if thoughts_upper.startswith("PHASE: VERIFY"):
+                            has_verify = True
+                            break
+                        elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
+                            break
+                    elif action in ("triage", "route") or waiting_for == "classify_event":
+                        # Domain reclassification (classify_event) or new agent dispatch
+                        # marks a work cycle boundary; any earlier PHASE: VERIFY is stale and
+                        # cannot satisfy verification for this cycle.
+                        break
+            if not has_verify:
+                reject_msg = f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."
+                turn = ConversationTurn(
+                    turn=(await ctx.next_turn_number(event_id)),
+                    actor="system",
+                    action="error",
+                    result=reject_msg,
+                    timestamp=time.time(),
+                )
+                await ctx.append_and_broadcast(event_id, turn)
+                return True
+
     current_phase = _resolve_phase(event_doc.brain_phase) if event_doc else None
     if current_phase is not None and phase == current_phase:
         logger.debug(f"set_phase: confirmed {phase} for {event_id}")

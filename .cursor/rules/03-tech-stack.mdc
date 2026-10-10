@@ -17,7 +17,7 @@ alwaysApply: false
 ## Executor (The Hands)
 
 * **Base Image:** Red Hat UBI 9 Node.js 22 (`registry.access.redhat.com/ubi9/nodejs-22:latest`)
-* **CLI Tools:** `@google/gemini-cli` + `@anthropic-ai/claude-code` (routed by `AGENT_CLI` env var)
+* **CLI Tools:** `@google/gemini-cli` + `@anthropic-ai/claude-code` + `agy` (routed by `AGENT_CLI` env var)
 * **Runtime:** Node.js 22, Python 3.12 (pytest, httpx), Playwright + Chromium
 
 ## Infrastructure

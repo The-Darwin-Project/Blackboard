@@ -13,11 +13,14 @@
 //    - MCP: team-chat-mcp.js notInModes on tools/list — e.g. message mode drops team_send_results + team_huddle.
 //    - Stop hook: http-handler.js allows exit without team_send_results when task.mode === message.
 //    Wake tryWake uses mode implement so pair-programming skills + full MCP apply.
+// 10. [Constraint]: writeAgyMcpServer is a no-op unless AGENT_CLI === 'agy' (it writes a plaintext credential store).
+//    Gate new agy writes there, not at call sites.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { AGENT_CLI } = require('./config');
 
 /**
  * Resolve a command name to its absolute path via `which`.
@@ -39,6 +42,8 @@ function resolveCommand(name) {
 }
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+const AGY_MCP_PATH = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+const AGY_HOOKS_PATH = path.join(os.homedir(), '.gemini', 'config', 'hooks.json');
 
 /**
  * Write an MCP server config into ~/.claude.json (the file Claude Code reads).
@@ -49,19 +54,134 @@ const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
  * @param {object} config - { command, args, env }
  */
 function writeClaudeMcpServer(name, config) {
+    if (name === '__proto__' || name === 'constructor') return;
+    const dir = path.dirname(CLAUDE_JSON_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
     let data = {};
     if (fs.existsSync(CLAUDE_JSON_PATH)) {
         try { data = JSON.parse(fs.readFileSync(CLAUDE_JSON_PATH, 'utf8')); } catch { /* fresh */ }
     }
     data.mcpServers = data.mcpServers || {};
     data.mcpServers[name] = config;
-    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(data, null, 2));
+
+    const tmpPath = `${CLAUDE_JSON_PATH}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, CLAUDE_JSON_PATH);
+    try { fs.chmodSync(CLAUDE_JSON_PATH, 0o600); } catch { /* ignore */ }
+}
+
+/**
+ * Write an MCP server config into ~/.gemini/config/mcp_config.json (the file agy reads).
+ * Read-modify-write: preserves existing keys.
+ * Uses 0o600 mode permissions and atomic write via temporary file.
+ * @param {string} name - Server name (e.g. 'TeamChat', 'GitHub')
+ * @param {object} config - { command, args, env }
+ */
+function writeAgyMcpServer(name, config) {
+    if (name === '__proto__' || name === 'constructor') return;
+    // Single chokepoint for every agy MCP write (cli-setup + all credentials.js call sites):
+    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude or
+    // gemini sidecar must not create it at all.
+    if (AGENT_CLI !== 'agy') return;
+    const agyMcpPath = AGY_MCP_PATH;
+    const dir = path.dirname(agyMcpPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let data = {};
+    if (fs.existsSync(agyMcpPath)) {
+        try { data = JSON.parse(fs.readFileSync(agyMcpPath, 'utf8')); } catch { /* fresh */ }
+    }
+    data.mcpServers = data.mcpServers || {};
+    data.mcpServers[name] = config;
+
+    const tmpPath = `${agyMcpPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, agyMcpPath);
+
+    try {
+        const fallbackDir = path.join(os.homedir(), '.gemini', 'antigravity');
+        const fallbackLink = path.join(fallbackDir, 'mcp_config.json');
+        if (fs.existsSync(fallbackDir)) {
+            try {
+                const stat = fs.lstatSync(fallbackLink);
+                if (stat.isSymbolicLink()) {
+                    const target = fs.readlinkSync(fallbackLink);
+                    if (target !== agyMcpPath) {
+                        fs.unlinkSync(fallbackLink);
+                        fs.symlinkSync(agyMcpPath, fallbackLink);
+                    }
+                } else {
+                    fs.unlinkSync(fallbackLink);
+                    fs.symlinkSync(agyMcpPath, fallbackLink);
+                }
+            } catch (e) {
+                if (e.code === 'ENOENT') {
+                    try { fs.symlinkSync(agyMcpPath, fallbackLink); } catch { /* ignore */ }
+                }
+            }
+        }
+    } catch { /* ignore */ }
+}
+
+/**
+ * Write hooks for Antigravity (agy) CLI into ~/.gemini/config/hooks.json.
+ * Provides defense-in-depth:
+ * - PreToolUse hook for validate-mutations.sh (merge-approval guard for all roles, mutation denylist for read-only roles)
+ * - Stop hook for require-results.sh (ensures team_send_results is called before exiting)
+ */
+function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
+    if (AGENT_CLI !== 'agy') return;
+    const agyHooksPath = AGY_HOOKS_PATH;
+    const dir = path.dirname(agyHooksPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    let data = {};
+    if (fs.existsSync(agyHooksPath)) {
+        try { data = JSON.parse(fs.readFileSync(agyHooksPath, 'utf8')); } catch { /* fresh start */ }
+    }
+
+    const validateHook = path.join(hooksDir, 'validate-mutations.sh');
+    const requireHook = path.join(hooksDir, 'require-results.sh');
+
+    data['validate-mutations'] = {
+        PreToolUse: [
+            {
+                matcher: 'run_command',
+                hooks: [
+                    {
+                        name: 'validate-mutations',
+                        type: 'command',
+                        command: validateHook,
+                        timeout: 5,
+                        description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
+                    },
+                ],
+            },
+        ],
+    };
+    data['require-results'] = {
+        Stop: [
+            {
+                name: 'require-results',
+                type: 'command',
+                command: requireHook,
+                timeout: 5,
+                description: 'Block exit if team_send_results not called',
+            },
+        ],
+    };
+
+    const tmpPath = `${agyHooksPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, agyHooksPath);
+    try { fs.chmodSync(agyHooksPath, 0o600); } catch { /* ignore */ }
 }
 
 /**
  * Register TeamChat MCP server + inbox hooks into a CLI settings object.
- * @param {object} settings - The settings object to modify (gemini or claude)
- * @param {string} cli - 'gemini' or 'claude'
+ * @param {object} settings - The settings object to modify (gemini, claude, or agy)
+ * @param {string} cli - 'gemini', 'claude', or 'agy'
  */
 function registerMCPsAndHooks(settings, cli) {
     const role = process.env.AGENT_ROLE || '';
@@ -94,6 +214,14 @@ function registerMCPsAndHooks(settings, cli) {
         settings.mcpServers.DarwinBlackboard = blackboardConfig;
         settings.mcpServers.DarwinJournal = journalConfig;
         settings.mcpServers.Playwright = playwrightConfig;
+    } else if (cli === 'agy') {
+        writeAgyMcpServer('TeamChat', teamChatConfig);
+        writeAgyMcpServer('DarwinBlackboard', blackboardConfig);
+        writeAgyMcpServer('DarwinJournal', journalConfig);
+        writeAgyMcpServer('Playwright', playwrightConfig);
+        writeAgyHooks();
+        console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for agy (role=${role}, peer=${peerPort || 'none'})`);
+        return;
     } else {
         writeClaudeMcpServer('TeamChat', teamChatConfig);
         writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
@@ -216,6 +344,15 @@ function initializeCLISettings() {
         console.log('Claude settings.json updated (MCPs + HTTP hooks registered)');
     } catch (err) {
         console.error(`Claude TeamChat registration error: ${err.message}`);
+    }
+    // Antigravity (agy) MCP registration (MCP goes to ~/.gemini/config/mcp_config.json via writeAgyMcpServer)
+    // Only for AGENT_CLI=agy sidecars -- see the credential note on writeAgyMcpServer.
+    if (AGENT_CLI === 'agy') {
+        try {
+            registerMCPsAndHooks({}, 'agy');
+        } catch (err) {
+            console.error(`agy MCP registration error: ${err.message}`);
+        }
     }
     // Trusted folders: JSON object format (path -> trust level), not array.
     // Even with trust disabled, an invalid file causes a warning on every run.
@@ -371,4 +508,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };

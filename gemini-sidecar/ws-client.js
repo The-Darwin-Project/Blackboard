@@ -41,7 +41,11 @@ let _catalogSynced = false;
 
 function killChild(child) {
   child.kill('SIGTERM');
-  const t = setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 5000);
+  const t = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+  }, 5000);
   child.on('exit', () => clearTimeout(t));
 }
 

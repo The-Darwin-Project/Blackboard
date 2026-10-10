@@ -108,6 +108,18 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
+# Install Antigravity CLI (agy) with strict SHA512 verification (maintained via scripts/update-agy.sh and CI)
+ARG AGY_VERSION="1.3.2"
+ARG AGY_URL="https://storage.googleapis.com/antigravity-public/antigravity-cli/1.3.2-5813501495738368/linux-x64/cli_linux_x64.tar.gz"
+ARG AGY_SHA512="8dc2bb8471cfa6326e29e2896add767ad2d1f3714304b70fbae720d68af011182e7afde43964a7a3f54c604ab72c4fad772c8595608b059cfc582fb6798a25d2"
+RUN curl -fsSL "${AGY_URL}" -o /tmp/agy.tar.gz && \
+    echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c - && \
+    tar -xz -C /usr/local/bin -f /tmp/agy.tar.gz antigravity && \
+    chmod 0755 /usr/local/bin/antigravity && \
+    ln -sf /usr/local/bin/antigravity /usr/local/bin/agy && \
+    rm -f /tmp/agy.tar.gz && \
+    /usr/local/bin/agy --help >/dev/null
+
 # Install ArgoCD MCP server (native ArgoCD tools for Gemini + Claude CLIs, replaces CLI session auth)
 RUN npm install -g argocd-mcp@latest && \
     ln -sf "$(npm prefix -g)/bin/argocd-mcp" /usr/local/bin/argocd-mcp && \
@@ -221,8 +233,11 @@ RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh \
     /app/hooks/require-results.sh /app/hooks/validate-mutations.sh
 
 # Create CLI config directories (rules come from ConfigMap mount)
-RUN mkdir -p /home/default/.gemini && \
-    mkdir -p /home/default/.claude
+RUN mkdir -p /home/default/.gemini/config /home/default/.gemini/antigravity && \
+    mkdir -p /home/default/.claude && \
+    ln -sf /home/default/.gemini/config/mcp_config.json /home/default/.gemini/antigravity/mcp_config.json && \
+    chown -R 1001:0 /home/default/.gemini && \
+    chmod -R g=u /home/default/.gemini
 
 # Install Darwin agent skills (shared skills, symlinked into both CLIs)
 # Gemini: ~/.gemini/skills/  Claude: ~/.claude/skills/

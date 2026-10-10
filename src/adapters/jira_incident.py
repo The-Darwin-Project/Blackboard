@@ -1,4 +1,4 @@
-# BlackBoard/src/adapters/jira_incident.py
+# src/adapters/jira_incident.py
 # @ai-rules:
 # 1. [Pattern]: Hexagonal adapter -- httpx-based Jira REST API client. No domain logic.
 # 2. [Constraint]: Auth via Basic (email:token). All org-specific values from env vars with empty defaults.
@@ -7,6 +7,11 @@
 #    (shared utils layer is allowed; still do NOT import from routes -- hexagonal boundary).
 # 5. [Constraint]: create_incident uses marklassian for Markdown→ADF conversion.
 # 6. [Pattern]: Platform stored as Jira label; extracted on read via VALID_PLATFORMS intersection.
+# 7. [Constraint]: All JQL string interpolation goes through the module-level _escape_jql_string -- never
+#    define a local copy (they drift).
+# 8. [Gotcha]: search_open_incidents RAISES RuntimeError on HTTP/transport failure (callers such as
+#    nightwatcher are fail-closed); list_incidents still returns [] on error. An empty/","-only
+#    JIRA_INCIDENT_CLOSED_STATUSES falls back to the legacy single-status clause.
 """
 Jira incident adapter -- create, list, search, and extend incidents.
 
@@ -33,6 +38,13 @@ _CACHE_TTL = 120
 def _adf_to_text(adf: dict) -> str:
     """Recursively extract text from Atlassian Document Format via shared converter."""
     return adf_to_markdown(adf)
+
+
+def _escape_jql_string(val: str) -> str:
+    """Escape backslashes and double quotes for safe JQL interpolation."""
+    if not val:
+        return ""
+    return val.replace("\\", "\\\\").replace('"', '\\"')
 
 
 class JiraIncidentAdapter:
@@ -85,6 +97,7 @@ class JiraIncidentAdapter:
 
         return {
             "issue_key": key,
+            "key": key,
             "issue_url": self._issue_url(key),
             "summary": fields.get("summary", ""),
             "description": description,
@@ -150,9 +163,9 @@ class JiraIncidentAdapter:
         if self._rows_cache and (now - self._rows_cache_ts) < _CACHE_TTL:
             return self._rows_cache
 
-        jql_parts = [f'project = "{self._project_key}"']
+        jql_parts = [f'project = "{_escape_jql_string(self._project_key)}"']
         if label_filter:
-            jql_parts.append(f'labels = "{label_filter}"')
+            jql_parts.append(f'labels = "{_escape_jql_string(label_filter)}"')
         jql = " AND ".join(jql_parts) + " ORDER BY created DESC"
 
         fields_param = "summary,status,priority,labels,components,description,created"
@@ -184,12 +197,21 @@ class JiraIncidentAdapter:
     async def search_open_incidents(self) -> list[dict]:
         """Search for open (non-closed) incidents. No cache -- always live."""
         label_filter = os.getenv("JIRA_INCIDENT_LABEL_FILTER", "")
-        closed_status = os.getenv("JIRA_INCIDENT_STATUSES", "New,Closed").split(",")[-1].strip()
+        closed_statuses_env = os.getenv("JIRA_INCIDENT_CLOSED_STATUSES", "")
+        # Filter empties BEFORE choosing the branch: a value like "," or " , " strips to an
+        # empty list, and `NOT IN ()` is invalid JQL (would fail every call). Fall back to the
+        # legacy single-status clause instead.
+        closed_statuses = [s.strip() for s in closed_statuses_env.split(",") if s.strip()]
+        if closed_statuses:
+            status_clause = "status NOT IN (" + ", ".join(f'"{_escape_jql_string(s)}"' for s in closed_statuses) + ")"
+        else:
+            closed_status = os.getenv("JIRA_INCIDENT_STATUSES", "New,Closed").split(",")[-1].strip()
+            status_clause = f'status != "{_escape_jql_string(closed_status)}"'
 
-        jql_parts = [f'project = "{self._project_key}"']
+        jql_parts = [f'project = "{_escape_jql_string(self._project_key)}"']
         if label_filter:
-            jql_parts.append(f'labels = "{label_filter}"')
-        jql_parts.append(f'status != "{closed_status}"')
+            jql_parts.append(f'labels = "{_escape_jql_string(label_filter)}"')
+        jql_parts.append(status_clause)
         jql = " AND ".join(jql_parts) + " ORDER BY created DESC"
 
         fields_param = "summary,status,priority,labels,components,description,created"
@@ -206,11 +228,13 @@ class JiraIncidentAdapter:
                 )
                 if not resp.is_success:
                     logger.warning("Jira search_open_incidents JQL failed: %d", resp.status_code)
-                    return []
+                    raise RuntimeError(f"Jira search_open_incidents JQL failed: {resp.status_code}")
                 data = resp.json()
-        except Exception:
+        except RuntimeError:
+            raise
+        except Exception as e:
             logger.exception("Jira search_open_incidents error")
-            return []
+            raise RuntimeError(f"Jira search_open_incidents error: {e}") from e
 
         return [self._normalize_issue(iss) for iss in data.get("issues", [])]
 

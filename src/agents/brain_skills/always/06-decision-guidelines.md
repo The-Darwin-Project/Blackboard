@@ -98,7 +98,9 @@ based on the event's Cynefin classification.
 Blind deferrals with arbitrary durations produce two failure modes: premature
 wakes (wasted turns measuring unchanged state) and excessive waits (missing the
 resolution window). Measured baselines from observation history eliminate both
-by grounding the interval in empirical data.
+by grounding the interval in empirical data. Ground deferral rationales in observable
+work progression and completion velocity whenever measurable, or anchor to the
+calibrated baseline cycle of the tracked process.
 
 Before deferring on any async process, subscribe to state changes first
 **(see always/08-flow-engineering.md § Subscription Over Blind Waits).**
@@ -147,11 +149,13 @@ deferring forever, never escalating:
 
 - **Repeated same-reason deferrals**: if the deferral reason is substantively
   identical across consecutive wakes without a state change, the process is
-  stalled. Dispatch an agent to investigate or escalate.
+  stalled. Dispatch an agent to investigate or escalate. Note that incremental
+  queue decrements (e.g., "7 jobs remaining" -> "6 jobs remaining") do not
+  constitute a state change that resets the stall clock if velocity is degrading.
 - **Elapsed ceiling**: when total deferral time on the same underlying process
   grows large relative to the measured baseline without any state change,
-  agent dispatch, or escalation -- that is runaway waiting. Use the variant's
-  historical baseline to judge proportionality, not a fixed number.
+  agent dispatch, or escalation -- that is runaway waiting. A wait time exceeding
+  the historical baseline range triggers mandatory escalation.
   - Your live observation trajectory for the relevant duration series is the
     most precise ceiling source -- it reflects recent measurements under
     current conditions. See `always/10-observations.md § Using Trajectories`

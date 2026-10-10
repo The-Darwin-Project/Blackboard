@@ -61,6 +61,7 @@ def _ctx(**overrides) -> GateContext:
         agent_completions=0,
         jarvis_already_waiting=False,
         jarvis_wait_count=0,
+        has_dispatch_backpressure=False,
     )
     defaults.update(overrides)
     return GateContext(**defaults)
@@ -71,8 +72,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_29_gates(self):
-        assert len(GATE_REGISTRY) == 29
+    def test_registry_has_30_gates(self):
+        assert len(GATE_REGISTRY) == 30
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -83,9 +84,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentyfive_strip_mode_gates(self):
+    def test_twentysix_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 25
+        assert len(strip_gates) == 26
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +100,13 @@ class TestDeferWakeIter0:
         assert "defer_event" not in _names(result)
 
     def test_does_not_fire_iter1(self):
-        ctx = _ctx(is_defer_wake=True, iteration=1)
+        # backpressure=True isolates this gate from DISPATCH_DEFER_GATE (dispatch phase, no backpressure)
+        ctx = _ctx(is_defer_wake=True, iteration=1, has_dispatch_backpressure=True)
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "defer_event" in _names(result)
 
     def test_diagnosis(self):
-        ctx = _ctx(is_defer_wake=True, iteration=0)
+        ctx = _ctx(is_defer_wake=True, iteration=0, has_dispatch_backpressure=True)
         msg = diagnose_rejection("defer_event", ctx)
         assert "[GATE]" in msg
         assert "first wake cycle" in msg
@@ -520,7 +522,7 @@ class TestHardStripDefer:
         assert "defer_event" not in _names(result)
 
     def test_keeps_in_dispatch_aligner(self):
-        ctx = _ctx(brain_phase="dispatch", event_source="aligner")
+        ctx = _ctx(brain_phase="dispatch", event_source="aligner", has_dispatch_backpressure=True)
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "defer_event" in _names(result)
 
@@ -728,6 +730,7 @@ class TestBehaviorParity:
             brain_phase="dispatch",
             event_source="chat",
             context_flags={"brain_has_classified": True, "event_domain": "complicated"},
+            has_dispatch_backpressure=True,
         )
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
@@ -914,7 +917,7 @@ class TestWaitLoopRailway:
         normal_ctx = _ctx(event_source="jarvis", conversation=[])
         assert is_defer_event_available(normal_ctx) is False
 
-        unaffected_ctx = _ctx(event_source="aligner", brain_phase="dispatch", conversation=[])
+        unaffected_ctx = _ctx(event_source="aligner", brain_phase="dispatch", conversation=[], has_dispatch_backpressure=True)
         assert is_defer_event_available(unaffected_ctx) is True
 
     def test_wait_loop_preserves_defer_against_defer_wake_iter0_jarvis(self):
@@ -1265,3 +1268,108 @@ class TestObsPlateau:
         ctx = _ctx(conversation=conv)
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "record_observation" in _names(result)
+
+# T-4: defer_event blocked in dispatch phase when has_dispatch_backpressure=False.
+def test_defer_event_blocked_dispatch_no_backpressure():
+    ctx = _ctx(brain_phase="dispatch", has_dispatch_backpressure=False)
+    allowed = evaluate_gates(_fake_schemas("defer_event"), ctx)
+    assert "defer_event" not in _names(allowed)
+
+# T-5: defer_event permitted in dispatch phase when has_dispatch_backpressure=True.
+def test_defer_event_permitted_dispatch_with_backpressure():
+    ctx = _ctx(brain_phase="dispatch", has_dispatch_backpressure=True)
+    allowed = evaluate_gates(_fake_schemas("defer_event"), ctx)
+    assert "defer_event" in _names(allowed)
+
+# T-6: defer_event permitted on wake iter 0 if record_observation was recorded in wake epoch.
+def test_defer_event_permitted_wake_iter_0_with_observation():
+    obs_turn = SimpleNamespace(actor="brain", action="tool_result", waitingFor="record_observation")
+    ctx = _ctx(brain_phase="dispatch", is_defer_wake=True, iteration=0, has_dispatch_backpressure=True, conversation=[obs_turn])
+    allowed = evaluate_gates(_fake_schemas("defer_event"), ctx)
+    assert "defer_event" in _names(allowed)
+
+# T-7: defer_event stripped on wake iter 0 without observation.
+def test_defer_event_stripped_wake_iter_0_no_observation():
+    ctx = _ctx(brain_phase="dispatch", is_defer_wake=True, iteration=0, has_dispatch_backpressure=True, conversation=[])
+    allowed = evaluate_gates(_fake_schemas("defer_event"), ctx)
+    assert "defer_event" not in _names(allowed)
+
+# T-15: is_defer_event_available mirrors gate evaluation.
+def test_is_defer_event_available_mirrors_gate():
+    from src.agents.tool_gates import is_defer_event_available
+    assert is_defer_event_available(_ctx(brain_phase="dispatch", has_dispatch_backpressure=True)) is True
+    assert is_defer_event_available(_ctx(brain_phase="dispatch", has_dispatch_backpressure=False)) is False
+
+# T-16: 3rd identical observation strips record_observation, keeps the decision tools the
+# gate message points to, and the diagnostic names them.
+def _plateau_conversation(n: int = 3) -> list[SimpleNamespace]:
+    return [
+        _turn(
+            "brain", "tool_result",
+            waitingFor="record_observation",
+            thoughts="Recorded observation 'pipeline_duration_m' = 31 (point #3, event age 45m)",
+        )
+        for _ in range(n)
+    ]
+
+
+def test_3rd_plateau_strips_record_observation_but_keeps_set_phase():
+    ctx = _ctx(brain_phase="dispatch", conversation=_plateau_conversation(3))
+    allowed = _names(evaluate_gates(_fake_schemas("record_observation", "set_phase"), ctx))
+    assert "record_observation" not in allowed
+    assert "set_phase" in allowed  # the escape route the hint tells the Brain to use
+
+
+def test_2nd_plateau_does_not_strip_record_observation():
+    ctx = _ctx(brain_phase="dispatch", conversation=_plateau_conversation(2))
+    assert "record_observation" in _names(evaluate_gates(_fake_schemas("record_observation"), ctx))
+
+
+def test_plateau_diagnostic_directs_brain_to_set_phase():
+    """Pins the _msg_obs_plateau wording: it must name set_phase and both target phases.
+
+    Fails on the pre-change text ("defer if waiting, close if resolved, or dispatch ...").
+    """
+    ctx = _ctx(brain_phase="dispatch", conversation=_plateau_conversation(3))
+    msg = diagnose_rejection("record_observation", ctx)
+    assert msg.startswith("[GATE] record_observation blocked.")
+    assert "set_phase" in msg
+    assert "'dispatch'" in msg and "'escalate'" in msg
+
+
+# --- DISPATCH_DEFER_GATE / DEFER_WAKE_ITER0 edge cases (discriminate the new logic) ---
+
+def test_defer_gate_does_not_fire_outside_dispatch_phase():
+    ctx = _ctx(brain_phase="escalate", has_dispatch_backpressure=False)
+    assert "defer_event" in _names(evaluate_gates(_fake_schemas("defer_event"), ctx))
+
+
+def test_defer_gate_does_not_fire_for_intermediate_events():
+    ctx = _ctx(
+        brain_phase="dispatch", has_dispatch_backpressure=False,
+        context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": True},
+    )
+    assert "defer_event" in _names(evaluate_gates(_fake_schemas("defer_event"), ctx))
+
+
+def test_wake_iter0_observation_before_previous_defer_does_not_unlock_defer():
+    """An observation from an EARLIER wake epoch (before the last brain.defer) must not count."""
+    conv = [
+        SimpleNamespace(actor="brain", action="tool_result", waitingFor="record_observation"),
+        SimpleNamespace(actor="brain", action="defer", waitingFor=None),
+    ]
+    ctx = _ctx(brain_phase="dispatch", is_defer_wake=True, iteration=0, has_dispatch_backpressure=True, conversation=conv)
+    assert "defer_event" not in _names(evaluate_gates(_fake_schemas("defer_event"), ctx))
+
+
+def test_defer_wake_iter0_predicate_handles_dict_turns():
+    """Predicate-level: the full gate pipeline only supports object turns, but this predicate
+    advertises dict support and must agree with the object path."""
+    from src.agents.tool_gates import _pred_defer_wake_iter0
+    after = [
+        {"actor": "brain", "action": "defer", "waitingFor": None},
+        {"actor": "brain", "action": "tool_result", "waitingFor": "record_observation"},
+    ]
+    before = list(reversed(after))
+    assert _pred_defer_wake_iter0(_ctx(is_defer_wake=True, iteration=0, conversation=after)) is False
+    assert _pred_defer_wake_iter0(_ctx(is_defer_wake=True, iteration=0, conversation=before)) is True

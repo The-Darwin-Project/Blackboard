@@ -9,7 +9,7 @@
 //    real, shipped bug (code_reviewer's 45min entry was dead) before resolveTimeoutMs existed. All
 //    consumers (currently only cli-executor.js's two spawn() call sites) MUST call
 //    resolveTimeoutMs(options.role || AGENT_ROLE) at the point of use, never cache the result.
-// 3. [Pattern]: AGENT_CLI routes CLI selection (gemini|claude); AGENT_EFFORT_LEVEL controls Claude adaptive reasoning depth.
+// 3. [Pattern]: AGENT_CLI routes CLI selection (gemini|claude|agy); AGENT_EFFORT_LEVEL controls Claude adaptive reasoning depth.
 // 4. [Pattern]: stripAnsi cleans PTY output for Brain/LLM consumption.
 // 5. [Gotcha]: stripAnsi and resolveTimeoutMs are the only non-constant exports — pure functions, safe to call anywhere.
 
@@ -37,9 +37,10 @@ const CLI_429_MAX_RETRIES = 2;              // 3 total attempts (1 initial + 2 r
 const CLI_429_INITIAL_DELAY_MS = 60000;     // 60s -- quota typically recovers in 1 min
 const CLI_429_BACKOFF_MULTIPLIER = 2;       // 60s, then 120s
 
-// CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
+// CLI routing -- AGENT_CLI selects which binary to spawn (claude, agy, or gemini)
 const AGENT_CLI = process.env.AGENT_CLI || 'claude';
-const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
+const AGY_CLI = process.env.AGY_CLI || process.env.ANTIGRAVITY_CLI || 'agy';
+const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || (AGENT_CLI === 'agy' ? 'gemini-3.7-flash' : '');
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';
 // Claude Code effort level -- controls adaptive reasoning depth (low|medium|high|max)
@@ -63,6 +64,7 @@ module.exports = {
   FINDINGS_FRESHNESS_MS,
   DEFAULT_WORK_DIR,
   AGENT_CLI,
+  AGY_CLI,
   AGENT_MODEL,
   AGENT_ROLE,
   AGENT_EFFORT_LEVEL,

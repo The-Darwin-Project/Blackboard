@@ -137,12 +137,18 @@ run_test \
   "explorer" \
   "allow"
 
-# --- Test 4: role bypass — sysadmin not gated ---
+# --- Test 4: role bypass — sysadmin not gated by denylist ---
 run_test \
-  "T4: sysadmin bypasses denylist (git push)" \
-  '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' \
+  "T4: sysadmin bypasses denylist (git push feature branch)" \
+  '{"tool_name":"Bash","tool_input":{"command":"git push origin feature-branch"}}' \
   "sysadmin" \
   "allow"
+
+# --- Test 4b: merge guard applies to mutating roles on unapproved push to main ---
+run_test_block_with_reason \
+  "T4b: sysadmin blocked on unapproved push to main by merge guard" \
+  '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' \
+  "sysadmin"
 
 # --- Test 5: filesystem mutation — rm -rf (security_analyst) ---
 run_test_block_with_reason \
@@ -201,6 +207,42 @@ run_test_unset_role \
   "T13: empty/unset AGENT_ROLE allows all" \
   '{"tool_name":"Bash","tool_input":{"command":"kubectl delete pod foo"}}' \
   "allow"
+
+# --- Test 14: agy format — denylist match with deny decision (explorer) ---
+run_test \
+  "T14: agy explorer blocked with decision=deny on kubectl delete" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kubectl delete pod foo"}}}' \
+  "explorer" \
+  "deny"
+
+# --- Test 15: agy format — merge guard with deny decision (sysadmin) ---
+run_test \
+  "T15: agy sysadmin blocked with decision=deny on push to main" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin main"}}}' \
+  "sysadmin" \
+  "deny"
+
+# --- Test 16: agy format — allowed tool call (developer) ---
+run_test \
+  "T16: agy developer allowed on benign command" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}}' \
+  "developer" \
+  "allow"
+
+# --- Test 17: Antigravity PreToolUse protocol compliance ---
+# Verify output schema strictly adheres to Antigravity hook specification:
+# 'decision' must be strictly 'deny' (never 'block') when blocked, with non-empty 'reason'.
+RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test"}}}' | AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK")
+DECISION=$(echo "$RES" | jq -r '.decision // empty')
+REASON=$(echo "$RES" | jq -r '.reason // empty')
+if [ "$DECISION" = "deny" ] && [ -n "$REASON" ]; then
+  PASS=$((PASS + 1))
+  echo "PASS [T17: Antigravity PreToolUse protocol schema compliance (decision=deny, non-empty reason)]"
+else
+  FAIL=$((FAIL + 1))
+  ERRORS+=("T17 failed: decision=$DECISION reason=$REASON, expected decision=deny with non-empty reason")
+  echo "FAIL [T17: Antigravity PreToolUse protocol schema compliance]"
+fi
 
 echo ""
 echo "=== Results ==="

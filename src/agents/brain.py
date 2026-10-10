@@ -277,6 +277,7 @@ class ContextFlags(TypedDict, total=False):
     is_first_human_turn: bool
     is_operational_chat: bool
     _cached_active_ids: list[str]
+    has_dispatch_backpressure: bool
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
 
@@ -365,6 +366,25 @@ def _safe_int_env(name: str, default: int) -> int:
     except ValueError:
         logger.warning("Invalid %s (non-integer value, len=%d), using default %d", name, len(val), default)
         return default
+
+def compute_dispatch_backpressure(conversation, active_event_count: int, threshold: int) -> bool:
+    """True when the dispatcher last reported it could not place work, or load is at threshold.
+
+    Structured signal, not text matching: Brain's dispatcher turns:
+    ``action="paused"`` when it defers for capacity/circuit-breaker/infra reasons and
+    ``action="connected"`` once an agent registers. The LATEST of those two decides, so the
+    signal neither flips on a wording change nor expires after N unrelated turns.
+    ``active_event_count`` is a coarse system-load proxy kept as a secondary trigger.
+    """
+    for t in reversed(conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        if actor == "dispatcher" and action in ("paused", "connected"):
+            if action == "paused":
+                return True
+            break
+    return active_event_count >= threshold
+
 
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
@@ -2345,7 +2365,11 @@ class Brain:
             and flags.get("brain_has_classified", False)
             and flags.get("event_domain") != "casual"
         )
-
+        flags["has_dispatch_backpressure"] = compute_dispatch_backpressure(
+            event.conversation,
+            len(flags.get("_cached_active_ids", [])),
+            _safe_int_env("DARWIN_DISPATCH_BACKPRESSURE_THRESHOLD", 10),
+        )
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
@@ -4063,11 +4087,15 @@ class Brain:
                         _ctx = (getattr(evidence, "github_context", None)
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
-                        provision_result = await self._ephemeral_provisioner.ensure_agent(
-                            event_id, _install_id,
-                            model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
-                            cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
-                        )
+                        try:
+                            provision_result = await self._ephemeral_provisioner.ensure_agent(
+                                event_id, _install_id,
+                                model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
+                                cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
+                            )
+                        except Exception as e:
+                            logger.exception("ensure_agent raised exception for %s: %s", event_id, e)
+                            provision_result = None
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:
                                 self._ephemeral_provisioner.record_dispatch_circuit_break()

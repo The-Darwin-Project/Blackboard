@@ -53,6 +53,7 @@ class GateContext:
     agent_completions: int = 0
     jarvis_already_waiting: bool = False
     jarvis_wait_count: int = 0
+    has_dispatch_backpressure: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,21 @@ class GateDefinition:
 # ---------------------------------------------------------------------------
 
 def _pred_defer_wake_iter0(ctx: GateContext) -> bool:
-    return ctx.is_defer_wake and ctx.iteration == 0
+    if not (ctx.is_defer_wake and ctx.iteration == 0):
+        return False
+        
+    for t in reversed(ctx.conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        
+        if actor == "brain" and action == "defer":
+            break
+            
+        waiting_for = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+        if action == "tool_result" and waiting_for == "record_observation":
+            return False
+            
+    return True
 
 
 def _pred_intermediate(ctx: GateContext) -> bool:
@@ -207,6 +222,15 @@ def _pred_read_sticky(ctx: GateContext) -> bool:
     return ctx.unread_notes <= 0
 
 
+def _pred_dispatch_defer(ctx: GateContext) -> bool:
+    """True when defer_event should be STRIPPED in dispatch phase (no backpressure)."""
+    if ctx.brain_phase != "dispatch":
+        return False
+    if ctx.context_flags.get("is_intermediate", False):
+        return False
+    return not ctx.has_dispatch_backpressure
+
+
 def has_unevaluated_close_blocker(conversation: list) -> bool:
     """True if unevaluated jarvis/user message exists after last brain.phase/close.
 
@@ -218,11 +242,22 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
         status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
         status_val = status.value if hasattr(status, "value") else status
-        if actor == "brain" and action in ("close", "phase"):
-            break
-        if actor in ("jarvis", "user") and action == "message" and (
-            not status_val or status_val in ("sent", "delivered")
-        ):
+        if actor == "brain":
+            if action in ("close", "respond_jarvis", "response"):
+                break
+            if action == "phase":
+                thoughts_str = str(t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", "") or "").upper()
+                if thoughts_str.startswith("PHASE: CLOSE"):
+                    break
+        
+        if actor == "jarvis":
+            thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
+            result = t.get("result") if isinstance(t, dict) else getattr(t, "result", None)
+            text_val = str(thoughts or result or "").lower().strip()
+            if text_val in ("watching", "watching.", "ok", "ok."):
+                continue
+
+        if actor in ("jarvis", "user") and action == "message" and (not status_val or status_val in ("sent", "delivered")):
             return True
     return False
 
@@ -591,8 +626,7 @@ def _msg_phase_observation(tool: str, _ctx: GateContext) -> str:
 def _msg_obs_plateau(tool: str, _ctx: GateContext) -> str:
     return (
         f"[GATE] {tool} blocked. Same observation recorded {_OBS_PLATEAU_THRESHOLD} times "
-        "consecutively without a decision. Evaluate the evidence: defer if waiting, "
-        "close if resolved, or dispatch if action is needed."
+        "consecutively without a decision. You must use set_phase to transition to 'dispatch' or 'escalate'."
     )
 
 
@@ -724,6 +758,13 @@ GATE_REGISTRY: list[GateDefinition] = [
         predicate=_pred_defer_wake_iter0,
         tools_affected=_tools_defer_event,
         message=_msg_defer_wake_iter0,
+    ),
+    GateDefinition(
+        gate_id="DISPATCH_DEFER_GATE",
+        mode="strip",
+        predicate=_pred_dispatch_defer,
+        tools_affected=_tools_defer_event,
+        message=lambda tool, _ctx: f"[GATE] {tool} blocked. Cannot defer in dispatch phase unless dispatcher reports backpressure.",
     ),
     GateDefinition(
         gate_id="INTERMEDIATE",
@@ -1070,4 +1111,5 @@ def build_gate_context(
         agent_completions=agent_completions,
         jarvis_already_waiting=jarvis_already_waiting,
         jarvis_wait_count=jarvis_wait_count,
+        has_dispatch_backpressure=flags.get("has_dispatch_backpressure", False),
     )

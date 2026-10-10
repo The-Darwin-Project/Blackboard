@@ -399,6 +399,24 @@ def _resolve_domain(domain: str | None) -> str:
     return raw
 
 
+def resolve_event_domain(event: EventDocument | None) -> str:
+    """Extract and canonicalize domain classification from an EventDocument.
+
+    Unknown values default to 'disorder' (fail-secure: triggers no domain
+    gates, forces reclassification).
+    """
+    if not event or not getattr(event, "event", None):
+        return "disorder"
+    evidence = getattr(event.event, "evidence", None)
+    if not evidence:
+        return "disorder"
+    if isinstance(evidence, dict):
+        raw = evidence.get("brain_domain") or evidence.get("domain")
+    else:
+        raw = getattr(evidence, "brain_domain", None) or getattr(evidence, "domain", None)
+    return _resolve_domain(raw)
+
+
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
