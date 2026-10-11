@@ -241,7 +241,6 @@ class LiveAPIAdapter:
                     return
 
             for attempt in range(2):
-                session_opened = False
                 try:
                     kwargs = {
                         "response_modalities": [types.Modality.TEXT],
@@ -268,28 +267,27 @@ class LiveAPIAdapter:
                     )
                     async with asyncio.timeout(30.0):
                         self._session = await self._session_ctx.__aenter__()
-                    session_opened = True
-                    self._running = True
+                        self._running = True
 
-                    if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
-                        logger.debug("Cortex _connect: cancelling stale receive_task")
-                        self._receive_task.cancel()
-                    self._receive_task = asyncio.create_task(self._receive_loop())
-                    logger.debug(
-                        "Cortex _connect: receive_task created (name=%s, done=%s)",
-                        self._receive_task.get_name(), self._receive_task.done(),
-                    )
-                    if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
-                        self._idle_watchdog_task.cancel()
-                    self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
-                    await self._load_neuron_labels()
-                    await self._broadcast_status("watching")
-                    orphan = await self._blackboard.find_active_event_by_source("jarvis")
-                    if orphan:
-                        self._active_meta_event_id = orphan
-                        active = await self._blackboard.get_active_events()
-                        self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                        logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
+                            logger.debug("Cortex _connect: cancelling stale receive_task")
+                            self._receive_task.cancel()
+                        self._receive_task = asyncio.create_task(self._receive_loop())
+                        logger.debug(
+                            "Cortex _connect: receive_task created (name=%s, done=%s)",
+                            self._receive_task.get_name(), self._receive_task.done(),
+                        )
+                        if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
+                            self._idle_watchdog_task.cancel()
+                        self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
+                        await self._load_neuron_labels()
+                        await self._broadcast_status("watching")
+                        orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                        if orphan:
+                            self._active_meta_event_id = orphan
+                            active = await self._blackboard.get_active_events()
+                            self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                            logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
                     logger.info(
                         "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                         self._model, self._shadow, len(self._neuron_labels),
@@ -297,8 +295,7 @@ class LiveAPIAdapter:
                     self._handle_connect_failures = 0
                     return
                 except Exception as e:
-                    if session_opened:
-                        await self._abort_partial_connect()
+                    await self._abort_partial_connect()
                     if self._resumption_handle:
                         # A single failure is usually transient (network, quota, backend blip) and the
                         # handle is still valid. Only presume it stale after consecutive failures, so an
@@ -317,7 +314,8 @@ class LiveAPIAdapter:
                     return
 
     async def _abort_partial_connect(self) -> None:
-        """Tear down a session that opened but failed later in _connect() so a retry cannot leak it."""
+        """Tear down a session that opened or failed during connect so a retry cannot leak it."""
+        self._running = False
         ctx, self._session_ctx = self._session_ctx, None
         self._session = None
         tasks_to_await = []
@@ -799,18 +797,18 @@ class LiveAPIAdapter:
                 elif name == "search_deep_memory":
                     return await self._tool_search_deep_memory(args.get("query", ""))
                 elif name == "send_event_message":
-                    return await self._tool_send_event_message(
+                    return await asyncio.shield(self._tool_send_event_message(
                         args.get("event_id", ""), args.get("message", ""),
-                    )
+                    ))
                 elif name == "propose_enhancement":
-                    return await self._tool_propose_enhancement(
+                    return await asyncio.shield(self._tool_propose_enhancement(
                         args.get("event_id", ""),
                         args.get("title", ""),
                         args.get("description", ""),
                         args.get("severity", "nice_to_have"),
-                    )
+                    ))
                 elif name == "create_system_review":
-                    return await self._tool_create_system_review(args.get("reason", ""))
+                    return await asyncio.shield(self._tool_create_system_review(args.get("reason", "")))
                 elif name == "recall_handoff_notes":
                     return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
                 elif name == "google_web_search":

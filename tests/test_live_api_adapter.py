@@ -48,6 +48,7 @@ async def test_connect_fresh():
     adapter._client = MagicMock()
     adapter._client.aio.live.connect.return_value = mock_ctx
     
+    adapter._connect_lock = asyncio.Lock()
     adapter._resumption_handle = None
     adapter._idle_watchdog_task = None
     adapter._receive_task = None
@@ -86,6 +87,7 @@ async def test_connect_resumption():
     adapter._client = MagicMock()
     adapter._client.aio.live.connect.return_value = mock_ctx
     
+    adapter._connect_lock = asyncio.Lock()
     adapter._resumption_handle = "h123"
     adapter._idle_watchdog_task = None
     adapter._receive_task = None
@@ -494,6 +496,7 @@ async def test_connect_does_not_cancel_current_task():
     adapter._client = MagicMock()
     adapter._client.aio.live.connect.return_value = mock_ctx
     
+    adapter._connect_lock = asyncio.Lock()
     current = asyncio.current_task()
     adapter._receive_task = current
     adapter._idle_watchdog_task = None
@@ -501,4 +504,41 @@ async def test_connect_does_not_cancel_current_task():
     await adapter._connect()
     
     assert not current.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_cleans_up_transport_and_resets_running():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._project = "test"
+    adapter._location = "us-central1"
+    adapter._model = "test-model"
+    adapter._connect_lock = asyncio.Lock()
+    adapter._resumption_handle = None
+    adapter._idle_watchdog_task = None
+    adapter._receive_task = None
+    adapter._build_live_tools = MagicMock(return_value=[])
+
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.side_effect = TimeoutError("Connection timed out")
+    mock_ctx.__aexit__ = AsyncMock()
+    adapter._client = MagicMock()
+    adapter._client.aio.live.connect.return_value = mock_ctx
+
+    await adapter._connect()
+
+    assert adapter._session is None
+    assert adapter._running is False
+    assert adapter._session_ctx is None
+    mock_ctx.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_mutating_shielded():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._tool_timeout = 60.0
+    adapter._tool_send_event_message = AsyncMock(return_value="Message sent")
+
+    result = await adapter._handle_tool_call("send_event_message", {"event_id": "evt-1", "message": "hello"})
+    assert result == "Message sent"
+    adapter._tool_send_event_message.assert_awaited_once_with("evt-1", "hello")
 
