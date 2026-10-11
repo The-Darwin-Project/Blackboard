@@ -423,7 +423,7 @@ async function executeCLI(prompt, options = {}) {
 
         child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             watch.close();
 
             if (lineBuffer.trim()) {
@@ -567,7 +567,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
 
         child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             watch.close();
             const capturedSessionId = state.getCurrentTask()?.sessionId || null;
 

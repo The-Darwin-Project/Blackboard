@@ -228,6 +228,21 @@ run_test_unset_role \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":"kubectl delete pod foo"}}}' \
   "deny"
 
+run_test_unset_role \
+  "T-2i: empty role allows MCP tool (team_send_results)" \
+  '{"toolCall":{"name":"team_send_results","args":{"content":"done"}}}' \
+  "allow"
+
+run_test_unset_role \
+  "T-2j: empty role allows non-mutation read tool (view_file)" \
+  '{"toolCall":{"name":"view_file","args":{"AbsolutePath":"/tmp/x"}}}' \
+  "allow"
+
+run_test_unset_role \
+  "T-2k: empty role still denies native file mutation (edit_file)" \
+  '{"toolCall":{"name":"edit_file","args":{"TargetFile":"/tmp/x"}}}' \
+  "deny"
+
 # =============================================================================
 # T-3: Fail-Closed on Malformed JSON (decision: "deny", exact reason)
 # =============================================================================
@@ -302,6 +317,25 @@ run_test_deny_with_reason \
   "T-4f: whitespace padded tool name denied for explorer" \
   '{"toolCall":{"name":"  write_to_file  ","args":{"TargetFile":"/tmp/exploit.sh","CodeContent":"evil"}}}' \
   "explorer"
+
+# =============================================================================
+# T-5: require-results.sh Stop hook -- "continue" is bounded
+# =============================================================================
+STOP_HOOK="${SCRIPT_DIR}/../hooks/require-results.sh"
+STOP_PORT=59997   # nothing listens here -> hasResults=no
+rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}"
+STOP_DECISIONS=""
+for _i in 1 2 3 4; do
+  STOP_DECISIONS+="$(echo '{}' | SIDECAR_PORT=$STOP_PORT bash "$STOP_HOOK" 2>/dev/null | jq -r '.decision') "
+done
+rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}"
+if [[ "$STOP_DECISIONS" == "continue continue continue stop " ]]; then
+  echo "PASS [T-5a: require-results continues at most 3 times, then stops]"
+  ((PASS++))
+else
+  ERRORS+=("FAIL [T-5a]: expected 'continue continue continue stop', got '$STOP_DECISIONS'")
+  ((FAIL++))
+fi
 
 echo ""
 echo "=== Results ==="

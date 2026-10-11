@@ -19,8 +19,17 @@ READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
 # Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
 # stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
-ROLE_DATA=$(curl -sf --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
-ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+# Retry the lookup: the sidecar may be momentarily busy (e.g. WS role hand-off) and a single
+# 1s attempt must not turn into an empty role.
+ROLE=""
+for _attempt in 1 2 3; do
+    ROLE_DATA=$(curl -sf --connect-timeout 1 --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
+    ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+    [ -n "$ROLE" ] && break
+    # Local sidecars carry AGENT_ROLE in env -- no need to keep retrying once we have it.
+    [ -n "${AGENT_ROLE:-}" ] && break
+    sleep 0.3
+done
 [ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
 
 # Read stdin (PreToolUse JSON payload)
@@ -72,6 +81,9 @@ COMMAND="${PARSED#*|||}"
 # Shell tools supported by agents
 SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
 
+# Native file mutation tools (denied for read-only roles; denied for unresolved roles)
+MUTATION_TOOLS="write_to_file replace_file_content edit_file"
+
 # --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
 if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
     MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
@@ -105,9 +117,15 @@ if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
     fi
 fi
 
-# Fail-closed: empty/unresolved role must never bypass mutation controls
+# Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
+# mutate (shell + native file mutation tools) are denied; other tools (MCP tools such as
+# team_send_results, reads, searches) are allowed so an unresolved role cannot wedge result delivery.
 if [ -z "$ROLE" ]; then
-    node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
+    if echo "$SHELL_TOOLS $MUTATION_TOOLS" | grep -qw -- "$TOOL_NAME"; then
+        node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
+    else
+        echo '{"decision":"allow"}'
+    fi
     exit 0
 fi
 
@@ -118,7 +136,6 @@ if ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
 fi
 
 # Native mutation tools check for read-only roles
-MUTATION_TOOLS="write_to_file replace_file_content edit_file"
 if echo "$MUTATION_TOOLS" | grep -qw "$TOOL_NAME"; then
     echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to mutate files\"}"
     exit 0

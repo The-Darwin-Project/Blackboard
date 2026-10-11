@@ -33,7 +33,7 @@ function freshExecutor(env = {}) {
     }
     delete require.cache[require.resolve(CONFIG_PATH)];
     delete require.cache[require.resolve(EXECUTOR_PATH)];
-    const mod = require(EXECUTOR_PATH);
+    let mod;
     const restore = () => {
         for (const [k, v] of Object.entries(saved)) {
             if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -42,6 +42,13 @@ function freshExecutor(env = {}) {
         delete require.cache[require.resolve(EXECUTOR_PATH)];
         fs.rmSync(fakeHome, { recursive: true, force: true });
     };
+    try {
+        mod = require(EXECUTOR_PATH);
+    } catch (err) {
+        // config.js fails fast on an unsupported AGENT_CLI -- never leak the env/cache into later tests
+        restore();
+        throw err;
+    }
     return { mod, restore };
 }
 
@@ -51,14 +58,14 @@ function mockSpawn(t, script) {
     t.mock.method(cp, 'spawn', (cmd, args) => {
         const idx = calls.length;
         calls.push(args);
-        const { code = 0, stdout = '', stderr = '' } = script(args, idx);
+        const { code = 0, signal, stdout = '', stderr = '' } = script(args, idx);
         const child = new EventEmitter();
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         setTimeout(() => {
             if (stdout) child.stdout.emit('data', Buffer.from(stdout));
             if (stderr) child.stderr.emit('data', Buffer.from(stderr));
-            child.emit('close', code);
+            child.emit('close', code, signal);
         }, 5);
         return child;
     });
@@ -278,24 +285,32 @@ describe('agy read-only roles (plan mode is the only enforcement layer)', () => 
 });
 
 describe('CLI Executor - Fail-fast CLI validation (T-6)', () => {
-    it('throws descriptive error when AGENT_CLI is gemini', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'gemini' });
-        try {
-            assert.throws(
-                () => mod.buildCLICommand('test', {}),
-                /Unsupported AGENT_CLI: gemini\. Supported runtimes: 'claude', 'agy'/
-            );
-        } finally {
-            restore();
-        }
+    it('config.js throws a descriptive error at load when AGENT_CLI is gemini', () => {
+        assert.throws(
+            () => freshExecutor({ AGENT_CLI: 'gemini' }),
+            /Unsupported AGENT_CLI: gemini\. Supported runtimes: 'claude', 'agy'/
+        );
     });
 
-    it('throws descriptive error when AGENT_CLI is unsupported or unknown', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'unsupported-cli' });
+    it('config.js throws a descriptive error at load when AGENT_CLI is unsupported or unknown', () => {
+        assert.throws(
+            () => freshExecutor({ AGENT_CLI: 'unsupported-cli' }),
+            /Unsupported AGENT_CLI: unsupported-cli\. Supported runtimes: 'claude', 'agy'/
+        );
+    });
+
+    it('does not leak an invalid AGENT_CLI into the environment after a failed load', () => {
+        const before = process.env.AGENT_CLI;
+        assert.throws(() => freshExecutor({ AGENT_CLI: 'gemini' }));
+        assert.equal(process.env.AGENT_CLI, before);
+    });
+
+    it('buildCLICommand still rejects an unsupported per-call agentCli override', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy' });
         try {
             assert.throws(
-                () => mod.buildCLICommand('test', {}),
-                /Unsupported AGENT_CLI: unsupported-cli\. Supported runtimes: 'claude', 'agy'/
+                () => mod.buildCLICommand('test', { agentCli: 'gemini' }),
+                /Unsupported AGENT_CLI: gemini/
             );
         } finally {
             restore();
@@ -367,3 +382,40 @@ describe('CLI Executor - Timeout and Process Resolution (T-7)', () => {
     });
 });
 
+
+describe('signal-terminated child (close(null, signal))', () => {
+    // Regression: the close handlers referenced `signal` without declaring it, so a SIGKILL/timeout
+    // (code === null) threw ReferenceError inside the event handler and the promise never settled.
+    it('executeCLI resolves failed with exitCode null on close(null, SIGKILL)', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
+        try {
+            const calls = mockSpawn(t, () => ({ code: null, signal: 'SIGKILL' }));
+            const result = await Promise.race([
+                mod.executeCLI('test', {}),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('executeCLI never settled')), 2000)),
+            ]);
+            assert.equal(result.status, 'failed');
+            assert.equal(result.exitCode, null);
+            assert.equal(calls.length, 1);
+        } finally {
+            restore();
+        }
+    });
+
+    it('executeCLIStreaming resolves failed with exitCode null on close(null, SIGKILL)', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
+        try {
+            const calls = mockSpawn(t, () => ({ code: null, signal: 'SIGKILL' }));
+            const ws = { readyState: 1, send() {} };
+            const result = await Promise.race([
+                mod.executeCLIStreaming(ws, 'evt-sig', 'test', {}),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('executeCLIStreaming never settled')), 2000)),
+            ]);
+            assert.equal(result.status, 'failed');
+            assert.equal(result.exitCode, null);
+            assert.equal(calls.length, 1);
+        } finally {
+            restore();
+        }
+    });
+});

@@ -1,6 +1,7 @@
 // gemini-sidecar/config.js
 // @ai-rules:
-// 1. [Constraint]: Pure constants and env-derived values only. No side effects at load time.
+// 1. [Constraint]: Pure constants and env-derived values only. No side effects at load time. The single exception is
+//    AGENT_CLI validation, which throws at load (fail-fast on an unsupported runtime).
 // 2. [Pattern]: resolveTimeoutMs(role) derives a per-task CLI timeout from ROLE_TIMEOUTS.
 //    There is deliberately NO module-level TIMEOUT_MS constant: ephemeral roles get their role
 //    per-task via a WS message field (see ws-server.js msg.role), NOT via AGENT_ROLE, which stays
@@ -38,7 +39,12 @@ const CLI_429_INITIAL_DELAY_MS = 60000;     // 60s -- quota typically recovers i
 const CLI_429_BACKOFF_MULTIPLIER = 2;       // 60s, then 120s
 
 // CLI routing -- AGENT_CLI selects which binary to spawn (claude or agy)
+const SUPPORTED_AGENT_CLIS = ['claude', 'agy'];
 const AGENT_CLI = process.env.AGENT_CLI || 'claude';
+// Fail fast at startup on an unsupported runtime (e.g. a stale 'gemini' value in a deployment)
+if (!SUPPORTED_AGENT_CLIS.includes(AGENT_CLI)) {
+  throw new Error(`Unsupported AGENT_CLI: ${AGENT_CLI}. Supported runtimes: ${SUPPORTED_AGENT_CLIS.map((c) => `'${c}'`).join(', ')}`);
+}
 const AGY_CLI = process.env.AGY_CLI || process.env.ANTIGRAVITY_CLI || 'agy';
 const AGENT_MODEL = process.env.AGENT_MODEL || (AGENT_CLI === 'agy' ? 'gemini-3.7-flash' : '');
 // Agent role -- used to restrict tools (e.g., architect can't write code files)

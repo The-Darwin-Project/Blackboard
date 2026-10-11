@@ -351,7 +351,7 @@ describe('writeAgyMcpServer MCP configuration', () => {
     });
   });
 
-  for (const cli of ['claude', 'gemini']) {
+  for (const cli of ['claude']) {
     it(`writes NOTHING (no plaintext credential file) when AGENT_CLI=${cli}`, () => {
       setEnv('AGENT_CLI', cli);
       withTempHome((home, cliSetup) => {
@@ -496,7 +496,7 @@ describe('writeAgyHooks Hook configuration', () => {
     });
   });
 
-  for (const cli of ['claude', 'gemini']) {
+  for (const cli of ['claude']) {
     it(`does not write agy hooks.json when AGENT_CLI=${cli}`, () => {
       setEnv('AGENT_CLI', cli);
       withTempHome((home, cliSetup) => {
