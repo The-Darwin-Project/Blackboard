@@ -27,8 +27,14 @@ import time
 import traceback
 
 PROJECT = os.environ.get("GCP_PROJECT", "cnv-ai-insights")
-LOCATION = os.environ.get("GCP_LOCATION", "global")
 MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
+sys2_loc = os.environ.get("GCP_LOCATION_SYSTEM2")
+if sys2_loc:
+    LOCATION = sys2_loc
+elif MODEL.startswith("gemini-3.8-live") and os.environ.get("GCP_LOCATION", "global") == "global":
+    LOCATION = "eu"
+else:
+    LOCATION = os.environ.get("GCP_LOCATION", "eu")
 SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS",
     os.path.join(os.path.dirname(__file__), "..", "cnv-ai-insights-8502f29094a2.json"))
 
@@ -92,13 +98,27 @@ FRICTION_PULSES = [
 ]
 
 
+def _make_config(types_mod, system_instruction=None, tools=None):
+    kwargs = {}
+    if MODEL.startswith("gemini-3.8-live"):
+        kwargs["output_audio_transcription"] = types_mod.AudioTranscriptionConfig()
+        kwargs["thinking_config"] = types_mod.ThinkingConfig(include_thoughts=True)
+    else:
+        kwargs["response_modalities"] = [types_mod.Modality.TEXT]
+    if system_instruction:
+        kwargs["system_instruction"] = system_instruction
+    if tools:
+        kwargs["tools"] = tools
+    return types_mod.LiveConnectConfig(**kwargs)
+
+
 async def test_connect():
     """Test 1: Can we connect a text-only Live API session?"""
     from google import genai
-    from google.genai.types import LiveConnectConfig, Modality
+    from google.genai import types
 
     client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
-    config = LiveConnectConfig(response_modalities=[Modality.TEXT])
+    config = _make_config(types)
 
     t0 = time.time()
     async with client.aio.live.connect(model=MODEL, config=config) as session:
@@ -109,9 +129,15 @@ async def test_connect():
         )
         response_text = []
         async for msg in session.receive():
-            if msg.text:
+            if hasattr(msg, "text") and msg.text:
                 response_text.append(msg.text)
-            if msg.server_content and msg.server_content.turn_complete:
+            elif (
+                hasattr(msg, "server_content")
+                and msg.server_content
+                and getattr(msg.server_content, "output_transcription", None)
+            ):
+                response_text.append(msg.server_content.output_transcription.text)
+            if hasattr(msg, "server_content") and msg.server_content and msg.server_content.turn_complete:
                 break
 
         text = "".join(response_text)
@@ -123,12 +149,12 @@ async def test_tool_declaration():
     from google import genai
     from google.genai import types
     from google.genai.types import (
-        Content, FunctionResponse, LiveConnectConfig, Modality, Part,
+        Content, FunctionResponse, Part,
     )
 
     client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
-    config = LiveConnectConfig(
-        response_modalities=[Modality.TEXT],
+    config = _make_config(
+        types,
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
         tools=[types.Tool(function_declarations=[
             types.FunctionDeclaration(
@@ -156,9 +182,15 @@ async def test_tool_declaration():
         tool_calls = []
         text_parts = []
         async for msg in session.receive():
-            if msg.text:
+            if hasattr(msg, "text") and msg.text:
                 text_parts.append(msg.text)
-            if msg.tool_call:
+            elif (
+                hasattr(msg, "server_content")
+                and msg.server_content
+                and getattr(msg.server_content, "output_transcription", None)
+            ):
+                text_parts.append(msg.server_content.output_transcription.text)
+            if hasattr(msg, "tool_call") and msg.tool_call:
                 for fc in msg.tool_call.function_calls:
                     tool_calls.append({"name": fc.name, "args": dict(fc.args) if fc.args else {}})
                     await session.send_tool_response(
@@ -167,7 +199,7 @@ async def test_tool_declaration():
                             response={"status": "observation_logged"},
                         )]
                     )
-            if msg.server_content and msg.server_content.turn_complete:
+            if hasattr(msg, "server_content") and msg.server_content and msg.server_content.turn_complete:
                 break
 
         text = "".join(text_parts)
@@ -181,12 +213,12 @@ async def test_friction_detection():
     from google import genai
     from google.genai import types
     from google.genai.types import (
-        Content, FunctionResponse, LiveConnectConfig, Modality, Part,
+        Content, FunctionResponse, Part,
     )
 
     client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
-    config = LiveConnectConfig(
-        response_modalities=[Modality.TEXT],
+    config = _make_config(
+        types,
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
         tools=[types.Tool(function_declarations=[
             types.FunctionDeclaration(
@@ -208,11 +240,11 @@ async def test_friction_detection():
             )
             # Drain any response
             async for msg in session.receive():
-                if msg.text:
+                if hasattr(msg, "text") and msg.text:
                     print(f"    Model: {msg.text[:80]}")
-                if msg.tool_call:
+                if hasattr(msg, "tool_call") and msg.tool_call:
                     print(f"    UNEXPECTED TOOL CALL on normal pulse: {msg.tool_call}")
-                if msg.server_content and msg.server_content.turn_complete:
+                if hasattr(msg, "server_content") and msg.server_content and msg.server_content.turn_complete:
                     break
 
         # Now send friction pulses (SHOULD trigger tool)
@@ -224,9 +256,15 @@ async def test_friction_detection():
                 turn_complete=True,
             )
             async for msg in session.receive():
-                if msg.text:
+                if hasattr(msg, "text") and msg.text:
                     print(f"    [{i+1}/10] Model: {msg.text[:80]}")
-                if msg.tool_call:
+                elif (
+                    hasattr(msg, "server_content")
+                    and msg.server_content
+                    and getattr(msg.server_content, "output_transcription", None)
+                ):
+                    print(f"    [{i+1}/10] Model: {msg.server_content.output_transcription.text[:80]}")
+                if hasattr(msg, "tool_call") and msg.tool_call:
                     for fc in msg.tool_call.function_calls:
                         call = {"name": fc.name, "args": dict(fc.args) if fc.args else {}, "pulse_index": i + 1}
                         tool_calls.append(call)
@@ -237,7 +275,7 @@ async def test_friction_detection():
                                 response={"status": "observation_logged"},
                             )]
                         )
-                if msg.server_content and msg.server_content.turn_complete:
+                if hasattr(msg, "server_content") and msg.server_content and msg.server_content.turn_complete:
                     break
 
         if tool_calls:

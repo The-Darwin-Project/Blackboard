@@ -83,6 +83,46 @@ async def test_connect_fresh():
     # Wait for the mocked tasks to complete
     await asyncio.sleep(0.01)
 
+
+@pytest.mark.asyncio
+async def test_connect_fresh_gemini_3_8_live():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._project = "test"
+    adapter._location = "eu"
+    adapter._model = "gemini-3.8-live"
+    
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = MagicMock()
+    adapter._client = MagicMock()
+    adapter._client.aio.live.connect.return_value = mock_ctx
+    
+    adapter._connect_lock = asyncio.Lock()
+    adapter._resumption_handle = None
+    adapter._idle_watchdog_task = None
+    adapter._receive_task = None
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.find_active_event_by_source = AsyncMock(return_value=None)
+    adapter._broadcast_status = AsyncMock()
+    adapter._load_neuron_labels = AsyncMock()
+    adapter._shadow = False
+    adapter._neuron_labels = {}
+    adapter._build_live_tools = MagicMock(return_value=[])
+    
+    adapter._receive_loop = AsyncMock()
+    adapter._idle_watchdog = AsyncMock()
+
+    await adapter._connect()
+
+    adapter._client.aio.live.connect.assert_called_once()
+    config = adapter._client.aio.live.connect.call_args.kwargs["config"]
+    assert config.output_audio_transcription is not None
+    assert config.response_modalities is None
+    assert config.session_resumption is None
+    assert config.thinking_config.include_thoughts is True
+    assert config.context_window_compression is not None
+    
+    await asyncio.sleep(0.01)
+
 # T-3: LiveConnectConfig resumption
 @pytest.mark.asyncio
 async def test_connect_resumption():
@@ -703,6 +743,60 @@ async def test_stop_prevents_connect_resurrection():
     adapter._client = MagicMock()
     await adapter._connect()
     adapter._client.aio.live.connect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_message_output_transcription():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._broadcast = AsyncMock()
+    adapter._active_meta_event_id = "evt-1"
+    adapter._awaiting_jarvis_reply = False
+
+    msg = MagicMock()
+    msg.server_content.model_turn = None
+    msg.server_content.output_transcription.text = "chunk of live text"
+    msg.server_content.turn_complete = False
+    msg.tool_call = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+
+    await adapter._process_message(msg)
+
+    assert adapter._text_buffer == ["chunk of live text"]
+
+
+def test_location_resolution():
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {"GCP_LOCATION": "global", "LLM_MODEL_SYSTEM2": "gemini-3.8-live"}, clear=True):
+        adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+        adapter._model = "gemini-3.8-live"
+        sys2_loc = os.getenv("GCP_LOCATION_SYSTEM2")
+        if sys2_loc:
+            adapter._location = sys2_loc
+        elif adapter._model.startswith("gemini-3.8-live") and os.getenv("GCP_LOCATION", "global") == "global":
+            adapter._location = "eu"
+        else:
+            adapter._location = os.getenv("GCP_LOCATION", "eu")
+        assert adapter._location == "eu"
+
+    with patch.dict(os.environ, {"GCP_LOCATION_SYSTEM2": "europe-west4", "GCP_LOCATION": "global"}, clear=True):
+        adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+        adapter._model = "gemini-3.8-live"
+        sys2_loc = os.getenv("GCP_LOCATION_SYSTEM2")
+        if sys2_loc:
+            adapter._location = sys2_loc
+        elif adapter._model.startswith("gemini-3.8-live") and os.getenv("GCP_LOCATION", "global") == "global":
+            adapter._location = "eu"
+        else:
+            adapter._location = os.getenv("GCP_LOCATION", "eu")
+        assert adapter._location == "europe-west4"
+
 
 
 

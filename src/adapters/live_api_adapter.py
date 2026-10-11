@@ -159,7 +159,13 @@ class LiveAPIAdapter:
         except (ValueError, TypeError):
             self._tool_timeout = 60.0
         self._project = os.getenv("GCP_PROJECT", "")
-        self._location = os.getenv("GCP_LOCATION", "global")
+        sys2_loc = os.getenv("GCP_LOCATION_SYSTEM2")
+        if sys2_loc:
+            self._location = sys2_loc
+        elif self._model.startswith("gemini-3.8-live") and os.getenv("GCP_LOCATION", "global") == "global":
+            self._location = "eu"
+        else:
+            self._location = os.getenv("GCP_LOCATION", "eu")
         self._seen_neurons: set[str] = set()
         self._neuron_labels: dict[str, str] = {}
         self._last_pulse_event_id: str | None = None
@@ -269,7 +275,6 @@ class LiveAPIAdapter:
                     return
                 try:
                     kwargs = {
-                        "response_modalities": [types.Modality.TEXT],
                         "thinking_config": types.ThinkingConfig(include_thoughts=True),
                         "generation_config": types.GenerationConfig(
                             max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
@@ -283,6 +288,10 @@ class LiveAPIAdapter:
                             sliding_window=types.SlidingWindow()
                         ),
                     }
+                    if self._model.startswith("gemini-3.8-live"):
+                        kwargs["output_audio_transcription"] = types.AudioTranscriptionConfig()
+                    else:
+                        kwargs["response_modalities"] = [types.Modality.TEXT]
                     if self._resumption_handle:
                         kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
                     config = types.LiveConnectConfig(**kwargs)
@@ -698,6 +707,16 @@ class LiveAPIAdapter:
                     self._handoff_buffer.append(text)
                 else:
                     self._text_buffer.append(text)
+
+        # Extract output audio transcription (e.g. for gemini-3.8-live text streaming)
+        output_tx = getattr(getattr(msg, "server_content", None), "output_transcription", None)
+        tx_text = getattr(output_tx, "text", None)
+        if isinstance(tx_text, str) and tx_text:
+            has_extracted_text = True
+            if self._collecting_handoff:
+                self._handoff_buffer.append(tx_text)
+            else:
+                self._text_buffer.append(tx_text)
 
         has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
         if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and msg.text:
@@ -1774,7 +1793,11 @@ class LiveAPIAdapter:
                         text = getattr(part, "text", None)
                         if not thought and text:
                             parts.append(text)
-                            has_extracted_text = True
+                    output_tx = getattr(getattr(msg, "server_content", None), "output_transcription", None)
+                    tx_text = getattr(output_tx, "text", None)
+                    if isinstance(tx_text, str) and tx_text:
+                        parts.append(tx_text)
+                        has_extracted_text = True
                     has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
                     if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and isinstance(msg.text, str) and msg.text:
                         parts.append(msg.text)
@@ -2052,7 +2075,12 @@ class LiveAPIAdapter:
                     if not getattr(part, "thought", False) and getattr(part, "text", None):
                         summary_parts.append(part.text)
                         extracted_part = True
-                if not extracted_part and hasattr(msg, "text") and msg.text:
+                output_tx = getattr(getattr(msg, "server_content", None), "output_transcription", None)
+                tx_text = getattr(output_tx, "text", None)
+                if isinstance(tx_text, str) and tx_text:
+                    summary_parts.append(tx_text)
+                    extracted_part = True
+                if not extracted_part and hasattr(msg, "text") and isinstance(msg.text, str) and msg.text:
                     summary_parts.append(msg.text)
                 if hasattr(msg, "server_content") and getattr(
                     msg.server_content, "turn_complete", False
