@@ -15,7 +15,7 @@
 | 1 | `stripAnsi` | 49 | `text: string` | `string` | Pure | Removes ANSI escape codes from PTY output. |
 | 2 | `parseStreamLine` | 128–169 | `line: string` | `{text, sessionId, toolCalls, done} \| null` | Pure | Unified stream-json line parser for both Gemini and Claude CLIs. Handles init, assistant message, content_block_delta, assistant summary, and result events. Falls back to raw text on JSON parse failure. |
 | 3 | `parseClaudeStreamLine` | 172–175 | `line: string` | `string \| null` | Pure | Backward-compat wrapper around `parseStreamLine`. Returns only the text field. |
-| 4 | `buildCLICommand` | 181–209 | `prompt: string, options?: {autoApprove?, sessionId?}` | `{binary: string, args: string[]}` | Pure | Routes to `gemini` or `claude` binary based on `AGENT_CLI` env var. Handles `--permission-mode`, `--dangerously-skip-permissions` / `--yolo`, `--resume`, `-o stream-json`, model selection. |
+| 4 | `buildCLICommand` | 181–209 | `prompt: string, options?: {autoApprove?, sessionId?}` | `{binary: string, args: string[]}` | Pure | Routes to `claude` or `agy` binary based on `AGENT_CLI` env var. Handles `--permission-mode`, `--dangerously-skip-permissions` / `--auto-approve`, `--resume`, `-o stream-json`, model selection. |
 | 5 | `findPrivateKeyPath` | 233–240 | _(none)_ | `string \| null` | Side-effect (fs read) | Scans `/secrets/github/` for a `.pem` file. |
 | 6 | `hasGitHubCredentials` | 245–249 | _(none)_ | `boolean` | Side-effect (fs read) | Checks existence of `app-id`, `installation-id`, and a `.pem` key in secrets dir. |
 | 7 | `generateInstallationToken` | 256–293 | _(none)_ | `Promise<string>` | Side-effect (fs read + HTTP POST) | Reads GitHub App credentials, creates JWT (RS256), exchanges it for an installation access token via GitHub API. Token valid ~1 hour. |
@@ -74,7 +74,7 @@ The `currentTask` object is loosely typed with these observed fields:
 | `TIMEOUT_MS` | 33 | `parseInt(process.env.TIMEOUT_MS) \|\| ROLE_TIMEOUTS[AGENT_ROLE] \|\| 300000` | Effective CLI process timeout |
 | `FINDINGS_FRESHNESS_MS` | 34 | `30000` | Max age (ms) for `findings.md` to be considered fresh in `readFindings` |
 | `DEFAULT_WORK_DIR` | 35 | `'/data/gitops'` | Default CWD for CLI execution |
-| `AGENT_CLI` | 43 | `process.env.AGENT_CLI \|\| 'gemini'` | Which CLI binary to spawn (`gemini` or `claude`) |
+| `AGENT_CLI` | 43 | `process.env.AGENT_CLI \|\| 'claude'` | Which CLI binary to spawn (`claude` or `agy`) |
 | `AGENT_MODEL` | 44 | `process.env.AGENT_MODEL \|\| ''` | Model override for CLI |
 | `ANSI_RE` | 48 | Regex | Pattern matching ANSI escape sequences |
 | `AGENT_ROLE` | 51 | `process.env.AGENT_ROLE \|\| ''` | Agent role (architect, sysadmin, developer, qe) |

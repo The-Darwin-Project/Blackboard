@@ -35,6 +35,7 @@ describe('ArgoCD MCP config', () => {
       assert.equal(cfg(r).env.MCP_READ_ONLY, 'true', r);
     }
     for (const r of ['developer', 'sysadmin', 'qe']) assert.equal(cfg(r).env.MCP_READ_ONLY, undefined, r);
+    for (const r of ['', undefined, null]) assert.equal(cfg(r).env.MCP_READ_ONLY, 'true', JSON.stringify(r));
   });
 });
 
@@ -59,6 +60,11 @@ describe('readonly-role-permissions.json (Claude engine-enforced deny list)', ()
   it('has Bash parity with the agy hook denylist (infra + merge commands)', () => {
     for (const r of ['Bash(helm install *)', 'Bash(argocd app sync *)', 'Bash(kubectl create *)', 'Bash(gh pr merge *)', 'Bash(glab mr merge *)', 'Bash(tkn pipeline start *)', 'Bash(kargo promote *)']) {
       assert.ok(deny.includes(r), r);
+    }
+  });
+  it('denies WebFetch and WebSearch to prevent external network exfiltration', () => {
+    for (const tool of ['WebFetch', 'WebSearch']) {
+      assert.ok(deny.includes(tool), tool);
     }
   });
 });

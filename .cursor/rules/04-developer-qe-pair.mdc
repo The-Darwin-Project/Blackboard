@@ -16,7 +16,7 @@ The Developer agent is NOT a single agent. It is a **pair programming team** man
 Developer and QE are **first-class agents** dispatched by the Brain via `select_agent`:
 
 - **Developer sidecar** (Claude Opus): Implements source code changes
-- **QE sidecar** (Gemini Pro): Independently verifies quality, writes tests
+- **QE sidecar** (Antigravity gemini-3.7-flash): Independently verifies quality, writes tests
 - **Flash Manager** (Gemini Flash, in-process): Moderates the pair, reviews outputs, triggers fix/verify rounds
 - **Developer** (`select_agent("developer")`): Implements code changes, manages branches, opens PRs.
 - **QE** (`select_agent("qe")`): Verifies quality, runs tests, validates deployments via Playwright.

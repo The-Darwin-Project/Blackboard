@@ -17,7 +17,7 @@ function normalizeRole(role) {
 function isReadOnlyRoleName(role) {
   const r = normalizeRole(role);
   if (!r) return false; // unset role is handled by each caller's own fail-closed path
-  return READ_ONLY_ROLES.has(r) || /review|analyst|explorer|architect/.test(r);
+  return READ_ONLY_ROLES.has(r) || /(?:^|[_-])(?:review(?:er)?|analyst|explorer|architect)(?:$|[_-])/.test(r);
 }
 
 module.exports = { READ_ONLY_ROLES, normalizeRole, isReadOnlyRoleName };

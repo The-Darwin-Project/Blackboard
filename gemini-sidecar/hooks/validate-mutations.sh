@@ -159,7 +159,7 @@ fi
 # else (qa_reviewer_agent, ARCHITECT_LEAD ...) is classified by the shared name heuristics in ../roles.js (fail closed:
 # a node failure counts as read-only).
 is_readonly_role() {
-    echo "$READONLY_ROLES" | grep -qwi -- "$1" && return 0
+    in_list "$1" "$READONLY_ROLES" && return 0
     in_list "$1" "developer sysadmin qe tester executor" && return 1
     local t out
     t=$(tmo 1) || return 0

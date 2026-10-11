@@ -449,7 +449,8 @@ async function handleRequest(req, res) {
       }
 
       // Configure ArgoCD MCP server (session API -> JWT per-task)
-      await setupArgoCDMCP();
+      const taskRole = body.role || state.resolveRole();
+      await setupArgoCDMCP(taskRole);
 
       // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
       await setupCLILogins();

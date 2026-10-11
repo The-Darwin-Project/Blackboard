@@ -4,6 +4,8 @@
       "Edit",
       "Write",
       "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
       "Read(//tmp/git-creds-*)",
       "Read(//tmp/gh-token-map*)",
       "Read(~/.git-credentials)",

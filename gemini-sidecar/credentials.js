@@ -518,15 +518,16 @@ function setupGitLabTooling(token) {
  * all other roles get full access. Callers MUST pass the per-task role (ephemeral agents have AGENT_ROLE="").
  * Falls back silently to argocd CLI if session API is unreachable.
  */
-// Pure builder (unit-tested): the ArgoCD MCP server definition for a role. Read-only roles get MCP_READ_ONLY=true.
 function buildArgoCDMcpConfig({ baseUrl, sessionJwt, role, insecure }) {
+  // Fail-closed: empty, omitted, or read-only role gets MCP_READ_ONLY=true
+  const readOnly = !role || isReadOnlyRoleName(role);
   return {
     command: resolveCommand('argocd-mcp'),
     args: ['stdio'],
     env: {
       ARGOCD_BASE_URL: baseUrl,
       ARGOCD_API_TOKEN: sessionJwt,
-      ...(isReadOnlyRoleName(role) ? { MCP_READ_ONLY: 'true' } : {}),
+      ...(readOnly ? { MCP_READ_ONLY: 'true' } : {}),
       ...(insecure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
     },
   };
