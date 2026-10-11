@@ -274,7 +274,8 @@ function registerMCPsAndHooks(settings, cli) {
 
     settings.hooks = settings.hooks || {};
     const hookUrl = `http://localhost:${port}`;
-    settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 5 }] }];
+    // timeout 10: the merge-approval guard may wait on the Brain approval proxy (<=3s) + git; a timed-out hook fails open.
+    settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 10 }] }];
     settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
     settings.hooks.SessionStart = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
     console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);

@@ -14,7 +14,11 @@
 // 4. [Gotcha]: Still defense-in-depth, not a sandbox: it cannot see inside scripts (`sh x.sh`), `python -c`,
 //    `curl -d @file`, or values resolved at runtime ($VAR as a command word is treated as suspicious only
 //    when merge/push appears among the arguments).
-// 5. [Pattern]: MCP tools are classified by NAME TOKENS (camelCase + snake_case split), so `mergePullRequest`,
+// 5. [Contract]: Also the Claude path's engine: claude-guard.js require()s classify()/approvalVerdict() for the
+//    HTTP PreToolUse hook (payload `cwd` -> git lookups). `--verdict` CLI mode shares approvalVerdict with the
+//    agy shell hook. Dynamic words ($ { ` * ?) in the command/sub-command position, stdin-fed shells
+//    (`| bash`, heredocs, `bash -s`) and `-c "$(...)"` payloads are treated as merge-class (fail closed).
+// 6. [Pattern]: MCP tools are classified by NAME TOKENS (camelCase + snake_case split), so `mergePullRequest`,
 //    `merge_pull_request` and `glab_mr_merge` all yield the verb `merge`; `merge_request` (the noun) does not.
 //    The read-only allowlist is verb-based -- extend READ/SAFE sets here, or set HOOK_EXTRA_ALLOWED_TOOLS in
 //    validate-mutations.sh's env, rather than loosening the shell wrapper.
@@ -29,6 +33,41 @@ const MAX_DEPTH = 4;
 // ---------------------------------------------------------------------------------------------
 // Shell tokenizer
 // ---------------------------------------------------------------------------------------------
+// Quote- and nesting-aware: returns the index just past the ')' matching the '(' before `start`.
+// A ')' inside '...' / "..." or escaped must not close the substitution (otherwise the remainder of the
+// command is re-parsed with the wrong quote state and a trailing `git merge` hides inside a "token").
+function matchParen(str, start) {
+  const n = str.length;
+  let depth = 1;
+  let j = start;
+  while (j < n && depth > 0) {
+    const c = str[j];
+    if (c === '\\') { j += 2; continue; }
+    if (c === "'") { const k = str.indexOf("'", j + 1); j = k === -1 ? n : k + 1; continue; }
+    if (c === '"') {
+      j++;
+      while (j < n && str[j] !== '"') {
+        if (str[j] === '\\') { j += 2; continue; }
+        if (str[j] === '$' && str[j + 1] === '(') { j = matchParen(str, j + 2); continue; }
+        j++;
+      }
+      j++; continue;
+    }
+    if (c === '$' && str[j + 1] === '(') { depth++; j += 2; continue; }
+    if (c === '(') depth++;
+    else if (c === ')') depth--;
+    j++;
+  }
+  return j; // == n (unterminated) or index after ')'
+}
+
+// Index of the closing backtick (honouring \` escapes), or n if unterminated.
+function matchBacktick(str, start) {
+  let j = start;
+  while (j < str.length && str[j] !== '`') j += str[j] === '\\' ? 2 : 1;
+  return Math.min(j, str.length);
+}
+
 // Returns { cmds: string[][], nested: string[] }. `nested` holds the bodies of $(...), `...`, <(...), >(...)
 // so they can be analyzed as commands of their own.
 function parseShell(str) {
@@ -43,16 +82,18 @@ function parseShell(str) {
   let i = 0;
 
   const grabParen = (start) => { // start points just after '('
-    let depth = 1; let j = start;
-    while (j < n && depth > 0) {
-      const c = str[j];
-      if (c === '\\') { j += 2; continue; }
-      if (c === '(') depth++;
-      else if (c === ')') depth--;
-      j++;
-    }
-    nested.push(str.slice(start, depth === 0 ? j - 1 : j));
-    return j;
+    const end = matchParen(str, start);
+    const closed = end <= n && str[end - 1] === ')';
+    const body = str.slice(start, closed ? end - 1 : end);
+    nested.push(body);
+    // `case x in a) ...;; esac` has unbalanced ')' of its own: also analyze everything that follows.
+    if (/\bcase\b/.test(body)) nested.push(str.slice(start));
+    return Math.min(end, n);
+  };
+  const grabTick = (start) => { // start points just after the opening backtick
+    const end = matchBacktick(str, start);
+    nested.push(str.slice(start, end));
+    return end + 1;
   };
 
   while (i < n) {
@@ -71,20 +112,14 @@ function parseShell(str) {
       while (i < n && str[i] !== '"') {
         if (str[i] === '\\' && i + 1 < n) { cur += str[i + 1]; i += 2; continue; }
         if (str[i] === '$' && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; continue; }
-        if (str[i] === '`') {
-          const j = str.indexOf('`', i + 1); const end = j === -1 ? n : j;
-          nested.push(str.slice(i + 1, end)); cur += '$SUBST'; i = end + 1; continue;
-        }
+        if (str[i] === '`') { i = grabTick(i + 1); cur += '$SUBST'; continue; }
         cur += str[i]; i++;
       }
       i++; continue;
     }
     if (c === '$' && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; has = true; continue; }
     if ((c === '<' || c === '>') && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; has = true; continue; }
-    if (c === '`') {
-      const j = str.indexOf('`', i + 1); const end = j === -1 ? n : j;
-      nested.push(str.slice(i + 1, end)); cur += '$SUBST'; has = true; i = end + 1; continue;
-    }
+    if (c === '`') { i = grabTick(i + 1); cur += '$SUBST'; has = true; continue; }
     if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') {
       // `>&` / `2>&1` / `&>` are redirections, not command separators
       if (c === '&' && (/[<>]$/.test(cur) || str[i + 1] === '>')) { cur += c; has = true; i++; continue; }
@@ -112,6 +147,8 @@ function parseShell(str) {
 }
 
 const base = (p) => p.replace(/\/+$/, '').split('/').pop();
+// Word that is only known at runtime (variable, substitution, brace expansion, glob) -- cannot be proven safe.
+const DYN = /[$`{*?[]/;
 const isAssign = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
 
 // Wrapper commands that merely run another command: option set (with values) and leading positionals.
@@ -161,9 +198,16 @@ function stripPrefix(tokens) {
 // ---------------------------------------------------------------------------------------------
 // git / gh / glab / http-client analysis
 // ---------------------------------------------------------------------------------------------
+// Per-invocation context. cwd: directory of the agent's repo (Claude HTTP hook passes the payload cwd; the
+// agy command hook inherits it). deadline: absolute ms; once passed, git lookups return null => fail closed.
+const CTX = { cwd: undefined, deadline: Infinity };
+const GIT_TIMEOUT_MS = 500;
 function gitOut(args) {
+  if (Date.now() >= CTX.deadline) return null;
   try {
-    return execFileSync('git', args, { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return execFileSync('git', args, {
+      encoding: 'utf8', timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', cwd: CTX.cwd, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
   } catch { return null; }
 }
 
@@ -252,12 +296,13 @@ function gitGuard(args, depth) {
   }
   const sub = (args[i] || '').toLowerCase();
   const rest = args.slice(i + 1);
+  if (DYN.test(sub)) return true; // git $SUB / ${X} / m{er,}ge / mer*: dynamic subcommand
   if (sub === 'merge') return true;
   if (sub === 'push') return pushGuard(rest, dirOverride);
   if (sub && !GIT_BUILTINS.has(sub) && depth < MAX_DEPTH) {
     const alias = gitOut(['config', '--get', `alias.${args[i]}`]);
     if (alias) {
-      if (alias.startsWith('!')) return analyzeString(alias.slice(1) + ' ' + rest.join(' '), depth + 1);
+      if (alias.startsWith('!')) return analyzeString(alias.slice(1) + ' ' + rest.join(' '), depth + 1, true);
       return gitGuard(parseShell(alias).cmds.flat().concat(rest), depth + 1);
     }
   }
@@ -297,6 +342,20 @@ function httpMethod(bin, args) {
   const kind = (bin === 'gh' || bin === 'glab') ? 'api' : (BODY_FLAG[bin] ? bin : null);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    if (bin === 'curl' && /^-[A-Za-z]{2,}/.test(a)) { // combined short flags: -sXPUT, -sX PUT, -sd '{}', -fsSLd
+      const SHORT_VALUED = 'XdFTHoUuAebcDEwymxKCrtQ';
+      for (let k = 1; k < a.length; k++) {
+        const ch = a[k];
+        if (ch === 'G') getFlag = true;
+        if (!SHORT_VALUED.includes(ch)) continue;
+        const val = a.slice(k + 1) || args[i + 1] || '';
+        if (ch === 'X') method = val.toUpperCase();
+        else if ('dFT'.includes(ch)) body = true;
+        if (!a.slice(k + 1)) i++; // value was the next token
+        break;
+      }
+      continue;
+    }
     if (a === '-X' || a === '--request' || a === '--method') { method = (args[i + 1] || '').toUpperCase(); i++; continue; }
     if (/^--(request|method)=/.test(a)) { method = a.split('=')[1].toUpperCase(); continue; }
     if (bin === 'curl' && /^-X./.test(a)) { method = a.slice(2).toUpperCase(); continue; }
@@ -314,19 +373,25 @@ function httpGuard(bin, args) {
   return MERGE_ENDPOINT_RE.test(args.join(' '));
 }
 
-function analyzeTokens(tokens, depth) {
+function analyzeTokens(tokens, depth, strict) {
   const t = stripPrefix(tokens);
   if (!t.length) return false;
   const rawBin = t[0];
   const bin = base(rawBin).toLowerCase();
   const rest = t.slice(1);
-  if (/[$`]/.test(rawBin)) return rest.some((x) => /^(merge|push)$/i.test(x)); // dynamic command word
+  if (DYN.test(rawBin)) { // dynamic command word
+    if (strict) return true;
+    return rest.some((x) => /^(merge|push|api)$/i.test(x) || DYN.test(x) && /merge|push/i.test(x));
+  }
   if (SHELLS.has(bin)) {
     const ci = rest.findIndex((x) => /^-[A-Za-z]*c[A-Za-z]*$/.test(x));
-    if (ci !== -1 && rest[ci + 1] !== undefined) return analyzeString(rest[ci + 1], depth + 1);
-    return false;
+    if (ci !== -1 && rest[ci + 1] !== undefined) return analyzeString(rest[ci + 1], depth + 1, true);
+    // No -c and no script file: the shell reads its program from stdin (`... | bash`, `bash <<EOF`, `bash -s`,
+    // here-strings) which cannot be inspected => needs approval. `bash script.sh` is NOT flagged (file body unseen).
+    const hasScript = rest.some((x, k) => !x.startsWith('-') && !(k > 0 && /^-[A-Za-z]*[oO]$/.test(rest[k - 1])));
+    return !hasScript;
   }
-  if (bin === 'eval') return analyzeString(rest.join(' '), depth + 1);
+  if (bin === 'eval') return analyzeString(rest.join(' '), depth + 1, true);
   if (bin === 'find') {
     for (let i = 0; i < rest.length; i++) {
       if (/^-(exec|execdir|ok|okdir)$/.test(rest[i])) {
@@ -340,6 +405,7 @@ function analyzeTokens(tokens, depth) {
   if (bin === 'git') return gitGuard(rest, depth);
   if (bin === 'gh' || bin === 'glab') {
     const pos = positionals(rest);
+    if (pos.slice(0, 3).some((x) => DYN.test(x))) return true; // gh $GRP $ACT: dynamic command path
     if (hasSubseq(pos, bin === 'gh' ? ['pr', 'merge'] : ['mr', 'merge'])) return true;
     if (pos[0] && pos[0].toLowerCase() === 'api') return httpGuard(bin, rest);
     return false;
@@ -348,10 +414,10 @@ function analyzeTokens(tokens, depth) {
   return false;
 }
 
-function analyzeString(str, depth) {
+function analyzeString(str, depth, strict) {
   if (depth > MAX_DEPTH) return true; // pathological nesting => fail closed
   const { cmds, nested } = parseShell(str);
-  for (const c of cmds) if (analyzeTokens(c, depth)) return true;
+  for (const c of cmds) if (analyzeTokens(c, depth, strict)) return true;
   for (const nsub of nested) if (analyzeString(nsub, depth + 1)) return true;
   return false;
 }
@@ -364,37 +430,49 @@ function shellNeedsGuard(cmd) {
 // MCP / non-shell tool classification (name tokens, not substrings)
 // ---------------------------------------------------------------------------------------------
 const nameTokens = (name) => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+// Server-name fragments (mcp__GitHub__x, mcp_KubeArchive_x ...). Dropped before looking for the action verb.
 const PREFIX_TOKENS = new Set(['mcp', 'github', 'gitlab', 'glab', 'gh', 'argocd', 'jenkins', 'darwin', 'blackboard', 'journal', 'teamchat', 'playwright', 'kubearchive', 'konflux',
   'git', 'hub', 'lab', 'argo', 'cd', 'k8s', 'kube', 'archive', 'chat']);
 const READ_VERBS = new Set(['get', 'list', 'read', 'search', 'view', 'find', 'fetch', 'query', 'show', 'describe', 'status', 'top',
   'log', 'logs', 'events', 'trace', 'diff', 'summary', 'stats', 'lint', 'contributors', 'count', 'compare', 'snapshot']);
-const SAFE_TOKENS = new Set(['comment', 'note', 'review', 'reply']); // PR/MR discussion, not code mutation
+// PR/MR discussion, not code mutation. `review` is deliberately NOT here: *_review_write can APPROVE/submit reviews.
+const SAFE_TOKENS = new Set(['comment', 'note', 'reply']);
 const HARD_WRITE = new Set(['delete', 'remove', 'merge', 'push', 'revoke', 'destroy', 'drop', 'publish', 'transfer', 'archive', 'fork', 'assign']);
 const WRITE = new Set(['create', 'update', 'write', 'set', 'add', 'run', 'sync', 'trigger', 'cancel', 'retry', 'close', 'reopen',
   'approve', 'upload', 'login', 'bootstrap', 'import', 'edit', 'save', 'amend', 'rebase', 'subscribe', 'unsubscribe', 'send',
-  'execute', 'exec', 'start', 'stop', 'apply', 'patch', 'scale', 'rollback', 'promote', 'deploy', 'put', 'post', 'commit', 'upsert']);
+  'execute', 'exec', 'start', 'stop', 'apply', 'patch', 'scale', 'rollback', 'promote', 'deploy', 'put', 'post', 'commit', 'upsert', 'submit']);
 const FAMILY_TOKENS = new Set(['team', 'bb', 'svc', 'ka']); // comms / blackboard / journal / kubearchive MCPs
 const NATIVE_ALLOW = new Set(['task_boundary', 'notify_user', 'browser_subagent']);
 // Native file-mutation tools: handled by validate-mutations.sh MUTATION_TOOLS (keep the two lists in sync).
 const NATIVE_MUTATION = new Set(['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'edit_file']);
 
+// glab_api MCP shape: { args: ['endpoint'] | 'endpoint', flags: { method, field, ... } | '-X PUT' }. Either may be a string.
 function apiTokens(args) {
-  // glab_api MCP shape: { args: ['endpoint'], flags: { method, field, raw_field, input, ... } }
   const toks = [];
   const a = args && typeof args === 'object' ? args : {};
-  const f = a.flags && typeof a.flags === 'object' ? a.flags : {};
-  if (f.method) toks.push('--method', String(f.method));
-  for (const k of ['field', 'raw_field', 'form', 'input']) {
-    if (f[k] !== undefined && f[k] !== false) toks.push('--field', ...[].concat(f[k]).map(String));
+  const asTokens = (v) => (typeof v === 'string' ? parseShell(v).cmds.flat() : []);
+  if (typeof a.flags === 'string') toks.push(...asTokens(a.flags));
+  else if (a.flags && typeof a.flags === 'object') {
+    const f = a.flags;
+    if (f.method) toks.push('--method', String(f.method));
+    for (const k of ['field', 'raw_field', 'form', 'input']) {
+      if (f[k] !== undefined && f[k] !== false) toks.push('--field', ...[].concat(f[k]).map(String));
+    }
   }
   if (Array.isArray(a.args)) toks.push(...a.args.map(String));
+  else if (typeof a.args === 'string') toks.push(...asTokens(a.args));
+  if (typeof args === 'string') toks.push(...asTokens(args));
   return toks;
 }
 
 function classifyTool(name, args) {
-  if (NATIVE_MUTATION.has(name.toLowerCase())) return { guard: false, readok: false };
+  const lname = name.toLowerCase();
+  if (NATIVE_MUTATION.has(lname)) return { guard: false, readok: false };
   const a = args && typeof args === 'object' ? args : {};
-  const tokens = nameTokens(name);
+  // mcp__<server>__<tool>: classify on the tool part only, so server names cannot masquerade as verbs/families.
+  const parts = name.split('__');
+  const toolPart = parts.length >= 3 && /^mcp$/i.test(parts[0]) ? parts.slice(2).join('__') : name;
+  const tokens = nameTokens(toolPart);
   const set = new Set(tokens);
   const verb = tokens.find((t) => !PREFIX_TOKENS.has(t)) || '';
   const readFirst = READ_VERBS.has(verb);
@@ -409,9 +487,10 @@ function classifyTool(name, args) {
       }
     }
   }
-  // remote file writes: default branch (or unspecified branch) needs approval
-  const isFileWrite = (set.has('push') && !readFirst)
-    || ((set.has('file') || set.has('files') || set.has('contents')) && [...set].some((t) => WRITE.has(t) || t === 'delete'));
+  // remote file/commit writes: default branch (or unspecified branch) needs approval
+  const writeish = [...set].some((t) => WRITE.has(t) || t === 'delete');
+  const isFileWrite = !readFirst && (set.has('push')
+    || ((set.has('file') || set.has('files') || set.has('contents') || set.has('commit') || set.has('commits')) && writeish));
   if (isFileWrite) {
     const br = a.branch ?? a.ref ?? a.target_branch ?? a.base_branch;
     if (typeof br !== 'string' || !br.trim() || isProtected(br)) guard = true;
@@ -420,7 +499,7 @@ function classifyTool(name, args) {
   const isApi = set.has('api');
   let apiRead = false;
   if (isApi) {
-    const toks = apiTokens(a);
+    const toks = apiTokens(args);
     const m = httpMethod('glab', toks);
     apiRead = isReadMethod(m);
     if (!apiRead && MERGE_ENDPOINT_RE.test(toks.join(' '))) guard = true;
@@ -430,56 +509,85 @@ function classifyTool(name, args) {
   // ("list_merge_requests") or the call is a read verb.
   const act = tokens.filter((t, i) => !PREFIX_TOKENS.has(t)
     && !(/^(auto)?merge[sd]?$/.test(t) && (readFirst || /^requests?$/.test(tokens[i + 1] || ''))));
+  // Families are anchored: the tool's FIRST action token must be the family (bb_get_approval, team_send_results),
+  // not merely contained somewhere in the name (create_team_discussion).
+  const family = FAMILY_TOKENS.has(verb);
   let readok = false;
   if (!guard) {
-    if (NATIVE_ALLOW.has(name.toLowerCase())) readok = true;
+    if (NATIVE_ALLOW.has(lname)) readok = true;
     else if (isApi) readok = apiRead;
     else if (act.some((t) => HARD_WRITE.has(t))) readok = false;
-    else if (tokens.some((t) => FAMILY_TOKENS.has(t))) readok = true;
-    else if (set.has('browser')) readok = !['run', 'unsafe', 'upload', 'drop'].some((t) => set.has(t));
+    else if (family) readok = true;
+    else if (verb === 'browser') readok = !['run', 'unsafe', 'upload', 'drop'].some((t) => set.has(t));
     else if (act.some((t) => SAFE_TOKENS.has(t))) readok = true;
-    else if (act.some((t) => WRITE.has(t))) readok = false;
+    // read-verb-first tools (get_commit, get_workflow_run, list_*) may carry write-ish nouns (commit, run)
+    else if (!readFirst && act.some((t) => WRITE.has(t))) readok = false;
     else readok = act.some((t) => READ_VERBS.has(t));
   }
   return { guard, readok };
 }
 
 // ---------------------------------------------------------------------------------------------
-// Entry point
+// Approval verdict (shared by validate-mutations.sh and the Claude HTTP hook)
 // ---------------------------------------------------------------------------------------------
-// Keep in sync with SHELL_TOOLS in validate-mutations.sh.
+function approvalVerdict(approval, localSha) {
+  if (!approval || typeof approval !== 'object' || !approval.approved) {
+    return { allow: false, reason: 'Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).' };
+  }
+  if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
+    return { allow: false, reason: `Merge REFUSED: live HEAD (${localSha || ''}) differs from authenticated approval SHA (${approval.approved_mr_sha}).` };
+  }
+  return { allow: true, reason: '' };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------------------------
+// Keep in sync with SHELL_TOOLS in validate-mutations.sh. Claude Code's tool is named `Bash`.
 const SHELL_TOOLS = new Set(['bash', 'shell', 'run_in_terminal', 'execute_command', 'run_shell_command', 'run_command']);
 
-function main(raw) {
-  const d = JSON.parse(raw);
-  if (!d || typeof d !== 'object' || Array.isArray(d)) return '__MALFORMED__';
+// Classify a PreToolUse payload (agy {toolCall:{name,args}} or Claude {tool_name,tool_input}).
+// Returns null if malformed, else { name, guard, readok, cmd, isShell }.
+function classify(d, opts = {}) {
+  CTX.cwd = opts.cwd || undefined;
+  CTX.deadline = Date.now() + (opts.budgetMs || 1500);
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
   let name = d.toolCall?.name || d.tool_name || d.functionCall?.name || '';
-  if (!name || typeof name !== 'string') return '__MALFORMED__';
+  if (!name || typeof name !== 'string') return null;
   name = name.trim();
   const rawCmd = d.toolCall?.args?.CommandLine ?? d.toolCall?.args?.command ?? (d.tool_input && d.tool_input.command) ?? (d.functionCall?.args?.command) ?? '';
-  if (rawCmd !== null && rawCmd !== undefined && typeof rawCmd !== 'string') return '__MALFORMED__';
+  if (rawCmd !== null && rawCmd !== undefined && typeof rawCmd !== 'string') return null;
   const cmd = (rawCmd || '').trim();
   const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
-  let guard = 0;
-  let readok = 0;
-  if (SHELL_TOOLS.has(name.toLowerCase())) {
-    guard = cmd && shellNeedsGuard(cmd) ? 1 : 0;
-  } else {
-    const c = classifyTool(name, args);
-    guard = c.guard ? 1 : 0;
-    readok = c.readok ? 1 : 0;
-  }
-  return `OK|||${name}|||${guard}|||${readok}|||${cmd}`;
+  const isShell = SHELL_TOOLS.has(name.toLowerCase());
+  if (isShell) return { name, guard: !!cmd && shellNeedsGuard(cmd), readok: false, cmd, isShell };
+  const c = classifyTool(name, args);
+  return { name, guard: c.guard, readok: c.readok, cmd, isShell };
+}
+
+function main(raw) {
+  const r = classify(JSON.parse(raw));
+  if (!r) return '__MALFORMED__';
+  return `OK|||${r.name}|||${r.guard ? 1 : 0}|||${r.readok ? 1 : 0}|||${r.cmd}`;
 }
 
 if (require.main === module) {
-  let raw = '';
-  process.stdin.on('data', (c) => { raw += c; });
-  process.stdin.on('end', () => {
-    let out;
-    try { out = main(raw); } catch { out = '__MALFORMED__'; }
-    process.stdout.write(out);
-  });
+  if (process.argv[2] === '--verdict') {
+    // node merge-guard.js --verdict -- <approval-json> <local-sha>  =>  ALLOW||| | BLOCK|||<reason>
+    const [, , , , rawApproval, sha] = process.argv;
+    let approval = null;
+    try { approval = JSON.parse(rawApproval || ''); } catch { approval = null; }
+    const v = approvalVerdict(approval, sha || '');
+    process.stdout.write(`${v.allow ? 'ALLOW' : 'BLOCK'}|||${v.reason}`);
+  } else {
+    let raw = '';
+    process.stdin.on('data', (c) => { raw += c; });
+    process.stdin.on('end', () => {
+      let out;
+      try { out = main(raw); } catch { out = '__MALFORMED__'; }
+      process.stdout.write(out);
+    });
+  }
 }
 
-module.exports = { shellNeedsGuard, classifyTool, parseShell, nameTokens };
+module.exports = { shellNeedsGuard, classifyTool, classify, approvalVerdict, parseShell, nameTokens };

@@ -30,6 +30,24 @@ SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_co
 # future iterations should migrate to an authoritative tool allowlist per role.
 MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content edit_file"
 
+# Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
+# treated as a non-blocking error, i.e. FAIL-OPEN. So every external call below is capped by what is left
+# of HOOK_BUDGET_SEC (integer seconds, default 8 => 2s margin) and the script DENIES itself on exhaustion.
+# Worst-case ladder: classify <=2s, approval fetch <=3s, git rev-parse <=1s, verdict <=1s, role lookup <=2s.
+HOOK_T0=$SECONDS
+HOOK_BUDGET="${HOOK_BUDGET_SEC:-8}"
+# tmo <cap>: prints min(cap, seconds left); returns 1 when the budget is exhausted.
+tmo() {
+    local cap="$1" left=$((HOOK_BUDGET - (SECONDS - HOOK_T0)))
+    [ "$left" -lt 1 ] && return 1
+    [ "$left" -lt "$cap" ] && cap="$left"
+    echo "$cap"
+}
+deny_budget() {
+    echo '{"decision": "deny", "reason": "Hook time budget exhausted before the call could be validated: failing closed"}'
+    exit 0
+}
+
 # Read stdin (PreToolUse JSON payload)
 INPUT=$(cat 2>/dev/null)
 
@@ -41,7 +59,7 @@ fi
 # Parse + classify via merge-guard.js (tokenizing shell analyzer, MCP verb classifier).
 # Output: OK|||<tool>|||<guard>|||<readok>|||<command>  (or __MALFORMED__). Missing helper/node => deny.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARSED=$(printf '%s' "$INPUT" | timeout 3 node "$HOOK_DIR/merge-guard.js" 2>/dev/null)
+PARSED=$(printf '%s' "$INPUT" | timeout -k 1 2 node "$HOOK_DIR/merge-guard.js" 2>/dev/null)
 
 if [ "$PARSED" = "__MALFORMED__" ] || [ -z "$PARSED" ] || [ "${PARSED%%|||*}" != "OK" ]; then
     echo '{"decision": "deny", "reason": "Malformed or unrecognized tool payload"}'
@@ -86,21 +104,6 @@ if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" != 1 ]; the
     fi
 fi
 
-# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
-# AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
-ROLE="${AGENT_ROLE:-}"
-if [ -z "$ROLE" ]; then
-    _start=$SECONDS
-    for _attempt in 1 2; do
-        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
-            ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
-            break
-        fi
-        [ $((SECONDS - _start)) -ge 2 ] && break
-        sleep 0.1
-    done
-fi
-
 # Used by the read-only git denylist below: global options may sit between `git` and the subcommand
 # (git -C . commit). Any dash-token with an optional value token is skipped.
 _DQ='"'; _SQ="'"
@@ -111,31 +114,37 @@ _G="([[:space:]]+-[^[:space:];&|]+([[:space:]]+${_V})?)*"
 # NEEDS_GUARD comes from merge-guard.js (shell: tokenized git/gh/glab/curl/wget analysis; MCP: verb-based).
 
 if [ "$NEEDS_GUARD" = 1 ]; then
-    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time 5 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
-    LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
-    GUARD_DECISION=$(node -e "
-      let raw = process.argv[1] || '';
-      let localSha = process.argv[2] || '';
-      let approval = null;
-      try { approval = JSON.parse(raw); } catch { approval = null; }
-      if (!approval || !approval.approved) {
-        process.stdout.write('BLOCK|||Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).');
-      } else if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
-        process.stdout.write('BLOCK|||Merge REFUSED: live HEAD (' + localSha + ') differs from authenticated approval SHA (' + approval.approved_mr_sha + ').');
-      } else {
-        process.stdout.write('ALLOW|||');
-      }
-    " -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    t=$(tmo 3) || deny_budget
+    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    LOCAL_SHA=$(timeout -k 1 "$t" git rev-parse HEAD 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
     GUARD_RESULT="${GUARD_DECISION%%|||*}"
     GUARD_REASON="${GUARD_DECISION#*|||}"
     if [ "$GUARD_RESULT" != "ALLOW" ]; then
         [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
-        node -e "
-          process.stdout.write(JSON.stringify({decision: 'deny', reason: process.argv[1]}));
-        " -- "$GUARD_REASON"
+        # Static JSON-escape of the reason (it only ever carries our own text + SHAs) -- no node needed.
+        GUARD_REASON="${GUARD_REASON//\\/\\\\}"; GUARD_REASON="${GUARD_REASON//\"/\\\"}"
+        echo "{\"decision\": \"deny\", \"reason\": \"$GUARD_REASON\"}"
         exit 0
     fi
     # Approved and SHA matches -- fall through to the role-based checks below.
+fi
+
+# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
+# AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
+ROLE="${AGENT_ROLE:-}"
+if [ -z "$ROLE" ]; then
+    for _attempt in 1 2; do
+        t=$(tmo 1) || deny_budget
+        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+            t=$(tmo 1) || deny_budget
+            ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            break
+        fi
+        sleep 0.1
+    done
 fi
 
 # Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
