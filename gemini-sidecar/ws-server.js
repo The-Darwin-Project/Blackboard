@@ -189,9 +189,9 @@ function setupWSServer(wss) {
           const child = task.child;
           child.kill('SIGTERM');
           const killTimer = setTimeout(() => {
-            if (!child.killed) {
+            if (child.exitCode === null && child.signalCode === null) {
               console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL for ${task?.eventId || 'unknown'}`);
-              child.kill('SIGKILL');
+              try { child.kill('SIGKILL'); } catch {}
             }
           }, 5000);
           child.on('exit', () => clearTimeout(killTimer));
@@ -209,9 +209,9 @@ function setupWSServer(wss) {
         const child = task.child;
         child.kill('SIGTERM');
         const killTimer = setTimeout(() => {
-          if (!child.killed) {
+          if (child.exitCode === null && child.signalCode === null) {
             console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL`);
-            child.kill('SIGKILL');
+            try { child.kill('SIGKILL'); } catch {}
           }
         }, 5000);
         child.on('exit', () => clearTimeout(killTimer));

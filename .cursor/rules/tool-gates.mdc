@@ -19,7 +19,7 @@ Tool gates control which tools FRIDAY can access in any given Brain state. `GATE
 
 | Mode | Count | Behavior | Example Gates |
 |---|---|---|---|
-| `strip` | 25 | Removes listed tools when predicate is true | PHASE_CLOSE, DOMAIN_COMPLEX, NO_KARGO, OBS_PLATEAU |
+| `strip` | 26 | Removes listed tools when predicate is true | PHASE_CLOSE, DOMAIN_COMPLEX, NO_KARGO, OBS_PLATEAU, DISPATCH_DEFER |
 | `allow` | 4 | Keeps ONLY listed tools, strips everything else | INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL |
 
 Allow-mode gates are more restrictive — they define a whitelist. When an allow-mode gate fires, only the listed tools survive.
@@ -60,7 +60,7 @@ Tool descriptions in `llm/types.py` act as the most proximate LLM instruction. T
 
 ## Key Invariants
 
-- `GATE_REGISTRY` length = 29 (25 strip + 4 allow; verify: `len(GATE_REGISTRY)` in code).
+- `GATE_REGISTRY` length = 30 (26 strip + 4 allow; verify: `len(GATE_REGISTRY)` in code).
 - Gate predicates are named functions (not lambdas) for per-gate unit testing.
 - `context_flags` is always a dict by the time it reaches `GateContext` (`build_gate_context` normalizes `None` → `{}`).
 - `UNEVALUATED_CLOSE` gate strips `close_event` when unevaluated `jarvis.message` or `user.message` turns exist — prevents closing over unread interventions.

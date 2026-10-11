@@ -177,8 +177,12 @@ If no proven fix exists, omit this section.
 |-------|-----------------|
 | `platform` | Infer from where the failure occurred: build system for PipelineRuns, promotion system for promotion failures, source control for native CI, registry for registry issues |
 | `summary` | `[evt-XXXXXXX] {one-line specific failure}` -- include the concrete error so the reader knows the issue without opening the description |
-| `priority` | Normal: first occurrence, no blast radius. Major: persistent after retest, blocks one component. Critical: affects multiple components or versions. Blocker: production outage. |
+| `priority` | Normal (P3/P4): first occurrence, no blast radius. Major (P2): persistent after retest, blocks one component. Critical/Blocker (P1): affects multiple components or versions, production outage. |
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |
+
+### Mandatory Maintainer Notification for P1/P2 Incidents
+
+For any incident classified as Critical/Blocker (P1) or Major (P2), you MUST issue a maintainer notification ping via the chat/slack tool immediately after filing the incident. Do not rely solely on the Jira/incident ticket.
 
 Include the event id in every output: incident summary, maintainer notifications, and close reason.
 

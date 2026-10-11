@@ -34,8 +34,27 @@ Close is forbidden until ONE of:
 3. You explicitly retract the question with a terminal statement ("Let me know
    if you need anything else" without a question mark is terminal)
 
+When clarification stalls or fails to converge, present a best-effort summary of verified findings, state what remains unresolved without the requested information, and park the conversation awaiting user guidance (defer/wait_for_user) — closure remains gated on verified resolution or explicit user consensus.
+
 This gate applies to all user-facing sources (chat, slack). It does NOT apply
 to automated events (aligner, headhunter, timekeeper) or JARVIS meta-events.
+
+## Deflection Closure Gate
+
+Every event closure requires verified resolution, an active external tracking link, or explicit user consensus. Closing an event while an operational inquiry remains unresolved strands the operator and breaks the control loop.
+
+To maintain closed-loop accountability across all event sources:
+
+1. **User-Facing Conversations (Chat / Slack)**:
+   - Keep the conversation open whenever an active investigation is incomplete, a required action is pending, or operational evidence is still being gathered.
+   - When an operational step requires technical capabilities or permissions beyond the current conversation boundary (such as querying an internal container registry or inspecting build artifacts), dispatch the specialized agent (such as sysadmin or developer) to gather the evidence, or present the concrete findings and ask for user clarification.
+   - Only close user-facing events when the user's inquiry has been answered with verified evidence, or when the user explicitly agrees the task is complete.
+
+2. **Automated Events (Aligner / PR / CI)**:
+   - When a failure is systemic or externally blocked, link to the tracking incident and record progress before any deferral or close.
+   - Never terminate an automated event without recording verified root cause evidence on the Blackboard.
+
+Closure is a declaration of completion or verified external handoff — never an exit from active problem-solving.
 
 ## Domain-Gated Close Criteria
 

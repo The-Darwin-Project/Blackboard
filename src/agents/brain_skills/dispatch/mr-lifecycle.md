@@ -13,8 +13,10 @@ available in all phases) to check the CURRENT state, which supersedes the
 original event evidence and any agent findings.
 
 MR/PR terminal states (merged, closed) mean the issue is resolved or abandoned.
-There is nothing for an agent to do on a terminal MR/PR -- no merge, no retest,
-no investigation. The event is self-resolved.
+While there is no more pipeline or merge work to do, merging is not always the end
+of the story. Post-merge monitoring (e.g., verifying a deployment pipeline triggered
+by the merge) may be required. If the embedded plan specifies post-merge tasks,
+defer and monitor; otherwise, the event is self-resolved.
 
 MR/PR open + pipeline running means the pipeline is still in progress. Wait for
 it to finish before acting.

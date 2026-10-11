@@ -1209,7 +1209,7 @@ class LiveAPIAdapter:
             active_ids, reason=reason, from_tool=True,
         )
         if event_id is None:
-            return "Review already active — use send_event_message to contribute to the existing one."
+            return f"Review already active (event_id={self._active_meta_event_id}) — use send_event_message to contribute to the existing one."
         return f"System review created: {event_id}. FRIDAY will triage and respond."
 
     async def _tool_recall_handoff_notes(self, last_n: int = 3) -> str:

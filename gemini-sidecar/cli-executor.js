@@ -18,22 +18,61 @@
 // 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
 //     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
 //     here (not a hardcoded role check) when a future role needs its own permission boundary.
+// 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
+//     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
+//     model-line-only, and match stderr only (stdout is model text and can mention these phrases).
+// 12. [Gotcha]: agy uses ~/.gemini/config/hooks.json for PreToolUse (validate-mutations.sh) and Stop (require-results.sh);
+//     `--mode plan` is its primary read-only layer backed by hook enforcement.
+//     Add read-only roles to AGY_READ_ONLY_ROLES (ROLE_SETTINGS_FILE keys are folded in automatically).
 
-const { spawn } = require('child_process');
+const cp = require('child_process');
+const spawn = (...args) => cp.spawn(...args);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+function resolveModel(options, agentCli) {
+  const effectiveRole = String(options.role || AGENT_ROLE || (agentCli === 'claude' ? 'planner' : 'triage')).trim().toLowerCase();
+  if (options.model) return options.model;
+  if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
+    return process.env.EPHEMERAL_MODEL_EXPLORER;
+  }
+  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-opus-4-6' : 'gemini-3.7-flash');
+}
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
 // Only roles listed here get --settings; all other roles are unaffected.
 const ROLE_SETTINGS_FILE = {
     code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+};
+
+// Roles that must never run with write/approve-all permissions on the agy path. agy runs
+// `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
+// Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is read-only by definition,
+// so it is folded in here rather than maintained as a second list.
+const AGY_READ_ONLY_ROLES = new Set([
+    'architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst',
+    ...Object.keys(ROLE_SETTINGS_FILE),
+]);
+
+// Whitelist of explicitly allowed mutating roles for agy. Mutating roles receive
+// --dangerously-skip-permissions but remain subject to the server-side merge-approval guard
+// via validate-mutations.sh. All other or unrecognized future roles fail closed to --mode plan
+// as a secondary trust boundary.
+const AGY_MUTATING_ROLES = new Set([
+    'developer', 'sysadmin', 'qe', 'tester', 'executor',
+]);
+
+// Fallback model per CLI for the invalid-model retry (see getRetryOptions).
+const FALLBACK_MODEL = {
+    claude: 'claude-opus-4-6',
+    gemini: 'gemini-2.5-flash',
+    agy: 'gemini-2.5-flash',
 };
 
 // Minimum load-bearing deny rules the settings-validity check requires (below) --
@@ -128,15 +167,73 @@ function writeThinkingConfig(effort, model) {
     }
 }
 
+// agy rejects a model name that already carries an effort suffix alongside --effort, so
+// peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.
+function splitModelEffortSuffix(model, effort) {
+    let m;
+    while ((m = model.match(/^(.+)-(low|medium|high|xhigh|max)$/))) {
+        model = m[1];
+        effort = m[2];
+    }
+    return { model, effort };
+}
+
 function buildCLICommand(prompt, options = {}) {
+    const rawRole = options.role || AGENT_ROLE || '';
+    const effectiveRole = String(rawRole).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
+
+    if (AGENT_CLI === 'agy') {
+        const args = [];
+        const binary = AGY_CLI;
+
+        // Read-only roles or plan mode run under --mode plan, and plan always wins over
+        // autoApprove: a read-only role must never get --dangerously-skip-permissions.
+        const isReadOnlyRole = AGY_READ_ONLY_ROLES.has(effectiveRole) ||
+            effectiveRole.includes('review') ||
+            effectiveRole.includes('analyst') ||
+            effectiveRole.includes('explorer') ||
+            effectiveRole.includes('architect');
+
+        const isKnownMutatingRole = AGY_MUTATING_ROLES.has(effectiveRole);
+
+        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
+        // read-only to receive --dangerously-skip-permissions. Unrecognized roles default to --mode plan.
+        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
+            args.push('--mode', 'plan');
+        } else if (options.autoApprove) {
+            args.push('--dangerously-skip-permissions');
+        } else {
+            // In non-interactive sidecar piped stdio, if autoApprove is not granted,
+            // default to --mode plan rather than unhandled interactive TTY prompts.
+            args.push('--mode', 'plan');
+        }
+        args.push('--output-format', 'stream-json');
+        // NOTE: Never pass --input-format stream-json; it conflicts with command-line -p prompt!
+
+        // Model & effort normalization to prevent CLI conflict errors
+        let model = resolveModel(options, AGENT_CLI);
+        let effort = options.effort || AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT;
+
+        ({ model, effort } = splitModelEffortSuffix(model, effort));
+        effort = effort || 'high'; // agy requires explicit --effort for flash/pro models
+
+        if (model) args.push('--model', model);
+        if (effort) args.push('--effort', effort);
+        if (options.conversationId || options.sessionId) {
+            args.push('--conversation', options.conversationId || options.sessionId);
+        }
+
+        args.push('-p', prompt);
+        return { binary, args };
+    }
+
     if (AGENT_CLI === 'claude') {
         const args = [];
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const effectiveRoleForSettings = options.role || AGENT_ROLE;
-        const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
+        const settingsFile = ROLE_SETTINGS_FILE[effectiveRole];
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
@@ -155,7 +252,7 @@ function buildCLICommand(prompt, options = {}) {
                 settingsValid = false;
             }
             if (!settingsValid) {
-                const msg = `Expected --settings file missing or invalid for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
+                const msg = `Expected --settings file missing or invalid for role '${effectiveRole}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
                 console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
                 throw new Error(msg);
             }
@@ -167,7 +264,7 @@ function buildCLICommand(prompt, options = {}) {
             args.push('--dangerously-skip-permissions');
         }
         args.push('--output-format', 'stream-json', '--verbose');
-        const model = options.model || AGENT_MODEL || 'claude-opus-4-6';
+        const model = resolveModel(options, AGENT_CLI);
         args.push('--model', model);
         const effort = options.effort || AGENT_EFFORT_LEVEL;
         if (effort) {
@@ -176,7 +273,6 @@ function buildCLICommand(prompt, options = {}) {
         if (options.sessionId) {
             args.push('--resume', options.sessionId);
         }
-        const effectiveRole = options.role || AGENT_ROLE;
         const ultrathinkPrefix = effectiveRole === 'architect' ? 'ultrathink ' : '';
         args.push('-p', ultrathinkPrefix + prompt);
         return { binary: 'claude', args };
@@ -184,13 +280,12 @@ function buildCLICommand(prompt, options = {}) {
     const args = [];
     if (options.autoApprove) args.push('--yolo');
     args.push('-o', 'stream-json');
-    const model = options.model || AGENT_MODEL || 'gemini-3.7-flash';
+    const model = resolveModel(options, AGENT_CLI);
     args.push('--model', model);
     if (options.sessionId) {
         args.push('--resume', options.sessionId);
     }
     const effort = options.effort || AGENT_EFFORT_LEVEL;
-    const effectiveRole = options.role || AGENT_ROLE;
     const resolvedEffort = effort || (effectiveRole === 'architect' ? 'high' : '');
     writeThinkingConfig(resolvedEffort || 'none', model);
     args.push('-p', prompt);
@@ -380,6 +475,8 @@ async function executeCLI(prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            sessionId: options.sessionId,
+            conversationId: options.conversationId,
         });
 
         console.log(`[${new Date().toISOString()}] Executing: ${AGENT_CLI} (prompt length: ${prompt.length})`);
@@ -400,12 +497,17 @@ async function executeCLI(prompt, options = {}) {
 
         let stdout = '';
         let stderr = '';
+        let lineBuffer = '';
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
             const text = data.toString();
             stdout += text;
-            for (const line of text.split('\n')) {
+            lineBuffer += text;
+
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop();
+            for (const line of lines) {
                 if (!line.trim()) continue;
                 const parsed = parseStreamLine(line);
                 if (parsed?.text) streamTextAccum += parsed.text;
@@ -418,6 +520,14 @@ async function executeCLI(prompt, options = {}) {
 
         child.on('close', (code) => {
             watch.close();
+
+            if (lineBuffer.trim()) {
+                const parsed = parseStreamLine(lineBuffer);
+                if (parsed?.text) streamTextAccum += parsed.text;
+                const task = state.getCurrentTask();
+                if (parsed?.sessionId && task) task.sessionId = parsed.sessionId;
+            }
+
             const effectiveOutput = streamTextAccum || stdout;
 
             console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
@@ -426,10 +536,12 @@ async function executeCLI(prompt, options = {}) {
                 console.log(`[${new Date().toISOString()}] stderr: ${stderr}`);
             }
 
+            const usedModel = resolveModel(options, AGENT_CLI);
+
             if (code === 0) {
                 try {
                     const result = JSON.parse(effectiveOutput);
-                    resolve({ status: 'success', exitCode: code, output: result, source: 'stdout' });
+                    resolve({ status: 'success', exitCode: code, output: result, source: 'stdout', usedModel });
                     return;
                 } catch (e) {}
 
@@ -443,13 +555,19 @@ async function executeCLI(prompt, options = {}) {
                     autoApprove: options.autoApprove !== false,
                     effectiveOutput,
                 }).then(({ output, source }) => {
-                    resolve({ status: 'success', exitCode: code, output, source });
+                    resolve({ status: 'success', exitCode: code, output, source, usedModel });
                 }).catch((err) => {
                     console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
-                    resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout' });
+                    resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
                 });
             } else {
-                resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
+                const retry = getRetryOptions(options, code, stderr);
+                if (retry) {
+                    console.log(`[${new Date().toISOString()}] ${retry.reason}`);
+                    executeCLI(prompt, retry.options).then(resolve).catch(reject);
+                    return;
+                }
+                resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
             }
         });
 
@@ -470,6 +588,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
             sessionId: options.sessionId,
+            conversationId: options.conversationId,
             model: options.model,
             effort: options.effort,
             role: options.role,
@@ -504,11 +623,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             existing.child = child;
             existing.model = options.model || '';
             existing.role = options.role || '';
+            existing.sessionId = options.sessionId || options.conversationId || null;
         } else {
             if (existing) {
                 console.error(`[${new Date().toISOString()}] WARNING: replacing in-flight task state for event ${existing.eventId} with unrelated task ${eventId} -- an upstream busy-guard was missed`);
             }
-            state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '' });
+            state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '', sessionId: options.sessionId || options.conversationId || null });
         }
 
         let stdout = '';
@@ -594,6 +714,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     executeCLIStreaming(ws, eventId, prompt, {
                         ...options,
                         sessionId: null,
+                        conversationId: null,
                         _retryWithoutSession: true,
                     }).then(resolve).catch(reject);
                     return;
@@ -603,11 +724,18 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     executeCLIStreaming(ws, eventId, prompt, {
                         ...options,
                         sessionId: null,
+                        conversationId: null,
                         _retryWithoutSession: true,
                     }).then(resolve).catch(reject);
                     return;
                 }
-                resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
+                const retry = getRetryOptions(options, code, stderr);
+                if (retry) {
+                    console.log(`[${new Date().toISOString()}] [${eventId}] ${retry.reason}`);
+                    executeCLIStreaming(ws, eventId, prompt, retry.options).then(resolve).catch(reject);
+                    return;
+                }
+                resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel: resolveModel(options, AGENT_CLI) });
             }
         });
 
@@ -641,6 +769,54 @@ function isGeminiSessionNotFound(exitCode, stderr) {
     return lower.includes('no previous sessions found') || lower.includes('session not found');
 }
 
+// agy only, stderr only: stdout carries the model's own text, so matching it would re-run
+// (and repeat any mutating tool calls of) a task that merely *talked about* a missing
+// conversation. Matches per-line to avoid spurious retries when unrelated lines combine.
+// `agentCli` is a parameter so the predicate stays testable.
+function isAgySessionError(exitCode, stderr, agentCli = AGENT_CLI) {
+    if (agentCli !== 'agy') return false;
+    return (stderr || '').toLowerCase().split('\n').some((line) =>
+        line.includes('conversation') && (line.includes('not found') || line.includes('corrupt') || line.includes('invalid')));
+}
+
+// A model-selection failure names the model on the same stderr line as the error marker.
+// Bare `invalid_argument` also covers bad --effort flags, MCP errors and oversized context,
+// none of which a model swap can fix -- so require the line to mention the model.
+function isInvalidModelError(stderr) {
+    return (stderr || '').toLowerCase().split('\n').some((line) =>
+        line.includes('model') && (line.includes('not found') || line.includes('invalid_argument') || line.includes('invalid model')));
+}
+
+// Shared by executeCLI and executeCLIStreaming: decide whether a failed run gets ONE retry
+// and with which options. Returns { reason, options } or null. Both retries re-run the whole
+// prompt, so each is bounded by its own flag and gated as narrowly as the evidence allows.
+function getRetryOptions(options, exitCode, stderr, agentCli = AGENT_CLI) {
+    const retryCount = options._retryCount || 0;
+    if (retryCount >= 1) return null;
+
+    if ((options.conversationId || options.sessionId) && !options._retryWithoutSession && isAgySessionError(exitCode, stderr, agentCli)) {
+        return {
+            reason: 'agy session error detected, retrying without --conversation',
+            options: { ...options, conversationId: null, sessionId: null, _retryWithoutSession: true, _retryCount: retryCount + 1 },
+        };
+    }
+    if (!options._retriedModel && isInvalidModelError(stderr)) {
+        const effectiveRole = String(options.role || AGENT_ROLE || '').trim().toLowerCase();
+        // Explorer falls back to flash on Gemini/Agy, or claude default on Claude CLI
+        const fallbackModel = (effectiveRole === 'explorer' && agentCli !== 'claude')
+            ? 'gemini-2.5-flash'
+            : FALLBACK_MODEL[agentCli];
+        // Retrying the model that just failed (e.g. claude already on the default) is pointless.
+        if (fallbackModel && fallbackModel !== resolveModel(options, agentCli)) {
+            return {
+                reason: `Invalid model error, retrying with ${fallbackModel}`,
+                options: { ...options, model: fallbackModel, _retriedModel: true, _retryCount: retryCount + 1 },
+            };
+        }
+    }
+    return null;
+}
+
 module.exports = {
     buildCLICommand,
     executeCLI,
@@ -652,6 +828,11 @@ module.exports = {
     prepareResultsDir,
     is429Error,
     is400SessionError,
+    isGeminiSessionNotFound,
+    isAgySessionError,
+    isInvalidModelError,
+    getRetryOptions,
+    resolveModel,
     writeThinkingConfig,
     GEMINI_SETTINGS_PATH,
     EFFORT_THINKING_BUDGET,
