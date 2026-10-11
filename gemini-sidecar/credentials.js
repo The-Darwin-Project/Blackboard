@@ -22,6 +22,7 @@ const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
 const { resolveCommand, writeClaudeMcpServer, writeAgyMcpServer } = require('./cli-setup');
+const { isReadOnlyRoleName } = require('./roles');
 
 // --- GitHub App ---
 const SECRETS_PATH = '/secrets/github';
@@ -513,10 +514,25 @@ function setupGitLabTooling(token) {
  * Configure ArgoCD MCP server for Antigravity (agy) and Claude Code.
  * Exchanges the existing ArgoCD password for a session JWT via the ArgoCD API,
  * then registers argocd-mcp as an MCP server in both CLI settings.
- * Architect gets read-only access; all other roles get full access.
+ * Every read-only role (roles.js: architect, explorer, security_analyst, code_reviewer, reviewer ...) gets a read-only MCP;
+ * all other roles get full access. Callers MUST pass the per-task role (ephemeral agents have AGENT_ROLE="").
  * Falls back silently to argocd CLI if session API is unreachable.
  */
-async function setupArgoCDMCP() {
+// Pure builder (unit-tested): the ArgoCD MCP server definition for a role. Read-only roles get MCP_READ_ONLY=true.
+function buildArgoCDMcpConfig({ baseUrl, sessionJwt, role, insecure }) {
+  return {
+    command: resolveCommand('argocd-mcp'),
+    args: ['stdio'],
+    env: {
+      ARGOCD_BASE_URL: baseUrl,
+      ARGOCD_API_TOKEN: sessionJwt,
+      ...(isReadOnlyRoleName(role) ? { MCP_READ_ONLY: 'true' } : {}),
+      ...(insecure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
+    },
+  };
+}
+
+async function setupArgoCDMCP(role = process.env.AGENT_ROLE || '') {
   const server = process.env.ARGOCD_SERVER;
   if (!server) return;
 
@@ -546,19 +562,10 @@ async function setupArgoCDMCP() {
     return;
   }
 
-  const role = process.env.AGENT_ROLE || '';
-  const readOnly = (role === 'architect');
-
-  const mcpConfig = {
-    command: resolveCommand('argocd-mcp'),
-    args: ['stdio'],
-    env: {
-      ARGOCD_BASE_URL: baseUrl,
-      ARGOCD_API_TOKEN: sessionJwt,
-      ...(readOnly ? { MCP_READ_ONLY: 'true' } : {}),
-      ...(insecure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
-    },
-  };
+  // `role` is the per-task role (ephemeral agents boot with AGENT_ROLE="", so the env var alone would leave
+  // explorer/security_analyst/code_reviewer with FULL ArgoCD access). Shared predicate: see roles.js.
+  const readOnly = isReadOnlyRoleName(role);
+  const mcpConfig = buildArgoCDMcpConfig({ baseUrl, sessionJwt, role, insecure });
 
   // Configure ArgoCD MCP for Claude Code (writes to ~/.claude.json)
   try {
@@ -840,6 +847,7 @@ async function setupJenkinsMCP() {
 }
 
 module.exports = {
+  buildArgoCDMcpConfig,
   hasGitHubCredentials,
   generateInstallationToken,
   discoverAndGenerateTokens,

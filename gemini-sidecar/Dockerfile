@@ -185,7 +185,7 @@ RUN npm install --omit=dev
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
      team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
-     jenkins-mcp.js catalog-skills.js claude-guard.js ./
+     jenkins-mcp.js catalog-skills.js claude-guard.js roles.js ./
 
 # Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name
 # contract that server.js/ws-*.js role gating depends on (jenkins_trigger_build,

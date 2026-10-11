@@ -38,6 +38,7 @@ const state = require('./state');
 const { AGENT_CLI, AGENT_MODEL, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL } = require('./config');
 const { wsSend } = require('./ws-utils');
 const { claudeMergeGuard } = require('./claude-guard');
+const { isReadOnlyRoleName } = require('./roles');
 const fs = require('fs');
 const http = require('http');
 
@@ -124,7 +125,7 @@ async function handleRequest(req, res) {
       // alone always misreported these two roles as 'full' here, since it never sees
       // the actual dispatched role for an ephemeral agent.
       agentRole: state.resolveRole('default'),
-      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer', 'explorer'].includes(state.resolveRole('default')) ? 'read-only (no file modification)' : 'full',
+      toolRestrictions: isReadOnlyRoleName(state.resolveRole('default')) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
@@ -150,6 +151,8 @@ async function handleRequest(req, res) {
     try {
       const payload = await parseBody(req).catch(() => null);
       const denial = await claudeMergeGuard(payload, {
+        role: state.resolveRole(''),
+        sidecarPort: PORT,
         fetchApproval: () => {
           const eventId = state.getCurrentTask()?.eventId;
           if (!eventId) return Promise.reject(new Error('no active event'));

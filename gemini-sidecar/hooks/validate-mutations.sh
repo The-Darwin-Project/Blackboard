@@ -19,6 +19,7 @@
 # 7. [Contract]: PreToolUse decision enum contract: strictly `decision: "deny"` to halt tool execution.
 
 # Read-only roles
+# Keep in sync with READ_ONLY_ROLES in ../roles.js (heuristics for other names live there).
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
 # Shell tools supported by agents
@@ -28,7 +29,7 @@ SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_co
 # Note: Denylist covers known mutation tools (write_to_file, replace_file_content, multi_replace_file_content,
 # edit_file; keep in sync with NATIVE_MUTATION in merge-guard.js);
 # future iterations should migrate to an authoritative tool allowlist per role.
-MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content edit_file"
+MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content edit_file Write Edit MultiEdit NotebookEdit"
 
 # Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
 # treated as a non-blocking error, i.e. FAIL-OPEN. So every external call below is capped by what is left
@@ -154,8 +155,21 @@ if [ -z "$ROLE" ]; then
     exit 0
 fi
 
+# Read-only role detection. Listed read-only roles match instantly; known mutating roles skip the check; anything
+# else (qa_reviewer_agent, ARCHITECT_LEAD ...) is classified by the shared name heuristics in ../roles.js (fail closed:
+# a node failure counts as read-only).
+is_readonly_role() {
+    echo "$READONLY_ROLES" | grep -qwi -- "$1" && return 0
+    in_list "$1" "developer sysadmin qe tester executor" && return 1
+    local t out
+    t=$(tmo 1) || return 0
+    out=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --readonly "$1" 2>/dev/null)
+    [ "$out" = "0" ] && return 1
+    return 0
+}
+
 # Fast exit: if role is an explicitly recognized mutating role, allow.
-if ! echo "$READONLY_ROLES" | grep -qwi "$ROLE"; then
+if ! is_readonly_role "$ROLE"; then
     echo '{"decision":"allow"}'
     exit 0
 fi

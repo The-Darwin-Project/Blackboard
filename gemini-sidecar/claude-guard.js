@@ -5,8 +5,9 @@
 //    Both share hooks/merge-guard.js (classification) + approvalVerdict (same approval/SHA contract).
 // 2. [Contract]: Returns null (allow) or a denial reason string. Any failure while the call is
 //    merge-class (analysis error, approval unreachable, git unavailable) => denial (fail CLOSED).
-//    Calls that are NOT merge-class are never blocked here (read-only roles are enforced by Claude's
-//    engine-level permission files, see cli-executor.js ROLE_SETTINGS_FILE).
+//    For MUTATING roles, calls that are not merge-class are never blocked here. READ-ONLY roles (roles.js) are
+//    delegated wholesale to hooks/validate-mutations.sh (denylist + read-only tool allowlist + merge guard), on top of
+//    Claude's engine-level permission files (cli-executor.js ROLE_SETTINGS_FILE).
 // 3. [Constraint]: Latency budget < the hook timeout (cli-setup.js, 10s): classify <=2.5s, approval
 //    fetch <=3s, git rev-parse <=1s. classify runs in a CHILD PROCESS (async) so git never blocks the
 //    event loop. A timed-out hook is a non-blocking error (fail-open), so we must answer with a denial
@@ -15,11 +16,14 @@
 //    not in the sidecar's own cwd.
 const { execFile, spawn } = require('child_process');
 const path = require('path');
+const { isReadOnlyRoleName, normalizeRole } = require('./roles');
 const mergeGuard = require('./hooks/merge-guard.js'); // approvalVerdict only; classification runs in a child process
 const GUARD_SCRIPT = path.join(__dirname, 'hooks', 'merge-guard.js');
+const VALIDATE_SCRIPT = path.join(__dirname, 'hooks', 'validate-mutations.sh');
 
 const APPROVAL_TIMEOUT_MS = 3000;
 const GIT_TIMEOUT_MS = 1000;
+const READONLY_HOOK_TIMEOUT_MS = 9000; // validate-mutations.sh enforces its own 8s budget; this is the hard kill
 const CLASSIFY_TIMEOUT_MS = 2500; // child kill deadline; the child enforces its own 1.5s git budget
 
 function gitHead(cwd) {
@@ -57,12 +61,45 @@ function classifyInChild(payload) {
   });
 }
 
+// Read-only roles on the Claude path get the SAME enforcement as the agy hook: run validate-mutations.sh (role
+// denylist for shell, read-only tool allowlist for everything else, merge-approval guard) with the Claude payload
+// as-is (it understands {tool_name, tool_input}). Spawned, never execSync: the sidecar event loop stays free (the
+// script may call back into this process's /hook-status and /proxy/approval). Resolves to a denial reason or null.
+function readOnlyRoleHook(payload, role, sidecarPort) {
+  return new Promise((resolve) => {
+    const cwd = typeof payload?.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
+    const child = spawn('bash', [VALIDATE_SCRIPT], {
+      cwd,
+      env: { ...process.env, AGENT_ROLE: role, SIDECAR_PORT: String(sidecarPort || process.env.PORT || 9090) },
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    let out = '';
+    const fail = (why) => resolve(`Read-only role '${role}': tool call could not be validated (${why}); failing closed.`);
+    const killer = setTimeout(() => { child.kill('SIGKILL'); fail('timeout'); }, READONLY_HOOK_TIMEOUT_MS);
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('error', () => { clearTimeout(killer); fail('spawn error'); });
+    child.on('close', () => {
+      clearTimeout(killer);
+      try {
+        const d = JSON.parse(out);
+        if (d.decision === 'allow') return resolve(null);
+        return resolve(d.reason || `Read-only role '${role}': tool call denied.`);
+      } catch { return fail('unparseable hook output'); }
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(JSON.stringify(payload ?? null));
+  });
+}
+
 /**
  * @param {object} payload   Claude PreToolUse payload ({tool_name, tool_input, cwd, ...})
- * @param {{fetchApproval: () => Promise<object>}} deps  fetchApproval resolves the Brain approval JSON for the current event
+ * @param {{fetchApproval: () => Promise<object>, role?: string, sidecarPort?: number}} deps  fetchApproval resolves the Brain
+ *   approval JSON for the current event; role is the resolved per-task role (read-only roles get the full hook policy)
  * @returns {Promise<string|null>} denial reason, or null to allow
  */
 async function claudeMergeGuard(payload, deps) {
+  const role = normalizeRole(deps.role);
+  if (isReadOnlyRoleName(role)) return readOnlyRoleHook(payload, role, deps.sidecarPort);
   let result;
   try {
     result = await classifyInChild(payload);

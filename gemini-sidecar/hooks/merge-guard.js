@@ -27,6 +27,10 @@
 //    pre-flight alias lookup: `git config alias.*|include.*|includeIf.*` writes, GIT_CONFIG_* env (and HOME/GIT_DIR/
 //    GIT_EXEC_PATH/PATH for a git call), redirects/`tee`/`cp`/`sed -i`/interpreters writing .git/config|~/.gitconfig, an
 //    unknown subcommand under -C/--git-dir (its aliases can't be looked up), and an executable git-<sub> on PATH.
+// 9. [Contract]: matchParen is heredoc-aware and returns n+1 for UNTERMINATED constructs; parseShell reports `unsafe`
+//    for any unterminated quote/$( )/backtick/$'..'/heredoc and analyzeString then guards (fail closed). Wrapper table
+//    WRAP covers sudo/doas/env(-S payloads)/xargs/parallel/ionice/taskset/chrt/flock/chroot/nsenter/unshare/watch/busybox;
+//    su/script -c, `sudo -s 'cmd'` and `bash -s` are handled in analyzeTokens. `--readonly <role>` exposes ../roles.js.
 // 6. [Pattern]: MCP tools are classified by NAME TOKENS (camelCase + snake_case split), so `mergePullRequest`,
 //    `merge_pull_request` and `glab_mr_merge` all yield the verb `merge`; `merge_request` (the noun) does not.
 //    The read-only allowlist is verb-based -- extend READ/SAFE sets here, or set HOOK_EXTRA_ALLOWED_TOOLS in
@@ -70,7 +74,7 @@ function scanAnsiC(str, start) {
   let j = start;
   while (j < str.length && str[j] !== "'") j += str[j] === '\\' ? 2 : 1;
   const end = Math.min(j, str.length);
-  return { text: decodeAnsiC(str.slice(start, end)), end: Math.min(end + 1, str.length) };
+  return { text: decodeAnsiC(str.slice(start, end)), end: Math.min(end + 1, str.length), closed: j < str.length };
 }
 
 // Index of the closing backtick (honouring \` escapes), or n if unterminated.
@@ -82,62 +86,129 @@ function matchBacktick(str, start) {
 
 const isWordStart = (str, j, lo) => j === lo || /[\s;&|()]/.test(str[j - 1]);
 
-// Quote-, comment- and nesting-aware: returns the index just past the ')' matching the '(' before `start`.
-// Quotes ('..', "..", $'..'), backticks, ${..}, `# comments` and nested $( ) must not close the substitution early;
-// otherwise the remainder of the command is re-parsed with the wrong state and a trailing `git merge` hides.
+// Parse `<<[-]WORD` starting at str[i] === '<' (not `<<<`). Returns { delim, strip, quoted, next } or null.
+function readHeredocStart(str, i) {
+  if (!(str[i] === '<' && str[i + 1] === '<' && str[i + 2] !== '<')) return null;
+  const n = str.length;
+  let j = i + 2;
+  const strip = str[j] === '-';
+  if (strip) j++;
+  while (str[j] === ' ' || str[j] === '\t') j++;
+  let delim = '';
+  let quoted = false;
+  while (j < n && !/[\s;&|()<>]/.test(str[j])) {
+    const ch = str[j];
+    if (ch === "'" || ch === '"') {
+      quoted = true;
+      const k = str.indexOf(ch, j + 1);
+      const e = k === -1 ? n : k;
+      delim += str.slice(j + 1, e); j = e + 1; continue;
+    }
+    if (ch === '\\') { quoted = true; delim += str[j + 1] ?? ''; j += 2; continue; }
+    delim += ch; j++;
+  }
+  return { delim, strip, quoted, next: j };
+}
+
+// Skip heredoc bodies starting at str[i] (just after a newline). Returns { next, bodies, ok } -- ok=false when a
+// terminator line is missing (unterminated heredoc).
+function skipHeredocBodies(str, i, pending) {
+  const n = str.length;
+  const bodies = [];
+  let ok = true;
+  for (const hd of pending) {
+    const body = [];
+    let found = false;
+    while (i < n) {
+      let e = str.indexOf('\n', i);
+      if (e === -1) e = n;
+      const line = str.slice(i, e);
+      i = Math.min(e + 1, n);
+      if ((hd.strip ? line.replace(/^\t+/, '') : line) === hd.delim) { found = true; break; }
+      body.push(line);
+    }
+    if (!found) ok = false;
+    bodies.push({ hd, text: body.join('\n') });
+  }
+  return { next: i, bodies, ok };
+}
+
+// Quote-, comment-, heredoc- and nesting-aware: returns the index just past the ')' matching the '(' before `start`,
+// or n + 1 when the construct is UNTERMINATED (callers must fail closed). Quotes ('..', "..", $'..'), backticks,
+// ${..}, `# comments`, heredoc bodies and nested $( ) must not close the substitution early; otherwise the remainder
+// of the command is re-parsed with the wrong state and a trailing `git push origin main` hides.
 function matchParen(str, start) {
   const n = str.length;
+  const UNTERM = n + 1;
   let depth = 1;
   let j = start;
+  const pending = [];
   while (j < n && depth > 0) {
     const c = str[j];
     if (c === '\\') { j += 2; continue; }
-    if (c === "'") { const k = str.indexOf("'", j + 1); j = k === -1 ? n : k + 1; continue; }
-    if (c === '$' && str[j + 1] === "'") { j = scanAnsiC(str, j + 2).end; continue; }
+    if (c === "'") { const k = str.indexOf("'", j + 1); if (k === -1) return UNTERM; j = k + 1; continue; }
+    if (c === '$' && str[j + 1] === "'") { const r = scanAnsiC(str, j + 2); if (!r.closed) return UNTERM; j = r.end; continue; }
     if (c === '"') {
       j++;
       while (j < n && str[j] !== '"') {
         if (str[j] === '\\') { j += 2; continue; }
-        if (str[j] === '$' && str[j + 1] === '(') { j = matchParen(str, j + 2); continue; }
-        if (str[j] === '`') { j = matchBacktick(str, j + 1) + 1; continue; }
+        if (str[j] === '$' && str[j + 1] === '(') { j = matchParen(str, j + 2); if (j > n) return UNTERM; continue; }
+        if (str[j] === '`') { const k = matchBacktick(str, j + 1); if (k >= n) return UNTERM; j = k + 1; continue; }
         j++;
       }
+      if (j >= n) return UNTERM;
       j++; continue;
     }
-    if (c === '`') { j = matchBacktick(str, j + 1) + 1; continue; }
-    if (c === '$' && str[j + 1] === '{') { const k = str.indexOf('}', j + 2); j = k === -1 ? n : k + 1; continue; }
+    if (c === '`') { const k = matchBacktick(str, j + 1); if (k >= n) return UNTERM; j = k + 1; continue; }
+    if (c === '$' && str[j + 1] === '{') { const k = str.indexOf('}', j + 2); if (k === -1) return UNTERM; j = k + 1; continue; }
     if (c === '#' && isWordStart(str, j, start)) { const k = str.indexOf('\n', j); j = k === -1 ? n : k; continue; }
+    if (c === '<' && str[j + 1] === '<' && str[j + 2] !== '<') {
+      const hd = readHeredocStart(str, j);
+      pending.push(hd); j = hd.next; continue;
+    }
+    if (c === '\n' && pending.length) {
+      const r = skipHeredocBodies(str, j + 1, pending.splice(0));
+      if (!r.ok) return UNTERM;
+      j = r.next; continue;
+    }
     if (c === '$' && str[j + 1] === '(') { depth++; j += 2; continue; }
     if (c === '(') depth++;
     else if (c === ')') depth--;
     j++;
   }
-  return j; // == n (unterminated) or index after ')'
+  return depth === 0 ? j : UNTERM;
 }
 
-// Collect $( ) / backtick substitutions that an UNQUOTED heredoc body would execute.
+// Collect $( ) / backtick substitutions that an UNQUOTED heredoc body would execute. Returns true if one is
+// unterminated (caller treats the whole command as unanalyzable => guarded).
 function bodySubstitutions(body, nested) {
+  let unsafe = false;
   for (let i = 0; i < body.length; i++) {
     if (body[i] === '\\') { i++; continue; }
     if (body[i] === '$' && body[i + 1] === '(') {
       const end = matchParen(body, i + 2);
+      if (end > body.length) { unsafe = true; nested.push(body.slice(i + 2)); break; }
       nested.push(body.slice(i + 2, Math.max(i + 2, end - 1)));
       i = end - 1;
     } else if (body[i] === '`') {
       const end = matchBacktick(body, i + 1);
+      if (end >= body.length) { unsafe = true; nested.push(body.slice(i + 1)); break; }
       nested.push(body.slice(i + 1, end));
       i = end;
     }
   }
+  return unsafe;
 }
 
-// Returns { cmds: {t: string[], f: boolean[]}[], nested: string[] }. `f[k]` marks token k as a redirection operator
+// Returns { cmds, nested, unsafe }; unsafe=true when ANY construct is unterminated (quote, $( ), backtick, $'..', heredoc
+// without terminator) -- the shell would reject or mis-split it, so it is analyzed as guarded. `f[k]` marks token k as a redirection operator
 // (built from an UNQUOTED < or >, so a quoted '>' argument is never mistaken for one). `nested` holds the bodies of
 // $(...), `...`, <(...), >(...) and of command substitutions inside unquoted heredocs, to be analyzed as commands.
 function parseShell(str) {
   const cmds = [];
   const nested = [];
   const pending = []; // heredocs whose bodies start after the next newline
+  let unsafe = false;
   let tokens = [];
   let flags = [];
   let cur = '';
@@ -151,8 +222,9 @@ function parseShell(str) {
 
   const grabParen = (start) => { // start points just after '('
     const end = matchParen(str, start);
-    const closed = end <= n && str[end - 1] === ')';
-    const body = str.slice(start, closed ? end - 1 : end);
+    const closed = end <= n;
+    if (!closed) unsafe = true;
+    const body = str.slice(start, closed ? end - 1 : n);
     nested.push(body);
     // `case x in a) ...;; esac` has unbalanced ')' of its own: also analyze everything that follows.
     if (/\bcase\b/.test(body)) nested.push(str.slice(start));
@@ -160,22 +232,15 @@ function parseShell(str) {
   };
   const grabTick = (start) => { // start points just after the opening backtick
     const end = matchBacktick(str, start);
+    if (end >= n) unsafe = true;
     nested.push(str.slice(start, end));
     return end + 1;
   };
   const readHeredocBodies = () => {
-    for (const hd of pending) {
-      const body = [];
-      while (i < n) {
-        let e = str.indexOf('\n', i);
-        if (e === -1) e = n;
-        const line = str.slice(i, e);
-        i = Math.min(e + 1, n);
-        if ((hd.strip ? line.replace(/^\t+/, '') : line) === hd.delim) break;
-        body.push(line);
-      }
-      if (!hd.quoted) bodySubstitutions(body.join('\n'), nested);
-    }
+    const r = skipHeredocBodies(str, i, pending);
+    i = r.next;
+    if (!r.ok) unsafe = true; // heredoc never terminated
+    for (const { hd, text } of r.bodies) if (!hd.quoted && bodySubstitutions(text, nested)) unsafe = true;
     pending.length = 0;
   };
 
@@ -189,10 +254,11 @@ function parseShell(str) {
     }
     if (c === "'") {
       const j = str.indexOf("'", i + 1);
+      if (j === -1) unsafe = true;
       const end = j === -1 ? n : j;
       cur += str.slice(i + 1, end); has = true; i = end + 1; continue;
     }
-    if (c === '$' && str[i + 1] === "'") { const r = scanAnsiC(str, i + 2); cur += r.text; has = true; i = r.end; continue; }
+    if (c === '$' && str[i + 1] === "'") { const r = scanAnsiC(str, i + 2); if (!r.closed) unsafe = true; cur += r.text; has = true; i = r.end; continue; }
     if (c === '$' && str[i + 1] === '"') { i++; continue; } // $"..." locale quoting: same as "..."
     if (c === '"') {
       i++; has = true;
@@ -202,6 +268,7 @@ function parseShell(str) {
         if (str[i] === '`') { i = grabTick(i + 1); cur += '$SUBST'; continue; }
         cur += str[i]; i++;
       }
+      if (i >= n) unsafe = true; // unterminated "..."
       i++; continue;
     }
     if (c === '$' && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; has = true; continue; }
@@ -211,25 +278,9 @@ function parseShell(str) {
     if (c === '<' && str[i + 1] === '<' && str[i + 2] !== '<') { // heredoc: <<WORD / <<-WORD / <<'WORD'
       if (/^\d+$/.test(cur)) { cur = ''; has = false; } // fd prefix (3<<EOF)
       pushTok();
-      let j = i + 2;
-      const strip = str[j] === '-';
-      if (strip) j++;
-      while (str[j] === ' ' || str[j] === '\t') j++;
-      let delim = '';
-      let quoted = false;
-      while (j < n && !/[\s;&|()<>]/.test(str[j])) {
-        const ch = str[j];
-        if (ch === "'" || ch === '"') {
-          quoted = true;
-          const k = str.indexOf(ch, j + 1);
-          const e = k === -1 ? n : k;
-          delim += str.slice(j + 1, e); j = e + 1; continue;
-        }
-        if (ch === '\\') { quoted = true; delim += str[j + 1] ?? ''; j += 2; continue; }
-        delim += ch; j++;
-      }
-      pending.push({ delim, strip, quoted });
-      i = j; continue;
+      const hd = readHeredocStart(str, i);
+      pending.push(hd);
+      i = hd.next; continue;
     }
     if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') {
       // `>&` / `2>&1` / `&>` are redirections, not command separators. Only an UNQUOTED < or > counts, so
@@ -244,6 +295,7 @@ function parseShell(str) {
     if (c === '<' || c === '>') redirTail = true;
     cur += c; has = true; i++;
   }
+  if (pending.length) unsafe = true; // heredoc operator with no body at all
   pushCmd();
 
   // Drop redirections (`> file`, `2>/dev/null`, `<<<`) so they don't pollute positional parsing. A bare operator
@@ -264,7 +316,7 @@ function parseShell(str) {
     }
     return out;
   }).filter((t) => t.length || t.redirs.length);
-  return { cmds: cleaned, nested };
+  return { cmds: cleaned, nested, unsafe };
 }
 
 const base = (p) => p.replace(/\/+$/, '').split('/').pop();
@@ -273,24 +325,37 @@ const DYN = /[$`{*?[]/;
 const isAssign = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
 
 // Wrapper commands that merely run another command: option set (with values) and leading positionals.
+const NOVAL = new Set();
 const WRAP = {
-  env: { valued: new Set(['-u', '--unset', '-C', '--chdir']), pos: 0 },
-  command: { valued: new Set(), pos: 0 },
-  builtin: { valued: new Set(), pos: 0 },
+  env: { valued: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '--default-signal', '--block-signal']), pos: 0 },
+  command: { valued: NOVAL, pos: 0 },
+  builtin: { valued: NOVAL, pos: 0 },
   exec: { valued: new Set(['-a']), pos: 0 },
-  sudo: { valued: new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '-r', '-t']), pos: 0 },
+  sudo: { valued: new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '-r', '-t', '--user', '--group', '--host', '--prompt',
+    '--chdir', '--role', '--type', '--other-user', '--close-from', '--command-timeout', '--chroot']), pos: 0 },
   doas: { valued: new Set(['-u', '-C']), pos: 0 },
-  nice: { valued: new Set(['-n']), pos: 0 },
-  nohup: { valued: new Set(), pos: 0 },
-  time: { valued: new Set(['-f', '-o']), pos: 0 },
+  nice: { valued: new Set(['-n', '--adjustment']), pos: 0 },
+  nohup: { valued: NOVAL, pos: 0 },
+  time: { valued: new Set(['-f', '-o', '--format', '--output']), pos: 0 },
   timeout: { valued: new Set(['-k', '-s', '--kill-after', '--signal']), pos: 1 },
   stdbuf: { valued: new Set(['-i', '-o', '-e']), pos: 0 },
-  setsid: { valued: new Set(), pos: 0 },
-  xargs: { valued: new Set(['-I', '-n', '-P', '-d', '-L', '-s', '-E', '-a', '-l']), pos: 0 },
+  setsid: { valued: NOVAL, pos: 0 },
+  xargs: { valued: new Set(['-I', '-n', '-P', '-d', '-L', '-s', '-E', '-a', '-l', '--max-args', '--max-procs', '--delimiter', '--arg-file',
+    '--max-lines', '--max-chars', '--eof']), pos: 0 },
+  parallel: { valued: new Set(['-j', '--jobs', '-n', '--max-args', '-N', '-I', '-S', '--sshlogin', '-a', '--arg-file']), pos: 0 },
+  ionice: { valued: new Set(['-c', '-n', '-p', '-P', '-u', '--class', '--classdata', '--pid', '--pgid', '--uid']), pos: 0 },
+  taskset: { valued: NOVAL, pos: 1 }, // `taskset [-c] MASK cmd`
+  chrt: { valued: NOVAL, pos: 1 }, // `chrt [opts] PRIORITY cmd`
+  flock: { valued: new Set(['-w', '-E', '--timeout', '--conflict-exit-code']), pos: 1 }, // `flock LOCKFILE cmd`
+  chroot: { valued: new Set(['--userspec', '--groups']), pos: 1 }, // `chroot NEWROOT cmd`
+  nsenter: { valued: new Set(['-t', '--target', '-S', '--setuid', '-G', '--setgid', '-w', '--wd']), pos: 0 },
+  unshare: { valued: new Set(['--map-user', '--map-group', '--propagation', '-S', '-G', '--setuid', '--setgid', '-w', '--wd']), pos: 0 },
+  watch: { valued: new Set(['-n', '--interval', '-d']), pos: 0 },
+  busybox: { valued: NOVAL, pos: 0 },
   // shell keywords that can precede a command word
-  if: { valued: new Set(), pos: 0 }, then: { valued: new Set(), pos: 0 }, do: { valued: new Set(), pos: 0 },
-  else: { valued: new Set(), pos: 0 }, elif: { valued: new Set(), pos: 0 }, while: { valued: new Set(), pos: 0 },
-  until: { valued: new Set(), pos: 0 }, '!': { valued: new Set(), pos: 0 }, '{': { valued: new Set(), pos: 0 },
+  if: { valued: NOVAL, pos: 0 }, then: { valued: NOVAL, pos: 0 }, do: { valued: NOVAL, pos: 0 },
+  else: { valued: NOVAL, pos: 0 }, elif: { valued: NOVAL, pos: 0 }, while: { valued: NOVAL, pos: 0 },
+  until: { valued: NOVAL, pos: 0 }, '!': { valued: NOVAL, pos: 0 }, '{': { valued: NOVAL, pos: 0 },
 };
 
 // Returns the command with wrappers/assignments removed; `.assigns` lists every VAR=value seen in front of it
@@ -298,7 +363,9 @@ const WRAP = {
 function stripPrefix(tokens) {
   const t = tokens.slice();
   const assigns = [];
+  const extras = []; // `env -S 'cmd args'` split-string payloads: more command text to analyze
   t.assigns = assigns;
+  t.extras = extras;
   for (;;) {
     while (t.length && isAssign(t[0])) assigns.push(t.shift());
     if (!t.length) return t;
@@ -309,6 +376,9 @@ function stripPrefix(tokens) {
     while (t.length) {
       const x = t[0];
       if (b === 'env' && isAssign(x)) { assigns.push(t.shift()); continue; }
+      if (b === 'env' && /^(-S|--split-string)$/.test(x)) { t.shift(); if (t.length) extras.push(t.shift()); continue; }
+      if (b === 'env' && /^-S./.test(x)) { extras.push(t.shift().slice(2)); continue; }
+      if (b === 'env' && /^--split-string=/.test(x)) { extras.push(t.shift().slice(15)); continue; }
       if (x.startsWith('-') && x.length > 1) {
         t.shift();
         if (spec.valued.has(x) && t.length) t.shift();
@@ -624,26 +694,38 @@ function analyzeTokens(tokens, depth, strict) {
   const t = stripPrefix(tokens);
   const assigns = t.assigns || [];
   const src = SRC.cur;
+  if (t.extras && t.extras.length) return analyzeString(`${t.extras.join(' ')} ${t.join(' ')}`, depth + 1, true); // env -S 'git merge x'
   if (!t.length) { // assignment-only / redirect-only command
     return configEnvGuard(assigns, '') || configFileWriteGuard('', [], redirs, src);
   }
   const rawBin = t[0];
   const bin = base(rawBin).toLowerCase();
   const rest = t.slice(1);
+  if (/\s/.test(rawBin)) return analyzeString(t.join(' '), depth + 1, true); // `sudo -s 'git merge x'`: the "command" is a script
   if (configEnvGuard(assigns, bin)) return true;
   if (ENV_BUILTINS.has(bin) && configEnvGuard(rest.filter(isAssign), '')) return true; // export GIT_CONFIG_COUNT=1
   if (configFileWriteGuard(bin, rest, redirs, src)) return true;
   if (DYN.test(rawBin)) { // dynamic command word
     if (strict) return true;
-    return rest.some((x) => /^(merge|push|api)$/i.test(x) || DYN.test(x) && /merge|push/i.test(x));
+    // Only the FIRST non-flag argument (the sub-command) matters: `$TOOL --help`, `$HOME/bin/t --grep=merge status` are fine.
+    const sub = rest.find((x) => !x.startsWith('-'));
+    return !!sub && (/^(merge|push|api)$/i.test(sub) || DYN.test(sub));
   }
   if (SHELLS.has(bin)) {
     const ci = rest.findIndex((x) => /^-[A-Za-z]*c[A-Za-z]*$/.test(x));
     if (ci !== -1 && rest[ci + 1] !== undefined) return analyzeString(rest[ci + 1], depth + 1, true);
+    // `bash -s [-- args]` reads the program from stdin even when positional args follow.
+    if (rest.some((x) => /^-[A-Za-z]*s[A-Za-z]*$/.test(x))) return true;
     // No -c and no script file: the shell reads its program from stdin (`... | bash`, `bash <<EOF`, `bash -s`,
     // here-strings) which cannot be inspected => needs approval. `bash script.sh` is NOT flagged (file body unseen).
     const hasScript = rest.some((x, k) => !x.startsWith('-') && !(k > 0 && /^-[A-Za-z]*[oO]$/.test(rest[k - 1])));
     return !hasScript;
+  }
+  if (bin === 'su' || bin === 'script' || bin === 'runuser') { // `su -c 'cmd' user`, `script -qc 'cmd' file`
+    const ci = rest.findIndex((x) => /^-[A-Za-z]*c$/.test(x) || /^--command(=|$)/.test(x));
+    if (ci === -1) return false;
+    const sc = rest[ci].includes('=') ? rest[ci].slice(rest[ci].indexOf('=') + 1) : rest[ci + 1];
+    return sc === undefined ? false : analyzeString(sc, depth + 1, true);
   }
   if (bin === 'eval') return analyzeString(rest.join(' '), depth + 1, true);
   if (bin === 'find') {
@@ -677,7 +759,8 @@ function analyzeString(str, depth, strict) {
   const prev = SRC.cur;
   SRC.cur = str;
   try {
-    const { cmds, nested } = parseShell(str);
+    const { cmds, nested, unsafe } = parseShell(str);
+    if (unsafe) return true; // unterminated construct: cannot be analyzed reliably => guarded
     for (const c of cmds) if (analyzeTokens(c, depth, strict)) return true;
     for (const nsub of nested) if (analyzeString(nsub, depth + 1)) return true;
     return false;
@@ -710,9 +793,13 @@ const FAMILY_TOKENS = new Set(['team', 'bb', 'svc', 'ka']); // comms / blackboar
 // network_request, find, tabs, wait_for, navigate, navigate_back, resize, hover, click, close).
 const BROWSER_READ = new Set(['snapshot', 'take', 'screenshot', 'console', 'messages', 'network', 'requests', 'request', 'find',
   'tabs', 'wait', 'for', 'navigate', 'back', 'resize', 'hover', 'click', 'close']);
-const NATIVE_ALLOW = new Set(['task_boundary', 'notify_user', 'browser_subagent']);
+// Native (non-MCP) tools that never mutate: agy built-ins and Claude Code's read/search/orchestration tools.
+const NATIVE_ALLOW = new Set(['task_boundary', 'notify_user', 'browser_subagent',
+  'read', 'grep', 'glob', 'ls', 'webfetch', 'websearch', 'todowrite', 'task', 'agent', 'exitplanmode', 'enterplanmode',
+  'bashoutput', 'killshell', 'notebookread', 'skill', 'askuserquestion', 'taskoutput']);
 // Native file-mutation tools: handled by validate-mutations.sh MUTATION_TOOLS (keep the two lists in sync).
-const NATIVE_MUTATION = new Set(['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'edit_file']);
+const NATIVE_MUTATION = new Set(['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'edit_file',
+  'write', 'edit', 'multiedit', 'notebookedit']); // last four: Claude Code's file-mutation tools
 
 // glab_api MCP shape: { args: ['endpoint'] | 'endpoint', flags: { method, field, ... } | '-X PUT' }. Either may be a string.
 function apiTokens(args) {
@@ -857,6 +944,11 @@ if (require.main === module) {
       try { out = JSON.stringify(classify(JSON.parse(raw), { cwd: process.env.MERGE_GUARD_CWD || undefined, budgetMs: 1500 })); } catch { out = 'null'; }
       process.stdout.write(out);
     });
+  } else if (process.argv[2] === '--readonly') {
+    // node merge-guard.js --readonly <role>  =>  1 | 0 (shared predicate, ../roles.js)
+    let ro = true;
+    try { ro = require('../roles').isReadOnlyRoleName(process.argv[3]); } catch { ro = true; }
+    process.stdout.write(ro ? '1' : '0');
   } else if (process.argv[2] === '--verdict') {
     // node merge-guard.js --verdict -- <approval-json> <local-sha>  =>  ALLOW||| | BLOCK|||<reason>
     const [, , , , rawApproval, sha] = process.argv;

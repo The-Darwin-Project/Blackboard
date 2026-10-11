@@ -69,7 +69,7 @@ server.listen(PORT, '0.0.0.0', () => {
   setupRegistryCredentials();
   setupRemoteK8sMCPs();
 
-  setupArgoCDMCP().catch((err) => {
+  setupArgoCDMCP(process.env.AGENT_ROLE || '').catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup ArgoCD MCP setup failed: ${err.message}`);
   });
 

@@ -653,6 +653,62 @@ check_in "$CFG_REPO" "T-16v: HOME for a non-git program allowed"                
 check_in "$CFG_REPO" "T-16w: export PATH allowed"                                      'export PATH=$PATH:/opt/bin' developer allow
 rm -rf "$CFG_REPO"
 
+# --- T-17: review round 7 -- heredoc-aware parens, unterminated constructs, wrapper gaps, read-only Claude tools ---
+sh_merge "T-17a: nested heredoc ')' cannot close \$( ) early (push to main)" $'x=$(cat <<\'EOF\'\n)\nEOF\n); git push origin main' developer
+sh_merge "T-17b: nested unquoted heredoc then merge"                        $'echo $(cat <<EOF\n)\nEOF\n); git merge x' developer
+sh_merge "T-17c: nested <<- heredoc then merge"                             $'echo $(cat <<-EOF\n\t)\n\tEOF\n); git merge x' developer
+sh_merge "T-17d: unterminated \$( ) fails closed"                           'echo $(git status' developer
+sh_merge "T-17e: unterminated single quote fails closed"                    "echo 'abc" developer
+sh_merge "T-17f: unterminated double quote fails closed"                    'echo "abc' developer
+sh_merge "T-17g: unterminated backtick fails closed"                        'echo `git status' developer
+sh_merge "T-17h: unterminated heredoc fails closed"                         $'cat <<EOF\nno terminator' developer
+sh_merge "T-17i: sudo --user root git merge"                                "sudo --user root git merge x" developer
+sh_merge "T-17j: env -S payload"                                            "env -S 'git merge x'" developer
+sh_merge "T-17k: env --split-string="                                       "env --split-string='git merge x'" developer
+sh_merge "T-17l: bash -s -- args (stdin program)"                           "bash -s -- a b" developer
+sh_merge "T-17m: xargs long option"                                         "xargs --max-args 1 git merge" developer
+sh_merge "T-17n: xargs -I{}"                                                "xargs -I{} git merge {}" developer
+sh_merge "T-17o: sudo -s script string"                                     "sudo -s 'git merge x'" developer
+sh_merge "T-17p: su -c"                                                     "su -c 'git merge x' root" developer
+sh_merge "T-17q: script -qc"                                                "script -qc 'git merge x' /dev/null" developer
+sh_merge "T-17r: flock lockfile cmd"                                        "flock /tmp/l git merge x" developer
+sh_merge "T-17s: ionice -c 2"                                               "ionice -c 2 git merge x" developer
+sh_merge "T-17t: taskset -c 0"                                              "taskset -c 0 git merge x" developer
+sh_merge "T-17u: chroot / cmd"                                              "chroot / git merge x" developer
+sh_merge "T-17v: watch"                                                     "watch -n1 'git merge x'" developer
+sh_merge "T-17w: busybox git"                                               "busybox git merge x" developer
+sh_merge "T-17x: nsenter / unshare"                                         "nsenter -t 1 git merge x" developer
+sh_merge "T-17y: dynamic command word + dynamic sub-command"                '$TOOL $ACTION' developer
+sh_merge "T-17z: dynamic command word + literal merge"                      '$TOOL merge x' developer
+for pair in \
+  'T-17aa|echo $(cat <<EOF\nhello (world)\nEOF\n); git status' \
+  'T-17ab|git commit -F - <<EOF\nmsg\nEOF' \
+  'T-17ac|sudo --user root ls' \
+  'T-17ad|$HOME/bin/tool --grep=merge status' \
+  'T-17ae|$TOOL --help' \
+  'T-17af|git log --grep="$X" --oneline' \
+  'T-17ag|git diff "$BASE"..."$HEAD"' \
+  'T-17ah|git show $SHA' \
+  'T-17ai|echo "$(git merge-base a b)"' \
+  'T-17aj|curl -s "$URL"'; do
+  cmd="${pair#*|}"; cmd="${cmd//\\n/$'\n'}"
+  check_in "$PWD" "${pair%%|*}: ${cmd//$'\n'/ ; }" "$cmd" developer allow
+done
+# Claude Code native tools under a read-only role (the Claude hook delegates read-only roles to this script)
+for t in Read Grep Glob LS Task Agent WebFetch WebSearch TodoWrite Skill BashOutput; do
+  run_test "T-17b${t}: explorer allowed Claude tool $t" "{\"tool_name\":\"$t\",\"tool_input\":{}}" explorer allow
+done
+for t in Write Edit MultiEdit NotebookEdit; do
+  run_test_deny_with_reason "T-17c${t}: explorer denied Claude tool $t" "{\"tool_name\":\"$t\",\"tool_input\":{}}" explorer "read-only"
+done
+run_test "T-17d: developer may use Write (Claude)" '{"tool_name":"Write","tool_input":{}}' developer allow
+run_test_deny_with_reason "T-17e: name-heuristic read-only role (qa_reviewer_agent) gets the shell denylist" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -am x"}}}' qa_reviewer_agent "mutation blocked"
+run_test_deny_with_reason "T-17f: ARCHITECT_LEAD denied native file mutation" \
+  '{"toolCall":{"name":"write_to_file","args":{}}}' ARCHITECT_LEAD "read-only"
+run_test "T-17g: unlisted non-read-only role stays a mutating role" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -am x"}}}' release_manager allow
+
 # Empty/missing command on every recognised shell tool name fails closed, for every role
 run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \
   '{"toolCall":{"name":"run_command","args":{"Other":"git merge x"}}}' developer "failing closed"

@@ -33,6 +33,7 @@ const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolve
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
+const { READ_ONLY_ROLES, isReadOnlyRoleName } = require('./roles');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveEffectiveRole(role) {
@@ -62,11 +63,7 @@ const ROLE_SETTINGS_FILE = {
     security_analyst: READONLY_SETTINGS_FILE,
 };
 
-// Same name heuristics the agy path uses: an unlisted-but-read-only-looking role (qa_reviewer_agent,
-// ARCHITECT_LEAD, security-analyst) must not silently fall through to an unrestricted Claude session.
-function isReadOnlyRoleName(role) {
-    return AGY_READ_ONLY_ROLES.has(role) || /review|analyst|explorer|architect/.test(role);
-}
+// Read-only role detection is shared (roles.js): name heuristics fail closed for unlisted read-only-looking roles.
 function settingsFileForRole(role) {
     return ROLE_SETTINGS_FILE[role] || (isReadOnlyRoleName(role) ? READONLY_SETTINGS_FILE : undefined);
 }
@@ -75,10 +72,7 @@ function settingsFileForRole(role) {
 // `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
 // Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is read-only by definition,
 // so it is folded in here rather than maintained as a second list.
-const AGY_READ_ONLY_ROLES = new Set([
-    'architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst',
-    ...Object.keys(ROLE_SETTINGS_FILE),
-]);
+const AGY_READ_ONLY_ROLES = new Set([...READ_ONLY_ROLES, ...Object.keys(ROLE_SETTINGS_FILE)]);
 
 // Whitelist of explicitly allowed mutating roles for agy. Mutating roles receive
 // --dangerously-skip-permissions but remain subject to the server-side merge-approval guard

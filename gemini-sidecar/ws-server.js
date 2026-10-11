@@ -99,7 +99,7 @@ function setupWSServer(wss) {
         }
 
         // Configure ArgoCD MCP server (session API -> JWT per-task)
-        await setupArgoCDMCP();
+        await setupArgoCDMCP(role || process.env.AGENT_ROLE || '');
 
         if (hasJenkinsCredentials() && ['sysadmin', 'developer'].includes(role)) {
           await setupJenkinsMCP();

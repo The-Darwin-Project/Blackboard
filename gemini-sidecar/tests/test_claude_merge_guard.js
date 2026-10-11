@@ -53,13 +53,13 @@ function startServer(handleRequest, brainBody) {
   });
 }
 
-async function setup(approval) {
+async function setup(approval, role = 'developer') {
   const { brain, brainPort } = await startServer(null, approval);
   setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${brainPort}`);
   clearCache();
   const handler = require(HTTP_HANDLER_PATH);
   const state = require(STATE_PATH);
-  state.setCurrentTask({ eventId: 'evt-1', role: 'developer' });
+  state.setCurrentTask({ eventId: 'evt-1', role });
   const app = await new Promise((resolve) => {
     const server = http.createServer((req, res) => { handler.handleRequest(req, res).catch(() => {}); });
     server.listen(0, '127.0.0.1', () => resolve(server));
@@ -154,6 +154,41 @@ describe('Claude PreToolUse merge guard', () => {
       const r = await s.post(bash('git status', repoFeat));
       assert.equal(r.status, 200);
       assert.ok(!denied(r));
+    } finally { s.close(); }
+  });
+});
+
+describe('Claude PreToolUse for READ-ONLY roles (delegated to validate-mutations.sh)', () => {
+  const tool = (tool_name, tool_input = {}, cwd) => ({ tool_name, tool_input, cwd });
+  for (const role of ['explorer', 'security_analyst', 'architect']) {
+    it(`${role}: native read tools allowed; writes, MCP writes and mutating shell denied`, async () => {
+      const s = await setup({ approved: false }, role);
+      try {
+        for (const t of ['Read', 'Grep', 'Glob', 'Task', 'WebFetch', 'mcp__GitHub__get_file_contents', 'mcp__GitHub__list_pull_requests', 'mcp__ArgoCD__get_application']) {
+          assert.ok(!denied(await s.post(tool(t, {}, repoFeat))), `expected allow: ${t}`);
+        }
+        assert.ok(!denied(await s.post(bash('git status', repoFeat))), 'read-only shell allowed');
+        for (const t of ['Write', 'Edit', 'NotebookEdit', 'mcp__GitHub__create_branch', 'mcp__GitHub__push_files', 'mcp__ArgoCD__sync_application', 'mcp__Playwright__browser_evaluate']) {
+          assert.ok(denied(await s.post(tool(t, { branch: 'feat/x' }, repoFeat))), `expected deny: ${t}`);
+        }
+        for (const c of ['git push origin feat/x', 'rm -rf x', 'echo x > f.txt', 'kubectl delete pod p']) {
+          assert.ok(denied(await s.post(bash(c, repoFeat))), `expected deny: ${c}`);
+        }
+      } finally { s.close(); }
+    });
+  }
+  it('a name-heuristic read-only role (qa_reviewer_agent) is read-only too', async () => {
+    const s = await setup({ approved: false }, 'qa_reviewer_agent');
+    try {
+      assert.ok(denied(await s.post(tool('Write', {}, repoFeat))));
+      assert.ok(!denied(await s.post(tool('Read', {}, repoFeat))));
+    } finally { s.close(); }
+  });
+  it('mutating roles keep the old behaviour (no read-only allowlist)', async () => {
+    const s = await setup({ approved: false }, 'developer');
+    try {
+      assert.ok(!denied(await s.post(tool('Write', {}, repoFeat))));
+      assert.ok(!denied(await s.post(tool('mcp__GitHub__create_branch', { branch: 'feat/x' }, repoFeat))));
     } finally { s.close(); }
   });
 });
