@@ -80,13 +80,13 @@ function writeClaudeMcpServer(name, config) {
 function writeAgyMcpServer(name, config) {
     if (name === '__proto__' || name === 'constructor') return;
     // Single chokepoint for every agy MCP write (cli-setup + all credentials.js call sites):
-    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude or
-    // gemini sidecar must not create it at all.
+    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude
+    // sidecar must not create it at all.
     if (AGENT_CLI !== 'agy') return;
     const agyMcpPath = AGY_MCP_PATH;
     const dir = path.dirname(agyMcpPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
+    try { fs.chmodSync(dir, 0o700); } catch (err) { console.warn('[cli-setup] chmod failed on MCP dir:', err.message); }
 
     let data = {};
     if (fs.existsSync(agyMcpPath)) {
@@ -135,7 +135,7 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
     const agyHooksPath = AGY_HOOKS_PATH;
     const dir = path.dirname(agyHooksPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
+    try { fs.chmodSync(dir, 0o700); } catch (err) { console.warn('[cli-setup] chmod failed on hooks dir:', err.message); }
 
     let data = {};
     if (fs.existsSync(agyHooksPath)) {
@@ -156,7 +156,7 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
                         name: 'validate-mutations',
                         type: 'command',
                         command: validateHook,
-                        timeout: 8,
+                        timeout: 10,
                         description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
                     },
                 ],
@@ -169,7 +169,7 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
                 name: 'require-results',
                 type: 'command',
                 command: requireHook,
-                timeout: 5,
+                timeout: 10,
                 description: 'Block exit if team_send_results not called',
             },
         ],
@@ -337,7 +337,6 @@ function initializeCLISettings() {
 }
 
 const AGY_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
-const GEMINI_SKILLS_DIR = AGY_SKILLS_DIR;
 const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 const DISABLED_SUFFIX = '.disabled';
 
@@ -470,4 +469,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills, AGY_SKILLS_DIR, GEMINI_SKILLS_DIR };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills, AGY_SKILLS_DIR };

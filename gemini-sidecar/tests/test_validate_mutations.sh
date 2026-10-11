@@ -323,12 +323,12 @@ run_test_deny_with_reason \
 # =============================================================================
 STOP_HOOK="${SCRIPT_DIR}/../hooks/require-results.sh"
 STOP_PORT=59997   # nothing listens here -> hasResults=no
-rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}"
+rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}" "/tmp/.darwin-hooks-${UID:-1001}/require-results-${STOP_PORT}-default.count"
 STOP_DECISIONS=""
 for _i in 1 2 3 4; do
   STOP_DECISIONS+="$(echo '{}' | SIDECAR_PORT=$STOP_PORT bash "$STOP_HOOK" 2>/dev/null | jq -r '.decision') "
 done
-rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}"
+rm -f "/tmp/darwin-require-results-continues-${STOP_PORT}" "/tmp/.darwin-hooks-${UID:-1001}/require-results-${STOP_PORT}-default.count"
 if [[ "$STOP_DECISIONS" == "continue continue continue stop " ]]; then
   echo "PASS [T-5a: require-results continues at most 3 times, then stops]"
   ((PASS++))

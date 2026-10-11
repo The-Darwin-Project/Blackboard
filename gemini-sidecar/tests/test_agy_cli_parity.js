@@ -527,7 +527,7 @@ describe('getRetryOptions retry bounding and model fallback', () => {
       { _retriedModel: true, _retryCount: 1, role: 'explorer' },
       1,
       'Model not found: gemini-custom',
-      'gemini'
+      'agy'
     );
     assert.equal(result, null);
   });
@@ -546,13 +546,13 @@ describe('getRetryOptions retry bounding and model fallback', () => {
     assert.equal(result.options._retryCount, 1);
   });
 
-  it('falls back to gemini-2.5-flash under gemini CLI for explorer role', () => {
+  it('falls back to gemini-2.5-flash under agy CLI for explorer role', () => {
     const { getRetryOptions } = freshModules();
     const result = getRetryOptions(
       { role: 'explorer', model: 'invalid-model' },
       1,
       'Model not found: invalid-model',
-      'gemini'
+      'agy'
     );
     assert.notEqual(result, null);
     assert.equal(result.options.model, 'gemini-2.5-flash');

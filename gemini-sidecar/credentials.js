@@ -758,7 +758,7 @@ function setupRegistryCredentials() {
   if (!fs.existsSync(REGISTRY_CONFIG_PATH)) return;
   try {
     fs.mkdirSync(DOCKER_DIR, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(DOCKER_DIR, 0o700); } catch { /* ignore */ }
+    try { fs.chmodSync(DOCKER_DIR, 0o700); } catch (err) { console.warn('[credentials] chmod failed on docker dir:', err.message); }
     const tmpDocker = `${DOCKER_CONFIG_PATH}.tmp.${process.pid}`;
     fs.copyFileSync(REGISTRY_CONFIG_PATH, tmpDocker);
     fs.chmodSync(tmpDocker, 0o600);

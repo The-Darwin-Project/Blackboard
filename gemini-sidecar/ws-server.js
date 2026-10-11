@@ -2,9 +2,8 @@
 // @ai-rules:
 // 1. [Pattern]: Legacy WS server — clients connect TO sidecar. Message types: task, followup, cancel.
 // 2. [Pattern]: All shared state via state.js. Concurrency guard — rejects both task AND followup
-//    if getCurrentTask() already set. Both spawn a `gemini` child that reads/writes the shared
-//    ~/.gemini/settings.json (see cli-executor.js writeThinkingConfig) -- an unguarded message type
-//    lets two invocations race on that file. Any new message type that reaches executeCLIStreaming
+//    if getCurrentTask() already set. Both spawn a CLI child (`claude` or `agy`). Concurrency guard
+//    ensures only one CLI task runs at a time on the sidecar. Any new message type that reaches executeCLIStreaming
 //    MUST carry the same guard.
 // 3. [Pattern]: Credentials (GitHub, GitLab, ArgoCD, Kargo) set up per task before executeCLIStreaming.
 // 4. [Gotcha]: On ws.close, kills orphaned child process (SIGTERM then SIGKILL after 5s) and clears currentTask.

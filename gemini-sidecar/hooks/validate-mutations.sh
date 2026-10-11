@@ -17,24 +17,13 @@
 # Read-only roles
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
-# Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
-# stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
-# Total role-lookup budget is capped (~2s) so the whole hook stays under the registered
-# PreToolUse timeout (cli-setup.js). Retry only when curl itself fails; a successful
-# response with an empty role is final (parse once).
-ROLE=""
-_start=$SECONDS
-for _attempt in 1 2 3; do
-    if ROLE_DATA=$(curl -sf --connect-timeout 1 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
-        ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
-        break
-    fi
-    # Local sidecars carry AGENT_ROLE in env -- no need to keep retrying once we have it.
-    [ -n "${AGENT_ROLE:-}" ] && break
-    [ $((SECONDS - _start)) -ge 2 ] && break
-    sleep 0.2
-done
-[ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
+# Shell tools supported by agents
+SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
+
+# Native file mutation tools (denied for read-only roles; denied for unresolved roles)
+# Note: Denylist covers known mutation tools (write_to_file, replace_file_content, edit_file);
+# future iterations should migrate to an authoritative tool allowlist per role.
+MUTATION_TOOLS="write_to_file replace_file_content edit_file"
 
 # Read stdin (PreToolUse JSON payload)
 INPUT=$(cat 2>/dev/null)
@@ -82,18 +71,35 @@ fi
 TOOL_NAME="${PARSED%%|||*}"
 COMMAND="${PARSED#*|||}"
 
-# Shell tools supported by agents
-SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
+# Fast exit: non-shell and non-file-mutation tools (reads, searches, MCP tools like team_send_results)
+# are allowed immediately without querying role over HTTP. This prevents hook timeouts and sidecar
+# degradation from impacting read-only tools.
+if ! echo "$SHELL_TOOLS $MUTATION_TOOLS" | grep -qwi -- "$TOOL_NAME"; then
+    echo '{"decision":"allow"}'
+    exit 0
+fi
 
-# Native file mutation tools (denied for read-only roles; denied for unresolved roles)
-MUTATION_TOOLS="write_to_file replace_file_content edit_file"
+# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
+# AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
+ROLE="${AGENT_ROLE:-}"
+if [ -z "$ROLE" ]; then
+    _start=$SECONDS
+    for _attempt in 1 2; do
+        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+            ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            break
+        fi
+        [ $((SECONDS - _start)) -ge 2 ] && break
+        sleep 0.1
+    done
+fi
 
 # --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
-if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
+if echo "$SHELL_TOOLS" | grep -qwi "$TOOL_NAME" && [ -n "$COMMAND" ]; then
     MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
     MERGE_PATTERN='\bgit\s+merge\b|\bgit\s+push\b[^&|;]*\bmain\b|\bgh\s+pr\s+merge\b|\bglab\s+mr\s+merge\b'
     if printf '%s\n' "$MERGE_CMD" | grep -qiE "$MERGE_PATTERN"; then
-        APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+        APPROVAL_JSON=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
         LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
         GUARD_DECISION=$(node -e "
           let raw = process.argv[1] || '';
@@ -122,31 +128,26 @@ if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
 fi
 
 # Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
-# mutate (shell + native file mutation tools) are denied; other tools (MCP tools such as
-# team_send_results, reads, searches) are allowed so an unresolved role cannot wedge result delivery.
+# mutate (shell + native file mutation tools) reach this point and are denied.
 if [ -z "$ROLE" ]; then
-    if echo "$SHELL_TOOLS $MUTATION_TOOLS" | grep -qw -- "$TOOL_NAME"; then
-        node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
-    else
-        echo '{"decision":"allow"}'
-    fi
+    node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
     exit 0
 fi
 
 # Fast exit: if role is an explicitly recognized mutating role, allow.
-if ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
+if ! echo "$READONLY_ROLES" | grep -qwi "$ROLE"; then
     echo '{"decision":"allow"}'
     exit 0
 fi
 
 # Native mutation tools check for read-only roles
-if echo "$MUTATION_TOOLS" | grep -qw "$TOOL_NAME"; then
+if echo "$MUTATION_TOOLS" | grep -qwi "$TOOL_NAME"; then
     echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to mutate files\"}"
     exit 0
 fi
 
 # Early exit: non-shell tools don't need shell mutation checking
-if ! echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME"; then
+if ! echo "$SHELL_TOOLS" | grep -qwi "$TOOL_NAME"; then
     echo '{"decision":"allow"}'
     exit 0
 fi

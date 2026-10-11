@@ -11,21 +11,28 @@
 
 MAX_CONTINUES=3
 COUNTER_TTL_MIN=30
-COUNTER_FILE="/tmp/darwin-require-results-continues-${SIDECAR_PORT:-9090}"
 
-# Drop a stale counter left over from an earlier task
-[ -f "$COUNTER_FILE" ] && [ -n "$(find "$COUNTER_FILE" -mmin +"$COUNTER_TTL_MIN" 2>/dev/null)" ] && rm -f "$COUNTER_FILE"
+INPUT=$(cat 2>/dev/null)
+RESULT=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
+HAS_RESULTS=$(echo "$RESULT" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.hasResults?'yes':'no')}catch{process.stdout.write('no')}" 2>/dev/null)
+TASK_MODE=$(echo "$RESULT" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.taskMode||'')}catch{process.stdout.write('')}" 2>/dev/null)
+TASK_ID=$(echo "$RESULT" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write((j.taskId||'').replace(/[^a-zA-Z0-9_-]/g,''))}catch{process.stdout.write('')}" 2>/dev/null)
+
+COUNTER_DIR="/tmp/.darwin-hooks-${UID:-1001}"
+mkdir -p -m 0700 "$COUNTER_DIR" 2>/dev/null
+COUNTER_FILE="${COUNTER_DIR}/require-results-${SIDECAR_PORT:-9090}-${TASK_ID:-default}.count"
+
+# Defend against symlink attacks: remove if it is a symlink
+[ -L "$COUNTER_FILE" ] && rm -f "$COUNTER_FILE" 2>/dev/null
+
+# Drop stale counters older than TTL
+[ -f "$COUNTER_FILE" ] && [ -n "$(find "$COUNTER_FILE" -mmin +"$COUNTER_TTL_MIN" 2>/dev/null)" ] && rm -f "$COUNTER_FILE" 2>/dev/null
 
 allow_stop() {
     rm -f "$COUNTER_FILE" 2>/dev/null
     echo '{"decision": "stop"}'
     exit 0
 }
-
-INPUT=$(cat 2>/dev/null)
-RESULT=$(curl -sf --connect-timeout 1 --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
-HAS_RESULTS=$(echo "$RESULT" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.hasResults?'yes':'no')}catch{process.stdout.write('no')}" 2>/dev/null)
-TASK_MODE=$(echo "$RESULT" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.taskMode||'')}catch{process.stdout.write('')}" 2>/dev/null)
 
 # Message mode is exempt -- those tasks use team_send_message
 if [ "$TASK_MODE" = "message" ]; then
@@ -42,7 +49,14 @@ case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 if [ "$COUNT" -ge "$MAX_CONTINUES" ]; then
     allow_stop
 fi
-echo $((COUNT + 1)) > "$COUNTER_FILE" 2>/dev/null
+
+TMP_CNT=$(mktemp "${COUNTER_DIR}/cnt.XXXXXX" 2>/dev/null)
+if [ -n "$TMP_CNT" ]; then
+    echo $((COUNT + 1)) > "$TMP_CNT" 2>/dev/null
+    mv -f "$TMP_CNT" "$COUNTER_FILE" 2>/dev/null
+else
+    echo $((COUNT + 1)) > "$COUNTER_FILE" 2>/dev/null
+fi
 
 # No results delivered -- continue (Antigravity Stop hook)
 node -e "

@@ -248,7 +248,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // Hook status for Gemini hooks (require-results.sh, validate-mutations.sh)
+  // Hook status for agent hooks (require-results.sh, validate-mutations.sh)
   if (url.pathname === '/hook-status' && req.method === 'GET') {
     const task = state.getCurrentTask();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -256,6 +256,7 @@ async function handleRequest(req, res) {
       hasResults: !!state.getCallbackResult(),
       taskMode: task?.mode || '',
       role: state.resolveRole('', task),
+      taskId: task?.taskId || task?.eventId || '',
     }));
     return;
   }
