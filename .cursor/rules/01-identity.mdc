@@ -58,7 +58,7 @@ All agents communicate exclusively via the **Conversation Queue** in Redis (shar
     * **See:** `BlackBoard/.cursor/rules/13-nightwatcher.mdc` for the full protocol and invariants.
 
 8. **JARVIS (Agent 7 -- System 2)**
-    * **Type:** In-process Python adapter using Gemini Live API (`gemini-live-2.5-flash`).
+    * **Type:** In-process Python adapter using Gemini Live API (`gemini-3.8-live`).
     * **Role:** Meta-cognitive observer. Watches the Brain's pulse stream, detects friction patterns, intervenes when FRIDAY is stuck.
     * **Behavior:** Composed, terse, evidence-first. Speaks only when silence would be negligent. Communicates with FRIDAY exclusively via `send_event_message` (direct conversation turns).
     * **Actor name:** `jarvis` in conversation turns (evidence, message, insight).
@@ -91,7 +91,7 @@ All agents communicate via the **Conversation Queue** in Redis (shared event doc
 5. **The Developer & QE (Agent 4 - Implementation & Verification)**: Independent CLI sidecars dispatched sequentially by Brain (Developer implements, QE verifies and writes tests). See `04-developer-qe-pair.mdc`.
 6. **The Headhunter (Agent 5 - VCS Triage & Lifecycle)**: In-process Python daemon with 3-head adapter (GitLab, GitHub, Jira). Polls todos/PRs, classifies severity, automates MR lifecycle. See `07-headhunter.mdc`.
 7. **The Nightwatcher (Agent 6 - Shift Consolidation)**: In-process Python daemon + Gemini Flash. Cron-scheduled batch-consolidation of Brain escalations into deduplicated Jira incidents. See `13-nightwatcher.mdc`.
-8. **JARVIS (Agent 7 - System 2 Observer)**: In-process Python adapter via Gemini Live API (`gemini-live-2.5-flash`). Meta-cognitive observer that monitors Brain pulse stream and nudges FRIDAY via direct conversation turns.
+8. **JARVIS (Agent 7 - System 2 Observer)**: In-process Python adapter via Gemini Live API (`gemini-3.8-live`). Meta-cognitive observer that monitors Brain pulse stream and nudges FRIDAY via direct conversation turns.
 9. **The Archivist (Memory Agent)**: In-process Python service using Gemini summarization, Claude lesson extraction, and Qdrant vector storage (`darwin_events`, `darwin_lessons`).
 10. **The SecurityAnalyst (Ephemeral Agent)**: Ephemeral Tekton pod sidecar. Scans vulnerabilities, audits dependencies, and assesses CVE remediations; hands off fixes to Developer.
 11. **The CodeReviewer (Ephemeral Agent)**: Ephemeral Claude CLI sidecar running 6 parallel subagents (architecture, correctness, maintainability, security, reliability, testing) as a pre-merge quality gate. See `10-ephemeral-agents.mdc`.

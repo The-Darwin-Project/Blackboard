@@ -28,7 +28,7 @@ import traceback
 
 PROJECT = os.environ.get("GCP_PROJECT", "cnv-ai-insights")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
-MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
 SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS",
     os.path.join(os.path.dirname(__file__), "..", "cnv-ai-insights-8502f29094a2.json"))
 
@@ -42,6 +42,7 @@ REPORT_TOOL = {
         "Call this when you detect patterns like tool thrashing, "
         "hypothesis pivots, or the Brain being stuck."
     ),
+    "behavior": "BLOCKING",
     "parameters": {
         "type": "object",
         "properties": {

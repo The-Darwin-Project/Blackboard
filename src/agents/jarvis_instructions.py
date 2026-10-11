@@ -784,6 +784,7 @@ TOOL_DECLARATIONS = [
             "when FRIDAY acknowledges your point, the exchange is closed — do not "
             "respond to acknowledgments. 'Nothing to add' is not a message."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -809,6 +810,7 @@ TOOL_DECLARATIONS = [
             "counts, tool usage, phase changes. Use to quantify a suspected friction pattern "
             "before intervening."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -825,6 +827,7 @@ TOOL_DECLARATIONS = [
             "Shows phase, turn count, elapsed time, FRIDAY's actions. "
             "Use after pulse history confirms a friction pattern."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -843,6 +846,7 @@ TOOL_DECLARATIONS = [
             "so the evidence is usually at N+1. Request a small range (N to N+2) "
             "to capture the full context around a tool execution."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -860,6 +864,7 @@ TOOL_DECLARATIONS = [
             "pattern text, keywords, channel, global recall count. "
             "Use when a neuron fires repeatedly and you need to understand why."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -876,6 +881,7 @@ TOOL_DECLARATIONS = [
             "root causes, and outcomes. Call this directly -- do not ask permission. "
             "MUST be called before making claims about historical patterns or precedent."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -890,6 +896,7 @@ TOOL_DECLARATIONS = [
             "**Situational awareness** [Observer | Peer] — snapshot of all events being "
             "processed: IDs, phases, elapsed time, turn counts."
         ),
+        "behavior": "BLOCKING",
         "parameters": {"type": "object", "properties": {}},
     },
     {
@@ -901,6 +908,7 @@ TOOL_DECLARATIONS = [
             "Use after session rotation to restore context. Recurring "
             "patterns across sessions are accumulated evidence."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -924,6 +932,7 @@ TOOL_DECLARATIONS = [
             "Before proposing: (1) Is this a system gap or an environmental condition? "
             "(2) Have you already proposed something similar this session?"
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -959,6 +968,7 @@ TOOL_DECLARATIONS = [
             "FRIDAY triages the event and responds. On close, the session report feeds "
             "the lesson extraction pipeline (experience-channel lessons for long-term memory)."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {
@@ -978,6 +988,7 @@ TOOL_DECLARATIONS = [
             "data to verify FRIDAY's claims, check recent CVEs, release dates, or confirm "
             "external system status. Returns a grounded summary with source URLs."
         ),
+        "behavior": "BLOCKING",
         "parameters": {
             "type": "object",
             "properties": {

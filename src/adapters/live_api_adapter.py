@@ -183,14 +183,16 @@ class LiveAPIAdapter:
     def _build_live_tools(self, types) -> list:
         """Build the Live API tool list.
 
-        Mutual exclusion: the untested 3-way combination (function_declarations +
-        google_search + retrieval) has never been probe-verified against the Live API.
-        When RAG retrieval is enabled, google_search is dropped in favor of
-        functions+retrieval.
+        Function declarations are built with Behavior.BLOCKING.
+        When RAG retrieval is enabled, a Retrieval tool with VertexRagStore is appended.
         """
-        tools = [types.Tool(function_declarations=[
-            types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
-        ])]
+        declarations = []
+        for td in TOOL_DECLARATIONS:
+            kwargs = dict(td)
+            if "behavior" in kwargs:
+                kwargs["behavior"] = types.Behavior(kwargs["behavior"])
+            declarations.append(types.FunctionDeclaration(**kwargs))
+        tools = [types.Tool(function_declarations=declarations)]
         rag_active = self._rag_enabled and bool(self._rag_corpus_id)
         if rag_active:
             tools.append(types.Tool(retrieval=types.Retrieval(
@@ -209,61 +211,79 @@ class LiveAPIAdapter:
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
-        try:
-            from google import genai
-            from google.genai import types
+        from google import genai
+        from google.genai import types
 
-            if not self._client:
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=self._project,
-                    location=self._location,
+        if not self._client:
+            self._client = genai.Client(
+                vertexai=True,
+                project=self._project,
+                location=self._location,
+            )
+
+        for attempt in range(2):
+            try:
+                kwargs = {
+                    "response_modalities": [types.Modality.TEXT],
+                    "thinking_config": types.ThinkingConfig(include_thoughts=True),
+                    "generation_config": types.GenerationConfig(
+                        max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
+                        temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
+                    ),
+                    "system_instruction": types.Content(
+                        parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                    ),
+                    "tools": self._build_live_tools(types),
+                    "context_window_compression": types.ContextWindowCompressionConfig(
+                        sliding_window=types.SlidingWindow()
+                    ),
+                }
+                if self._resumption_handle:
+                    kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
+                config = types.LiveConnectConfig(**kwargs)
+
+                self._session_ctx = self._client.aio.live.connect(
+                    model=self._model,
+                    config=config,
                 )
+                self._session = await self._session_ctx.__aenter__()
+                self._running = True
 
-            config = types.LiveConnectConfig(
-                response_modalities=[types.Modality.TEXT],
-                generation_config=types.GenerationConfig(
-                    max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                    temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-                ),
-                tools=self._build_live_tools(types),
-            )
+                if attempt == 1 and self._last_pulse_event_id:
+                    await self._replay_pending_context()
 
-            self._session_ctx = self._client.aio.live.connect(
-                model=self._model,
-                config=config,
-            )
-            self._session = await self._session_ctx.__aenter__()
-            self._running = True
-            if self._receive_task and not self._receive_task.done():
-                logger.debug("Cortex _connect: cancelling stale receive_task")
-                self._receive_task.cancel()
-            self._receive_task = asyncio.create_task(self._receive_loop())
-            logger.debug(
-                "Cortex _connect: receive_task created (name=%s, done=%s)",
-                self._receive_task.get_name(), self._receive_task.done(),
-            )
-            if self._idle_watchdog_task and not self._idle_watchdog_task.done():
-                self._idle_watchdog_task.cancel()
-            self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
-            await self._load_neuron_labels()
-            await self._broadcast_status("watching")
-            orphan = await self._blackboard.find_active_event_by_source("jarvis")
-            if orphan:
-                self._active_meta_event_id = orphan
-                active = await self._blackboard.get_active_events()
-                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
-            logger.info(
-                "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
-                self._model, self._shadow, len(self._neuron_labels),
-            )
-        except Exception as e:
-            logger.error("Cortex Live API failed to connect: %s", e)
-            self._session = None
+                if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
+                    logger.debug("Cortex _connect: cancelling stale receive_task")
+                    self._receive_task.cancel()
+                self._receive_task = asyncio.create_task(self._receive_loop())
+                logger.debug(
+                    "Cortex _connect: receive_task created (name=%s, done=%s)",
+                    self._receive_task.get_name(), self._receive_task.done(),
+                )
+                if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
+                    self._idle_watchdog_task.cancel()
+                self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
+                await self._load_neuron_labels()
+                await self._broadcast_status("watching")
+                orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                if orphan:
+                    self._active_meta_event_id = orphan
+                    active = await self._blackboard.get_active_events()
+                    self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                    logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                logger.info(
+                    "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
+                    self._model, self._shadow, len(self._neuron_labels),
+                )
+                return
+            except Exception as e:
+                if self._resumption_handle and attempt == 0:
+                    logger.warning("Cortex Live API connect failed with handle, retrying fresh: %s", e)
+                    self._resumption_handle = None
+                    continue
+                logger.error("Cortex Live API failed to connect: %s", e)
+                self._session = None
+                return
 
     async def stop(self) -> None:
         """Graceful shutdown -- called during app teardown."""
@@ -542,8 +562,9 @@ class LiveAPIAdapter:
 
         if hasattr(msg, "session_resumption_update") and msg.session_resumption_update:
             update = msg.session_resumption_update
-            if getattr(update, "resumable", False) and getattr(update, "new_handle", None):
-                self._resumption_handle = update.new_handle
+            new_handle = getattr(update, "new_handle", None)
+            if getattr(update, "resumable", False) and isinstance(new_handle, str) and new_handle.strip():
+                self._resumption_handle = new_handle
                 logger.debug("Cortex session resumption handle updated")
 
         eid = self._last_pulse_event_id
@@ -573,7 +594,26 @@ class LiveAPIAdapter:
             except Exception as e:
                 logger.debug("Cortex grounding_metadata parse failed (non-fatal): %s", e)
 
-        if hasattr(msg, "text") and msg.text:
+        model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+        parts_list = getattr(model_turn, "parts", None) or []
+        has_extracted_text = False
+        for part in parts_list:
+            thought = bool(getattr(part, "thought", False))
+            text = getattr(part, "text", None)
+            if thought and text:
+                try:
+                    target_eid = eid or self._active_meta_event_id
+                    await self._broadcast({"type": "cortex_thinking", "thought": text, "event_id": target_eid})
+                except Exception as e:
+                    logger.debug("Failed to broadcast cortex_thinking chunk: %s", e)
+            elif not thought and text:
+                has_extracted_text = True
+                if self._collecting_handoff:
+                    self._handoff_buffer.append(text)
+                else:
+                    self._text_buffer.append(text)
+
+        if not has_extracted_text and hasattr(msg, "text") and msg.text:
             if self._collecting_handoff:
                 self._handoff_buffer.append(msg.text)
             else:
@@ -597,11 +637,14 @@ class LiveAPIAdapter:
             if is_idle_ack and not self._awaiting_jarvis_reply:
                 await self._broadcast_status("watching")
                 heartbeat_type = "spike" if full_text.lower().startswith("ok") else "wave"
-                await self._broadcast({
-                    "type": "cortex_heartbeat",
-                    "heartbeat": heartbeat_type,
-                    "timestamp": time.time(),
-                })
+                try:
+                    await self._broadcast({
+                        "type": "cortex_heartbeat",
+                        "heartbeat": heartbeat_type,
+                        "timestamp": time.time(),
+                    })
+                except Exception:
+                    pass
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False
@@ -682,44 +725,48 @@ class LiveAPIAdapter:
     async def _handle_tool_call(self, name: str, args: dict) -> str:
         """Route tool calls to implementations. Shadow flag gates write tools."""
         try:
-            if name == "list_active_events":
-                return await self._tool_list_active_events()
-            elif name == "view_event_blackboard":
-                return await self._tool_view_event_blackboard(args.get("event_id", ""))
-            elif name == "read_event_turns":
-                return await self._tool_read_event_turns(
-                    args.get("event_id", ""),
-                    args.get("from_turn"),
-                    args.get("to_turn"),
-                )
-            elif name == "get_pulse_history":
-                return await self._tool_get_pulse_history(
-                    args.get("event_id", ""),
-                    args.get("last_n_minutes", 10),
-                )
-            elif name == "get_neuron_details":
-                return await self._tool_get_neuron_details(args.get("neuron_id", ""))
-            elif name == "search_deep_memory":
-                return await self._tool_search_deep_memory(args.get("query", ""))
-            elif name == "send_event_message":
-                return await self._tool_send_event_message(
-                    args.get("event_id", ""), args.get("message", ""),
-                )
-            elif name == "propose_enhancement":
-                return await self._tool_propose_enhancement(
-                    args.get("event_id", ""),
-                    args.get("title", ""),
-                    args.get("description", ""),
-                    args.get("severity", "nice_to_have"),
-                )
-            elif name == "create_system_review":
-                return await self._tool_create_system_review(args.get("reason", ""))
-            elif name == "recall_handoff_notes":
-                return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
-            elif name == "google_web_search":
-                return await self._tool_google_web_search(args.get("query", ""))
-            else:
-                return f"Unknown tool: {name}"
+            async with asyncio.timeout(60):
+                if name == "list_active_events":
+                    return await self._tool_list_active_events()
+                elif name == "view_event_blackboard":
+                    return await self._tool_view_event_blackboard(args.get("event_id", ""))
+                elif name == "read_event_turns":
+                    return await self._tool_read_event_turns(
+                        args.get("event_id", ""),
+                        args.get("from_turn"),
+                        args.get("to_turn"),
+                    )
+                elif name == "get_pulse_history":
+                    return await self._tool_get_pulse_history(
+                        args.get("event_id", ""),
+                        args.get("last_n_minutes", 10),
+                    )
+                elif name == "get_neuron_details":
+                    return await self._tool_get_neuron_details(args.get("neuron_id", ""))
+                elif name == "search_deep_memory":
+                    return await self._tool_search_deep_memory(args.get("query", ""))
+                elif name == "send_event_message":
+                    return await self._tool_send_event_message(
+                        args.get("event_id", ""), args.get("message", ""),
+                    )
+                elif name == "propose_enhancement":
+                    return await self._tool_propose_enhancement(
+                        args.get("event_id", ""),
+                        args.get("title", ""),
+                        args.get("description", ""),
+                        args.get("severity", "nice_to_have"),
+                    )
+                elif name == "create_system_review":
+                    return await self._tool_create_system_review(args.get("reason", ""))
+                elif name == "recall_handoff_notes":
+                    return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
+                elif name == "google_web_search":
+                    return await self._tool_google_web_search(args.get("query", ""))
+                else:
+                    return f"Unknown tool: {name}"
+        except TimeoutError:
+            logger.warning("Cortex tool %s timed out after 60s", name)
+            return "Error: Tool execution timed out after 60s"
         except Exception as e:
             logger.warning("Cortex tool %s failed: %s", name, e)
             return f"Error: {e}"
@@ -1317,7 +1364,7 @@ class LiveAPIAdapter:
                     else:
                         delay = 300
                         if t.thoughts:
-                            logger.debug("defer regex miss -- defaulting to 300s: %s", (t.thoughts or "")[:80])
+                            logger.debug("defer regex miss -- defaulting to 300s (has_thoughts=%s)", bool(t.thoughts))
                     defer_total_s += delay
                     last_defer_turn = t
                     last_defer_delay = delay
@@ -1823,7 +1870,6 @@ class LiveAPIAdapter:
                             for eid in self._brain.pending_jarvis_event_ids():
                                 self._brain.clear_jarvis_wait(eid)
                             logger.info("Cortex reconnect: cleared stale JARVIS wait states")
-                        await self._replay_pending_context()
                         return
                 except Exception as e:
                     logger.warning("Cortex reconnect failed: %s", e)
@@ -1898,6 +1944,7 @@ class LiveAPIAdapter:
             summary = "(session rotated, previous context unavailable)"
 
         await self._disconnect()
+        self._resumption_handle = None
         await self._connect()
 
         if self._session and summary:
