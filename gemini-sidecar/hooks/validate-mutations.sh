@@ -5,13 +5,16 @@
 #    for read-only roles, PLUS (regardless of role) enforces the out-of-band merge-approval guard.
 # 2. [Contract]: Defense-in-depth flange. Primary enforcement is behavioral (agent rules).
 #    No normalization pipeline — trusted Darwin prompts, not untrusted external code.
-# 3. [Constraint]: Fail-CLOSED on malformed or unrecognized tool payloads (decision: "deny").
+# 3. [Constraint]: Fail-CLOSED on malformed or unrecognized tool payloads (decision: "deny"),
+#    and on shell tools whose command cannot be extracted (empty COMMAND).
 #    Exit 0 with JSON always. Merge-approval guard fails closed when approval cannot be verified.
 # 4. [Constraint]: Single-responsibility — validation ONLY.
 # 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
 #    have AGENT_ROLE="" — real role arrives via WS, exposed by /hook-status endpoint.
 # 6. [Security]: Merge-approval guard is the server-side backstop for the Developer merge
-#    guard (breaking prompt injection circularity, C2). Applies to EVERY role.
+#    guard (breaking prompt injection circularity, C2). Applies to EVERY role and to MCP
+#    merge/write tools (classified in the node parser as MCP_GUARD=1), not just shell commands.
+#    MERGE_PATTERN tolerates global options (git -C . merge, gh -R o/r pr merge).
 # 7. [Contract]: PreToolUse decision enum contract: strictly `decision: "deny"` to halt tool execution.
 
 # Read-only roles
@@ -56,7 +59,20 @@ PARSED=$(printf '%s' "$INPUT" | timeout 3 node -e "
         return;
       }
       const cmd = (rawCmd || '').trim();
-      process.stdout.write(name + '|||' + cmd);
+      // MCP merge/write tools never carry a shell command, so classify them here:
+      // guard=1 routes them through the merge-approval guard instead of the fast-exit allow.
+      const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
+      const lname = name.toLowerCase();
+      const tail = lname.split(/[.:\/]/).pop();
+      let guard = 0;
+      if (/(^|[^a-z])merge([^a-z]|\$)/.test(tail)) guard = 1;
+      if (/(^|[^a-z])(push_files|create_or_update_file|delete_file)\$/.test(tail)) {
+        const br = args && typeof args === 'object' ? args.branch : undefined;
+        const b = typeof br === 'string' ? br.trim().toLowerCase().replace(/^refs\/heads\//, '') : '';
+        if (!b || b === 'main' || b === 'master') guard = 1;
+      }
+      if (/(^|[^a-z])glab_api\$/.test(tail) && /\/merge([^a-z0-9_-]|\$)/i.test(JSON.stringify(args ?? ''))) guard = 1;
+      process.stdout.write(name + '|||' + guard + '|||' + cmd);
     } catch {
       process.stdout.write('__MALFORMED__');
     }
@@ -69,12 +85,33 @@ if [ "$PARSED" = "__MALFORMED__" ] || [ -z "$PARSED" ]; then
 fi
 
 TOOL_NAME="${PARSED%%|||*}"
-COMMAND="${PARSED#*|||}"
+_REST="${PARSED#*|||}"
+MCP_GUARD="${_REST%%|||*}"
+COMMAND="${_REST#*|||}"
 
-# Fast exit: non-shell and non-file-mutation tools (reads, searches, MCP tools like team_send_results)
-# are allowed immediately without querying role over HTTP. This prevents hook timeouts and sidecar
-# degradation from impacting read-only tools.
-if ! echo "$SHELL_TOOLS $MUTATION_TOOLS" | grep -qwi -- "$TOOL_NAME"; then
+# Exact (case-insensitive) membership test; avoids treating TOOL_NAME as a grep pattern.
+in_list() {
+    local needle="${1,,}" item
+    for item in $2; do
+        [ "${item,,}" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+IS_SHELL=0; in_list "$TOOL_NAME" "$SHELL_TOOLS" && IS_SHELL=1
+IS_MUTATION=0; in_list "$TOOL_NAME" "$MUTATION_TOOLS" && IS_MUTATION=1
+
+# Fail closed: a shell tool with no extractable command cannot be validated (unknown arg key,
+# empty payload) and must not be allowed through.
+if [ "$IS_SHELL" = 1 ] && [ -z "$COMMAND" ]; then
+    echo '{"decision": "deny", "reason": "Shell tool call with empty or unextractable command: failing closed"}'
+    exit 0
+fi
+
+# Fast exit: tools that are neither shell, native file mutation, nor an MCP merge/write tool flagged
+# by the parser (MCP_GUARD=1) are allowed immediately without querying role over HTTP. This prevents
+# hook timeouts and sidecar degradation from impacting read-only tools.
+if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$MCP_GUARD" != 1 ]; then
     echo '{"decision":"allow"}'
     exit 0
 fi
@@ -94,41 +131,61 @@ if [ -z "$ROLE" ]; then
     done
 fi
 
+# Global options may sit between the binary and the subcommand (git -C . merge, gh -R o/r pr merge,
+# glab -R o/r mr merge). Any dash-token with an optional value token is skipped.
+_DQ='"'; _SQ="'"
+_V="(${_DQ}[^${_DQ}]*${_DQ}|${_SQ}[^${_SQ}]*${_SQ}|[^[:space:];&|${_DQ}${_SQ}]+)"
+_G="([[:space:]]+-[^[:space:];&|]+([[:space:]]+${_V})?)*"
+_END='([^[:alnum:]_-]|$)'
+
 # --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
-if echo "$SHELL_TOOLS" | grep -qwi "$TOOL_NAME" && [ -n "$COMMAND" ]; then
-    MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
-    MERGE_PATTERN='\bgit\s+merge\b|\bgit\s+push\b[^&|;]*\bmain\b|\bgh\s+pr\s+merge\b|\bglab\s+mr\s+merge\b'
+NEEDS_GUARD=0
+if [ "$MCP_GUARD" = 1 ]; then
+    NEEDS_GUARD=1
+elif [ "$IS_SHELL" = 1 ]; then
+    # Flatten line continuations/newlines so a split command cannot dodge the per-line grep.
+    MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E ':a;N;$!ba;s#\\\n# #g' | tr '\n' ' ' | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
+    MERGE_PATTERN="\\bgit${_G}[[:space:]]+merge${_END}"
+    MERGE_PATTERN+="|\\bgit${_G}[[:space:]]+push([[:space:]][^&|;]*)?[[:space:]:/+${_DQ}${_SQ}](main|master)([^[:alnum:]_.-]|\$)"
+    MERGE_PATTERN+="|\\bgit${_G}[[:space:]]+push([[:space:]][^&|;]*)?[[:space:]](--all|--mirror)${_END}"
+    MERGE_PATTERN+="|\\bgh${_G}[[:space:]]+pr${_G}[[:space:]]+merge${_END}"
+    MERGE_PATTERN+="|\\bglab${_G}[[:space:]]+mr${_G}[[:space:]]+merge${_END}"
+    MERGE_PATTERN+="|\\b(gh|glab)${_G}[[:space:]]+api\\b[^&|;]*/merge${_END}"
     if printf '%s\n' "$MERGE_CMD" | grep -qiE "$MERGE_PATTERN"; then
-        APPROVAL_JSON=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
-        LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
-        GUARD_DECISION=$(node -e "
-          let raw = process.argv[1] || '';
-          let localSha = process.argv[2] || '';
-          let approval = null;
-          try { approval = JSON.parse(raw); } catch { approval = null; }
-          if (!approval || !approval.approved) {
-            process.stdout.write('BLOCK|||Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).');
-          } else if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
-            process.stdout.write('BLOCK|||Merge REFUSED: live HEAD (' + localSha + ') differs from authenticated approval SHA (' + approval.approved_mr_sha + ').');
-          } else {
-            process.stdout.write('ALLOW|||');
-          }
-        " "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
-        GUARD_RESULT="${GUARD_DECISION%%|||*}"
-        GUARD_REASON="${GUARD_DECISION#*|||}"
-        if [ "$GUARD_RESULT" != "ALLOW" ]; then
-            [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
-            node -e "
-              process.stdout.write(JSON.stringify({decision: 'deny', reason: process.argv[1]}));
-            " "$GUARD_REASON"
-            exit 0
-        fi
-        # Approved and SHA matches -- fall through to the role-based mutation checks below.
+        NEEDS_GUARD=1
     fi
 fi
 
+if [ "$NEEDS_GUARD" = 1 ]; then
+    APPROVAL_JSON=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
+    GUARD_DECISION=$(node -e "
+      let raw = process.argv[1] || '';
+      let localSha = process.argv[2] || '';
+      let approval = null;
+      try { approval = JSON.parse(raw); } catch { approval = null; }
+      if (!approval || !approval.approved) {
+        process.stdout.write('BLOCK|||Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).');
+      } else if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
+        process.stdout.write('BLOCK|||Merge REFUSED: live HEAD (' + localSha + ') differs from authenticated approval SHA (' + approval.approved_mr_sha + ').');
+      } else {
+        process.stdout.write('ALLOW|||');
+      }
+    " "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    GUARD_RESULT="${GUARD_DECISION%%|||*}"
+    GUARD_REASON="${GUARD_DECISION#*|||}"
+    if [ "$GUARD_RESULT" != "ALLOW" ]; then
+        [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
+        node -e "
+          process.stdout.write(JSON.stringify({decision: 'deny', reason: process.argv[1]}));
+        " "$GUARD_REASON"
+        exit 0
+    fi
+    # Approved and SHA matches -- fall through to the role-based checks below.
+fi
+
 # Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
-# mutate (shell + native file mutation tools) reach this point and are denied.
+# mutate (shell, native file mutation, guarded MCP merge/write tools) reach this point and are denied.
 if [ -z "$ROLE" ]; then
     node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
     exit 0
@@ -141,19 +198,16 @@ if ! echo "$READONLY_ROLES" | grep -qwi "$ROLE"; then
 fi
 
 # Native mutation tools check for read-only roles
-if echo "$MUTATION_TOOLS" | grep -qwi "$TOOL_NAME"; then
+if [ "$IS_MUTATION" = 1 ]; then
     echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to mutate files\"}"
     exit 0
 fi
 
-# Early exit: non-shell tools don't need shell mutation checking
-if ! echo "$SHELL_TOOLS" | grep -qwi "$TOOL_NAME"; then
-    echo '{"decision":"allow"}'
+# MCP merge/write tools are never permitted for read-only roles, even when approved
+if [ "$IS_SHELL" = 0 ]; then
+    echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to merge or write via MCP tools\"}"
     exit 0
 fi
-
-# Empty command = nothing to validate
-[ -z "$COMMAND" ] && { echo '{"decision":"allow"}'; exit 0; }
 
 # Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
 CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
@@ -161,7 +215,7 @@ CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g
 # --- Mutation denylist (infrastructure + filesystem + git + network mutations) ---
 BLOCK_PATTERN=''
 # Git mutations
-BLOCK_PATTERN+='\bgit\s+(commit|push|merge|rebase|reset\s+.*--hard|tag\b|clean\b|apply\b|am\b)\b'
+BLOCK_PATTERN+="\\bgit${_G}[[:space:]]+(commit|push|merge|rebase|reset[[:space:]]+.*--hard|tag\\b|clean\\b|apply\\b|am\\b)\\b"
 # K8s/OCP mutations (with flag-gap tolerance)
 BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create)\b)'
 # Helm mutations

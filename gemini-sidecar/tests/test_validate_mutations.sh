@@ -211,11 +211,11 @@ run_test \
   "explorer" \
   "allow"
 
-run_test \
-  "T-2f: empty command allowed" \
+run_test_deny_with_reason \
+  "T-2f: empty shell command fails closed" \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":""}}}' \
   "explorer" \
-  "allow"
+  "failing closed"
 
 run_test \
   "T-2g: sysadmin bypasses denylist for feature branch push" \
@@ -317,6 +317,83 @@ run_test_deny_with_reason \
   "T-4f: whitespace padded tool name denied for explorer" \
   '{"toolCall":{"name":"  write_to_file  ","args":{"TargetFile":"/tmp/exploit.sh","CodeContent":"evil"}}}' \
   "explorer"
+
+# =============================================================================
+# T-6: Merge-approval guard bypass regressions (global flags, MCP tools, empty command)
+# =============================================================================
+# SIDECAR_PORT=1 => approval endpoint unreachable => guard must BLOCK every merge-class call.
+
+mg() { # name, tool, args-json, role
+  run_test_deny_with_reason "$1" "{\"toolCall\":{\"name\":\"$2\",\"args\":$3}}" "$4" "Merge REFUSED"
+}
+sh_merge() { # name, command, role
+  local cmd_json
+  cmd_json="$(jq -cn --arg c "$2" '{CommandLine:$c}')"
+  mg "$1" run_command "$cmd_json" "$3"
+}
+
+sh_merge "T-6a: git -C . merge blocked"               "git -C . merge feature" developer
+sh_merge "T-6b: git -c k=v merge blocked"             "git -c user.name=x merge feature" developer
+sh_merge "T-6c: git --no-pager merge blocked"         "git --no-pager merge feature" developer
+sh_merge "T-6d: git -C quoted path merge blocked"     "git -C \"/data/my repo\" merge feature" developer
+sh_merge "T-6e: git --git-dir=x merge blocked"        "git --git-dir=/x/.git merge feature" developer
+sh_merge "T-6f: git -C . push origin main blocked"    "git -C . push origin main" developer
+sh_merge "T-6g: git push HEAD:refs/heads/main"        "git push origin HEAD:refs/heads/main" developer
+sh_merge "T-6h: git push --force origin +main"        "git push --force origin +main" developer
+sh_merge "T-6i: git push --all blocked"               "git push --all origin" developer
+sh_merge "T-6j: gh -R o/r pr merge blocked"           "gh -R o/r pr merge 273" developer
+sh_merge "T-6k: gh pr -R o/r merge blocked"           "gh pr -R o/r merge 273" developer
+sh_merge "T-6l: gh --repo o/r pr merge --auto"        "gh --repo o/r pr merge 273 --auto" developer
+sh_merge "T-6m: glab -R o/r mr merge blocked"         "glab -R o/r mr merge 5" developer
+sh_merge "T-6n: gh api .../merge blocked"             "gh api -X PUT repos/o/r/pulls/273/merge" developer
+sh_merge "T-6o: chained after && still blocked"       "cd /tmp && git -C . merge x" developer
+sh_merge "T-6p: line-continuation split blocked"      $'git -C . \\\n merge x' developer
+sh_merge "T-6q: uppercase GIT MERGE blocked"          "GIT -C . MERGE x" developer
+sh_merge "T-6r: env-prefixed merge blocked"           "GIT_AUTHOR_NAME=x git -C . merge x" developer
+
+# MCP merge/write tools no longer take the non-shell fast-exit allow
+mg "T-6s: GitHub MCP merge_pull_request blocked"      mcp__GitHub__merge_pull_request '{"owner":"o","repo":"r","pullNumber":273}' developer
+mg "T-6t: GitLab MCP glab_mr_merge blocked"           mcp__GitLab__glab_mr_merge '{"args":["5"],"flags":{}}' developer
+mg "T-6u: bare merge_pull_request blocked"            merge_pull_request '{"pullNumber":1}' developer
+mg "T-6v: push_files to main blocked"                 mcp__GitHub__push_files '{"branch":"main","files":[],"message":"x"}' developer
+mg "T-6w: create_or_update_file refs/heads/main"      mcp__GitHub__create_or_update_file '{"branch":"refs/heads/main","path":"a"}' developer
+mg "T-6x: delete_file without branch fails closed"    mcp__GitHub__delete_file '{"path":"a"}' developer
+mg "T-6y: glab_api merge endpoint blocked"            mcp__GitLab__glab_api '{"args":["projects/1/merge_requests/2/merge"],"flags":{"method":"PUT"}}' developer
+
+run_test_deny_with_reason \
+  "T-6z: read-only role denied for MCP merge tool" \
+  '{"toolCall":{"name":"mcp__GitHub__merge_pull_request","args":{}}}' "explorer"
+
+# No false positives: reads, feature-branch writes, near-miss git subcommands
+run_test "T-7a: push_files to feature branch allowed" \
+  '{"toolCall":{"name":"mcp__GitHub__push_files","args":{"branch":"feat/x","files":[],"message":"m"}}}' developer allow
+run_test "T-7b: list_pull_requests allowed" \
+  '{"toolCall":{"name":"mcp__GitHub__list_pull_requests","args":{"owner":"o","repo":"r"}}}' developer allow
+run_test "T-7c: glab_api list MRs allowed" \
+  '{"toolCall":{"name":"mcp__GitLab__glab_api","args":{"args":["projects/1/merge_requests"]}}}' developer allow
+run_test "T-7d: git merge-base allowed" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git merge-base HEAD origin/main"}}}' developer allow
+run_test "T-7e: commit message mentioning merge allowed" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m \"fix merge guard\""}}}' developer allow
+run_test "T-7f: git -C . log allowed" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git -C . log --merges -3"}}}' developer allow
+run_test "T-7g: gh pr view allowed" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"gh -R o/r pr view 273"}}}' developer allow
+run_test "T-7h: push to main-fix feature branch allowed" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin domain-fix"}}}' developer allow
+
+run_test_deny_with_reason "T-7i: git -C . commit denylisted for explorer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git -C . commit -am x"}}}' explorer "mutation blocked"
+run_test_deny_with_reason "T-7j: git --no-pager tag denylisted for explorer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git --no-pager tag v1"}}}' explorer "mutation blocked"
+
+# Empty/missing command on every recognised shell tool name fails closed, for every role
+run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \
+  '{"toolCall":{"name":"run_command","args":{"Other":"git merge x"}}}' developer "failing closed"
+run_test_deny_with_reason "T-8b: whitespace-only command fails closed" \
+  '{"toolCall":{"name":"Bash","args":{"command":"   "}}}' developer "failing closed"
+run_test_deny_with_reason "T-8c: Bash tool_input without command fails closed" \
+  '{"tool_name":"Bash","tool_input":{"cmd":"git merge x"}}' developer "failing closed"
 
 # =============================================================================
 # T-5: require-results.sh Stop hook -- "continue" is bounded
