@@ -153,7 +153,7 @@ class LiveAPIAdapter:
         self._session = None
         self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
-        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
         self._project = os.getenv("GCP_PROJECT", "")
         self._location = os.getenv("GCP_LOCATION", "global")
         self._seen_neurons: set[str] = set()
@@ -305,9 +305,16 @@ class LiveAPIAdapter:
         """Tear down a session that opened but failed later in _connect() so a retry cannot leak it."""
         ctx, self._session_ctx = self._session_ctx, None
         self._session = None
+        tasks_to_await = []
         for task in (self._receive_task, self._idle_watchdog_task):
             if task and not task.done() and task is not asyncio.current_task():
                 task.cancel()
+                tasks_to_await.append(task)
+        for task in tasks_to_await:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if ctx:
             try:
                 await ctx.__aexit__(None, None, None)
@@ -1962,8 +1969,12 @@ class LiveAPIAdapter:
             )
             summary_parts = []
             async for msg in self._session.receive():
-                if hasattr(msg, "text") and msg.text:
-                    summary_parts.append(msg.text)
+                model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+                parts_list = getattr(model_turn, "parts", None) or []
+                for part in parts_list:
+                    if not getattr(part, "thought", False) and getattr(part, "text", None):
+                        summary_parts.append(part.text)
+                
                 if hasattr(msg, "server_content") and getattr(
                     msg.server_content, "turn_complete", False
                 ):
