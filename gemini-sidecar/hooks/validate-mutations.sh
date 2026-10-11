@@ -19,16 +19,20 @@ READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
 # Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
 # stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
-# Retry the lookup: the sidecar may be momentarily busy (e.g. WS role hand-off) and a single
-# 1s attempt must not turn into an empty role.
+# Total role-lookup budget is capped (~2s) so the whole hook stays under the registered
+# PreToolUse timeout (cli-setup.js). Retry only when curl itself fails; a successful
+# response with an empty role is final (parse once).
 ROLE=""
+_start=$SECONDS
 for _attempt in 1 2 3; do
-    ROLE_DATA=$(curl -sf --connect-timeout 1 --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
-    ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
-    [ -n "$ROLE" ] && break
+    if ROLE_DATA=$(curl -sf --connect-timeout 1 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+        ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+        break
+    fi
     # Local sidecars carry AGENT_ROLE in env -- no need to keep retrying once we have it.
     [ -n "${AGENT_ROLE:-}" ] && break
-    sleep 0.3
+    [ $((SECONDS - _start)) -ge 2 ] && break
+    sleep 0.2
 done
 [ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
 
@@ -89,7 +93,7 @@ if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
     MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
     MERGE_PATTERN='\bgit\s+merge\b|\bgit\s+push\b[^&|;]*\bmain\b|\bgh\s+pr\s+merge\b|\bglab\s+mr\s+merge\b'
     if printf '%s\n' "$MERGE_CMD" | grep -qiE "$MERGE_PATTERN"; then
-        APPROVAL_JSON=$(curl -sf --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+        APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
         LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
         GUARD_DECISION=$(node -e "
           let raw = process.argv[1] || '';

@@ -21,7 +21,7 @@ run_test() {
   local expected_decision="$4"
 
   local output
-  output="$(echo "$input" | AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
 
   if ! echo "$output" | jq empty 2>/dev/null; then
     ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
@@ -48,7 +48,7 @@ run_test_deny_with_reason() {
   local expected_reason_substr="${4:-}"
 
   local output
-  output="$(echo "$input" | AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
 
   if ! echo "$output" | jq empty 2>/dev/null; then
     ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
@@ -90,7 +90,7 @@ run_test_unset_role() {
   local expected_decision="$3"
 
   local output
-  output="$(echo "$input" | AGENT_ROLE="" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
 
   if ! echo "$output" | jq empty 2>/dev/null; then
     ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
@@ -165,7 +165,7 @@ run_test_deny_with_reason \
   "Merge REFUSED"
 
 # Protocol schema compliance: must be 'deny' (never 'block') with non-empty reason
-RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test"}}}' | AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK" 2>/dev/null)
+RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test"}}}' | SIDECAR_PORT=1 AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK" 2>/dev/null)
 DECISION=$(echo "$RES" | jq -r '.decision // empty')
 REASON=$(echo "$RES" | jq -r '.reason // empty')
 if [[ "$DECISION" == "deny" ]] && [[ -n "$REASON" ]]; then

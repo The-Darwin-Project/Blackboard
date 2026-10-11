@@ -156,7 +156,7 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
                         name: 'validate-mutations',
                         type: 'command',
                         command: validateHook,
-                        timeout: 5,
+                        timeout: 8,
                         description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
                     },
                 ],
