@@ -336,7 +336,7 @@ spec:
             - name: EPHEMERAL_EFFORT_EXPLORER
               value: {{ .Values.ephemeralAgents.roleEffort.explorer | quote }}
             - name: EPHEMERAL_CLI_EXPLORER
-              value: {{ .Values.ephemeralAgents.roleCli.explorer | default "gemini" | quote }}
+              value: {{ .Values.ephemeralAgents.roleCli.explorer | default "claude" | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -893,9 +893,9 @@ spec:
               value: "{{ .Values.sidecars.architect.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.architect.gitUserEmail }}"
-            # CLI routing (gemini or claude)
+            # CLI routing (claude or agy)
             - name: AGENT_CLI
-              value: "{{ .Values.sidecars.architect.cliType | default "gemini" }}"
+              value: "{{ .Values.sidecars.architect.cliType | default "claude" }}"
             - name: AGENT_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
             # GCP/Vertex AI configuration
@@ -903,13 +903,7 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
-            {{- if ne (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
-            - name: GOOGLE_GENAI_USE_VERTEXAI
-              value: "true"
-            - name: GEMINI_MODEL
-              value: "{{ .Values.sidecars.architect.modelName }}"
-            {{- end }}
-            {{- if eq (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
+            {{- if eq (.Values.sidecars.architect.cliType | default "claude") "claude" }}
             # Claude Code CLI -- Vertex AI configuration
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"
@@ -1060,15 +1054,11 @@ spec:
               value: "{{ .Values.sidecars.sysadmin.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.sysadmin.gitUserEmail }}"
-            # CLI routing (gemini or claude)
+            # CLI routing (claude or agy)
             - name: AGENT_CLI
-              value: "{{ .Values.sidecars.sysadmin.cliType | default "gemini" }}"
+              value: "{{ .Values.sidecars.sysadmin.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "sysadmin"
-            {{- if and (ne (.Values.sidecars.sysadmin.cliType | default "gemini") "claude") .Values.sidecars.sysadmin.interactive }}
-            - name: GEMINI_INTERACTIVE
-              value: "true"
-            {{- end }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.sysadmin.permissionMode | default "" }}"
             - name: AGENT_MODEL
@@ -1078,13 +1068,7 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
-            {{- if ne (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
-            - name: GOOGLE_GENAI_USE_VERTEXAI
-              value: "true"
-            - name: GEMINI_MODEL
-              value: "{{ .Values.sidecars.sysadmin.modelName }}"
-            {{- end }}
-            {{- if eq (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
+            {{- if eq (.Values.sidecars.sysadmin.cliType | default "claude") "claude" }}
             # Claude Code CLI -- Vertex AI configuration
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"
@@ -1254,9 +1238,9 @@ spec:
               value: "{{ .Values.sidecars.developer.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.developer.gitUserEmail }}"
-            # CLI routing (gemini or claude)
+            # CLI routing (claude or agy)
             - name: AGENT_CLI
-              value: "{{ .Values.sidecars.developer.cliType | default "gemini" }}"
+              value: "{{ .Values.sidecars.developer.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "developer"
             - name: AGENT_PERMISSION_MODE
@@ -1268,13 +1252,7 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
-            {{- if ne (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
-            - name: GOOGLE_GENAI_USE_VERTEXAI
-              value: "true"
-            - name: GEMINI_MODEL
-              value: "{{ .Values.sidecars.developer.modelName }}"
-            {{- end }}
-            {{- if eq (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
+            {{- if eq (.Values.sidecars.developer.cliType | default "claude") "claude" }}
             # Claude Code CLI -- Vertex AI configuration
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"
@@ -1416,15 +1394,11 @@ spec:
               value: "{{ .Values.sidecars.qe.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.qe.gitUserEmail }}"
-            # CLI routing (gemini or claude)
+            # CLI routing (claude or agy)
             - name: AGENT_CLI
-              value: "{{ .Values.sidecars.qe.cliType | default "gemini" }}"
+              value: "{{ .Values.sidecars.qe.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "qe"
-            {{- if and (ne (.Values.sidecars.qe.cliType | default "gemini") "claude") .Values.sidecars.qe.interactive }}
-            - name: GEMINI_INTERACTIVE
-              value: "true"
-            {{- end }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.qe.permissionMode | default "" }}"
             - name: AGENT_MODEL
@@ -1434,13 +1408,7 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
-            {{- if ne (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
-            - name: GOOGLE_GENAI_USE_VERTEXAI
-              value: "true"
-            - name: GEMINI_MODEL
-              value: "{{ .Values.sidecars.qe.modelName }}"
-            {{- end }}
-            {{- if eq (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
+            {{- if eq (.Values.sidecars.qe.cliType | default "claude") "claude" }}
             # Claude Code CLI -- Vertex AI configuration
             - name: CLAUDE_CODE_USE_VERTEX
               value: "1"

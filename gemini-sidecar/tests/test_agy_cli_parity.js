@@ -3,7 +3,7 @@
 // 1. [Constraint]: Pure unit tests for cli-executor.js and cli-setup.js agy CLI parity — uses node:test + node:assert/strict.
 // 2. [Pattern]: Sets AGENT_CLI=agy, clears require.cache between tests, restores environment.
 // 3. [Coverage]: Validates buildCLICommand agy path, flag order, effort normalization, mode plan security,
-//    conversation persistence, settings.json non-mutation, writeAgyMcpServer, and isAgySessionError recovery.
+//    conversation persistence, writeAgyMcpServer, and isAgySessionError recovery.
 
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -282,38 +282,7 @@ describe('agy buildCLICommand: conversation session tracking', () => {
 });
 
 // =============================================================================
-// 5. Zero settings.json Mutation under agy
-// =============================================================================
-
-describe('agy buildCLICommand: settings.json immutability', () => {
-  it('never mutates settings.json when running with agy', () => {
-    // Own HOME + a pre-seeded file: node --test runs files concurrently, so a shared
-    // ~/.gemini/settings.json is raced by the gemini parity tests, and an absent file made
-    // this assertion vacuous.
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-settings-'));
-    try {
-      setEnv('HOME', home);
-      setEnv('AGENT_CLI', 'agy');
-      fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
-      const { buildCLICommand, GEMINI_SETTINGS_PATH } = freshModules();
-      assert.ok(GEMINI_SETTINGS_PATH.startsWith(home), 'settings path must resolve inside the sandbox HOME');
-
-      const seeded = JSON.stringify({ mcpServers: { Keep: { command: 'x' } } }, null, 2);
-      fs.writeFileSync(GEMINI_SETTINGS_PATH, seeded);
-      const initialMtime = fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs;
-
-      buildCLICommand('do work with agy', { effort: 'high', model: 'gemini-3.7-flash' });
-
-      assert.equal(fs.statSync(GEMINI_SETTINGS_PATH).mtimeMs, initialMtime, 'settings.json mtime should not change under agy');
-      assert.equal(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8'), seeded, 'settings.json content should not change under agy');
-    } finally {
-      fs.rmSync(home, { recursive: true, force: true });
-    }
-  });
-});
-
-// =============================================================================
-// 6. Session Recovery: isAgySessionError (agy only, stderr only)
+// 5. Session Recovery: isAgySessionError (agy only, stderr only)
 // =============================================================================
 
 describe('isAgySessionError recovery logic', () => {
@@ -489,11 +458,23 @@ describe('writeAgyHooks Hook configuration', () => {
       const content = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
 
       assert.equal(Array.isArray(content['validate-mutations']?.PreToolUse), true);
-      assert.equal(content['validate-mutations'].PreToolUse[0].matcher, 'run_command');
+      assert.equal(content['validate-mutations'].PreToolUse[0].matcher, '*');
       assert.equal(content['validate-mutations'].PreToolUse[0].hooks[0].command, '/app/hooks/validate-mutations.sh');
 
       assert.equal(Array.isArray(content['require-results']?.Stop), true);
       assert.equal(content['require-results'].Stop[0].command, '/app/hooks/require-results.sh');
+
+      assert.equal(Array.isArray(content['cluster-context']?.SessionStart), true);
+      assert.equal(content['cluster-context'].SessionStart[0].matcher, '*');
+      assert.equal(content['cluster-context'].SessionStart[0].hooks[0].command, '/app/hooks/cluster-context.sh');
+
+      assert.equal(Array.isArray(content['team-inbox']?.SessionStart), true);
+      assert.equal(content['team-inbox'].SessionStart[0].matcher, '*');
+      assert.equal(content['team-inbox'].SessionStart[0].hooks[0].command, '/app/hooks/check-inbox.sh');
+
+      assert.equal(Array.isArray(content['team-inbox']?.PostToolUse), true);
+      assert.equal(content['team-inbox'].PostToolUse[0].matcher, '*');
+      assert.equal(content['team-inbox'].PostToolUse[0].hooks[0].command, '/app/hooks/check-inbox.sh');
 
       assert.equal(fs.statSync(hooksPath).mode & 0o777, 0o600, 'hooks.json must be 0600 mode');
     });

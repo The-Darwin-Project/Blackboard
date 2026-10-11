@@ -1,7 +1,7 @@
 // gemini-sidecar/tests/test_stream_parser.js
 // @ai-rules:
 // 1. [Constraint]: Pure unit tests for stream-parser.js — uses node:test + node:assert/strict.
-// 2. [Pattern]: Tests stream parser across Gemini, Claude, and Antigravity (agy) schemas.
+// 2. [Pattern]: Tests stream parser across Claude and Antigravity (agy) schemas.
 // 3. [Coverage]: Tests agy init, step_update (text_delta, tool_info, error), result (success text: null, error text: [error]...),
 //    raw fallback, and parseClaudeStreamLine wrapper.
 
@@ -10,87 +10,6 @@ const assert = require('node:assert/strict');
 const path = require('path');
 
 const { parseStreamLine, parseClaudeStreamLine } = require('../stream-parser.js');
-
-describe('stream-parser: Gemini format', () => {
-  it('parses init event', () => {
-    const line = JSON.stringify({ type: 'init', session_id: 'gemini-sess-123' });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: null,
-      sessionId: 'gemini-sess-123',
-      toolCalls: null,
-      done: false,
-    });
-  });
-
-  it('parses assistant message event', () => {
-    const line = JSON.stringify({ type: 'message', role: 'assistant', content: 'Gemini says hello' });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: 'Gemini says hello',
-      sessionId: null,
-      toolCalls: null,
-      done: false,
-    });
-  });
-
-  it('parses tool_use event', () => {
-    const line = JSON.stringify({
-      type: 'tool_use',
-      tool_name: 'read_file',
-      parameters: { file_path: '/path/to/file.txt' },
-    });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: '[tool] read_file: /path/to/file.txt',
-      sessionId: null,
-      toolCalls: null,
-      done: false,
-    });
-  });
-
-  it('parses tool_result event', () => {
-    const line = JSON.stringify({
-      type: 'tool_result',
-      tool_name: 'read_file',
-      output: 'file content preview',
-    });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: '[read_file] → file content preview',
-      sessionId: null,
-      toolCalls: null,
-      done: false,
-    });
-  });
-
-  it('parses error event', () => {
-    const line = JSON.stringify({ type: 'error', message: 'Quota exceeded warning' });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: '[error] Quota exceeded warning',
-      sessionId: null,
-      toolCalls: null,
-      done: false,
-    });
-  });
-
-  it('parses result event', () => {
-    const line = JSON.stringify({
-      type: 'result',
-      status: 'success',
-      result: 'Final Gemini summary',
-      stats: { tool_calls: 3 },
-    });
-    const res = parseStreamLine(line);
-    assert.deepEqual(res, {
-      text: 'Final Gemini summary',
-      sessionId: null,
-      toolCalls: 3,
-      done: true,
-    });
-  });
-});
 
 describe('stream-parser: Claude format', () => {
   it('parses system init event', () => {

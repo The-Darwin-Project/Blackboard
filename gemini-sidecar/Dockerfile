@@ -1,6 +1,6 @@
 # gemini-sidecar/Dockerfile
-# Agent CLI sidecar - HTTP wrapper for Gemini + Claude Code CLIs with GitHub/GitLab auth
-# Uses Node.js 22 (required by @google/gemini-cli)
+# Agent CLI sidecar - HTTP wrapper for Claude Code + Antigravity (agy) CLIs with GitHub/GitLab auth
+# Uses Node.js 22
 
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest
 
@@ -94,11 +94,6 @@ RUN \
     .gh-real --version && github-mcp-server --help | head -1 && \
     glab --version && flux --version
 
-# Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
-# UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
-RUN npm install -g @google/gemini-cli@latest && \
-    ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
-    /usr/local/bin/gemini --version || echo "Gemini CLI linked"
 
 # GitLab MCP server: provided by glab CLI (`glab mcp serve`), no separate npm package needed.
 # The deprecated @modelcontextprotocol/server-gitlab has broken schemas -- glab is the replacement.

@@ -1,23 +1,20 @@
 // gemini-sidecar/stream-parser.js
 // @ai-rules:
 // 1. [Constraint]: Pure JSON parsing functions — no side effects, no state, no I/O.
-// 2. [Pattern]: Unified parseStreamLine handles both Gemini and Claude stream-json schemas; returns { text, sessionId, toolCalls, done } or null.
+// 2. [Pattern]: Unified parseStreamLine handles both Antigravity (agy) and Claude stream-json schemas; returns { text, sessionId, toolCalls, done } or null.
 // 3. [Pattern]: parseClaudeStreamLine is backward-compat wrapper — returns parsed.text only for legacy callers.
 // 4. [Gotcha]: Non-JSON input returns { text: line, ... } (raw line as text); JSON parse errors are caught, not thrown.
 
 /**
- * Unified stream-json line parser for both Gemini and Claude CLIs.
+ * Unified stream-json line parser for Antigravity (agy) and Claude CLIs.
  * Returns { text, sessionId, toolCalls, done } or null if not user-facing.
  *
- * Gemini stream-json schema (probed 2026-02-13, updated 2026-02-22):
- *   {"type":"init","session_id":"...","model":"auto-gemini-2.5"}
- *   {"type":"message","role":"assistant","content":"...","delta":true}
- *   {"type":"tool_use","tool_name":"read_file","tool_id":"...","parameters":{...}}
- *   {"type":"tool_result","tool_name":"read_file","output":"..."}
- *   {"type":"error","message":"Non-fatal warning or error"}
- *   {"type":"result","status":"success","stats":{"tool_calls":0,...}}
+ * Antigravity CLI (agy) stream-json schema:
+ *   {"event":"init","conversation_id":"..."}
+ *   {"event":"step_update","step_update":{"text_delta":"...","tool_info":{...},"error":"..."}}
+ *   {"event":"result","result":{"status":"SUCCESS","num_turns":1,...}}
  *
- * Claude stream-json schema (verified via podman 2026-02-22):
+ * Claude stream-json schema (verified via podman):
  *   {"type":"system","subtype":"init","session_id":"...","tools":[...],"model":"..."}
  *   {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","id":"...","input":{...}}]}}
  *   {"type":"user","message":{"content":[{"tool_use_id":"...","type":"tool_result","content":"..."}]}}
@@ -88,14 +85,9 @@ function parseStreamLine(line) {
             };
         }
 
-        // --- Init events (both CLIs emit session_id) ---
-        if (obj.type === 'init' || (obj.type === 'system' && obj.subtype === 'init')) {
+        // --- Claude: Init event ---
+        if (obj.type === 'system' && obj.subtype === 'init') {
             return { text: null, sessionId: obj.session_id || null, toolCalls: null, done: false };
-        }
-
-        // --- Gemini: assistant message ---
-        if (obj.type === 'message' && obj.role === 'assistant' && obj.content) {
-            return { text: obj.content, sessionId: null, toolCalls: null, done: false };
         }
 
         // --- Claude: assistant message (text + tool_use blocks) ---
@@ -123,14 +115,7 @@ function parseStreamLine(line) {
             return null;
         }
 
-        // --- Gemini: tool_use event (top-level, not nested in assistant message) ---
-        if (obj.type === 'tool_use' && obj.tool_name) {
-            const hint = obj.parameters?.file_path || obj.parameters?.command || obj.parameters?.query || '';
-            const suffix = hint ? `: ${hint.toString().slice(0, 2000)}` : '';
-            return { text: `[tool] ${obj.tool_name}${suffix}`, sessionId: null, toolCalls: null, done: false };
-        }
-
-        // --- Both CLIs: tool_result event (brief summary of tool output) ---
+        // --- Claude: tool_result event (brief summary of tool output) ---
         if (obj.type === 'tool_result') {
             const name = obj.tool_name || 'tool';
             let raw = obj.output || '';
@@ -145,13 +130,7 @@ function parseStreamLine(line) {
             return { text: `[${name}]${suffix}`, sessionId: null, toolCalls: null, done: false };
         }
 
-        // --- Gemini: error event (non-fatal warnings) ---
-        if (obj.type === 'error') {
-            const msg = obj.message || obj.error || JSON.stringify(obj);
-            return { text: `[error] ${msg}`, sessionId: null, toolCalls: null, done: false };
-        }
-
-        // --- Result events (both CLIs) ---
+        // --- Claude: result event ---
         if (obj.type === 'result') {
             const toolCalls = obj.stats?.tool_calls ?? null;
             let text = null;

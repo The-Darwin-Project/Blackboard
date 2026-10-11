@@ -305,10 +305,10 @@ class TestExplorerRoleMaps:
         assert _ROLE_EFFORT_MAP.get("explorer") == "low"
 
     def test_explorer_cli_map(self):
-        """Explorer CLI resolves to 'gemini'."""
+        """Explorer CLI resolves to 'agy'."""
         from src.agents.brain import _ROLE_CLI_MAP
 
-        assert _ROLE_CLI_MAP.get("explorer") == "gemini"
+        assert _ROLE_CLI_MAP.get("explorer") == "agy"
 
     def test_other_roles_default_to_claude_cli(self):
         """Non-explorer roles default to 'claude' via .get() fallback."""

@@ -7,7 +7,7 @@
 // 3. [Pattern]: git-credential-darwin shell helper resolves per-org tokens from the map file.
 //    gh-wrapper.sh does the same for `gh` CLI invocations.
 // 4. [Pattern]: GitLab uses static PAT; ArgoCD session API for MCP JWT; Registry copies
-//    dockerconfigjson to ~/.docker/config.json. Claude MCP -> ~/.claude.json; Gemini MCP -> ~/.gemini/settings.json.
+//    dockerconfigjson to ~/.docker/config.json. Claude MCP -> ~/.claude.json; agy MCP -> ~/.gemini/config/mcp_config.json.
 // 5. [Gotcha]: findPrivateKeyPath/createAppJWT are internal — not exported; only public API exposed.
 // 6. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 5 min.
 // 7. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true.
@@ -334,7 +334,7 @@ function setupGitCredentials(tokenMap, workDir) {
 /**
  * Configure GitHub MCP server + gh CLI auth with multi-org token map.
  * Selects primary token: GITHUB_TARGET_ORG → GITHUB_INSTALLATION_ID → _default → first available.
- * Both Gemini CLI and Claude Code use the MCP server for structured GitHub interaction.
+ * Both Antigravity (agy) and Claude Code use the MCP server for structured GitHub interaction.
  * The gh CLI uses GH_TOKEN env var; per-repo switching handled by gh-wrapper.sh.
  *
  * @param {Object} tokenMap - Multi-org token map from discoverAndGenerateTokens()
@@ -377,32 +377,11 @@ function setupGitHubTooling(tokenMap) {
   // 1. Set GH_TOKEN for gh CLI (persists in process env for child processes)
   process.env.GH_TOKEN = token;
 
-  // 2. Configure GitHub MCP server for both CLIs
+  // 2. Configure GitHub MCP server for Claude Code and agy
   // Hoisted above try blocks: resolveCommand never throws (catches internally, falls back to relative name)
   const ghMcpBin = resolveCommand('github-mcp-server');
-  const geminiSettingsDir = `${process.env.HOME}/.gemini`;
-  const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
-  try {
-    fs.mkdirSync(geminiSettingsDir, { recursive: true });
-    // Read existing settings (may have other config)
-    let settings = {};
-    if (fs.existsSync(geminiSettingsPath)) {
-      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
-    }
-    // Add/update GitHub MCP server config (stdio transport -- CLI spawns server as child)
-    settings.mcpServers = settings.mcpServers || {};
-    settings.mcpServers.GitHub = {
-      command: ghMcpBin,
-      args: ['stdio'],
-      env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
-    };
-    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-    console.log(`[${new Date().toISOString()}] GitHub MCP configured for Gemini CLI`);
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] GitHub MCP config (Gemini) failed: ${err.message}`);
-  }
 
-  // 3. Configure GitHub MCP server for Claude Code (writes to ~/.claude.json)
+  // Configure GitHub MCP server for Claude Code (writes to ~/.claude.json)
   try {
     writeClaudeMcpServer('GitHub', {
       command: ghMcpBin, args: ['stdio'],
@@ -473,7 +452,7 @@ function setupGitLabCredentials(token, workDir) {
 
 /**
  * Configure GitLab MCP server + glab CLI auth with a token.
- * Both Gemini CLI and Claude Code use the MCP server for structured GitLab interaction.
+ * Both Antigravity (agy) and Claude Code use the MCP server for structured GitLab interaction.
  * The glab CLI uses GITLAB_TOKEN env var for direct commands.
  *
  * @param {string} token - GitLab access token (PAT)
@@ -511,24 +490,7 @@ function setupGitLabTooling(token) {
     },
   };
 
-  // 2. Configure GitLab MCP for Gemini CLI
-  const geminiSettingsDir = `${process.env.HOME}/.gemini`;
-  const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
-  try {
-    fs.mkdirSync(geminiSettingsDir, { recursive: true });
-    let settings = {};
-    if (fs.existsSync(geminiSettingsPath)) {
-      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
-    }
-    settings.mcpServers = settings.mcpServers || {};
-    settings.mcpServers.GitLab = mcpConfig;
-    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-    console.log(`[${new Date().toISOString()}] GitLab MCP configured for Gemini CLI (glab mcp serve)`);
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] GitLab MCP config (Gemini) failed: ${err.message}`);
-  }
-
-  // 3. Configure GitLab MCP for Claude Code (writes to ~/.claude.json)
+  // Configure GitLab MCP for Claude Code (writes to ~/.claude.json)
   try {
     writeClaudeMcpServer('GitLab', mcpConfig);
     console.log(`[${new Date().toISOString()}] GitLab MCP configured for Claude Code (glab mcp serve)`);
@@ -548,7 +510,7 @@ function setupGitLabTooling(token) {
 }
 
 /**
- * Configure ArgoCD MCP server for Gemini CLI and Claude Code.
+ * Configure ArgoCD MCP server for Antigravity (agy) and Claude Code.
  * Exchanges the existing ArgoCD password for a session JWT via the ArgoCD API,
  * then registers argocd-mcp as an MCP server in both CLI settings.
  * Architect gets read-only access; all other roles get full access.
@@ -597,21 +559,6 @@ async function setupArgoCDMCP() {
       ...(insecure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
     },
   };
-
-  const geminiSettingsPath = `${process.env.HOME}/.gemini/settings.json`;
-  try {
-    fs.mkdirSync(`${process.env.HOME}/.gemini`, { recursive: true });
-    let settings = {};
-    if (fs.existsSync(geminiSettingsPath)) {
-      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh */ }
-    }
-    settings.mcpServers = settings.mcpServers || {};
-    settings.mcpServers.ArgoCD = mcpConfig;
-    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-    console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for Gemini CLI${readOnly ? ' (read-only)' : ''}`);
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Gemini) failed: ${err.message}`);
-  }
 
   // Configure ArgoCD MCP for Claude Code (writes to ~/.claude.json)
   try {
@@ -707,7 +654,6 @@ function setupRemoteK8sMCPs() {
   catch { return; }
 
   const mcpBin = resolveCommand('kubernetes-mcp-server');
-  const geminiSettingsPath = `${process.env.HOME}/.gemini/settings.json`;
 
   for (const entry of clusterDirs) {
     if (!entry.isDirectory()) continue;
@@ -720,19 +666,6 @@ function setupRemoteK8sMCPs() {
       command: mcpBin,
       args: ['--kubeconfig', kubeconfigPath, '--read-only', '--toolsets', 'core,config,tekton'],
     };
-
-    try {
-      fs.mkdirSync(`${process.env.HOME}/.gemini`, { recursive: true });
-      let settings = {};
-      if (fs.existsSync(geminiSettingsPath)) {
-        try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { }
-      }
-      settings.mcpServers = settings.mcpServers || {};
-      settings.mcpServers[mcpName] = mcpConfig;
-      fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-    } catch (err) {
-      console.error(`[${new Date().toISOString()}] ${mcpName} MCP config (Gemini) failed: ${err.message}`);
-    }
 
     try {
       writeClaudeMcpServer(mcpName, mcpConfig);
@@ -774,18 +707,6 @@ function setupRemoteK8sMCPs() {
           args: ['/app/kubearchive-mcp.js'],
           env: { KUBEARCHIVE_URL: meta.kubearchiveUrl, KUBEARCHIVE_TOKEN: token },
         };
-
-        try {
-          let kaSettings = {};
-          if (fs.existsSync(geminiSettingsPath)) {
-            try { kaSettings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { }
-          }
-          kaSettings.mcpServers = kaSettings.mcpServers || {};
-          kaSettings.mcpServers[kaMcpName] = kaMcpConfig;
-          fs.writeFileSync(geminiSettingsPath, JSON.stringify(kaSettings, null, 2));
-        } catch (err) {
-          console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (Gemini) failed: ${err.message}`);
-        }
 
         try {
           writeClaudeMcpServer(kaMcpName, kaMcpConfig);
@@ -836,9 +757,12 @@ function hasRegistryCredentials() {
 function setupRegistryCredentials() {
   if (!fs.existsSync(REGISTRY_CONFIG_PATH)) return;
   try {
-    fs.mkdirSync(DOCKER_DIR, { recursive: true });
-    fs.copyFileSync(REGISTRY_CONFIG_PATH, DOCKER_CONFIG_PATH);
-    fs.chmodSync(DOCKER_CONFIG_PATH, 0o600);
+    fs.mkdirSync(DOCKER_DIR, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(DOCKER_DIR, 0o700); } catch { /* ignore */ }
+    const tmpDocker = `${DOCKER_CONFIG_PATH}.tmp.${process.pid}`;
+    fs.copyFileSync(REGISTRY_CONFIG_PATH, tmpDocker);
+    fs.chmodSync(tmpDocker, 0o600);
+    fs.renameSync(tmpDocker, DOCKER_CONFIG_PATH);
     console.log(`[${new Date().toISOString()}] Registry credentials configured (${DOCKER_CONFIG_PATH})`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Registry credentials setup failed: ${err.message}`);
@@ -860,7 +784,7 @@ function hasJenkinsCredentials() {
 }
 
 /**
- * Configure the Jenkins MCP server (local gemini-sidecar/jenkins-mcp.js) for Gemini CLI and
+ * Configure the Jenkins MCP server (local gemini-sidecar/jenkins-mcp.js) for Antigravity (agy) and
  * Claude Code. Static user/API-token auth, same shape as GitLab's PAT (no session exchange).
  * Replaces @kud/mcp-jenkins: that package could not read a prior build's parameters before
  * retriggering, so a retrigger of a parameterized job posted to /build with no params and
@@ -898,22 +822,6 @@ async function setupJenkinsMCP() {
     // Jenkins, so there is nothing else that needs the global override.
     mcpConfig.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     mcpConfig.env.MCP_JENKINS_INSECURE_TLS = 'true';
-  }
-
-  const geminiSettingsDir = `${process.env.HOME}/.gemini`;
-  const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
-  try {
-    fs.mkdirSync(geminiSettingsDir, { recursive: true });
-    let settings = {};
-    if (fs.existsSync(geminiSettingsPath)) {
-      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
-    }
-    settings.mcpServers = settings.mcpServers || {};
-    settings.mcpServers.Jenkins = mcpConfig;
-    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-    console.log(`[${new Date().toISOString()}] Jenkins MCP configured for Gemini CLI`);
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] Jenkins MCP config (Gemini) failed: ${err.message}`);
   }
 
   try {

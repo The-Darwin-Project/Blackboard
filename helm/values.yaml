@@ -85,7 +85,7 @@ sidecars:
   architect:
     enabled: true
     port: 9091
-    cliType: "claude" # "gemini" or "claude"
+    cliType: "claude" # "claude" or "agy"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
     modelName: "claude-opus-5-5" # Claude Opus 5.5 via Vertex AI
@@ -95,7 +95,7 @@ sidecars:
   sysadmin:
     enabled: true
     port: 9092
-    cliType: "claude" # "gemini" or "claude"
+    cliType: "claude" # "claude" or "agy"
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
     modelName: "claude-sonnet-5-5" # Claude Sonnet 5.5 via Vertex AI
@@ -480,7 +480,7 @@ ephemeralAgents:
     code_reviewer: "high"
     explorer: "high"
   roleCli:
-    explorer: "gemini"
+    explorer: "agy"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
   pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup

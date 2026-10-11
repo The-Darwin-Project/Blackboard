@@ -24,7 +24,7 @@ spec:
       description: Per-role model override from Brain (falls back to the Helm default when omitted)
       default: {{ .Values.ephemeralAgents.model | quote }}
     - name: cli
-      description: Per-role CLI binary override (claude or gemini)
+      description: Per-role CLI binary override (claude or agy)
       default: {{ .Values.ephemeralAgents.cli | quote }}
   resourcetemplates:
     - apiVersion: tekton.dev/v1
@@ -86,8 +86,6 @@ spec:
                   value: {{ .Values.gcp.location | quote }}
                 - name: GOOGLE_APPLICATION_CREDENTIALS
                   value: "/var/secrets/google/agent-service-account.json"
-                - name: GOOGLE_GENAI_USE_VERTEXAI
-                  value: "true"
                 - name: CLAUDE_CODE_USE_VERTEX
                   value: "1"
                 - name: ANTHROPIC_VERTEX_PROJECT_ID
