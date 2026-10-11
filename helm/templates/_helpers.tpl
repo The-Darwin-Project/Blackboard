@@ -93,3 +93,23 @@ Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of 
 {{- end }}
 {{- end }}
 
+
+{{/*
+Validate sidecar cliType. The sidecar entrypoint only supports 'claude' and 'agy' (legacy
+'gemini' was sunset in VMER-2030); a stale override such as cliType=gemini would otherwise
+render fine and crash-loop the sidecar at startup. Empty falls back to 'claude' as in the
+deployment env. Only enabled sidecars are checked.
+Usage: {{ include "darwin.validateSidecars" . }}
+*/}}
+{{- define "darwin.validateSidecars" -}}
+{{- $allowed := list "claude" "agy" -}}
+{{- range $role := list "architect" "sysadmin" "developer" "qe" -}}
+{{- $sc := index $.Values.sidecars $role | default dict -}}
+{{- if and (kindIs "map" $sc) (ne (toString (get $sc "enabled")) "false") -}}
+{{- $cli := (get $sc "cliType") | default "claude" -}}
+{{- if not (has $cli $allowed) -}}
+{{- fail (printf "sidecars.%s.cliType=%q is invalid: must be one of %s (legacy 'gemini' was removed in VMER-2030; update or remove the stale override)" $role $cli (join ", " $allowed)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

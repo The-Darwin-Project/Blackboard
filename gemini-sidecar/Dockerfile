@@ -224,6 +224,7 @@ COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
 COPY hooks/cluster-context.sh /app/hooks/cluster-context.sh
 COPY hooks/require-results.sh /app/hooks/require-results.sh
 COPY hooks/validate-mutations.sh /app/hooks/validate-mutations.sh
+COPY hooks/merge-guard.js /app/hooks/merge-guard.js
 RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh \
     /app/hooks/require-results.sh /app/hooks/validate-mutations.sh
 

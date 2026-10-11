@@ -387,6 +387,107 @@ run_test_deny_with_reason "T-7i: git -C . commit denylisted for explorer" \
 run_test_deny_with_reason "T-7j: git --no-pager tag denylisted for explorer" \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":"git --no-pager tag v1"}}}' explorer "mutation blocked"
 
+# --- T-9: bare `git push`, HTTP clients, API verbs, camelCase / verb-based MCP matching ---
+# Bare push resolves the current branch, so run these inside throwaway repos.
+REPO_MAIN="$(mktemp -d)"; REPO_FEAT="$(mktemp -d)"
+for r in "$REPO_MAIN" "$REPO_FEAT"; do git -C "$r" init -q -b main && git -C "$r" -c user.name=t -c user.email=t@t commit -q --allow-empty -m i; done
+git -C "$REPO_FEAT" checkout -q -b feat/x
+git_in() { # dir, then run_test_deny_with_reason args (name, input, role, substr)
+  local dir="$1"; shift
+  ( cd "$dir" && run_test_deny_with_reason "$@" ); local rc=$?
+}
+in_repo() { # dir name input role expected_decision  (allow check)
+  local dir="$1"; shift
+  ( cd "$dir" && run_test "$@" )
+}
+# Subshell counters are lost, so evaluate by hand and bump the parent's counters.
+check_in() { # dir name command role expected(deny|allow)
+  local dir="$1" name="$2" cmd="$3" role="$4" want="$5" out got
+  out="$(cd "$dir" && jq -cn --arg c "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$c}}}' | SIDECAR_PORT=1 AGENT_ROLE="$role" bash "$HOOK" 2>/dev/null)"
+  got="$(echo "$out" | jq -r '.decision')"
+  if [[ "$got" == "$want" ]] && { [[ "$want" == allow ]] || [[ "$out" == *"Merge REFUSED"* ]]; }; then
+    echo "PASS [$name]"; ((PASS++))
+  else
+    ERRORS+=("FAIL [$name]: want=$want got=$out"); ((FAIL++))
+  fi
+}
+check_in "$REPO_MAIN" "T-9a: bare 'git push' on main blocked"            "git push" developer deny
+check_in "$REPO_MAIN" "T-9b: 'git push origin' on main blocked"          "git push origin" developer deny
+check_in "$REPO_MAIN" "T-9c: 'git push origin HEAD' on main blocked"     "git push origin HEAD" developer deny
+check_in "$REPO_MAIN" "T-9d: 'git push -u origin' on main blocked"       "git push -u origin" developer deny
+check_in "$REPO_FEAT" "T-9e: bare 'git push' on feature allowed"         "git push" developer allow
+check_in "$REPO_FEAT" "T-9f: 'git push origin HEAD' on feature allowed"  "git push origin HEAD" developer allow
+check_in "$REPO_FEAT" "T-9g: 'git push origin HEAD:main' blocked"        "git push origin HEAD:main" developer deny
+check_in "$REPO_FEAT" "T-9h: 'git push origin \$BRANCH' (dynamic) ok if no glob" "git push origin feat/x" developer allow
+check_in "$REPO_FEAT" "T-9i: refspec glob blocked"                       "git push origin 'refs/heads/*:refs/heads/*'" developer deny
+check_in "$REPO_FEAT" "T-9j: -C bare push blocked (cannot resolve)"      "git -C /somewhere push" developer deny
+git -C "$REPO_FEAT" config push.default matching
+check_in "$REPO_FEAT" "T-9k: push.default=matching bare push blocked"    "git push" developer deny
+git -C "$REPO_FEAT" config --unset push.default
+git -C "$REPO_FEAT" config remote.origin.push 'refs/heads/*:refs/heads/*'
+check_in "$REPO_FEAT" "T-9l: remote.origin.push glob bare push blocked"  "git push" developer deny
+git -C "$REPO_FEAT" config --unset remote.origin.push
+check_in "$REPO_FEAT" "T-9m: git push --tags allowed"                    "git push origin --tags" developer allow
+
+check_in "$REPO_FEAT" "T-9n: curl -X PUT .../pulls/1/merge blocked"      "curl -X PUT -H 'Authorization: token x' https://api.github.com/repos/o/r/pulls/1/merge" developer deny
+check_in "$REPO_FEAT" "T-9o: curl -XPUT .../merges blocked"              "curl -XPUT https://api.github.com/repos/o/r/merges -d '{}'" developer deny
+check_in "$REPO_FEAT" "T-9p: curl POST data to /merge blocked"           "curl https://gitlab.example/api/v4/projects/1/merge_requests/2/merge -d should_remove_source_branch=true" developer deny
+check_in "$REPO_FEAT" "T-9q: curl graphql mergePullRequest blocked"      "curl -s https://api.github.com/graphql -d '{\"query\":\"mutation{mergePullRequest(input:{pullRequestId:\\\"x\\\"}){clientMutationId}}\"}'" developer deny
+check_in "$REPO_FEAT" "T-9r: wget --method=PUT merge blocked"            "wget -qO- --method=PUT https://api.github.com/repos/o/r/pulls/1/merge" developer deny
+check_in "$REPO_FEAT" "T-9s: curl merge-upstream blocked"                "curl -X POST https://api.github.com/repos/o/r/merge-upstream -d '{}'" developer deny
+check_in "$REPO_FEAT" "T-9t: gh api graphql mergePullRequest blocked"    "gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'" developer deny
+check_in "$REPO_FEAT" "T-9u: glab api -X PUT merge blocked"              "glab api -X PUT projects/1/merge_requests/2/merge" developer deny
+check_in "$REPO_FEAT" "T-9v: gh api --method PUT merge blocked"          "gh api --method PUT repos/o/r/pulls/1/merge" developer deny
+check_in "$REPO_FEAT" "T-9w: bash -c wrapper blocked"                    "bash -c 'git -C . merge x'" developer deny
+check_in "$REPO_FEAT" "T-9x: quoted binary/subcommand blocked"           "\"git\" 'merge' x" developer deny
+check_in "$REPO_FEAT" "T-9y: command substitution blocked"               "echo \$(git merge x)" developer deny
+check_in "$REPO_FEAT" "T-9z: find -exec blocked"                         "find . -maxdepth 0 -exec git merge x \;" developer deny
+check_in "$REPO_FEAT" "T-9aa: sudo/env wrapper blocked"                  "sudo -u root env A=1 gh pr merge 3" developer deny
+# non-merge HTTP calls stay allowed
+check_in "$REPO_FEAT" "T-9ab: curl GET pulls allowed"                    "curl -s https://api.github.com/repos/o/r/pulls" developer allow
+check_in "$REPO_FEAT" "T-9ac: curl GET merge_requests list allowed"      "curl -s https://gitlab.example/api/v4/projects/1/merge_requests" developer allow
+check_in "$REPO_FEAT" "T-9ad: curl POST create MR allowed"               "curl -X POST https://gitlab.example/api/v4/projects/1/merge_requests -d title=x" developer allow
+check_in "$REPO_FEAT" "T-9ae: gh api GET allowed"                        "gh api repos/o/r/pulls/1" developer allow
+check_in "$REPO_FEAT" "T-9af: gh pr create allowed"                      "gh pr create --title x --body y" developer allow
+rm -rf "$REPO_MAIN" "$REPO_FEAT"
+
+# Verb-based MCP matching (camelCase, snake_case, prefixed or bare)
+mg "T-9ag: camelCase mergePullRequest blocked"       mergePullRequest '{}' developer
+mg "T-9ah: mcp-prefixed camelCase blocked"           mcp_GitHub_mergePullRequest '{}' developer
+mg "T-9ai: enableAutoMerge blocked"                  enablePullRequestAutoMerge '{}' developer
+mg "T-9aj: accept_merge_request blocked"             accept_merge_request '{}' developer
+run_test "T-9ak: create_merge_request (noun) not a merge" \
+  '{"toolCall":{"name":"create_merge_request","args":{}}}' developer allow
+run_test "T-9al: list_merge_requests allowed for explorer" \
+  '{"toolCall":{"name":"list_merge_requests","args":{}}}' explorer allow
+
+# Read-only roles: only allowlisted (read/comms) non-shell tools
+for t in mcp__GitHub__push_files mcp__GitHub__create_or_update_file mcp__GitHub__create_branch mcp__GitHub__create_pull_request \
+         mcp__GitHub__issue_write mcp__GitHub__fork_repository mcp__ArgoCD__sync_application mcp__ArgoCD__create_application \
+         mcp__Jenkins__jenkins_trigger_build mcp__GitLab__glab_mr_approve mcp__GitLab__glab_ci_run mcp__GitLab__glab_mr_note_delete \
+         mcp__Playwright__browser_run_code_unsafe some_unknown_tool multi_replace_file_content; do
+  run_test_deny_with_reason "T-10a: read-only role denied for $t" \
+    "{\"toolCall\":{\"name\":\"$t\",\"args\":{\"branch\":\"feat/x\"}}}" explorer "read-only"
+done
+for t in mcp__GitHub__get_file_contents mcp__GitHub__list_pull_requests mcp__GitHub__search_code mcp__GitHub__pull_request_read \
+         mcp__GitHub__add_comment_to_pending_review mcp__GitHub__pull_request_review_write mcp__GitHub__add_issue_comment \
+         mcp__GitLab__glab_mr_view mcp__GitLab__glab_mr_note_create mcp__ArgoCD__get_application mcp__K8s_konflux__pods_log \
+         mcp__KubeArchive_konflux__ka_get_log mcp__DarwinBlackboard__bb_catch_up mcp__DarwinJournal__svc_get_service \
+         mcp__TeamChat__team_send_results mcp__Playwright__browser_snapshot view_file grep_search; do
+  run_test "T-10b: read-only role allowed for $t" \
+    "{\"toolCall\":{\"name\":\"$t\",\"args\":{}}}" explorer allow
+done
+run_test "T-10c: glab_api GET allowed for explorer" \
+  '{"toolCall":{"name":"mcp__GitLab__glab_api","args":{"args":["projects/1/merge_requests"],"flags":{}}}}' explorer allow
+run_test_deny_with_reason "T-10d: glab_api POST denied for explorer" \
+  '{"toolCall":{"name":"mcp__GitLab__glab_api","args":{"args":["projects/1/issues"],"flags":{"method":"POST"}}}}' explorer "read-only"
+run_test "T-10e: non-readonly role may push_files to a feature branch" \
+  '{"toolCall":{"name":"mcp__GitHub__push_files","args":{"branch":"feat/x"}}}' developer allow
+OUT="$(echo '{"toolCall":{"name":"mcp__GitHub__create_branch","args":{}}}' | SIDECAR_PORT=1 AGENT_ROLE=explorer HOOK_EXTRA_ALLOWED_TOOLS="mcp__GitHub__create_branch" bash "$HOOK" | jq -r .decision)"
+if [[ "$OUT" == allow ]]; then echo "PASS [T-10f: HOOK_EXTRA_ALLOWED_TOOLS extends read-only allowlist]"; ((PASS++)); else ERRORS+=("FAIL [T-10f]: got $OUT"); ((FAIL++)); fi
+run_test_deny_with_reason "T-10g: extra allowlist cannot override the merge guard" \
+  '{"toolCall":{"name":"mcp__GitHub__merge_pull_request","args":{}}}' developer "Merge REFUSED"
+
 # Empty/missing command on every recognised shell tool name fails closed, for every role
 run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \
   '{"toolCall":{"name":"run_command","args":{"Other":"git merge x"}}}' developer "failing closed"

@@ -91,6 +91,10 @@ Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supp
 --set sidecars.architect.modelName=claude-opus-5-5
 ```
 
+`cliType` is validated at render time (`darwin.validateSidecars` in `templates/_helpers.tpl`) for every enabled sidecar:
+anything other than `claude` or `agy` (e.g. a stale `gemini` override, removed in VMER-2030) fails `helm template`/`helm install`
+instead of crash-looping the sidecar. An empty value falls back to `claude`.
+
 ## Observers
 
 Four background observers can be enabled independently:
