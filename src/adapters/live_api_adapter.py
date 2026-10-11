@@ -154,7 +154,10 @@ class LiveAPIAdapter:
         self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
         self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
-        self._tool_timeout = float(os.getenv("SYSTEM2_TOOL_TIMEOUT", "60.0"))
+        try:
+            self._tool_timeout = max(1.0, float(os.getenv("SYSTEM2_TOOL_TIMEOUT", "60.0")))
+        except (ValueError, TypeError):
+            self._tool_timeout = 60.0
         self._project = os.getenv("GCP_PROJECT", "")
         self._location = os.getenv("GCP_LOCATION", "global")
         self._seen_neurons: set[str] = set()
@@ -221,11 +224,15 @@ class LiveAPIAdapter:
         from google.genai import types
 
         if not self._client:
-            self._client = genai.Client(
-                vertexai=True,
-                project=self._project,
-                location=self._location,
-            )
+            try:
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=self._project,
+                    location=self._location,
+                )
+            except Exception as e:
+                logger.error("Cortex failed to initialize genai.Client: %s", e)
+                return
 
         for attempt in range(2):
             session_opened = False
@@ -1979,7 +1986,6 @@ class LiveAPIAdapter:
                         extracted_part = True
                 if not extracted_part and hasattr(msg, "text") and msg.text:
                     summary_parts.append(msg.text)
-                
                 if hasattr(msg, "server_content") and getattr(
                     msg.server_content, "turn_complete", False
                 ):
