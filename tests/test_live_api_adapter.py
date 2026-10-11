@@ -481,12 +481,15 @@ async def test_rotate_session_clears_resumption_handle():
 @pytest.mark.asyncio
 async def test_handle_tool_call_timeout():
     adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
-    adapter._tool_timeout = 60.0
-    adapter._tool_list_active_events = AsyncMock()
-    
-    with patch("asyncio.timeout", side_effect=TimeoutError):
-        result = await adapter._handle_tool_call("list_active_events", {})
-        assert "timed out" in result
+    adapter._tool_timeout = 0.05
+
+    async def slow_tool():
+        await asyncio.sleep(0.5)
+        return "done"
+
+    adapter._tool_list_active_events = slow_tool
+    result = await adapter._handle_tool_call("list_active_events", {})
+    assert "timed out after" in result
 
 @pytest.mark.asyncio
 async def test_connect_does_not_cancel_current_task():
@@ -594,6 +597,8 @@ async def test_propose_enhancement_idempotent():
     existing_entry = json.dumps({
         "event_id": "evt-dup",
         "title": "Fix memory leak",
+        "description": "Duplicate proposal",
+        "severity": "blocking",
         "status": "pending",
     })
     adapter._blackboard.redis.lrange.return_value = [existing_entry]
@@ -607,5 +612,97 @@ async def test_propose_enhancement_idempotent():
 
     assert "already pending review" in result
     adapter._blackboard.redis.rpush.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_propose_enhancement_allows_updated_revision():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.redis = AsyncMock()
+    adapter._broadcast = AsyncMock()
+
+    existing_entry = json.dumps({
+        "event_id": "evt-dup",
+        "title": "Fix memory leak",
+        "description": "Original description",
+        "severity": "nice_to_have",
+        "status": "pending",
+    })
+    adapter._blackboard.redis.lrange.return_value = [existing_entry]
+
+    result = await adapter._tool_propose_enhancement(
+        event_id="evt-dup",
+        title="Fix memory leak",
+        description="Escalated description with root cause",
+        severity="blocking",
+    )
+
+    assert "stored for operator review" in result
+    adapter._blackboard.redis.rpush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_session_report_filters_thoughts():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._broadcast = AsyncMock()
+    adapter._store_handoff_report = AsyncMock()
+
+    thought_part = MagicMock()
+    thought_part.thought = True
+    thought_part.text = "Internal chain of thought reasoning that should NOT leak"
+
+    content_part = MagicMock()
+    content_part.thought = False
+    content_part.text = "Actual session summary report"
+
+    turn_complete_content = MagicMock()
+    turn_complete_content.turn_complete = True
+
+    msg1 = MagicMock()
+    msg1.text = None
+    msg1.server_content.model_turn.parts = [thought_part, content_part]
+    msg1.server_content.turn_complete = False
+
+    msg2 = MagicMock()
+    msg2.text = None
+    msg2.server_content = turn_complete_content
+
+    async def mock_receive():
+        yield msg1
+        yield msg2
+
+    mock_session = MagicMock()
+    mock_session.send = AsyncMock()
+    mock_session.receive = mock_receive
+
+    await adapter._generate_session_report_on(mock_session)
+
+    adapter._broadcast.assert_awaited_once()
+    broadcast_call = adapter._broadcast.call_args[0][0]
+    assert broadcast_call["type"] == "cortex_session_report"
+    assert "Internal chain of thought reasoning" not in broadcast_call["report"]
+    assert "Actual session summary report" in broadcast_call["report"]
+
+
+@pytest.mark.asyncio
+async def test_stop_prevents_connect_resurrection():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._stopped = False
+    adapter._running = True
+    adapter._connect_lock = asyncio.Lock()
+    adapter._session = MagicMock()
+    adapter._disconnect = AsyncMock()
+
+    await adapter.stop()
+
+    assert adapter._stopped is True
+    assert adapter._running is False
+    adapter._disconnect.assert_awaited_once()
+
+    # Calling _connect() after stop() must immediately return without connecting
+    adapter._client = MagicMock()
+    await adapter._connect()
+    adapter._client.aio.live.connect.assert_not_called()
+
 
 

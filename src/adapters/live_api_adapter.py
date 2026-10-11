@@ -168,6 +168,7 @@ class LiveAPIAdapter:
         self._receive_task: asyncio.Task | None = None
         self._idle_watchdog_task: asyncio.Task | None = None
         self._running = False
+        self._stopped = False
         self._connect_lock = asyncio.Lock()
         self._client = None
         self._last_status_broadcast: float = 0
@@ -237,100 +238,112 @@ class LiveAPIAdapter:
         """Lazy-connect Live API session. Called on first pulse after idle."""
         if not hasattr(self, "_connect_lock"):
             self._connect_lock = asyncio.Lock()
+        if getattr(self, "_stopped", False):
+            return
         try:
-            async with asyncio.timeout(60.0):
-                async with self._connect_lock:
-                    if getattr(self, "_session", None):
-                        return
-                    from google import genai
-                    from google.genai import types
-
-                    if not self._client:
-                        try:
-                            self._client = genai.Client(
-                                vertexai=True,
-                                project=self._project,
-                                location=self._location,
-                            )
-                        except Exception as e:
-                            logger.error("Cortex failed to initialize genai.Client: %s", e)
-                            return
-
-                    for attempt in range(2):
-                        try:
-                            kwargs = {
-                                "response_modalities": [types.Modality.TEXT],
-                                "thinking_config": types.ThinkingConfig(include_thoughts=True),
-                                "generation_config": types.GenerationConfig(
-                                    max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                                    temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
-                                ),
-                                "system_instruction": types.Content(
-                                    parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-                                ),
-                                "tools": self._build_live_tools(types),
-                                "context_window_compression": types.ContextWindowCompressionConfig(
-                                    sliding_window=types.SlidingWindow()
-                                ),
-                            }
-                            if self._resumption_handle:
-                                kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
-                            config = types.LiveConnectConfig(**kwargs)
-
-                            self._session_ctx = self._client.aio.live.connect(
-                                model=self._model,
-                                config=config,
-                            )
-                            async with asyncio.timeout(30.0):
-                                self._session = await self._session_ctx.__aenter__()
-                            self._running = True
-
-                            self._start_tasks()
-
-                            try:
-                                async with asyncio.timeout(15.0):
-                                    await self._load_neuron_labels()
-                                    await self._broadcast_status("watching")
-                                    orphan = await self._blackboard.find_active_event_by_source("jarvis")
-                                    if orphan:
-                                        self._active_meta_event_id = orphan
-                                        active = await self._blackboard.get_active_events()
-                                        self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                                        logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
-                            except (Exception, asyncio.CancelledError) as init_err:
-                                if isinstance(init_err, asyncio.CancelledError):
-                                    raise
-                                logger.warning("Cortex post-connect initialization degraded (non-fatal): %s", init_err)
-
-                            logger.info(
-                                "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
-                                self._model, self._shadow, len(self._neuron_labels),
-                            )
-                            self._handle_connect_failures = 0
-                            return
-                        except (Exception, asyncio.CancelledError) as e:
-                            await self._abort_partial_connect()
-                            if isinstance(e, asyncio.CancelledError):
-                                raise
-                            if self._resumption_handle:
-                                # A single failure is usually transient (network, quota, backend blip) and the
-                                # handle is still valid. Only presume it stale after consecutive failures, so an
-                                # outage never discards a good handle or doubles request volume on one attempt.
-                                self._handle_connect_failures += 1
-                                if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
-                                    logger.warning(
-                                        "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
-                                        self._handle_connect_failures, e,
-                                    )
-                                    self._resumption_handle = None
-                                    self._handle_connect_failures = 0
-                                    continue
-                            logger.error("Cortex Live API failed to connect: %s", e)
-                            self._session = None
-                            return
+            async with asyncio.timeout(30.0):
+                await self._connect_lock.acquire()
         except TimeoutError:
             logger.error("Cortex _connect aborted: timed out waiting for _connect_lock")
             return
+
+        try:
+            if getattr(self, "_stopped", False) or getattr(self, "_session", None):
+                return
+            from google import genai
+            from google.genai import types
+
+            if not self._client:
+                try:
+                    self._client = genai.Client(
+                        vertexai=True,
+                        project=self._project,
+                        location=self._location,
+                    )
+                except Exception as e:
+                    logger.error("Cortex failed to initialize genai.Client: %s", e)
+                    return
+
+            for attempt in range(2):
+                if getattr(self, "_stopped", False):
+                    return
+                try:
+                    kwargs = {
+                        "response_modalities": [types.Modality.TEXT],
+                        "thinking_config": types.ThinkingConfig(include_thoughts=True),
+                        "generation_config": types.GenerationConfig(
+                            max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
+                            temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
+                        ),
+                        "system_instruction": types.Content(
+                            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                        ),
+                        "tools": self._build_live_tools(types),
+                        "context_window_compression": types.ContextWindowCompressionConfig(
+                            sliding_window=types.SlidingWindow()
+                        ),
+                    }
+                    if self._resumption_handle:
+                        kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
+                    config = types.LiveConnectConfig(**kwargs)
+
+                    self._session_ctx = self._client.aio.live.connect(
+                        model=self._model,
+                        config=config,
+                    )
+                    async with asyncio.timeout(30.0):
+                        self._session = await self._session_ctx.__aenter__()
+
+                    if getattr(self, "_stopped", False):
+                        await self._abort_partial_connect()
+                        return
+
+                    self._running = True
+                    self._start_tasks()
+
+                    try:
+                        async with asyncio.timeout(15.0):
+                            await self._load_neuron_labels()
+                            await self._broadcast_status("watching")
+                            orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                            if orphan:
+                                self._active_meta_event_id = orphan
+                                active = await self._blackboard.get_active_events()
+                                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                                logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                    except (Exception, asyncio.CancelledError) as init_err:
+                        if isinstance(init_err, asyncio.CancelledError):
+                            raise
+                        logger.warning("Cortex post-connect initialization degraded (non-fatal): %s", init_err)
+
+                    logger.info(
+                        "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
+                        self._model, self._shadow, len(self._neuron_labels),
+                    )
+                    self._handle_connect_failures = 0
+                    return
+                except (Exception, asyncio.CancelledError) as e:
+                    await self._abort_partial_connect()
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    if self._resumption_handle:
+                        # A single failure is usually transient (network, quota, backend blip) and the
+                        # handle is still valid. Only presume it stale after consecutive failures, so an
+                        # outage never discards a good handle or doubles request volume on one attempt.
+                        self._handle_connect_failures += 1
+                        if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
+                            logger.warning(
+                                "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
+                                self._handle_connect_failures, e,
+                            )
+                            self._resumption_handle = None
+                            self._handle_connect_failures = 0
+                            continue
+                    logger.error("Cortex Live API failed to connect: %s", e)
+                    self._session = None
+                    return
+        finally:
+            self._connect_lock.release()
 
     async def _abort_partial_connect(self) -> None:
         """Tear down a session that opened or failed during connect so a retry cannot leak it."""
@@ -355,14 +368,11 @@ class LiveAPIAdapter:
 
     async def stop(self) -> None:
         """Graceful shutdown -- called during app teardown."""
+        self._stopped = True
         self._running = False
         if not hasattr(self, "_connect_lock"):
             self._connect_lock = asyncio.Lock()
-        try:
-            async with asyncio.timeout(10.0):
-                async with self._connect_lock:
-                    await self._disconnect()
-        except Exception:
+        async with self._connect_lock:
             await self._disconnect()
         logger.info("Cortex Live API stopped")
 
@@ -1309,7 +1319,8 @@ class LiveAPIAdapter:
                         and p.get("title") == title
                         and p.get("status") == "pending"
                     ):
-                        return f"Proposal '{title}' is already pending review for {event_id}."
+                        if p.get("description") == description and p.get("severity") == severity:
+                            return f"Proposal '{title}' is already pending review for {event_id}."
                 except Exception:
                     pass
             await redis.rpush(key, entry)
@@ -1754,7 +1765,18 @@ class LiveAPIAdapter:
             parts: list[str] = []
             async with asyncio.timeout(45):
                 async for msg in session.receive():
-                    if hasattr(msg, "text") and msg.text:
+                    model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+                    raw_parts = getattr(model_turn, "parts", None)
+                    parts_list = raw_parts if isinstance(raw_parts, (list, tuple)) else []
+                    has_extracted_text = False
+                    for part in parts_list:
+                        thought = bool(getattr(part, "thought", False))
+                        text = getattr(part, "text", None)
+                        if not thought and text:
+                            parts.append(text)
+                            has_extracted_text = True
+                    has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
+                    if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and isinstance(msg.text, str) and msg.text:
                         parts.append(msg.text)
                     if hasattr(msg, "server_content") and getattr(
                         msg.server_content, "turn_complete", False

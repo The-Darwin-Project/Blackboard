@@ -629,7 +629,7 @@ cortex:
     handoffReport: true # Capture session notes on go_away before reconnect
     model: "gemini-3.8-live" # GA (VMER-2031)
     maxOutputTokens: "8192" # JARVIS Live API session generation_config cap
-    toolTimeout: "60.0" # Timeout in seconds for tool executions in Cortex Live API
+    toolTimeout: "60.0" # Timeout in seconds for tool executions in Cortex Live API (min 1.0s, no disabled option; do not set to "0")
 # =============================================================================
 # Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
 # =============================================================================
