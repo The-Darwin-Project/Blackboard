@@ -725,7 +725,7 @@ _ROLE_MODEL_MAP = {
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5-5"),
     "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5-5"),
-    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.7-flash"),
+    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.8-flash"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
