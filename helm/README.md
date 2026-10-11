@@ -84,12 +84,18 @@ Default Ingress annotations include WebSocket timeout overrides (3600s) for `/ws
 
 ## Agent Sidecars
 
-Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supports `gemini` or `claude` CLI:
+Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supports `claude` or `agy` CLI:
 
 ```bash
 --set sidecars.architect.cliType=claude
 --set sidecars.architect.modelName=claude-opus-5-5
 ```
+
+Every CLI selector is validated at render time (`darwin.validateSidecars` in `templates/_helpers.tpl`):
+`sidecars.<role>.cliType` (enabled sidecars), `ephemeralAgents.cli` (when ephemeral agents are enabled) and every
+`ephemeralAgents.roleCli.<role>` entry must be `claude` or `agy`. Anything else (e.g. a stale `gemini` override, removed
+in VMER-2030) fails `helm template`/`helm install` instead of crash-looping at startup. Empty values fall back to the
+default (`claude` for sidecars).
 
 ## Observers
 

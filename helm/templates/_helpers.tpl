@@ -93,3 +93,44 @@ Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of 
 {{- end }}
 {{- end }}
 
+
+{{/*
+Validate every CLI selector in the chart. The sidecar entrypoint / Brain only support 'claude' and 'agy'
+(legacy 'gemini' was sunset in VMER-2030); a stale override such as cliType=gemini would otherwise render
+fine and crash-loop the sidecar or ephemeral agent at startup. Checked values:
+  - sidecars.{architect,sysadmin,developer,qe}.cliType   (enabled sidecars only; empty => 'claude')
+  - ephemeralAgents.cli                                  (when ephemeralAgents.enabled; empty tolerated)
+  - ephemeralAgents.roleCli.<role>                       (every entry; empty => unset/default)
+Usage: {{ include "darwin.validateSidecars" . }}
+*/}}
+{{- define "darwin.validateSidecars" -}}
+{{- $allowed := list "claude" "agy" -}}
+{{- range $role := list "architect" "sysadmin" "developer" "qe" -}}
+{{- $sc := index $.Values.sidecars $role | default dict -}}
+{{- if and (kindIs "map" $sc) (ne (toString (get $sc "enabled")) "false") -}}
+{{- $cli := (get $sc "cliType") | default "claude" -}}
+{{- if not (has $cli $allowed) -}}
+{{- fail (printf "sidecars.%s.cliType=%q is invalid: must be one of %s (legacy 'gemini' was removed in VMER-2030; update or remove the stale override)" $role $cli (join ", " $allowed)) -}}
+{{- end -}}
+{{- $model := (get $sc "modelName") | default "" -}}
+{{- if and (eq $cli "agy") (hasPrefix "claude" $model) -}}
+{{- fail (printf "sidecars.%s.cliType is 'agy' but modelName=%q is a Claude model: agy requires a Gemini model (e.g. gemini-3.7-flash)" $role $model) -}}
+{{- end -}}
+{{- if and (eq $cli "claude") (hasPrefix "gemini" $model) -}}
+{{- fail (printf "sidecars.%s.cliType is 'claude' but modelName=%q is a Gemini model: claude requires a Claude model (e.g. claude-sonnet-5-5)" $role $model) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $ea := $.Values.ephemeralAgents | default dict -}}
+{{- if and (kindIs "map" $ea) (ne (toString (get $ea "enabled")) "false") -}}
+{{- $cli := (get $ea "cli") | default "" -}}
+{{- if and $cli (not (has $cli $allowed)) -}}
+{{- fail (printf "ephemeralAgents.cli=%q is invalid: must be one of %s (legacy 'gemini' was removed in VMER-2030)" $cli (join ", " $allowed)) -}}
+{{- end -}}
+{{- range $role, $rcli := (get $ea "roleCli" | default dict) -}}
+{{- if and $rcli (not (has (toString $rcli) $allowed)) -}}
+{{- fail (printf "ephemeralAgents.roleCli.%s=%q is invalid: must be one of %s (legacy 'gemini' was removed in VMER-2030)" $role $rcli (join ", " $allowed)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

@@ -737,7 +737,7 @@ _ROLE_EFFORT_MAP = {
     "explorer": os.getenv("EPHEMERAL_EFFORT_EXPLORER", "low"),
 }
 _ROLE_CLI_MAP = {
-    "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "gemini"),
+    "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "agy"),
 }
 
 

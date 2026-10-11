@@ -1,6 +1,6 @@
 # gemini-sidecar/Dockerfile
-# Agent CLI sidecar - HTTP wrapper for Gemini + Claude Code CLIs with GitHub/GitLab auth
-# Uses Node.js 22 (required by @google/gemini-cli)
+# Agent CLI sidecar - HTTP wrapper for Claude Code + Antigravity (agy) CLIs with GitHub/GitLab auth
+# Uses Node.js 22
 
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest
 
@@ -94,12 +94,6 @@ RUN \
     .gh-real --version && github-mcp-server --help | head -1 && \
     glab --version && flux --version
 
-# Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
-# UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
-RUN npm install -g @google/gemini-cli@latest && \
-    ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
-    /usr/local/bin/gemini --version || echo "Gemini CLI linked"
-
 # GitLab MCP server: provided by glab CLI (`glab mcp serve`), no separate npm package needed.
 # The deprecated @modelcontextprotocol/server-gitlab has broken schemas -- glab is the replacement.
 
@@ -186,11 +180,11 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 
-# Copy server code (modular -- entrypoint + 12 modules + 4 MCP servers)
+# Copy server code (modular -- entrypoint + 13 modules + 4 MCP servers)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
      team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
-     jenkins-mcp.js catalog-skills.js ./
+     jenkins-mcp.js catalog-skills.js claude-guard.js roles.js ./
 
 # Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name
 # contract that server.js/ws-*.js role gating depends on (jenkins_trigger_build,
@@ -229,6 +223,7 @@ COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
 COPY hooks/cluster-context.sh /app/hooks/cluster-context.sh
 COPY hooks/require-results.sh /app/hooks/require-results.sh
 COPY hooks/validate-mutations.sh /app/hooks/validate-mutations.sh
+COPY hooks/merge-guard.js /app/hooks/merge-guard.js
 RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh \
     /app/hooks/require-results.sh /app/hooks/validate-mutations.sh
 

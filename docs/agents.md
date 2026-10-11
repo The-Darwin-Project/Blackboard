@@ -15,11 +15,11 @@ Darwin uses 9 specialized agents plus the Brain orchestrator, communicating via 
 | **Brain** | Orchestrator | Vertex AI Pro (Gemini) | Cynefin classification, progressive skill loading, agent routing, feedback loop verification, Google Search grounding |
 | **Aligner** | Truth Maintenance | In-process Python + Flash | Telemetry processing, LLM signal analysis, anomaly-triggered event creation |
 | **Archivist** | Deep Memory | In-process Python + Flash | Event summarization, vector embedding (text-embedding-005), similarity search, lessons extraction |
-| **Architect** | Strategy | CLI sidecar (gemini/claude) | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
-| **SysAdmin** | Execution | CLI sidecar (gemini/claude) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
-| **Developer** | Implementation | CLI sidecar (gemini/claude) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
-| **QE** | Verification | CLI sidecar (gemini/claude) | Test writing, test execution, verification of Developer changes |
-| **Security Analyst** | Security Review | CLI sidecar (gemini/claude) | Vulnerability scanning, CVE remediation assessment, security-focused code review |
+| **Architect** | Strategy | CLI sidecar (claude/agy) | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
+| **SysAdmin** | Execution | CLI sidecar (claude/agy) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
+| **Developer** | Implementation | CLI sidecar (claude/agy) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
+| **QE** | Verification | CLI sidecar (claude/agy) | Test writing, test execution, verification of Developer changes |
+| **Security Analyst** | Security Review | CLI sidecar (claude/agy) | Vulnerability scanning, CVE remediation assessment, security-focused code review |
 | **Headhunter** | MR/PR Lifecycle | In-process Python + Flash Lite | Multi-platform VCS polling (GitLab todos + GitHub PRs), LLM-based triage and plan generation |
 | **Headhunter Jira** | Jira Missions | In-process Python + Claude | Jira issue polling, BA analysis comments, approved missions → Brain events |
 | **Nightwatcher** | Shift Consolidation | In-process Python + Flash | Phase-gated escalation review, batch clustering, Jira incidents, Slack shift summaries |

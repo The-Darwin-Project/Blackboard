@@ -7,6 +7,8 @@
 // 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
 // 6. [Pattern]: /proxy/* endpoints forward GET requests to Brain API at BRAIN_HTTP_URL || localhost:8000. Read-only, no auth.
 // 7. [Gotcha]: /proxy/turns returns empty response if no active task (eventId is null).
+// 8a. [Security]: POST /hooks/pre-tool-use runs the merge-approval guard (claude-guard.js) BEFORE context injection and
+//     denies via hookSpecificOutput.permissionDecision for merge-class calls it cannot approve (fail-closed).
 // 8. [Pattern]: POST /hooks/stop — if currentTask.mode === 'message', allow exit without team_send_results (skips hasResults + pending queue gates).
 // 9. [Constraint]: /proxy/plan-step is the sole mutating /proxy/* route (writes to the Brain's plan-step
 //    state) — restricted to loopback callers via isLoopbackAddress() since it has no other auth. Its only
@@ -35,6 +37,8 @@ const {
 const state = require('./state');
 const { AGENT_CLI, AGENT_MODEL, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL } = require('./config');
 const { wsSend } = require('./ws-utils');
+const { claudeMergeGuard } = require('./claude-guard');
+const { isReadOnlyRoleName } = require('./roles');
 const fs = require('fs');
 const http = require('http');
 
@@ -121,7 +125,7 @@ async function handleRequest(req, res) {
       // alone always misreported these two roles as 'full' here, since it never sees
       // the actual dispatched role for an ephemeral agent.
       agentRole: state.resolveRole('default'),
-      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer', 'explorer'].includes(state.resolveRole('default')) ? 'read-only (no file modification)' : 'full',
+      toolRestrictions: isReadOnlyRoleName(state.resolveRole('default')) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
@@ -142,6 +146,31 @@ async function handleRequest(req, res) {
   // =========================================================================
 
   if (url.pathname === '/hooks/pre-tool-use' && req.method === 'POST') {
+    // Merge-approval guard (Claude path; the agy path enforces the same via validate-mutations.sh).
+    // Fail CLOSED for merge-class calls: answered with a 200 + permissionDecision=deny.
+    try {
+      const payload = await parseBody(req).catch(() => null);
+      const denial = await claudeMergeGuard(payload, {
+        role: state.resolveRole(''),
+        sidecarPort: PORT,
+        fetchApproval: () => {
+          const eventId = state.getCurrentTask()?.eventId;
+          if (!eventId) return Promise.reject(new Error('no active event'));
+          return proxyGet(`/queue/${eventId}/approval`);
+        },
+      });
+      if (denial) {
+        console.log(`[${new Date().toISOString()}] PreToolUse merge guard DENY (${payload?.tool_name || '?'}): ${denial}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: denial } }));
+        return;
+      }
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] PreToolUse merge guard error: ${err.message}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Merge guard error (failing closed).' } }));
+      return;
+    }
     try {
       const bbTurns = state.getBlackboardTurnsSince(state.getHookHighwater());
       const inbound = state.drainInboundMessages();
@@ -248,7 +277,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // Hook status for Gemini hooks (require-results.sh, validate-mutations.sh)
+  // Hook status for agent hooks (require-results.sh, validate-mutations.sh)
   if (url.pathname === '/hook-status' && req.method === 'GET') {
     const task = state.getCurrentTask();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -256,6 +285,7 @@ async function handleRequest(req, res) {
       hasResults: !!state.getCallbackResult(),
       taskMode: task?.mode || '',
       role: state.resolveRole('', task),
+      taskId: task?.taskId || task?.eventId || '',
     }));
     return;
   }
@@ -419,7 +449,8 @@ async function handleRequest(req, res) {
       }
 
       // Configure ArgoCD MCP server (session API -> JWT per-task)
-      await setupArgoCDMCP();
+      const taskRole = body.role || state.resolveRole();
+      await setupArgoCDMCP(taskRole);
 
       // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
       await setupCLILogins();

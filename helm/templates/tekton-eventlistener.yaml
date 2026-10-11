@@ -24,7 +24,7 @@ spec:
       description: Per-role model override from Brain (falls back to the Helm default when omitted)
       default: {{ .Values.ephemeralAgents.model | quote }}
     - name: cli
-      description: Per-role CLI binary override (claude or gemini)
+      description: Per-role CLI binary override (claude or agy)
       default: {{ .Values.ephemeralAgents.cli | quote }}
   resourcetemplates:
     - apiVersion: tekton.dev/v1

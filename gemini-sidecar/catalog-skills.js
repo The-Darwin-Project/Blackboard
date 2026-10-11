@@ -19,7 +19,7 @@ const https = require('https');
 const http = require('http');
 const AdmZip = require('adm-zip');
 
-const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
+const AGY_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
 const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 const CONCURRENCY_CAP = 8;
 const SAFE_SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -75,7 +75,7 @@ async function syncCatalogSkills(catalogUrl) {
   const skills = (index.skills || []).filter((s) => s.lifecycle === 'active');
   if (!skills.length) return 0;
 
-  fs.mkdirSync(GEMINI_SKILLS_DIR, { recursive: true });
+  fs.mkdirSync(AGY_SKILLS_DIR, { recursive: true });
   fs.mkdirSync(CLAUDE_SKILLS_DIR, { recursive: true });
 
   const downloadTasks = skills.map((skill) => () => downloadAndExtract(catalogUrl, skill.name));
@@ -103,9 +103,9 @@ async function downloadAndExtract(catalogUrl, slug) {
   const buf = await httpGet(url, DOWNLOAD_TIMEOUT_MS);
 
   const zip = new AdmZip(buf);
-  const destDir = path.resolve(GEMINI_SKILLS_DIR, `catalog-${slug}`);
-  const tmpDir = path.resolve(GEMINI_SKILLS_DIR, `.tmp-${slug}-${Date.now()}`);
-  if (!destDir.startsWith(GEMINI_SKILLS_DIR + path.sep) || !tmpDir.startsWith(GEMINI_SKILLS_DIR + path.sep)) {
+  const destDir = path.resolve(AGY_SKILLS_DIR, `catalog-${slug}`);
+  const tmpDir = path.resolve(AGY_SKILLS_DIR, `.tmp-${slug}-${Date.now()}`);
+  if (!destDir.startsWith(AGY_SKILLS_DIR + path.sep) || !tmpDir.startsWith(AGY_SKILLS_DIR + path.sep)) {
     console.warn(`[catalog-skills] Path confinement failed for slug: ${JSON.stringify(slug).slice(0, 80)}`);
     return;
   }

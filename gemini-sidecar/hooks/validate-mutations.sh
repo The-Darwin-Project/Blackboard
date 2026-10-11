@@ -1,130 +1,191 @@
 #!/bin/bash
 # gemini-sidecar/hooks/validate-mutations.sh
 # @ai-rules:
-# 1. [Pattern]: Gemini CLI BeforeTool hook — blocks shell mutations for read-only roles,
-#    PLUS (regardless of role) enforces the out-of-band merge-approval guard below.
+# 1. [Pattern]: Antigravity CLI PreToolUse hook — blocks shell mutations and native file mutations
+#    for read-only roles, PLUS (regardless of role) enforces the out-of-band merge-approval guard.
 # 2. [Contract]: Defense-in-depth flange. Primary enforcement is behavioral (agent rules).
 #    No normalization pipeline — trusted Darwin prompts, not untrusted external code.
-#    Known accepted gap: a naive regex denylist over the raw command string cannot catch
-#    indirection (eval, process substitution, variable-split commands). Closing that
-#    requires a tool-allowlist / engine permissions.deny layer, out of scope here.
-# 3. [Constraint]: Fail-OPEN always. Exit 0 with JSON. Never exit non-zero (blocks agent).
-#    "Fail-open" is about this script's own exit code only -- the merge-approval guard
-#    below still emits decision:"block" (a normal, successful JSON response) whenever
-#    approval cannot be positively confirmed; it fails CLOSED on the merge decision itself.
-# 4. [Constraint]: Single-responsibility — validation ONLY. Context injection stays in AfterTool.
+# 3. [Constraint]: Fail-CLOSED on malformed or unrecognized tool payloads (decision: "deny"),
+#    and on shell tools whose command cannot be extracted (empty COMMAND).
+#    Exit 0 with JSON always. Merge-approval guard fails closed when approval cannot be verified.
+# 4. [Constraint]: Single-responsibility — validation ONLY.
 # 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
 #    have AGENT_ROLE="" — real role arrives via WS, exposed by /hook-status endpoint.
 # 6. [Security]: Merge-approval guard is the server-side backstop for the Developer merge
-#    guard described in src/agents/brain_skills/dispatch/mr-lifecycle.md (breaking prompt
-#    injection circularity, C2) -- same approved/approved_mr_sha comparison as
-#    src/utils/vcs_approval.py's verify_merge_guard(), reached here via the sidecar's own
-#    /proxy/approval route. Applies to EVERY role (including "developer", who is
-#    intentionally absent from READONLY_ROLES below since Developer must be able to git
-#    push/commit) -- git mutations in general are allowed for Developer, but a merge
-#    specifically now requires server-confirmed approval bound to the current commit.
-# 7. [Contract]: PreToolUse / BeforeTool decision enum contract parity across engines:
-#    - Antigravity (agy) PreToolUse schema strictly requires `decision: "deny"` to hard-block
-#      execution immediately (ref: agy-customizations/docs/hooks.md § PreToolUse). Verified
-#      against agy 1.3.2 binary: `decision: "deny"` halts tool execution with
-#      "tool call denied by pre-tool hook: <reason>" even under --dangerously-skip-permissions.
-#    - Gemini CLI BeforeTool schema strictly requires `decision: "block"`.
-#    Returning "block" to agy or "deny" to Gemini fails to trigger the respective engine's blocker.
+#    guard (breaking prompt injection circularity, C2). Applies to EVERY role. Detection lives in
+#    hooks/merge-guard.js (tokenizing shell analyzer + verb-based MCP classifier); this script only
+#    enforces its verdict (guard=1 => approval + SHA check). Do not re-add regex detection here.
+#    Read-only roles may call only allowlisted non-shell tools (readok=1 or HOOK_EXTRA_ALLOWED_TOOLS).
+# 7. [Contract]: PreToolUse decision enum contract: strictly `decision: "deny"` to halt tool execution.
 
-# Read-only roles (Gemini-CLI and agy roles)
+# Read-only roles
+# Keep in sync with READ_ONLY_ROLES in ../roles.js (heuristics for other names live there).
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
-# Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
-# stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
-ROLE_DATA=$(curl -sf --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
-ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
-[ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
-
-# Read stdin (BeforeTool JSON payload) once, before any role-based fast exit -- the
-# merge-approval guard below must run for every role, not just READONLY_ROLES.
-INPUT=$(cat 2>/dev/null) || { echo '{"decision":"allow"}'; exit 0; }
-
-# Parse tool name, command, and client flavor via node (supports Gemini BeforeTool and agy PreToolUse)
-PARSED=$(printf '%s' "$INPUT" | timeout 3 node -e "
-  let raw = '';
-  process.stdin.on('data', (c) => { raw += c; });
-  process.stdin.on('end', () => {
-    try {
-      const d = JSON.parse(raw);
-      const isAgy = Boolean(d.toolCall) || process.env.AGENT_CLI === 'agy';
-      const name = d.tool_name || d.functionCall?.name || d.toolCall?.name || '';
-      const cmd = (d.tool_input && d.tool_input.command) || (d.functionCall?.args?.command) || (d.toolCall?.args?.CommandLine) || (d.toolCall?.args?.command) || '';
-      process.stdout.write((isAgy ? 'agy' : 'gemini') + '|||' + name + '|||' + cmd);
-    } catch { process.stdout.write('gemini||||||'); }
-  });
-" 2>/dev/null) || { echo '{"decision":"allow"}'; exit 0; }
-
-CLIENT_FLAVOR="${PARSED%%|||*}"
-REST="${PARSED#*|||}"
-TOOL_NAME="${REST%%|||*}"
-COMMAND="${REST#*|||}"
-IS_AGY="no"
-[ "$CLIENT_FLAVOR" = "agy" ] && IS_AGY="yes"
-
-# run_shell_command is Gemini CLI's built-in shell tool; run_command is Antigravity (agy).
+# Shell tools supported by agents
 SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
 
-# --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
-if echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME" && [ -n "$COMMAND" ]; then
-    MERGE_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
-    MERGE_PATTERN='\bgit\s+merge\b|\bgit\s+push\b[^&|;]*\bmain\b|\bgh\s+pr\s+merge\b|\bglab\s+mr\s+merge\b'
-    if printf '%s\n' "$MERGE_CMD" | grep -qiE "$MERGE_PATTERN"; then
-        APPROVAL_JSON=$(curl -sf --max-time 2 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
-        LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
-        GUARD_DECISION=$(node -e "
-          let raw = process.argv[1] || '';
-          let localSha = process.argv[2] || '';
-          let approval = null;
-          try { approval = JSON.parse(raw); } catch { approval = null; }
-          if (!approval || !approval.approved) {
-            process.stdout.write('BLOCK|||Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).');
-          } else if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
-            process.stdout.write('BLOCK|||Merge REFUSED: live HEAD (' + localSha + ') differs from authenticated approval SHA (' + approval.approved_mr_sha + ').');
-          } else {
-            process.stdout.write('ALLOW|||');
-          }
-        " "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
-        GUARD_RESULT="${GUARD_DECISION%%|||*}"
-        GUARD_REASON="${GUARD_DECISION#*|||}"
-        # Empty GUARD_DECISION means the node subprocess itself failed (not a parse outcome,
-        # since the script above always writes BLOCK||| or ALLOW|||) -- fail CLOSED here too,
-        # this is the one check in this file where "unable to verify" must mean "refuse".
-        if [ "$GUARD_RESULT" != "ALLOW" ]; then
-            [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
-            node -e "
-              const isAgy = process.argv[2] === 'yes' || process.env.AGENT_CLI === 'agy';
-              // Antigravity (agy) PreToolUse schema strictly requires 'deny' to hard block.
-              // Gemini CLI BeforeTool schema strictly requires 'block'.
-              const decision = isAgy ? 'deny' : 'block';
-              process.stdout.write(JSON.stringify({decision, reason: process.argv[1]}));
-            " "$GUARD_REASON" "$IS_AGY"
-            exit 0
-        fi
-        # Approved and SHA matches -- fall through to the role-based mutation checks below.
+# Native file mutation tools (denied for read-only roles; denied for unresolved roles)
+# Note: Denylist covers known mutation tools (write_to_file, replace_file_content, multi_replace_file_content,
+# edit_file; keep in sync with NATIVE_MUTATION in merge-guard.js);
+# future iterations should migrate to an authoritative tool allowlist per role.
+MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content edit_file Write Edit MultiEdit NotebookEdit"
+
+# Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
+# treated as a non-blocking error, i.e. FAIL-OPEN. So every external call below is capped by what is left
+# of HOOK_BUDGET_SEC (integer seconds, default 8 => 2s margin) and the script DENIES itself on exhaustion.
+# Worst-case ladder: classify <=2s, approval fetch <=3s, git rev-parse <=1s, verdict <=1s, role lookup <=2s.
+HOOK_T0=$SECONDS
+HOOK_BUDGET="${HOOK_BUDGET_SEC:-8}"
+# tmo <cap>: prints min(cap, seconds left); returns 1 when the budget is exhausted.
+tmo() {
+    local cap="$1" left=$((HOOK_BUDGET - (SECONDS - HOOK_T0)))
+    [ "$left" -lt 1 ] && return 1
+    [ "$left" -lt "$cap" ] && cap="$left"
+    echo "$cap"
+}
+deny_budget() {
+    echo '{"decision": "deny", "reason": "Hook time budget exhausted before the call could be validated: failing closed"}'
+    exit 0
+}
+
+# Read stdin (PreToolUse JSON payload)
+INPUT=$(cat 2>/dev/null)
+
+if [ -z "$INPUT" ]; then
+    echo '{"decision": "deny", "reason": "Malformed or unrecognized tool payload"}'
+    exit 0
+fi
+
+# Parse + classify via merge-guard.js (tokenizing shell analyzer, MCP verb classifier).
+# Output: OK|||<tool>|||<guard>|||<readok>|||<command>  (or __MALFORMED__). Missing helper/node => deny.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARSED=$(printf '%s' "$INPUT" | timeout -k 1 2 node "$HOOK_DIR/merge-guard.js" 2>/dev/null)
+
+if [ "$PARSED" = "__MALFORMED__" ] || [ -z "$PARSED" ] || [ "${PARSED%%|||*}" != "OK" ]; then
+    echo '{"decision": "deny", "reason": "Malformed or unrecognized tool payload"}'
+    exit 0
+fi
+PARSED="${PARSED#OK|||}"
+
+TOOL_NAME="${PARSED%%|||*}"
+_REST="${PARSED#*|||}"
+NEEDS_GUARD="${_REST%%|||*}"
+_REST="${_REST#*|||}"
+READ_OK="${_REST%%|||*}"
+COMMAND="${_REST#*|||}"
+
+# Exact (case-insensitive) membership test; avoids treating TOOL_NAME as a grep pattern.
+in_list() {
+    local needle="${1,,}" item
+    for item in $2; do
+        [ "${item,,}" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+IS_SHELL=0; in_list "$TOOL_NAME" "$SHELL_TOOLS" && IS_SHELL=1
+IS_MUTATION=0; in_list "$TOOL_NAME" "$MUTATION_TOOLS" && IS_MUTATION=1
+
+# Fail closed: a shell tool with no extractable command cannot be validated (unknown arg key,
+# empty payload) and must not be allowed through.
+if [ "$IS_SHELL" = 1 ] && [ -z "$COMMAND" ]; then
+    echo '{"decision": "deny", "reason": "Shell tool call with empty or unextractable command: failing closed"}'
+    exit 0
+fi
+
+# Fast exit: non-shell, non-mutation tools that the classifier marked read-only/comms (readok=1) and
+# that cannot merge/write a default branch (guard=0) are allowed without a role lookup. This prevents
+# hook timeouts and sidecar degradation from impacting read-only tools. HOOK_EXTRA_ALLOWED_TOOLS
+# (space-separated, operator-set env) can add exact tool names to the read-only allowlist.
+if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" != 1 ]; then
+    if [ "$READ_OK" = 1 ] || in_list "$TOOL_NAME" "${HOOK_EXTRA_ALLOWED_TOOLS:-}"; then
+        echo '{"decision":"allow"}'
+        exit 0
     fi
 fi
 
-# Fast exit: if role is not read-only, allow everything else.
-# Explicit empty check first -- don't rely on grep -w's empty-pattern behavior,
-# which is not consistently specified across grep implementations.
-if [ -z "$ROLE" ] || ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
+# Used by the read-only git denylist below: global options may sit between `git` and the subcommand
+# (git -C . commit). Any dash-token with an optional value token is skipped.
+_DQ='"'; _SQ="'"
+_V="(${_DQ}[^${_DQ}]*${_DQ}|${_SQ}[^${_SQ}]*${_SQ}|[^[:space:];&|${_DQ}${_SQ}]+)"
+_G="([[:space:]]+-[^[:space:];&|]+([[:space:]]+${_V})?)*"
+
+# --- Merge-approval guard (applies to ALL roles, runs before the READONLY_ROLES gate) ---
+# NEEDS_GUARD comes from merge-guard.js (shell: tokenized git/gh/glab/curl/wget analysis; MCP: verb-based).
+
+if [ "$NEEDS_GUARD" = 1 ]; then
+    t=$(tmo 3) || deny_budget
+    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    LOCAL_SHA=$(timeout -k 1 "$t" git rev-parse HEAD 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    GUARD_RESULT="${GUARD_DECISION%%|||*}"
+    GUARD_REASON="${GUARD_DECISION#*|||}"
+    if [ "$GUARD_RESULT" != "ALLOW" ]; then
+        [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
+        # Static JSON-escape of the reason (it only ever carries our own text + SHAs) -- no node needed.
+        GUARD_REASON="${GUARD_REASON//\\/\\\\}"; GUARD_REASON="${GUARD_REASON//\"/\\\"}"
+        echo "{\"decision\": \"deny\", \"reason\": \"$GUARD_REASON\"}"
+        exit 0
+    fi
+    # Approved and SHA matches -- fall through to the role-based checks below.
+fi
+
+# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
+# AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
+ROLE="${AGENT_ROLE:-}"
+if [ -z "$ROLE" ]; then
+    for _attempt in 1 2; do
+        t=$(tmo 1) || deny_budget
+        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+            t=$(tmo 1) || deny_budget
+            ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
+# Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
+# mutate (shell, native file mutation, guarded MCP merge/write tools) reach this point and are denied.
+if [ -z "$ROLE" ]; then
+    node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
+    exit 0
+fi
+
+# Read-only role detection. Listed read-only roles match instantly; known mutating roles skip the check; anything
+# else (qa_reviewer_agent, ARCHITECT_LEAD ...) is classified by the shared name heuristics in ../roles.js (fail closed:
+# a node failure counts as read-only).
+is_readonly_role() {
+    in_list "$1" "$READONLY_ROLES" && return 0
+    in_list "$1" "developer sysadmin qe tester executor" && return 1
+    local t out
+    t=$(tmo 1) || return 0
+    out=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --readonly "$1" 2>/dev/null)
+    [ "$out" = "0" ] && return 1
+    return 0
+}
+
+# Fast exit: if role is an explicitly recognized mutating role, allow.
+if ! is_readonly_role "$ROLE"; then
     echo '{"decision":"allow"}'
     exit 0
 fi
 
-# Early exit: non-shell tools don't need mutation checking
-if ! echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME"; then
-    echo '{"decision":"allow"}'
+# Native mutation tools check for read-only roles
+if [ "$IS_MUTATION" = 1 ]; then
+    echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to mutate files\"}"
     exit 0
 fi
 
-# Empty command = nothing to validate
-[ -z "$COMMAND" ] && { echo '{"decision":"allow"}'; exit 0; }
+# Non-shell tools that reach here are not allowlisted read-only/comms tools (merge/write MCP tools,
+# unknown verbs): never permitted for read-only roles, even when the merge guard approved.
+if [ "$IS_SHELL" = 0 ]; then
+    echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only: tool $TOOL_NAME is not on the read-only allowlist\"}"
+    exit 0
+fi
 
 # Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
 CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
@@ -132,7 +193,7 @@ CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g
 # --- Mutation denylist (infrastructure + filesystem + git + network mutations) ---
 BLOCK_PATTERN=''
 # Git mutations
-BLOCK_PATTERN+='\bgit\s+(commit|push|merge|rebase|reset\s+.*--hard|tag\b|clean\b|apply\b|am\b)\b'
+BLOCK_PATTERN+="\\bgit${_G}[[:space:]]+(commit|push|merge|rebase|reset[[:space:]]+.*--hard|tag\\b|clean\\b|apply\\b|am\\b)\\b"
 # K8s/OCP mutations (with flag-gap tolerance)
 BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create)\b)'
 # Helm mutations
@@ -143,54 +204,45 @@ BLOCK_PATTERN+='|\bargocd\s+app\s+(sync|delete|set)\b'
 BLOCK_PATTERN+='|\btkn\s+(pipeline\s+start|taskrun\s+create|pipelinerun\s+cancel)\b'
 # Kargo mutations
 BLOCK_PATTERN+='|\bkargo\s+(promote|verify)\b'
-# Filesystem mutations — \binstall\b intentionally blocks npm/pip install (read-only roles
-# must not modify the runtime environment; legitimate package installs go through Dockerfile)
+# Filesystem mutations
 BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
 # File write redirects (exclude /dev/null and fd duplication)
 BLOCK_PATTERN+='|\btee\b'
-# Shell redirection to a real file (CHECK_CMD already stripped >/dev/null above;
-# any >/>> remaining is a write). Excludes fd duplication (e.g. 2>&1).
+# Shell redirection to a real file
 BLOCK_PATTERN+='|>>?[[:space:]]*[^&[:space:]]'
-# Piping output into an interpreter (curl ... | bash, etc.) -- trivial RCE otherwise
+# Piping output into an interpreter
 BLOCK_PATTERN+='|\|\s*(sudo\s+)?(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\b'
 # Package publish
 BLOCK_PATTERN+='|\bnpm\s+publish\b'
 
 # Credential file paths — block read access to sensitive token stores
-CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.netrc|/secrets/)'
+CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|/tmp/vertex-sa|/tmp/[^[:space:]]*token|/tmp/[^[:space:]]*credential|(/var)?/run/secrets|/secrets/|(/[^[:space:]]+|~|\$HOME)?/\.(ssh|git-credentials|gitconfig|aws|netrc|claude|gemini|docker|kube|config/(gh|glab-cli|gcloud|git)))'
 BLOCK_PATTERN+="|${CRED_READ_PATTERN}"
 
 # Case-insensitive check for the main denylist
 if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "
-      const isAgy = process.argv[3] === 'yes' || process.env.AGENT_CLI === 'agy';
       process.stdout.write(JSON.stringify({
-        decision: isAgy ? 'deny' : 'block',
+        decision: 'deny',
         reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
                 process.argv[2].slice(0, 120)
       }));
-    " "$ROLE" "$LOG_CMD" "$IS_AGY"
+    " -- "$ROLE" "$LOG_CMD"
     exit 0
 fi
 
-# Curl mutations. Method/data/upload flags are checked case-INSENSITIVELY (curl accepts
-# lowercase HTTP verbs, e.g. `-X post`). -F is checked separately, case-SENSITIVE, since
-# uppercase -F is form upload but lowercase -f is unrelated (fail-silently).
+# Curl mutations
 if printf '%s\n' "$CHECK_CMD" | grep -qiE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d(\s|\S)|--form\b|-T\b|--upload-file\b)' \
     || printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*-F\S?'; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "
-      const isAgy = process.argv[3] === 'yes' || process.env.AGENT_CLI === 'agy';
-      // Antigravity (agy) PreToolUse schema strictly requires 'deny' to hard block.
-      // Gemini CLI BeforeTool schema strictly requires 'block'.
-      const decision = isAgy ? 'deny' : 'block';
       process.stdout.write(JSON.stringify({
-        decision,
+        decision: 'deny',
         reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
                 process.argv[2].slice(0, 120)
       }));
-    " "$ROLE" "$LOG_CMD" "$IS_AGY"
+    " -- "$ROLE" "$LOG_CMD"
     exit 0
 fi
 

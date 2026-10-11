@@ -10,7 +10,7 @@
 Covers:
 - T-1: Explorer always routes via ephemeral (Tier-0, never local)
 - T-2: Explorer model resolves to gemini-3.5-flash-lite
-- T-3: Explorer CLI resolves to gemini
+- T-3: Explorer CLI resolves to agy
 - T-4: Explorer present in select_agent schema enum
 - T-5: Busy local sidecar + aligner event -> ephemeral overflow
 - T-6: Busy local sidecar + provisioner circuit break -> graceful defer
@@ -247,14 +247,14 @@ class TestExplorerModelResolution:
 # ---------------------------------------------------------------------------
 
 class TestExplorerCLIResolution:
-    """Explorer resolves to 'gemini' in the role CLI map."""
+    """Explorer resolves to 'agy' in the role CLI map."""
 
     def test_role_cli_map_has_explorer(self):
-        """T-3: _ROLE_CLI_MAP["explorer"] == "gemini"."""
+        """T-3: _ROLE_CLI_MAP["explorer"] == "agy"."""
         from src.agents.brain import _ROLE_CLI_MAP
 
         assert "explorer" in _ROLE_CLI_MAP
-        assert _ROLE_CLI_MAP["explorer"] == "gemini"
+        assert _ROLE_CLI_MAP["explorer"] == "agy"
 
     def test_role_cli_map_defaults_to_claude(self):
         """T-3 corollary: non-explorer roles get "claude" as CLI default."""
@@ -638,15 +638,15 @@ class TestInfraVerification:
     """
 
     @pytest.mark.skip(reason="Shell verification -- run manually: see docstring")
-    def test_t8_gemini_build_cli_command_model_flag(self):
-        """T-8: Verify Gemini CLI buildCLICommand includes --model flag.
+    def test_t8_agy_build_cli_command_model_flag(self):
+        """T-8: Verify agy CLI buildCLICommand includes --model flag.
 
         Verification command (from BlackBoard root):
             node -e "
               const {buildCLICommand} = require('./gemini-sidecar/cli-executor.js');
-              const cmd = buildCLICommand({cli:'gemini', model:'gemini-3.5-flash-lite', task:'test'});
-              const args = cmd.join(' ');
-              if (!args.includes('--model gemini-3.5-flash-lite')) {
+              const cmd = buildCLICommand('test', {role:'explorer', model:'gemini-3.7-flash'});
+              const args = cmd.args.join(' ');
+              if (!args.includes('--model gemini-3.7-flash')) {
                 console.error('FAIL: --model not found in:', args);
                 process.exit(1);
               }
@@ -660,13 +660,13 @@ class TestInfraVerification:
 
         Verification command (from BlackBoard root):
             helm template darwin ./helm \\
-              --set ephemeralAgents.roleCli.explorer=gemini \\
+              --set ephemeralAgents.roleCli.explorer=agy \\
               | grep -A2 'name: AGENT_CLI' \\
-              | grep -q 'value:.*gemini' \\
-              && echo "PASS: AGENT_CLI=gemini found" \\
+              | grep -q 'value:.*agy' \\
+              && echo "PASS: AGENT_CLI=agy found" \\
               || echo "FAIL: AGENT_CLI not parameterized"
 
         Expected: TaskRun env block contains:
             - name: AGENT_CLI
-              value: $(tt.params.cli)   # or resolved to "gemini" via TT default
+              value: $(tt.params.cli)   # or resolved to "agy" via TT default
         """

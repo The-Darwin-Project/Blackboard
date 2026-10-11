@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const CONFIG_PATH = path.resolve(__dirname, '..', 'config.js');
 const CREDENTIALS_PATH = path.resolve(__dirname, '..', 'credentials.js');
 const CLI_SETUP_PATH = path.resolve(__dirname, '..', 'cli-setup.js');
 const SERVER_PATH = path.resolve(__dirname, '..', 'server.js');
@@ -25,7 +26,7 @@ function freshRequire(modulePath) {
 }
 
 function clearModuleCache() {
-  for (const modulePath of [CREDENTIALS_PATH, CLI_SETUP_PATH]) {
+  for (const modulePath of [CONFIG_PATH, CREDENTIALS_PATH, CLI_SETUP_PATH]) {
     const resolved = require.resolve(modulePath);
     delete require.cache[resolved];
   }
@@ -138,8 +139,9 @@ describe('Jenkins MCP credential helpers', () => {
     assert.equal(hasJenkinsCredentials(), false);
   });
 
-  it('T-8: setupJenkinsMCP writes Jenkins MCP config and dual-registers Claude', async () => {
+  it('T-8: setupJenkinsMCP writes Jenkins MCP config and dual-registers Claude and agy', async () => {
     let claudeRegistration = null;
+    let agyRegistration = null;
     restore = mockFs({
       exists: {
         '/secrets/jenkins/username': true,
@@ -156,21 +158,29 @@ describe('Jenkins MCP credential helpers', () => {
       writeClaudeMcpServer: (name, config) => {
         claudeRegistration = { name, config };
       },
+      writeAgyMcpServer: (name, config) => {
+        agyRegistration = { name, config };
+      },
     }, async () => {
       const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
       await setupJenkinsMCP();
     });
 
-    const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    const config = settings.mcpServers.Jenkins;
+    assert.ok(claudeRegistration, 'writeClaudeMcpServer must be called');
+    assert.equal(claudeRegistration.name, 'Jenkins');
+    const config = claudeRegistration.config;
 
     assert.equal(config.command, 'node');
     assert.deepEqual(config.args, ['/app/jenkins-mcp.js']);
     assert.equal(config.env.MCP_JENKINS_URL, 'https://jenkins.example.test');
     assert.equal(config.env.MCP_JENKINS_USER, 'darwin-user');
     assert.equal(config.env.MCP_JENKINS_API_TOKEN, 'darwin-token');
-    assert.deepEqual(claudeRegistration, { name: 'Jenkins', config });
+
+    assert.ok(agyRegistration, 'writeAgyMcpServer must be called');
+    assert.deepEqual(agyRegistration, { name: 'Jenkins', config });
+
+    const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
+    assert.equal(fs.existsSync(settingsPath), false, 'settings.json must not be created');
   });
 
   it('T-8b: setupJenkinsMCP scopes insecure TLS to the MCP child env only', async () => {
@@ -186,22 +196,39 @@ describe('Jenkins MCP credential helpers', () => {
     });
     setEnv('JENKINS_INSECURE_TLS', 'true');
 
+    let claudeRegistration = null;
+    let agyRegistration = null;
     await withMockedCliSetup({
       resolveCommand: () => 'node',
-      writeClaudeMcpServer: () => {},
+      writeClaudeMcpServer: (name, config) => {
+        claudeRegistration = { name, config };
+      },
+      writeAgyMcpServer: (name, config) => {
+        agyRegistration = { name, config };
+      },
     }, async () => {
       const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
       await setupJenkinsMCP();
     });
 
-    const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    assert.ok(claudeRegistration, 'writeClaudeMcpServer must be called');
     assert.equal(
-      settings.mcpServers.Jenkins.env.NODE_TLS_REJECT_UNAUTHORIZED,
+      claudeRegistration.config.env.NODE_TLS_REJECT_UNAUTHORIZED,
       '0',
     );
-    assert.equal(settings.mcpServers.Jenkins.env.MCP_JENKINS_INSECURE_TLS, 'true');
+    assert.equal(claudeRegistration.config.env.MCP_JENKINS_INSECURE_TLS, 'true');
+
+    assert.ok(agyRegistration, 'writeAgyMcpServer must be called');
+    assert.equal(
+      agyRegistration.config.env.NODE_TLS_REJECT_UNAUTHORIZED,
+      '0',
+    );
+    assert.equal(agyRegistration.config.env.MCP_JENKINS_INSECURE_TLS, 'true');
+
     assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, undefined);
+
+    const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
+    assert.equal(fs.existsSync(settingsPath), false, 'settings.json must not be created');
   });
 
   it('T-crash: setupJenkinsMCP does not throw on credential read failure (TOCTOU guard)', async () => {
@@ -219,16 +246,52 @@ describe('Jenkins MCP credential helpers', () => {
       readFileThrows: ['/secrets/jenkins/username', '/secrets/jenkins/api-token'],
     });
 
+    let claudeCalls = 0;
+    let agyCalls = 0;
     await withMockedCliSetup({
       resolveCommand: () => 'node',
-      writeClaudeMcpServer: () => {},
+      writeClaudeMcpServer: () => { claudeCalls++; },
+      writeAgyMcpServer: () => { agyCalls++; },
     }, async () => {
       const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
       await assert.doesNotReject(setupJenkinsMCP());
     });
 
+    assert.equal(claudeCalls, 0, 'Claude MCP must not be registered on failure');
+    assert.equal(agyCalls, 0, 'Agy MCP must not be registered on failure');
     const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
     assert.equal(fs.existsSync(settingsPath), false, 'settings.json must not be created on read failure');
+  });
+
+  it('T-10: setupJenkinsMCP writes ~/.claude.json and ~/.gemini/config/mcp_config.json on disk, never settings.json', async () => {
+    restore = mockFs({
+      exists: {
+        '/secrets/jenkins/username': true,
+        '/secrets/jenkins/api-token': true,
+      },
+      readFile: {
+        '/secrets/jenkins/username': 'darwin-user\n',
+        '/secrets/jenkins/api-token': 'darwin-token\n',
+      },
+    });
+    setEnv('AGENT_CLI', 'agy');
+    clearModuleCache();
+
+    const { setupJenkinsMCP } = freshRequire(CREDENTIALS_PATH);
+    await setupJenkinsMCP();
+
+    const claudeJsonPath = path.join(tmpHome, '.claude.json');
+    assert.equal(fs.existsSync(claudeJsonPath), true, '~/.claude.json must exist');
+    const claudeConfig = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    assert.ok(claudeConfig.mcpServers && claudeConfig.mcpServers.Jenkins, 'Jenkins must be in ~/.claude.json');
+
+    const agyMcpPath = path.join(tmpHome, '.gemini', 'config', 'mcp_config.json');
+    assert.equal(fs.existsSync(agyMcpPath), true, '~/.gemini/config/mcp_config.json must exist');
+    const agyConfig = JSON.parse(fs.readFileSync(agyMcpPath, 'utf8'));
+    assert.ok(agyConfig.mcpServers && agyConfig.mcpServers.Jenkins, 'Jenkins must be in ~/.gemini/config/mcp_config.json');
+
+    const settingsPath = path.join(tmpHome, '.gemini', 'settings.json');
+    assert.equal(fs.existsSync(settingsPath), false, 'settings.json must not be created on disk');
   });
 });
 

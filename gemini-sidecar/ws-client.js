@@ -213,7 +213,7 @@ async function handleTask(ws, msg) {
       sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: `GitLab creds failed: ${err.message}, continuing...` });
     }
   }
-  await setupArgoCDMCP();
+  await setupArgoCDMCP(role);
   sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'ArgoCD MCP configured' });
   if (hasJenkinsCredentials() && ['sysadmin', 'developer'].includes(role)) {
     await setupJenkinsMCP();

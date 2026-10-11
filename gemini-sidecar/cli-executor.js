@@ -4,10 +4,7 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI; on Gemini CLI,
-//    effort maps to thinkingBudget via dynamic ~/.gemini/settings.json override
-//    (max=16384, high=8192, medium/low/absent=0). Architect role defaults to high.
-//    Uses read-merge-write to preserve existing MCP/hook settings in the file.
+// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI and Antigravity CLI.
 // 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
@@ -15,8 +12,10 @@
 // 9. [Pattern]: options.model/effort/role override env (AGENT_MODEL/AGENT_EFFORT_LEVEL/AGENT_ROLE) at the per-task level.
 //    Stored on state.getCurrentTask() (model/role) so resolveResult -> requestFindings can read them without threading
 //    extra params through the whole call chain -- mirrors the existing sessionId bridging pattern.
-// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
-//     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
+// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code permissions.deny).
+//     Read-only roles explorer/architect/security_analyst share readonly-role-permissions.json, and any other
+//     read-only-looking role name falls back to it via settingsFileForRole. CLAUDE_SETTINGS_DIR overrides
+//     /app/claude-settings (tests). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
 //     here (not a hardcoded role check) when a future role needs its own permission boundary.
 // 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
 //     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
@@ -34,10 +33,16 @@ const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolve
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
+const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+function resolveEffectiveRole(role) {
+    const raw = role || AGENT_ROLE || '';
+    return String(raw).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+
 function resolveModel(options, agentCli) {
-  const effectiveRole = String(options.role || AGENT_ROLE || (agentCli === 'claude' ? 'planner' : 'triage')).trim().toLowerCase();
+  const effectiveRole = resolveEffectiveRole(options.role);
   if (options.model) return options.model;
   if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
     return process.env.EPHEMERAL_MODEL_EXPLORER;
@@ -47,18 +52,32 @@ function resolveModel(options, agentCli) {
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
 // Only roles listed here get --settings; all other roles are unaffected.
+const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || path.join(__dirname, 'claude-settings');
+const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
 const ROLE_SETTINGS_FILE = {
-    code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+    code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
+    // Read-only roles on the Claude path (the agy path enforces these via --mode plan + validate-mutations.sh).
+    // Claude has no mutation hook, so without a deny file these roles ran with --dangerously-skip-permissions.
+    explorer: READONLY_SETTINGS_FILE,
+    architect: READONLY_SETTINGS_FILE,
+    security_analyst: READONLY_SETTINGS_FILE,
 };
+
+// Read-only role detection is shared (roles.js): name heuristics fail closed for unlisted read-only-looking roles.
+// Any role that is not an explicitly allowed mutating role gets the read-only deny file (fail closed).
+function settingsFileForRole(role) {
+    if (ROLE_SETTINGS_FILE[role]) return ROLE_SETTINGS_FILE[role];
+    if (!role || !isMutatingRoleName(role) || isReadOnlyRoleName(role)) {
+        return READONLY_SETTINGS_FILE;
+    }
+    return undefined;
+}
 
 // Roles that must never run with write/approve-all permissions on the agy path. agy runs
 // `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
 // Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is read-only by definition,
 // so it is folded in here rather than maintained as a second list.
-const AGY_READ_ONLY_ROLES = new Set([
-    'architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst',
-    ...Object.keys(ROLE_SETTINGS_FILE),
-]);
+const AGY_READ_ONLY_ROLES = new Set([...READ_ONLY_ROLES, ...Object.keys(ROLE_SETTINGS_FILE)]);
 
 // Whitelist of explicitly allowed mutating roles for agy. Mutating roles receive
 // --dangerously-skip-permissions but remain subject to the server-side merge-approval guard
@@ -71,7 +90,6 @@ const AGY_MUTATING_ROLES = new Set([
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
     claude: 'claude-opus-4-6',
-    gemini: 'gemini-2.5-flash',
     agy: 'gemini-2.5-flash',
 };
 
@@ -82,90 +100,6 @@ const FALLBACK_MODEL = {
 // git mutation, filesystem mutation, network exfil) catches wholesale content
 // tampering/corruption without needing to enumerate every rule in the real file.
 const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git push *)', 'Bash(rm *)'];
-
-const GEMINI_SETTINGS_PATH = path.join(os.homedir(), '.gemini', 'settings.json');
-
-// medium/low/none all map to 0 (no extra thinking budget) -- this is intentional,
-// not a placeholder: only high/max are meant to purchase extended reasoning on the
-// Gemini side, mirroring Claude's --effort where low/medium/none don't request
-// extended thinking either. If a future tier needs a non-zero budget, update it
-// explicitly here rather than assuming these three should move together.
-const EFFORT_THINKING_BUDGET = {
-    max: 16384,
-    high: 8192,
-    medium: 0,
-    low: 0,
-    none: 0,
-};
-
-// Gemini CLI model names are short, human-chosen identifiers (e.g. "gemini-3.7-flash"),
-// never free-form user input. Reject anything else before it's persisted into the
-// shared settings.json match key -- caller-controlled options.model (reachable from
-// WS/HTTP task requests) must not be able to inject arbitrary structure into the file.
-const MODEL_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
-function isValidModelName(model) {
-    return typeof model === 'string' && MODEL_NAME_RE.test(model);
-}
-
-// NOTE on schema coupling: this reaches directly into Gemini CLI's
-// modelConfigs.overrides[].match.model / generateContentConfig.thinkingConfig shape,
-// which is not versioned or capability-guarded here. A future CLI schema change would
-// silently degrade effort-based reasoning control to CLI defaults. The write path below
-// fails closed (throws) so a broken/unwritable file surfaces as a hard error rather than
-// a silent degrade; read failures are logged (not just swallowed) for the same reason --
-// but neither replaces an actual schema/version check if Gemini CLI changes this shape.
-function writeThinkingConfig(effort, model) {
-    const budget = EFFORT_THINKING_BUDGET[effort] ?? 0;
-
-    if (!isValidModelName(model)) {
-        console.error(`[${new Date().toISOString()}] Refusing to write thinking config: invalid model name '${model}'`);
-        return;
-    }
-
-    let settings = {};
-    try {
-        if (fs.existsSync(GEMINI_SETTINGS_PATH)) {
-            settings = JSON.parse(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8'));
-        }
-    } catch (e) {
-        console.error(`[${new Date().toISOString()}] Failed to read/parse existing thinking config, starting fresh: ${e.message}`);
-        settings = {};
-    }
-
-    if (!settings.modelConfigs) settings.modelConfigs = {};
-    if (!Array.isArray(settings.modelConfigs.overrides)) settings.modelConfigs.overrides = [];
-    const overrides = settings.modelConfigs.overrides;
-    const newOverride = {
-        match: { model },
-        modelConfig: {
-            generateContentConfig: {
-                thinkingConfig: {
-                    thinkingBudget: budget,
-                    includeThoughts: false,
-                },
-            },
-        },
-    };
-    // Upsert by model -- never wholesale-replace the array, or a pre-existing
-    // override for a different model gets silently destroyed on every call.
-    const existingIndex = overrides.findIndex((o) => o && o.match && o.match.model === model);
-    if (existingIndex >= 0) {
-        overrides[existingIndex] = newOverride;
-    } else {
-        overrides.push(newOverride);
-    }
-
-    try {
-        fs.writeFileSync(GEMINI_SETTINGS_PATH, JSON.stringify(settings, null, 2));
-    } catch (e) {
-        // Fail CLOSED, matching the ROLE_SETTINGS_FILE precedent below: a caller that
-        // asked for a specific thinking budget must not silently spawn Gemini with
-        // whatever budget the file happened to have (or none at all).
-        const msg = `Failed to write thinking config for model '${model}': ${e.message}`;
-        console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
-        throw new Error(msg);
-    }
-}
 
 // agy rejects a model name that already carries an effort suffix alongside --effort, so
 // peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.
@@ -179,21 +113,21 @@ function splitModelEffortSuffix(model, effort) {
 }
 
 function buildCLICommand(prompt, options = {}) {
-    const rawRole = options.role || AGENT_ROLE || '';
-    const effectiveRole = String(rawRole).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const agentCli = options.agentCli || AGENT_CLI;
+    if (agentCli !== 'claude' && agentCli !== 'agy') {
+        throw new Error(`Unsupported AGENT_CLI: ${agentCli}. Supported runtimes: 'claude', 'agy'`);
+    }
+
+    const effectiveRole = resolveEffectiveRole(options.role);
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
 
-    if (AGENT_CLI === 'agy') {
+    if (agentCli === 'agy') {
         const args = [];
         const binary = AGY_CLI;
 
         // Read-only roles or plan mode run under --mode plan, and plan always wins over
         // autoApprove: a read-only role must never get --dangerously-skip-permissions.
-        const isReadOnlyRole = AGY_READ_ONLY_ROLES.has(effectiveRole) ||
-            effectiveRole.includes('review') ||
-            effectiveRole.includes('analyst') ||
-            effectiveRole.includes('explorer') ||
-            effectiveRole.includes('architect');
+        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
 
         const isKnownMutatingRole = AGY_MUTATING_ROLES.has(effectiveRole);
 
@@ -212,7 +146,7 @@ function buildCLICommand(prompt, options = {}) {
         // NOTE: Never pass --input-format stream-json; it conflicts with command-line -p prompt!
 
         // Model & effort normalization to prevent CLI conflict errors
-        let model = resolveModel(options, AGENT_CLI);
+        let model = resolveModel(options, agentCli);
         let effort = options.effort || AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT_LEVEL || process.env.AGENT_EFFORT;
 
         ({ model, effort } = splitModelEffortSuffix(model, effort));
@@ -228,12 +162,12 @@ function buildCLICommand(prompt, options = {}) {
         return { binary, args };
     }
 
-    if (AGENT_CLI === 'claude') {
+    if (agentCli === 'claude') {
         const args = [];
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const settingsFile = ROLE_SETTINGS_FILE[effectiveRole];
+        const settingsFile = settingsFileForRole(effectiveRole);
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
@@ -258,13 +192,20 @@ function buildCLICommand(prompt, options = {}) {
             }
             args.push('--settings', settingsFile);
         }
-        if (permissionMode === 'plan') {
+        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
+        const isKnownMutatingRole = isMutatingRoleName(effectiveRole);
+
+        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
+        // read-only to receive --dangerously-skip-permissions. Unrecognized/empty roles default to --permission-mode plan.
+        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
             args.push('--permission-mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');
+        } else {
+            args.push('--permission-mode', 'plan');
         }
         args.push('--output-format', 'stream-json', '--verbose');
-        const model = resolveModel(options, AGENT_CLI);
+        const model = resolveModel(options, agentCli);
         args.push('--model', model);
         const effort = options.effort || AGENT_EFFORT_LEVEL;
         if (effort) {
@@ -277,19 +218,6 @@ function buildCLICommand(prompt, options = {}) {
         args.push('-p', ultrathinkPrefix + prompt);
         return { binary: 'claude', args };
     }
-    const args = [];
-    if (options.autoApprove) args.push('--yolo');
-    args.push('-o', 'stream-json');
-    const model = resolveModel(options, AGENT_CLI);
-    args.push('--model', model);
-    if (options.sessionId) {
-        args.push('--resume', options.sessionId);
-    }
-    const effort = options.effort || AGENT_EFFORT_LEVEL;
-    const resolvedEffort = effort || (effectiveRole === 'architect' ? 'high' : '');
-    writeThinkingConfig(resolvedEffort || 'none', model);
-    args.push('-p', prompt);
-    return { binary: 'gemini', args };
 }
 
 function readFindings(workDir) {
@@ -386,7 +314,7 @@ async function requestFindings(workDir, autoApprove, model, role) {
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {
-            env: { ...process.env, ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}) },
+            env: process.env,
             cwd: workDir,
             timeout: 60000,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -486,10 +414,7 @@ async function executeCLI(prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: {
-                ...process.env,
-                ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
-            },
+            env: process.env,
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -518,7 +443,7 @@ async function executeCLI(prompt, options = {}) {
 
         child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             watch.close();
 
             if (lineBuffer.trim()) {
@@ -561,6 +486,9 @@ async function executeCLI(prompt, options = {}) {
                     resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
                 });
             } else {
+                if (code === null && signal) {
+                    console.warn(`[${new Date().toISOString()}] CLI process exited via signal ${signal} (possible timeout or SIGKILL)`);
+                }
                 const retry = getRetryOptions(options, code, stderr);
                 if (retry) {
                     console.log(`[${new Date().toISOString()}] ${retry.reason}`);
@@ -601,10 +529,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: {
-                ...process.env,
-                ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
-            },
+            env: process.env,
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -662,7 +587,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
 
         child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-        child.on('close', (code) => {
+        child.on('close', (code, signal) => {
             watch.close();
             const capturedSessionId = state.getCurrentTask()?.sessionId || null;
 
@@ -709,18 +634,11 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), source: 'stdout' });
                 });
             } else {
+                if (code === null && signal) {
+                    console.warn(`[${new Date().toISOString()}] [${eventId}] CLI process exited via signal ${signal} (possible timeout or SIGKILL)`);
+                }
                 if (options.sessionId && !options._retryWithoutSession && is400SessionError(effectiveOutput, stderr)) {
                     console.log(`[${new Date().toISOString()}] [${eventId}] 400 session error detected, retrying without --resume`);
-                    executeCLIStreaming(ws, eventId, prompt, {
-                        ...options,
-                        sessionId: null,
-                        conversationId: null,
-                        _retryWithoutSession: true,
-                    }).then(resolve).catch(reject);
-                    return;
-                }
-                if (options.sessionId && !options._retryWithoutSession && isGeminiSessionNotFound(code, stderr)) {
-                    console.log(`[${new Date().toISOString()}] [${eventId}] Gemini session-not-found (exit 42), retrying without --resume`);
                     executeCLIStreaming(ws, eventId, prompt, {
                         ...options,
                         sessionId: null,
@@ -761,12 +679,6 @@ function is400SessionError(output, stderr) {
         combined.includes('text content blocks must be non-empty') ||
         combined.includes('invalid_request_error')
     );
-}
-
-function isGeminiSessionNotFound(exitCode, stderr) {
-    if (exitCode !== 42) return false;
-    const lower = (stderr || '').toLowerCase();
-    return lower.includes('no previous sessions found') || lower.includes('session not found');
 }
 
 // agy only, stderr only: stdout carries the model's own text, so matching it would re-run
@@ -828,12 +740,8 @@ module.exports = {
     prepareResultsDir,
     is429Error,
     is400SessionError,
-    isGeminiSessionNotFound,
     isAgySessionError,
     isInvalidModelError,
     getRetryOptions,
     resolveModel,
-    writeThinkingConfig,
-    GEMINI_SETTINGS_PATH,
-    EFFORT_THINKING_BUDGET,
 };

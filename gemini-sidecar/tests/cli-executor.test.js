@@ -33,7 +33,7 @@ function freshExecutor(env = {}) {
     }
     delete require.cache[require.resolve(CONFIG_PATH)];
     delete require.cache[require.resolve(EXECUTOR_PATH)];
-    const mod = require(EXECUTOR_PATH);
+    let mod;
     const restore = () => {
         for (const [k, v] of Object.entries(saved)) {
             if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -42,6 +42,13 @@ function freshExecutor(env = {}) {
         delete require.cache[require.resolve(EXECUTOR_PATH)];
         fs.rmSync(fakeHome, { recursive: true, force: true });
     };
+    try {
+        mod = require(EXECUTOR_PATH);
+    } catch (err) {
+        // config.js fails fast on an unsupported AGENT_CLI -- never leak the env/cache into later tests
+        restore();
+        throw err;
+    }
     return { mod, restore };
 }
 
@@ -51,14 +58,14 @@ function mockSpawn(t, script) {
     t.mock.method(cp, 'spawn', (cmd, args) => {
         const idx = calls.length;
         calls.push(args);
-        const { code = 0, stdout = '', stderr = '' } = script(args, idx);
+        const { code = 0, signal, stdout = '', stderr = '' } = script(args, idx);
         const child = new EventEmitter();
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         setTimeout(() => {
             if (stdout) child.stdout.emit('data', Buffer.from(stdout));
             if (stderr) child.stderr.emit('data', Buffer.from(stderr));
-            child.emit('close', code);
+            child.emit('close', code, signal);
         }, 5);
         return child;
     });
@@ -69,7 +76,7 @@ const modelOf = (args) => args[args.indexOf('--model') + 1];
 
 describe('CLI Executor', () => {
     it('T-14: resolves Explorer model from EPHEMERAL_MODEL_EXPLORER', () => {
-        const { mod, restore } = freshExecutor({ EPHEMERAL_MODEL_EXPLORER: 'gemini-test-model' });
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', EPHEMERAL_MODEL_EXPLORER: 'gemini-test-model' });
         try {
             const { args } = mod.buildCLICommand('prompt', { role: 'explorer' });
             assert.equal(modelOf(args), 'gemini-test-model');
@@ -80,8 +87,8 @@ describe('CLI Executor', () => {
 });
 
 describe('invalid-model fallback (shared getRetryOptions)', () => {
-    it('T-17: gemini falls back to gemini-2.5-flash exactly once', async (t) => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'gemini', EPHEMERAL_MODEL_EXPLORER: 'invalid-model-that-fails' });
+    it('T-17: agy falls back to gemini-2.5-flash exactly once', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', EPHEMERAL_MODEL_EXPLORER: 'invalid-model-that-fails' });
         try {
             const calls = mockSpawn(t, (args) => args.includes('invalid-model-that-fails')
                 ? { code: 1, stderr: 'INVALID_ARGUMENT: model not found' }
@@ -95,7 +102,7 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
     });
 
     it('is one-shot: a fallback that also fails is returned as failed, not retried again', async (t) => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'gemini', AGENT_MODEL: 'gemini-x' });
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
         try {
             const calls = mockSpawn(t, () => ({ code: 1, stderr: 'model not found' }));
             const result = await mod.executeCLI('test', {});
@@ -119,7 +126,7 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
     });
 
     it('does not retry a bare INVALID_ARGUMENT that does not name the model (bad flag, MCP, context size)', async (t) => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'gemini', AGENT_MODEL: 'gemini-x' });
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
         try {
             const calls = mockSpawn(t, () => ({ code: 1, stderr: 'INVALID_ARGUMENT: effort level unsupported\nrequest too large' }));
             const result = await mod.executeCLI('test', {});
@@ -131,7 +138,7 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
     });
 
     it('executeCLIStreaming uses the same fallback logic', async (t) => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'gemini', AGENT_MODEL: 'gemini-bad' });
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-bad' });
         try {
             const calls = mockSpawn(t, (args) => modelOf(args) === 'gemini-bad'
                 ? { code: 1, stderr: 'model gemini-bad not found' }
@@ -163,8 +170,8 @@ describe('agy session retry (shared getRetryOptions)', () => {
         }
     });
 
-    it('isAgySessionError is false for claude/gemini even on matching stderr', () => {
-        for (const cli of ['claude', 'gemini']) {
+    it('isAgySessionError is false for claude even on matching stderr', () => {
+        for (const cli of ['claude']) {
             const { mod, restore } = freshExecutor({ AGENT_CLI: cli });
             try {
                 assert.equal(mod.isAgySessionError(1, 'conversation not found'), false, cli);
@@ -209,6 +216,42 @@ describe('agy session retry (shared getRetryOptions)', () => {
             const result = await mod.executeCLI('test', { sessionId: 'sess-1' });
             assert.equal(result.status, 'failed');
             assert.equal(calls.length, 1);
+        } finally {
+            restore();
+        }
+    });
+});
+
+describe('claude read-only roles (engine-enforced permissions.deny, not just plan mode)', () => {
+    const SETTINGS_DIR = path.resolve(__dirname, '..', 'claude-settings');
+    for (const role of ['explorer', 'architect', 'security_analyst', 'code_reviewer', 'qa_reviewer_agent', 'ARCHITECT_LEAD', 'security-analyst']) {
+        it(`${role}: gets a --settings deny file even with autoApprove`, () => {
+            const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: SETTINGS_DIR });
+            try {
+                const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
+                const file = args[args.indexOf('--settings') + 1];
+                assert.ok(file && file.startsWith(SETTINGS_DIR), `expected --settings under ${SETTINGS_DIR}, got ${file}`);
+                const deny = JSON.parse(fs.readFileSync(file, 'utf8')).permissions.deny;
+                for (const rule of ['Edit', 'Write', 'Bash(git push *)', 'Bash(git commit *)', 'Bash(rm *)']) assert.ok(deny.includes(rule), rule);
+            } finally {
+                restore();
+            }
+        });
+    }
+    it('mutating roles (developer, sysadmin, qe) get no --settings file', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: SETTINGS_DIR });
+        try {
+            for (const role of ['developer', 'sysadmin', 'qe']) {
+                assert.equal(mod.buildCLICommand('p', { role, autoApprove: true }).args.includes('--settings'), false, role);
+            }
+        } finally {
+            restore();
+        }
+    });
+    it('fails closed when the read-only settings file is missing', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: '/nonexistent-dir' });
+        try {
+            assert.throws(() => mod.buildCLICommand('p', { role: 'explorer', autoApprove: true }), /refusing to launch/);
         } finally {
             restore();
         }
@@ -271,6 +314,142 @@ describe('agy read-only roles (plan mode is the only enforcement layer)', () => 
                 assert.equal(args[args.indexOf('--mode') + 1], 'plan', `Role ${r} should fail-closed to --mode plan`);
                 assert.equal(args.includes('--dangerously-skip-permissions'), false, `Role ${r} must not get --dangerously-skip-permissions`);
             }
+        } finally {
+            restore();
+        }
+    });
+});
+
+describe('CLI Executor - Fail-fast CLI validation (T-6)', () => {
+    it('config.js throws a descriptive error at load when AGENT_CLI is gemini', () => {
+        assert.throws(
+            () => freshExecutor({ AGENT_CLI: 'gemini' }),
+            /Unsupported AGENT_CLI: gemini\. Supported runtimes: 'claude', 'agy'/
+        );
+    });
+
+    it('config.js throws a descriptive error at load when AGENT_CLI is unsupported or unknown', () => {
+        assert.throws(
+            () => freshExecutor({ AGENT_CLI: 'unsupported-cli' }),
+            /Unsupported AGENT_CLI: unsupported-cli\. Supported runtimes: 'claude', 'agy'/
+        );
+    });
+
+    it('does not leak an invalid AGENT_CLI into the environment after a failed load', () => {
+        const before = process.env.AGENT_CLI;
+        assert.throws(() => freshExecutor({ AGENT_CLI: 'gemini' }));
+        assert.equal(process.env.AGENT_CLI, before);
+    });
+
+    it('buildCLICommand still rejects an unsupported per-call agentCli override', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy' });
+        try {
+            assert.throws(
+                () => mod.buildCLICommand('test', { agentCli: 'gemini' }),
+                /Unsupported AGENT_CLI: gemini/
+            );
+        } finally {
+            restore();
+        }
+    });
+});
+
+describe('CLI Executor - Timeout and Process Resolution (T-7)', () => {
+    it('explorer resolves to 30 minutes (1800000ms), matching other roles', () => {
+        const { restore } = freshExecutor({ TIMEOUT_MS: undefined });
+        try {
+            const { resolveTimeoutMs } = require(CONFIG_PATH);
+            assert.equal(resolveTimeoutMs('explorer'), 1800000);
+        } finally {
+            restore();
+        }
+    });
+
+    it('other roles are untouched by the explorer-specific bump', () => {
+        const { restore } = freshExecutor({ TIMEOUT_MS: undefined });
+        try {
+            const { resolveTimeoutMs } = require(CONFIG_PATH);
+            assert.equal(resolveTimeoutMs('developer'), 1800000);
+            assert.equal(resolveTimeoutMs('code_reviewer'), 2700000);
+        } finally {
+            restore();
+        }
+    });
+
+    it('an explicit TIMEOUT_MS env override still wins over the explorer ceiling', () => {
+        const { restore } = freshExecutor({ TIMEOUT_MS: '123000' });
+        try {
+            const { resolveTimeoutMs } = require(CONFIG_PATH);
+            assert.equal(resolveTimeoutMs('explorer'), 123000);
+        } finally {
+            restore();
+        }
+    });
+
+    it('Claude buildCLICommand: still uses --effort (not prompt prefix) and the claude-opus-4-6 fallback', () => {
+        const { mod, restore } = freshExecutor({
+            AGENT_CLI: 'claude',
+            AGENT_MODEL: undefined,
+            GEMINI_MODEL: undefined,
+        });
+        try {
+            const { binary, args } = mod.buildCLICommand('x', { effort: 'high' });
+            assert.equal(binary, 'claude');
+            assert.equal(args.includes('--thinking'), false);
+            const effortIdx = args.indexOf('--effort');
+            assert.notEqual(effortIdx, -1);
+            assert.equal(args[effortIdx + 1], 'high');
+            const modelIdx = args.indexOf('--model');
+            assert.equal(args[modelIdx + 1], 'claude-opus-4-6');
+        } finally {
+            restore();
+        }
+    });
+
+    it('Claude buildCLICommand: still uses the ultrathink prefix for architect, not the Gemini prefix', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', CLAUDE_SETTINGS_DIR: path.resolve(__dirname, '..', 'claude-settings') });
+        try {
+            const { args } = mod.buildCLICommand('review', { role: 'architect' });
+            const promptIdx = args.indexOf('-p');
+            assert.equal(args[promptIdx + 1], 'ultrathink review');
+        } finally {
+            restore();
+        }
+    });
+});
+
+
+describe('signal-terminated child (close(null, signal))', () => {
+    // Regression: the close handlers referenced `signal` without declaring it, so a SIGKILL/timeout
+    // (code === null) threw ReferenceError inside the event handler and the promise never settled.
+    it('executeCLI resolves failed with exitCode null on close(null, SIGKILL)', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
+        try {
+            const calls = mockSpawn(t, () => ({ code: null, signal: 'SIGKILL' }));
+            const result = await Promise.race([
+                mod.executeCLI('test', {}),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('executeCLI never settled')), 2000)),
+            ]);
+            assert.equal(result.status, 'failed');
+            assert.equal(result.exitCode, null);
+            assert.equal(calls.length, 1);
+        } finally {
+            restore();
+        }
+    });
+
+    it('executeCLIStreaming resolves failed with exitCode null on close(null, SIGKILL)', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: 'gemini-x' });
+        try {
+            const calls = mockSpawn(t, () => ({ code: null, signal: 'SIGKILL' }));
+            const ws = { readyState: 1, send() {} };
+            const result = await Promise.race([
+                mod.executeCLIStreaming(ws, 'evt-sig', 'test', {}),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('executeCLIStreaming never settled')), 2000)),
+            ]);
+            assert.equal(result.status, 'failed');
+            assert.equal(result.exitCode, null);
+            assert.equal(calls.length, 1);
         } finally {
             restore();
         }

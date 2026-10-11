@@ -29,7 +29,7 @@ Agent sidecars manage external authentication across three distinct lifecycle ph
 flowchart TD
     subgraph Boot ["Phase 1: Boot (server.js / cli-setup.js)"]
         B1["Initialize CLI Settings"]
-        B2["Register MCPs in ~/.claude.json & ~/.gemini/settings.json<br/>(GitLab, Remote K8s, KubeArchive, Jenkins, Blackboard)"]
+        B2["Register MCPs in ~/.claude.json & ~/.gemini/config/mcp_config.json<br/>(GitLab, Remote K8s, KubeArchive, Jenkins, Blackboard)"]
     end
 
     subgraph Startup ["Phase 2: Startup (credentials.js)"]
@@ -48,7 +48,7 @@ flowchart TD
 
     subgraph Dispatch ["Runtime Task Dispatch (cli-executor.js)"]
         T1["Task arrives via Reverse WebSocket (/agent/ws)"]
-        T2["Agent CLI executes: gemini -p &lt;prompt&gt; OR claude -p &lt;prompt&gt;"]
+        T2["Agent CLI executes: agy -p &lt;prompt&gt; OR claude -p &lt;prompt&gt;"]
         T3["CLIs & MCP Tools execute with pre-authenticated sessions"]
     end
 
@@ -57,7 +57,7 @@ flowchart TD
 ```
 
 ### Lifecycle Phases
-- **Phase 1: Boot**: When the sidecar container boots, `cli-setup.js` initializes the configuration files (`~/.claude.json` and `~/.gemini/settings.json`) registering all available MCP servers for Gemini and Claude Code CLIs.
+- **Phase 1: Boot**: When the sidecar container boots, `cli-setup.js` initializes the configuration files (`~/.claude.json` and `~/.gemini/config/mcp_config.json`) registering all available MCP servers for Antigravity (agy) and Claude Code CLIs.
 - **Phase 2: Startup**: `server.js` executes `setupCredentials()` to copy registry credentials, register multi-cluster Kubernetes MCPs, acquire the initial ArgoCD REST Session JWT, and spin up role-gated internal MCP daemons.
 - **Phase 3: Periodic Refresh**: A 5-minute background interval (`CLI_LOGIN_INTERVAL_MS = 5 * 60 * 1000`) continuously runs `setupCLILogins()` to renew CLI sessions and JWT maps before tokens expire, preventing task interruption.
 

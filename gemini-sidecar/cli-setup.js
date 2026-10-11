@@ -3,9 +3,8 @@
 // 1. [Pattern]: Startup init — runs once at process start. Writes to ~/.claude and ~/.gemini.
 // 2. [Constraint]: Idempotent — checks fs.existsSync before creating; skips overwrite of existing settings/rules.
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
-// 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
+// 4. [Pattern]: MCPs (TeamChat + Blackboard + Journal): agy -> ~/.gemini/config/mcp_config.json (via writeAgyMcpServer), Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: agy -> ~/.gemini/config/hooks.json (command), Claude -> PreToolUse+Stop+SessionStart (HTTP to sidecar). PostToolUse is broken in Claude Code (github.com/anthropics/claude-code/issues/6305).
 // 5. [Pattern]: filterSkillsByRole uses .disabled rename (re-entrant). swapActiveRules copies role-specific rules for dynamic switching.
-// 6. [Pattern]: MCPs (TeamChat + Blackboard + Journal): Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool (command), Claude PreToolUse+Stop+SessionStart (HTTP to sidecar). PostToolUse is broken in Claude Code (github.com/anthropics/claude-code/issues/6305).
 // 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
 // 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
 // 9. [Doc]: Skill vs MCP mode filtering (independent layers, same Brain `mode` on WS task):
@@ -81,12 +80,13 @@ function writeClaudeMcpServer(name, config) {
 function writeAgyMcpServer(name, config) {
     if (name === '__proto__' || name === 'constructor') return;
     // Single chokepoint for every agy MCP write (cli-setup + all credentials.js call sites):
-    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude or
-    // gemini sidecar must not create it at all.
+    // this file holds GitHub/GitLab/ArgoCD/Jenkins/K8s credentials in plaintext, so a claude
+    // sidecar must not create it at all.
     if (AGENT_CLI !== 'agy') return;
     const agyMcpPath = AGY_MCP_PATH;
     const dir = path.dirname(agyMcpPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch (err) { console.warn('[cli-setup] chmod failed on MCP dir:', err.message); }
 
     let data = {};
     if (fs.existsSync(agyMcpPath)) {
@@ -134,7 +134,8 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
     if (AGENT_CLI !== 'agy') return;
     const agyHooksPath = AGY_HOOKS_PATH;
     const dir = path.dirname(agyHooksPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch (err) { console.warn('[cli-setup] chmod failed on hooks dir:', err.message); }
 
     let data = {};
     if (fs.existsSync(agyHooksPath)) {
@@ -143,17 +144,19 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
 
     const validateHook = path.join(hooksDir, 'validate-mutations.sh');
     const requireHook = path.join(hooksDir, 'require-results.sh');
+    const clusterHook = path.join(hooksDir, 'cluster-context.sh');
+    const inboxHook = path.join(hooksDir, 'check-inbox.sh');
 
     data['validate-mutations'] = {
         PreToolUse: [
             {
-                matcher: 'run_command',
+                matcher: '*',
                 hooks: [
                     {
                         name: 'validate-mutations',
                         type: 'command',
                         command: validateHook,
-                        timeout: 5,
+                        timeout: 10,
                         description: 'Block shell mutations for read-only roles and enforce merge-approval guard',
                     },
                 ],
@@ -166,8 +169,54 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
                 name: 'require-results',
                 type: 'command',
                 command: requireHook,
-                timeout: 5,
+                timeout: 10,
                 description: 'Block exit if team_send_results not called',
+            },
+        ],
+    };
+    data['cluster-context'] = {
+        SessionStart: [
+            {
+                matcher: '*',
+                hooks: [
+                    {
+                        name: 'cluster-context',
+                        type: 'command',
+                        command: clusterHook,
+                        timeout: 5,
+                        description: 'Inject cluster context at session start',
+                    },
+                ],
+            },
+        ],
+    };
+    data['team-inbox'] = {
+        SessionStart: [
+            {
+                matcher: '*',
+                hooks: [
+                    {
+                        name: 'team-inbox-start',
+                        type: 'command',
+                        command: inboxHook,
+                        timeout: 5,
+                        description: 'Check team inbox at session start',
+                    },
+                ],
+            },
+        ],
+        PostToolUse: [
+            {
+                matcher: '*',
+                hooks: [
+                    {
+                        name: 'team-inbox',
+                        type: 'command',
+                        command: inboxHook,
+                        timeout: 5,
+                        description: 'Check team inbox after tool use',
+                    },
+                ],
             },
         ],
     };
@@ -180,8 +229,8 @@ function writeAgyHooks(hooksDir = process.env.AGY_HOOKS_DIR || '/app/hooks') {
 
 /**
  * Register TeamChat MCP server + inbox hooks into a CLI settings object.
- * @param {object} settings - The settings object to modify (gemini, claude, or agy)
- * @param {string} cli - 'gemini', 'claude', or 'agy'
+ * @param {object} settings - The settings object to modify (claude or agy)
+ * @param {string} cli - 'claude' or 'agy'
  */
 function registerMCPsAndHooks(settings, cli) {
     const role = process.env.AGENT_ROLE || '';
@@ -208,13 +257,7 @@ function registerMCPsAndHooks(settings, cli) {
         args: ['--headless', '--no-sandbox'],
     };
 
-    if (cli === 'gemini') {
-        settings.mcpServers = settings.mcpServers || {};
-        settings.mcpServers.TeamChat = teamChatConfig;
-        settings.mcpServers.DarwinBlackboard = blackboardConfig;
-        settings.mcpServers.DarwinJournal = journalConfig;
-        settings.mcpServers.Playwright = playwrightConfig;
-    } else if (cli === 'agy') {
+    if (cli === 'agy') {
         writeAgyMcpServer('TeamChat', teamChatConfig);
         writeAgyMcpServer('DarwinBlackboard', blackboardConfig);
         writeAgyMcpServer('DarwinJournal', journalConfig);
@@ -222,71 +265,25 @@ function registerMCPsAndHooks(settings, cli) {
         writeAgyHooks();
         console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for agy (role=${role}, peer=${peerPort || 'none'})`);
         return;
-    } else {
-        writeClaudeMcpServer('TeamChat', teamChatConfig);
-        writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
-        writeClaudeMcpServer('DarwinJournal', journalConfig);
-        writeClaudeMcpServer('Playwright', playwrightConfig);
     }
 
+    writeClaudeMcpServer('TeamChat', teamChatConfig);
+    writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
+    writeClaudeMcpServer('DarwinJournal', journalConfig);
+    writeClaudeMcpServer('Playwright', playwrightConfig);
+
     settings.hooks = settings.hooks || {};
-    if (cli === 'gemini') {
-        settings.hooks.BeforeTool = settings.hooks.BeforeTool || [];
-        if (!settings.hooks.BeforeTool.some(h => h.hooks?.some(hh => hh.name === 'validate-mutations'))) {
-            settings.hooks.BeforeTool.push({
-                matcher: '*',
-                hooks: [{ name: 'validate-mutations', type: 'command',
-                           command: '/app/hooks/validate-mutations.sh', timeout: 3000,
-                           description: 'Block shell mutations for read-only roles (defense-in-depth)' }],
-            });
-        }
-        settings.hooks.AfterTool = settings.hooks.AfterTool || [];
-        if (!settings.hooks.AfterTool.some(h => h.hooks?.some(hh => hh.name === 'team-inbox'))) {
-            settings.hooks.AfterTool.push({
-                matcher: '*',
-                hooks: [{ name: 'team-inbox', type: 'command',
-                           command: '/app/hooks/check-inbox.sh', timeout: 2000,
-                           description: 'Check for pending team messages and blackboard turns after each tool call' }],
-            });
-        }
-        settings.hooks.AfterAgent = settings.hooks.AfterAgent || [];
-        if (!settings.hooks.AfterAgent.some(h => h.hooks?.some(hh => hh.name === 'require-results'))) {
-            settings.hooks.AfterAgent.push({
-                matcher: '*',
-                hooks: [{ name: 'require-results', type: 'command',
-                           command: '/app/hooks/require-results.sh', timeout: 3000,
-                           description: 'Block exit if team_send_results not called (parity with Claude Stop hook)' }],
-            });
-        }
-        settings.hooks.SessionStart = settings.hooks.SessionStart || [];
-        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.name === 'team-inbox-reinject'))) {
-            settings.hooks.SessionStart.push({
-                matcher: 'compact',
-                hooks: [{ name: 'team-inbox-reinject', type: 'command',
-                           command: '/app/hooks/check-inbox.sh', timeout: 2000 }],
-            });
-        }
-        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.name === 'cluster-context'))) {
-            settings.hooks.SessionStart.push({
-                matcher: '*',
-                hooks: [{ name: 'cluster-context', type: 'command',
-                           command: '/app/hooks/cluster-context.sh', timeout: 2000 }],
-            });
-        }
-    } else {
-        const hookUrl = `http://localhost:${port}`;
-        settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 5 }] }];
-        settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
-        settings.hooks.SessionStart = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
-    }
+    const hookUrl = `http://localhost:${port}`;
+    // timeout 10: the merge-approval guard may wait on the Brain approval proxy (<=3s) + git; a timed-out hook fails open.
+    settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 10 }] }];
+    settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
+    settings.hooks.SessionStart = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
     console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);
 }
 
 /**
  * Initialize CLI settings at startup:
  * - Claude settings.json (~/.claude/settings.json) to skip onboarding
- * - Gemini settings.json (~/.gemini/settings.json) with trust disabled and MCP servers
- * - Gemini trustedFolders.json
  * - Copy agent rules from /tmp/agent-rules/GEMINI.md to ~/.gemini/GEMINI.md and ~/.claude/CLAUDE.md
  */
 function initializeCLISettings() {
@@ -298,8 +295,6 @@ function initializeCLISettings() {
         console.log('Claude settings.json created (skip onboarding)');
     }
 
-    // Pre-create Gemini settings. Trust is disabled so the trust dialog never appears.
-    // Auth is handled by env vars in headless mode (no interactive wizard needed).
     const geminiDir = path.join(os.homedir(), '.gemini');
     fs.mkdirSync(geminiDir, { recursive: true });
     // Copy agent rules from staging mount into writable CLI dirs so save_memory can append
@@ -316,23 +311,7 @@ function initializeCLISettings() {
             console.log(`Agent rules copied: ${stagedRulesPath} -> ${claudeRulesPath}`);
         }
     }
-    const geminiSettingsPath = path.join(geminiDir, 'settings.json');
-    try {
-        let geminiSettings = {};
-        if (fs.existsSync(geminiSettingsPath)) {
-            try { geminiSettings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
-        }
-        // Disable trust folder prompt (all agent working dirs are safe)
-        geminiSettings.security = geminiSettings.security || {};
-        geminiSettings.security.folderTrust = { enabled: false };
-        // Preserve any existing MCP server configs
-        geminiSettings.mcpServers = geminiSettings.mcpServers || {};
-        registerMCPsAndHooks(geminiSettings, 'gemini');
-        fs.writeFileSync(geminiSettingsPath, JSON.stringify(geminiSettings, null, 2));
-        console.log('Gemini settings.json created (trust disabled, MCPs + hooks registered)');
-    } catch (err) {
-        console.error(`Gemini settings.json error: ${err.message}`);
-    }
+
     // Update Claude settings with TeamChat hooks (MCP goes to ~/.claude.json via writeClaudeMcpServer)
     try {
         let claudeSettings = {};
@@ -354,25 +333,25 @@ function initializeCLISettings() {
             console.error(`agy MCP registration error: ${err.message}`);
         }
     }
-    // Trusted folders: JSON object format (path -> trust level), not array.
-    // Even with trust disabled, an invalid file causes a warning on every run.
-    const trustedFoldersPath = path.join(geminiDir, 'trustedFolders.json');
-    try {
-        const trustedFolders = {
-            '/data/gitops': 'TRUST_FOLDER',
-            '/data/gitops-architect': 'TRUST_FOLDER',
-            '/data/gitops-sysadmin': 'TRUST_FOLDER',
-            '/data/gitops-developer': 'TRUST_FOLDER',
-            '/data/gitops-qe': 'TRUST_FOLDER',
-            '/data/workspace': 'TRUST_FOLDER',
-        };
-        fs.writeFileSync(trustedFoldersPath, JSON.stringify(trustedFolders, null, 2));
-        console.log('Gemini trustedFolders.json created (object format)');
-    } catch (err) {
-        console.error(`Gemini trustedFolders.json error: ${err.message}`);
-    }
 
     filterSkillsByRole((process.env.AGENT_ROLE || '').toLowerCase());
+}
+
+const AGY_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
+const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
+const DISABLED_SUFFIX = '.disabled';
+
+function safeRename(src, dest) {
+    try {
+        fs.renameSync(src, dest);
+    } catch (err) {
+        if (err.code === 'EXDEV') {
+            fs.cpSync(src, dest, { recursive: true });
+            fs.rmSync(src, { recursive: true, force: true });
+        } else {
+            throw err;
+        }
+    }
 }
 
 /**
@@ -383,12 +362,12 @@ function initializeCLISettings() {
 function filterSkillsByRole(role) {
     if (!role) return;
     restoreAllSkills();
-    if (!fs.existsSync(GEMINI_SKILLS_DIR)) return;
+    if (!fs.existsSync(AGY_SKILLS_DIR)) return;
 
     let kept = 0, disabled = 0;
-    for (const entry of fs.readdirSync(GEMINI_SKILLS_DIR)) {
+    for (const entry of fs.readdirSync(AGY_SKILLS_DIR)) {
         if (entry.endsWith(DISABLED_SUFFIX)) continue;
-        const skillMd = path.join(GEMINI_SKILLS_DIR, entry, 'SKILL.md');
+        const skillMd = path.join(AGY_SKILLS_DIR, entry, 'SKILL.md');
         if (!fs.existsSync(skillMd)) continue;
 
         const head = fs.readFileSync(skillMd, 'utf8').slice(0, 500);
@@ -399,8 +378,8 @@ function filterSkillsByRole(role) {
         if (roles.includes(role)) { kept++; continue; }
 
         safeRename(
-            path.join(GEMINI_SKILLS_DIR, entry),
-            path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
+            path.join(AGY_SKILLS_DIR, entry),
+            path.join(AGY_SKILLS_DIR, entry + DISABLED_SUFFIX),
         );
         const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
         if (fs.existsSync(claudeEntry)) {
@@ -429,40 +408,23 @@ function swapActiveRules(role) {
     console.log(`Rules swapped to ${role}: ${sourceFile}`);
 }
 
-const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
-const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
-const DISABLED_SUFFIX = '.disabled';
-
-function safeRename(src, dest) {
-    try {
-        fs.renameSync(src, dest);
-    } catch (err) {
-        if (err.code === 'EXDEV') {
-            fs.cpSync(src, dest, { recursive: true });
-            fs.rmSync(src, { recursive: true, force: true });
-        } else {
-            throw err;
-        }
-    }
-}
-
 /**
  * Hide skills that don't match the current task mode by renaming dirs to *.disabled.
  * Reads `modes: [...]` from each SKILL.md frontmatter.
  * Skills WITHOUT a `modes:` field load in all modes (backward compatible).
  * Empty mode ('') skips filtering entirely.
- * Renames in both Gemini and Claude skill dirs (Claude entries are symlinks).
+ * Renames in both Antigravity (~/.gemini/skills) and Claude skill dirs (Claude entries are symlinks).
  *
  * See @ai-rules item 9 (Skill vs MCP matrix). MCP filtering is separate in team-chat-mcp.js.
  */
 function filterSkillsByMode(mode) {
     if (!mode) return;
-    if (!fs.existsSync(GEMINI_SKILLS_DIR)) return;
+    if (!fs.existsSync(AGY_SKILLS_DIR)) return;
 
     let disabled = 0, active = 0;
-    for (const entry of fs.readdirSync(GEMINI_SKILLS_DIR)) {
+    for (const entry of fs.readdirSync(AGY_SKILLS_DIR)) {
         if (entry.endsWith(DISABLED_SUFFIX)) continue;
-        const skillMd = path.join(GEMINI_SKILLS_DIR, entry, 'SKILL.md');
+        const skillMd = path.join(AGY_SKILLS_DIR, entry, 'SKILL.md');
         if (!fs.existsSync(skillMd)) continue;
 
         const head = fs.readFileSync(skillMd, 'utf8').slice(0, 500);
@@ -473,8 +435,8 @@ function filterSkillsByMode(mode) {
         if (modes.includes(mode.toLowerCase())) { active++; continue; }
 
         safeRename(
-            path.join(GEMINI_SKILLS_DIR, entry),
-            path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
+            path.join(AGY_SKILLS_DIR, entry),
+            path.join(AGY_SKILLS_DIR, entry + DISABLED_SUFFIX),
         );
         const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
         if (fs.existsSync(claudeEntry)) {
@@ -489,18 +451,18 @@ function filterSkillsByMode(mode) {
 
 /**
  * Restore all *.disabled skill dirs back to their original names.
- * Processes Gemini first so symlink targets exist when Claude entries are restored.
+ * Processes Antigravity first so symlink targets exist when Claude entries are restored.
  * Idempotent — safe to call when no .disabled dirs exist.
  */
 function restoreAllSkills() {
     let restored = 0;
-    for (const dir of [GEMINI_SKILLS_DIR, CLAUDE_SKILLS_DIR]) {
+    for (const dir of [AGY_SKILLS_DIR, CLAUDE_SKILLS_DIR]) {
         if (!fs.existsSync(dir)) continue;
         for (const entry of fs.readdirSync(dir)) {
             if (!entry.endsWith(DISABLED_SUFFIX)) continue;
             const baseName = entry.slice(0, -DISABLED_SUFFIX.length);
             safeRename(path.join(dir, entry), path.join(dir, baseName));
-            if (dir === GEMINI_SKILLS_DIR) restored++;
+            if (dir === AGY_SKILLS_DIR) restored++;
         }
     }
     if (restored > 0) {
@@ -508,4 +470,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, writeAgyMcpServer, writeAgyHooks, registerMCPsAndHooks, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills, AGY_SKILLS_DIR };
