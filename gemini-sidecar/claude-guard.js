@@ -16,7 +16,7 @@
 //    not in the sidecar's own cwd.
 const { execFile, spawn } = require('child_process');
 const path = require('path');
-const { isReadOnlyRoleName, normalizeRole } = require('./roles');
+const { isReadOnlyRoleName, isMutatingRoleName, normalizeRole } = require('./roles');
 const mergeGuard = require('./hooks/merge-guard.js'); // approvalVerdict only; classification runs in a child process
 const GUARD_SCRIPT = path.join(__dirname, 'hooks', 'merge-guard.js');
 const VALIDATE_SCRIPT = path.join(__dirname, 'hooks', 'validate-mutations.sh');
@@ -74,7 +74,9 @@ function readOnlyRoleHook(payload, role, sidecarPort) {
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     let out = '';
-    const fail = (why) => resolve(`Read-only role '${role}': tool call could not be validated (${why}); failing closed.`);
+    const fail = (why) => resolve(role
+      ? `Read-only role '${role}': tool call could not be validated (${why}); failing closed.`
+      : `Unresolved or empty agent role: tool call could not be validated (${why}); failing closed.`);
     const killer = setTimeout(() => { child.kill('SIGKILL'); fail('timeout'); }, READONLY_HOOK_TIMEOUT_MS);
     child.stdout.on('data', (c) => { out += c; });
     child.on('error', () => { clearTimeout(killer); fail('spawn error'); });
@@ -83,7 +85,7 @@ function readOnlyRoleHook(payload, role, sidecarPort) {
       try {
         const d = JSON.parse(out);
         if (d.decision === 'allow') return resolve(null);
-        return resolve(d.reason || `Read-only role '${role}': tool call denied.`);
+        return resolve(d.reason || (role ? `Read-only role '${role}': tool call denied.` : 'Unresolved or empty agent role: tool call denied.'));
       } catch { return fail('unparseable hook output'); }
     });
     child.stdin.on('error', () => {});
@@ -99,7 +101,7 @@ function readOnlyRoleHook(payload, role, sidecarPort) {
  */
 async function claudeMergeGuard(payload, deps) {
   const role = normalizeRole(deps.role);
-  if (isReadOnlyRoleName(role)) return readOnlyRoleHook(payload, role, deps.sidecarPort);
+  if (!isMutatingRoleName(role)) return readOnlyRoleHook(payload, role, deps.sidecarPort);
   let result;
   try {
     result = await classifyInChild(payload);

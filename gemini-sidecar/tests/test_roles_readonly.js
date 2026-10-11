@@ -8,20 +8,35 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { isReadOnlyRoleName, normalizeRole } = require('../roles');
+const { isReadOnlyRoleName, isMutatingRoleName, normalizeRole } = require('../roles');
 
-describe('isReadOnlyRoleName', () => {
+describe('isReadOnlyRoleName & isMutatingRoleName', () => {
   it('listed read-only roles', () => {
-    for (const r of ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst']) assert.equal(isReadOnlyRoleName(r), true, r);
+    for (const r of ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst']) {
+      assert.equal(isReadOnlyRoleName(r), true, r);
+      assert.equal(isMutatingRoleName(r), false, r);
+    }
   });
-  it('mutating roles are not read-only', () => {
-    for (const r of ['developer', 'sysadmin', 'qe', 'tester', 'executor', 'release_manager']) assert.equal(isReadOnlyRoleName(r), false, r);
+  it('mutating roles are mutating and not read-only', () => {
+    for (const r of ['developer', 'sysadmin', 'qe', 'tester', 'executor']) {
+      assert.equal(isReadOnlyRoleName(r), false, r);
+      assert.equal(isMutatingRoleName(r), true, r);
+    }
+    // release_manager is unlisted mutating role, neither explicitly mutating nor read-only
+    assert.equal(isReadOnlyRoleName('release_manager'), false);
+    assert.equal(isMutatingRoleName('release_manager'), false);
   });
   it('read-only-looking and oddly-cased names fail closed', () => {
-    for (const r of ['qa_reviewer_agent', 'ARCHITECT_LEAD', 'security-analyst', '  Explorer \n']) assert.equal(isReadOnlyRoleName(r), true, JSON.stringify(r));
+    for (const r of ['qa_reviewer_agent', 'ARCHITECT_LEAD', 'security-analyst', '  Explorer \n']) {
+      assert.equal(isReadOnlyRoleName(r), true, JSON.stringify(r));
+      assert.equal(isMutatingRoleName(r), false, JSON.stringify(r));
+    }
   });
-  it('unset role is not claimed read-only (callers have their own unresolved-role path)', () => {
-    for (const r of ['', undefined, null]) assert.equal(isReadOnlyRoleName(r), false);
+  it('unset role is neither (callers have their own unresolved-role fail-closed path)', () => {
+    for (const r of ['', undefined, null]) {
+      assert.equal(isReadOnlyRoleName(r), false);
+      assert.equal(isMutatingRoleName(r), false);
+    }
     assert.equal(normalizeRole(' A/B '), 'ab');
   });
 });
@@ -65,6 +80,19 @@ describe('readonly-role-permissions.json (Claude engine-enforced deny list)', ()
   it('denies WebFetch and WebSearch to prevent external network exfiltration', () => {
     for (const tool of ['WebFetch', 'WebSearch']) {
       assert.ok(deny.includes(tool), tool);
+    }
+  });
+  it('denies Bash(cat ...) for all sensitive credential stores', () => {
+    for (const r of [
+      'Bash(cat ~/.claude.json*)', 'Bash(cat ~/.claude/.credentials.json*)', 'Bash(cat ~/.claude/*)',
+      'Bash(cat ~/.gemini/*)', 'Bash(cat ~/.docker/*)', 'Bash(cat /var/run/secrets/*)', 'Bash(cat /run/secrets/*)',
+      'Bash(cat /secrets/*)', 'Bash(cat ~/.ssh/*)', 'Bash(cat ~/.git-credentials*)', 'Bash(cat ~/.gitconfig*)',
+      'Bash(cat ~/.config/git/*)', 'Bash(cat ~/.netrc*)', 'Bash(cat ~/.aws/*)', 'Bash(cat ~/.kube/config*)',
+      'Bash(cat ~/.kube/*)', 'Bash(cat ~/.config/gh/*)', 'Bash(cat ~/.config/glab-cli/*)', 'Bash(cat ~/.config/gcloud/*)',
+      'Bash(cat /tmp/vertex-sa*)', 'Bash(cat /tmp/*token*)', 'Bash(cat /tmp/*credential*)',
+      'Bash(cat /tmp/git-creds-*)', 'Bash(cat /tmp/gh-token-map*)',
+    ]) {
+      assert.ok(deny.includes(r), r);
     }
   });
 });

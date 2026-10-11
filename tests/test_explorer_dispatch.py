@@ -638,15 +638,15 @@ class TestInfraVerification:
     """
 
     @pytest.mark.skip(reason="Shell verification -- run manually: see docstring")
-    def test_t8_gemini_build_cli_command_model_flag(self):
-        """T-8: Verify Gemini CLI buildCLICommand includes --model flag.
+    def test_t8_agy_build_cli_command_model_flag(self):
+        """T-8: Verify agy CLI buildCLICommand includes --model flag.
 
         Verification command (from BlackBoard root):
             node -e "
               const {buildCLICommand} = require('./gemini-sidecar/cli-executor.js');
-              const cmd = buildCLICommand({cli:'gemini', model:'gemini-3.5-flash-lite', task:'test'});
-              const args = cmd.join(' ');
-              if (!args.includes('--model gemini-3.5-flash-lite')) {
+              const cmd = buildCLICommand('test', {role:'explorer', model:'gemini-3.7-flash'});
+              const args = cmd.args.join(' ');
+              if (!args.includes('--model gemini-3.7-flash')) {
                 console.error('FAIL: --model not found in:', args);
                 process.exit(1);
               }
@@ -660,13 +660,13 @@ class TestInfraVerification:
 
         Verification command (from BlackBoard root):
             helm template darwin ./helm \\
-              --set ephemeralAgents.roleCli.explorer=gemini \\
+              --set ephemeralAgents.roleCli.explorer=agy \\
               | grep -A2 'name: AGENT_CLI' \\
-              | grep -q 'value:.*gemini' \\
-              && echo "PASS: AGENT_CLI=gemini found" \\
+              | grep -q 'value:.*agy' \\
+              && echo "PASS: AGENT_CLI=agy found" \\
               || echo "FAIL: AGENT_CLI not parameterized"
 
         Expected: TaskRun env block contains:
             - name: AGENT_CLI
-              value: $(tt.params.cli)   # or resolved to "gemini" via TT default
+              value: $(tt.params.cli)   # or resolved to "agy" via TT default
         """

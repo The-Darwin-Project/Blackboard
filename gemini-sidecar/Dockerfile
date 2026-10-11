@@ -94,7 +94,6 @@ RUN \
     .gh-real --version && github-mcp-server --help | head -1 && \
     glab --version && flux --version
 
-
 # GitLab MCP server: provided by glab CLI (`glab mcp serve`), no separate npm package needed.
 # The deprecated @modelcontextprotocol/server-gitlab has broken schemas -- glab is the replacement.
 

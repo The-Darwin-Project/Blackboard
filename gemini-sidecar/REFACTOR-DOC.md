@@ -98,7 +98,7 @@ The `currentTask` object is loosely typed with these observed fields:
 | Env Var | Read Where | Purpose |
 | --------- | ----------- | --------- |
 | `AGENT_PERMISSION_MODE` | `buildCLICommand` L182 | If `"plan"` → `--permission-mode plan` for Claude |
-| `GOOGLE_GENAI_USE_VERTEXAI` | `executeCLI` L804, `executeCLIStreaming` L921, `requestFindings` L717 | Set to `'true'` in spawned Gemini env |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Inherited from pod env | ADC flag for Vertex AI auth (purged from explicit sidecar child process injection) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Inherited by child processes | ADC for Vertex AI auth |
 | `GH_TOKEN` | Set by `setupGitHubTooling` L404 | Used by `gh` CLI |
 | `GITLAB_TOKEN` | Set by `setupGitLabTooling` L506 | Used by `glab` CLI |

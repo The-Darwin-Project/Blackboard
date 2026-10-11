@@ -614,22 +614,30 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
 
   it('require-results.sh emits decision: "continue" (not "block") for agy Stop hook when results missing', () => {
     const hookPath = path.join(hooksDir, 'require-results.sh');
+    const testPort = '19090';
+    const counterDir = `/tmp/.darwin-hooks-${process.getuid ? process.getuid() : 1001}`;
+    const counterFile = path.join(counterDir, `require-results-${testPort}-default.count`);
+    try { fs.rmSync(counterFile, { force: true }); } catch {}
     const input = JSON.stringify({
       type: 'Stop',
       messages: [{ content: 'just wrapping up' }]
     });
 
-    const res = spawnSync('bash', [hookPath], {
-      input,
-      env: { ...process.env, AGENT_CLI: 'agy', SIDECAR_PORT: '19090' },
-      encoding: 'utf8'
-    });
+    try {
+      const res = spawnSync('bash', [hookPath], {
+        input,
+        env: { ...process.env, AGENT_CLI: 'agy', SIDECAR_PORT: testPort },
+        encoding: 'utf8'
+      });
 
-    assert.equal(res.status, 0);
-    const payload = JSON.parse(res.stdout);
-    // Antigravity Stop hook contract: decision must be 'continue' to keep agent running
-    assert.equal(payload.decision, 'continue', 'agy Stop hook requires decision: "continue"');
-    assert.notEqual(payload.decision, 'block', 'Gemini "block" string breaks agy parser');
+      assert.equal(res.status, 0);
+      const payload = JSON.parse(res.stdout);
+      // Antigravity Stop hook contract: decision must be 'continue' to keep agent running
+      assert.equal(payload.decision, 'continue', 'agy Stop hook requires decision: "continue"');
+      assert.notEqual(payload.decision, 'block', 'Gemini "block" string breaks agy parser');
+    } finally {
+      try { fs.rmSync(counterFile, { force: true }); } catch {}
+    }
   });
 
   const hasAgy = Boolean(process.env.AGY_INTEGRATION_TEST) && (() => {

@@ -33,7 +33,7 @@ const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolve
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
-const { READ_ONLY_ROLES, isReadOnlyRoleName } = require('./roles');
+const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveEffectiveRole(role) {
@@ -52,7 +52,7 @@ function resolveModel(options, agentCli) {
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
 // Only roles listed here get --settings; all other roles are unaffected.
-const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || '/app/claude-settings';
+const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || path.join(__dirname, 'claude-settings');
 const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
 const ROLE_SETTINGS_FILE = {
     code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
@@ -64,8 +64,13 @@ const ROLE_SETTINGS_FILE = {
 };
 
 // Read-only role detection is shared (roles.js): name heuristics fail closed for unlisted read-only-looking roles.
+// Any role that is not an explicitly allowed mutating role gets the read-only deny file (fail closed).
 function settingsFileForRole(role) {
-    return ROLE_SETTINGS_FILE[role] || (isReadOnlyRoleName(role) ? READONLY_SETTINGS_FILE : undefined);
+    if (ROLE_SETTINGS_FILE[role]) return ROLE_SETTINGS_FILE[role];
+    if (!role || !isMutatingRoleName(role) || isReadOnlyRoleName(role)) {
+        return READONLY_SETTINGS_FILE;
+    }
+    return undefined;
 }
 
 // Roles that must never run with write/approve-all permissions on the agy path. agy runs
@@ -187,10 +192,17 @@ function buildCLICommand(prompt, options = {}) {
             }
             args.push('--settings', settingsFile);
         }
-        if (permissionMode === 'plan') {
+        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
+        const isKnownMutatingRole = isMutatingRoleName(effectiveRole);
+
+        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
+        // read-only to receive --dangerously-skip-permissions. Unrecognized/empty roles default to --permission-mode plan.
+        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
             args.push('--permission-mode', 'plan');
         } else if (options.autoApprove) {
             args.push('--dangerously-skip-permissions');
+        } else {
+            args.push('--permission-mode', 'plan');
         }
         args.push('--output-format', 'stream-json', '--verbose');
         const model = resolveModel(options, agentCli);

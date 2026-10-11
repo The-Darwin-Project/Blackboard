@@ -191,4 +191,12 @@ describe('Claude PreToolUse for READ-ONLY roles (delegated to validate-mutations
       assert.ok(!denied(await s.post(tool('mcp__GitHub__create_branch', { branch: 'feat/x' }, repoFeat))));
     } finally { s.close(); }
   });
+  it('unresolved or empty role fails closed to read-only hook', async () => {
+    const s = await setup({ approved: false }, '');
+    try {
+      assert.ok(denied(await s.post(tool('Write', {}, repoFeat))));
+      assert.ok(denied(await s.post(bash('rm -rf x', repoFeat))));
+      assert.ok(!denied(await s.post(tool('Read', {}, repoFeat))));
+    } finally { s.close(); }
+  });
 });

@@ -9,9 +9,15 @@
 // 4. [Gotcha]: hooks/validate-mutations.sh keeps its own READONLY_ROLES string (bash, no node dependency on the
 //    fast path); keep it in sync with READ_ONLY_ROLES below.
 const READ_ONLY_ROLES = new Set(['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst']);
+const MUTATING_ROLES = new Set(['developer', 'sysadmin', 'qe', 'tester', 'executor']);
 
 function normalizeRole(role) {
   return String(role ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+
+function isMutatingRoleName(role) {
+  const r = normalizeRole(role);
+  return MUTATING_ROLES.has(r);
 }
 
 function isReadOnlyRoleName(role) {
@@ -20,4 +26,4 @@ function isReadOnlyRoleName(role) {
   return READ_ONLY_ROLES.has(r) || /(?:^|[_-])(?:review(?:er)?|analyst|explorer|architect)(?:$|[_-])/.test(r);
 }
 
-module.exports = { READ_ONLY_ROLES, normalizeRole, isReadOnlyRoleName };
+module.exports = { READ_ONLY_ROLES, MUTATING_ROLES, normalizeRole, isReadOnlyRoleName, isMutatingRoleName };
