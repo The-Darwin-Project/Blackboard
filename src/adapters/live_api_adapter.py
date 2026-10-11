@@ -46,7 +46,8 @@
 # 18. [Pattern]: _build_live_tools() assembles the tool list for _connect(). When JARVIS_RAG_ENABLED
 #     and JARVIS_RAG_CORPUS_ID are set, adds Tool(retrieval=VertexRagStore(store_context=True))
 #     for implicit RAG grounding. store_context=True is Live API-specific (not for generateContent).
-#     google_web_search is declared as a standard FunctionDeclaration alongside retrieval.
+#     google_web_search is declared as a standard FunctionDeclaration alongside retrieval (the Live API
+#     supports tool declarations with BLOCKING behavior alongside Vertex RAG retrieval).
 # 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
 #     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect).
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks.
@@ -265,7 +266,8 @@ class LiveAPIAdapter:
                         model=self._model,
                         config=config,
                     )
-                    self._session = await self._session_ctx.__aenter__()
+                    async with asyncio.timeout(30.0):
+                        self._session = await self._session_ctx.__aenter__()
                     session_opened = True
                     self._running = True
 
@@ -616,7 +618,7 @@ class LiveAPIAdapter:
                 self._resumption_handle = new_handle
                 logger.debug("Cortex session resumption handle updated")
 
-        eid = self._last_pulse_event_id
+        eid = getattr(self, "_last_pulse_event_id", None)
 
         if hasattr(msg, "server_content") and msg.server_content:
             try:
@@ -644,14 +646,15 @@ class LiveAPIAdapter:
                 logger.debug("Cortex grounding_metadata parse failed (non-fatal): %s", e)
 
         model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
-        parts_list = getattr(model_turn, "parts", None) or []
+        raw_parts = getattr(model_turn, "parts", None)
+        parts_list = raw_parts if isinstance(raw_parts, (list, tuple)) else []
         has_extracted_text = False
         for part in parts_list:
             thought = bool(getattr(part, "thought", False))
             text = getattr(part, "text", None)
             if thought and text:
                 try:
-                    target_eid = eid or self._active_meta_event_id
+                    target_eid = eid or getattr(self, "_active_meta_event_id", None)
                     await self._broadcast({"type": "cortex_thinking", "thought": text, "event_id": target_eid})
                 except Exception as e:
                     logger.debug("Failed to broadcast cortex_thinking chunk: %s", e)
@@ -662,7 +665,8 @@ class LiveAPIAdapter:
                 else:
                     self._text_buffer.append(text)
 
-        if not has_extracted_text and hasattr(msg, "text") and msg.text:
+        has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
+        if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and msg.text:
             if self._collecting_handoff:
                 self._handoff_buffer.append(msg.text)
             else:
@@ -1860,7 +1864,7 @@ class LiveAPIAdapter:
         self._go_away_received = False
         self._collecting_handoff = False
         self._handoff_buffer = []
-        if self._receive_task and not self._receive_task.done():
+        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
             self._receive_task.cancel()
             try:
                 await self._receive_task

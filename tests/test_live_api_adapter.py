@@ -150,6 +150,38 @@ async def test_process_message_demuxes_interleaved_parts():
     
     assert adapter._text_buffer == ["hello"]
 
+
+@pytest.mark.asyncio
+async def test_process_message_thought_only_does_not_leak_to_text_buffer():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._broadcast = AsyncMock()
+    adapter._active_meta_event_id = "evt-1"
+    adapter._awaiting_jarvis_reply = False
+
+    msg = MagicMock()
+    part = MagicMock()
+    part.thought = True
+    part.text = "internal thought reasoning"
+    msg.server_content.model_turn.parts = [part]
+    msg.server_content.turn_complete = False
+    msg.text = "internal thought reasoning"
+    msg.tool_call = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+
+    await adapter._process_message(msg)
+
+    adapter._broadcast.assert_called_once_with({
+        "type": "cortex_thinking",
+        "thought": "internal thought reasoning",
+        "event_id": "evt-1"
+    })
+    assert adapter._text_buffer == []
+
+
 # T-5: Tool execution exception safety
 @pytest.mark.asyncio
 async def test_handle_tool_call_exception_safety():

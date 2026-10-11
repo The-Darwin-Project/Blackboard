@@ -2,14 +2,14 @@
 # @ai-rules:
 # 1. [Constraint]: Standalone probe script. Zero imports from BlackBoard/src.
 # 2. [Pattern]: Tests both Live API model candidates side-by-side.
-# 3. [Gotcha]: gemini-3.1-flash-live-preview may not be on Vertex AI yet -- handle gracefully.
+# 3. [Pattern]: Live API model evaluation (default gemini-3.8-live, VMER-2031).
 """
 Probe 0b: Compare Live API models + test session rotation.
 
 Gates Phase 5 of the Cognitive Recall Graph plan.
 Tests:
-  1. gemini-live-2.5-flash-native-audio (GA) -- text + tool use
-  2. gemini-3.1-flash-live-preview -- text + tool use (may fail if not on Vertex AI)
+  1. gemini-3.8-live (GA) -- text + tool use
+  2. gemini-live-2.5-flash (legacy) -- text + tool use
   3. Session rotation: connect -> 10 turns -> summarize -> reconnect with summary
   4. Latency comparison
 
