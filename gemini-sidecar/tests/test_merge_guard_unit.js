@@ -66,3 +66,21 @@ describe('MCP classification tightening', () => {
     assert.equal(api('-X POST', '$URL'), true);
   });
 });
+
+describe('git-<sub> programs on PATH (external subcommands)', () => {
+  it('an executable git-<name> on PATH is guarded; git-lfs and unknown names are not', () => {
+    const bindir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-bin-'));
+    const savedPath = process.env.PATH;
+    try {
+      fs.writeFileSync(path.join(bindir, 'git-m'), '#!/bin/sh\nexec git merge "$@"\n', { mode: 0o755 });
+      fs.writeFileSync(path.join(bindir, 'git-lfs'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      process.env.PATH = `${bindir}:${savedPath}`;
+      assert.equal(mg.classify(sh('git m x'), { cwd: repo }).guard, true);
+      assert.equal(mg.classify(sh('git lfs ls-files'), { cwd: repo }).guard, false);
+      assert.equal(mg.classify(sh('git zzz'), { cwd: repo }).guard, false);
+    } finally {
+      process.env.PATH = savedPath;
+      fs.rmSync(bindir, { recursive: true, force: true });
+    }
+  });
+});

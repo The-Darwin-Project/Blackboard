@@ -23,12 +23,18 @@
 //    git state is read via gitQuery(): ok=false (budget/spawn-cap/timeout/not-a-repo) is UNKNOWN and always guards;
 //    at most MAX_GIT_SPAWNS git processes per call. `--json` mode (+ MERGE_GUARD_CWD) is how the Claude HTTP hook
 //    runs classification in a child process so git never blocks the sidecar event loop.
+// 8. [Contract]: Defining git configuration by ANY route is merge-class because a same-command-line alias is invisible to the
+//    pre-flight alias lookup: `git config alias.*|include.*|includeIf.*` writes, GIT_CONFIG_* env (and HOME/GIT_DIR/
+//    GIT_EXEC_PATH/PATH for a git call), redirects/`tee`/`cp`/`sed -i`/interpreters writing .git/config|~/.gitconfig, an
+//    unknown subcommand under -C/--git-dir (its aliases can't be looked up), and an executable git-<sub> on PATH.
 // 6. [Pattern]: MCP tools are classified by NAME TOKENS (camelCase + snake_case split), so `mergePullRequest`,
 //    `merge_pull_request` and `glab_mr_merge` all yield the verb `merge`; `merge_request` (the noun) does not.
 //    The read-only allowlist is verb-based -- extend READ/SAFE sets here, or set HOOK_EXTRA_ALLOWED_TOOLS in
 //    validate-mutations.sh's env, rather than loosening the shell wrapper.
 'use strict';
 const { spawnSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const PROTECTED = new Set(['main', 'master']);
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
@@ -242,17 +248,22 @@ function parseShell(str) {
 
   // Drop redirections (`> file`, `2>/dev/null`, `<<<`) so they don't pollute positional parsing. A bare operator
   // token consumes the next token (its target). Quoted '>' arguments are NOT flagged and are kept.
+  // Redirection TARGETS are kept on `out.redirs` (`echo x >> .git/config` must stay visible to the config-file check).
   const cleaned = cmds.map(({ t, f }) => {
     const out = [];
+    out.redirs = [];
     for (let k = 0; k < t.length; k++) {
       if (f[k]) {
-        if (/^\d*(>>?|<<?<?|>&|<&|&>>?)$/.test(t[k])) k++;
+        const m = /^\d*(>>?\|?|<<?<?|>&|<&|&>>?)/.exec(t[k]);
+        const attached = m ? t[k].slice(m[0].length) : '';
+        if (attached) out.redirs.push(attached);
+        else if (m && k + 1 < t.length) { out.redirs.push(t[k + 1]); k++; }
         continue;
       }
       out.push(t[k]);
     }
     return out;
-  }).filter((t) => t.length);
+  }).filter((t) => t.length || t.redirs.length);
   return { cmds: cleaned, nested };
 }
 
@@ -282,10 +293,14 @@ const WRAP = {
   until: { valued: new Set(), pos: 0 }, '!': { valued: new Set(), pos: 0 }, '{': { valued: new Set(), pos: 0 },
 };
 
+// Returns the command with wrappers/assignments removed; `.assigns` lists every VAR=value seen in front of it
+// (leading assignments and `env VAR=value`), which matter for git (GIT_CONFIG_*, HOME, PATH ...).
 function stripPrefix(tokens) {
   const t = tokens.slice();
+  const assigns = [];
+  t.assigns = assigns;
   for (;;) {
-    while (t.length && isAssign(t[0])) t.shift();
+    while (t.length && isAssign(t[0])) assigns.push(t.shift());
     if (!t.length) return t;
     const b = base(t[0]).toLowerCase();
     if (!Object.prototype.hasOwnProperty.call(WRAP, b)) return t;
@@ -293,7 +308,7 @@ function stripPrefix(tokens) {
     t.shift();
     while (t.length) {
       const x = t[0];
-      if (b === 'env' && isAssign(x)) { t.shift(); continue; }
+      if (b === 'env' && isAssign(x)) { assigns.push(t.shift()); continue; }
       if (x.startsWith('-') && x.length > 1) {
         t.shift();
         if (spec.valued.has(x) && t.length) t.shift();
@@ -403,6 +418,67 @@ const GIT_BUILTINS = new Set(['status', 'log', 'diff', 'commit', 'add', 'checkou
   'commit-tree', 'mktree', 'hash-object', 'verify-commit', 'verify-tag', 'stripspace', 'check-ignore', 'sparse-checkout',
   'maintenance', 'range-diff', 'whatchanged', 'revert', 'difftool', 'request-pull', 'prune', 'repack', 'pack-refs']);
 
+// ---- Same-command-line / out-of-band git configuration (aliases, includes, env, config files) ----
+// An alias (or git-<name> program) that is DEFINED and USED in one command line is invisible to the pre-flight alias
+// lookup, so defining one by any route is itself merge-class: `git config alias.m merge; git m x`,
+// `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.m GIT_CONFIG_VALUE_0=merge git m x`, `echo '[alias] m=merge' >> .git/config`.
+const CONFIG_ENV_RE = /^GIT_CONFIG(_[A-Z0-9_]*)?$/i; // GIT_CONFIG_COUNT/KEY_n/VALUE_n/PARAMETERS/GLOBAL/SYSTEM/NOSYSTEM
+const GIT_ENV_RE = /^(HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|GIT_EXEC_PATH|PATH)$/i; // redirect config/programs for a git call
+const ASSIGN_ONLY_ENV_RE = /^(HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|GIT_EXEC_PATH)$/i; // (PATH is too common to flag alone)
+const GITCFG_PATH_RE = /(\.git\/config(\.worktree)?|\.gitconfig|\.config\/git\/config|\/etc\/gitconfig|gitdir\/config)(?![\w.-])/i;
+// Programs that write to the file operands they are given.
+const FILE_WRITERS = new Set(['tee', 'cp', 'mv', 'install', 'ln', 'dd', 'truncate', 'sponge', 'perl', 'python', 'python2', 'python3',
+  'ruby', 'node', 'php', 'awk', 'gawk', 'ed', 'ex', 'vi', 'vim', 'nano']);
+const ENV_BUILTINS = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
+
+function assignName(a) { return a.slice(0, a.indexOf('=')); }
+
+function configEnvGuard(assigns, bin) {
+  for (const a of assigns) {
+    const name = assignName(a);
+    if (CONFIG_ENV_RE.test(name)) return true;
+    if (bin === 'git' && GIT_ENV_RE.test(name)) return true;
+    if (!bin && ASSIGN_ONLY_ENV_RE.test(name)) return true; // `HOME=/tmp/x; git ...` persists for later commands
+  }
+  return false;
+}
+
+// `git config` writes of alias.* / include.* / includeIf.* keys (or opening the editor).
+function configWriteGuard(args) {
+  if (args.some((a) => /^(-e|--edit)$/.test(a))) return true;
+  if (args.some((a) => /^(--get|--get-all|--get-regexp|--get-urlmatch|--list|-l|--show-origin|--show-scope|--name-only)$/.test(a))) return false;
+  const keys = args.filter((a) => !a.startsWith('-'));
+  const writeFlag = args.some((a) => /^--(add|replace-all|unset|unset-all|rename-section|remove-section)$/.test(a));
+  if (keys.length < 2 && !writeFlag) return false; // `git config alias.m` is a read
+  return keys.some((k) => /^(alias\.|include\.|includeif\.)/i.test(k) || DYN.test(k));
+}
+
+// Writes to git config files: redirection targets, or file operands of write-capable programs.
+function configFileWriteGuard(bin, rest, redirs, src) {
+  const gitish = /\.git\b|GIT_DIR/.test(src);
+  for (const r of redirs) {
+    if (GITCFG_PATH_RE.test(r)) return true;
+    if (gitish && /(^|\/)config(\.worktree)?$/.test(r)) return true; // `cd .git; echo ... >> config`
+  }
+  const writer = FILE_WRITERS.has(bin) || (bin === 'sed' && rest.some((a) => /^(-[A-Za-z]*i|--in-place)/.test(a)));
+  if (writer && rest.some((a) => GITCFG_PATH_RE.test(a) || (gitish && /(^|\/)config$/.test(a)))) return true;
+  return false;
+}
+
+// `git <sub>` with no builtin/alias runs an external `git-<sub>` program found on PATH (an attacker-supplied
+// shim can `exec git merge`). Git's own exec-path programs are not attacker controlled and are not checked.
+const SAFE_EXTERNAL = new Set(['lfs']);
+function externalGitCommand(sub) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(sub) || SAFE_EXTERNAL.has(sub)) return false;
+  for (const dir of String(process.env.PATH || '').split(':')) {
+    try {
+      const f = path.join(dir || '.', `git-${sub}`);
+      if (fs.statSync(f).isFile()) { fs.accessSync(f, fs.constants.X_OK); return true; }
+    } catch { /* not here */ }
+  }
+  return false;
+}
+
 function gitGuard(args, depth) {
   let i = 0;
   let dirOverride = false;
@@ -422,9 +498,12 @@ function gitGuard(args, depth) {
   const rest = args.slice(i + 1);
   if (DYN.test(sub)) return true; // git $SUB / ${X} / m{er,}ge / mer*: dynamic subcommand
   if (sub === 'merge') return true;
+  if (sub === 'config') return configWriteGuard(rest);
   if (sub === 'push') return pushGuard(rest, dirOverride);
   if (sub && !GIT_BUILTINS.has(sub)) {
     if (depth >= MAX_DEPTH) return true; // alias chain too deep to follow => guarded
+    if (dirOverride) return true; // -C/--git-dir: that repo's aliases are not the ones we can look up
+    if (externalGitCommand(sub)) return true; // user-supplied git-<sub> program on PATH
     let alias = CTX.aliasCache.get(args[i]);
     if (alias === undefined) {
       alias = gitQuery(['config', '--get', `alias.${args[i]}`]);
@@ -541,11 +620,19 @@ function httpGuard(bin, args) {
 }
 
 function analyzeTokens(tokens, depth, strict) {
+  const redirs = tokens.redirs || [];
   const t = stripPrefix(tokens);
-  if (!t.length) return false;
+  const assigns = t.assigns || [];
+  const src = SRC.cur;
+  if (!t.length) { // assignment-only / redirect-only command
+    return configEnvGuard(assigns, '') || configFileWriteGuard('', [], redirs, src);
+  }
   const rawBin = t[0];
   const bin = base(rawBin).toLowerCase();
   const rest = t.slice(1);
+  if (configEnvGuard(assigns, bin)) return true;
+  if (ENV_BUILTINS.has(bin) && configEnvGuard(rest.filter(isAssign), '')) return true; // export GIT_CONFIG_COUNT=1
+  if (configFileWriteGuard(bin, rest, redirs, src)) return true;
   if (DYN.test(rawBin)) { // dynamic command word
     if (strict) return true;
     return rest.some((x) => /^(merge|push|api)$/i.test(x) || DYN.test(x) && /merge|push/i.test(x));
@@ -583,12 +670,20 @@ function analyzeTokens(tokens, depth, strict) {
   return false;
 }
 
+// Source text currently being analyzed (config-file checks look for `.git` anywhere in it).
+const SRC = { cur: '' };
 function analyzeString(str, depth, strict) {
   if (depth > MAX_DEPTH) return true; // pathological nesting => fail closed
-  const { cmds, nested } = parseShell(str);
-  for (const c of cmds) if (analyzeTokens(c, depth, strict)) return true;
-  for (const nsub of nested) if (analyzeString(nsub, depth + 1)) return true;
-  return false;
+  const prev = SRC.cur;
+  SRC.cur = str;
+  try {
+    const { cmds, nested } = parseShell(str);
+    for (const c of cmds) if (analyzeTokens(c, depth, strict)) return true;
+    for (const nsub of nested) if (analyzeString(nsub, depth + 1)) return true;
+    return false;
+  } finally {
+    SRC.cur = prev;
+  }
 }
 
 function shellNeedsGuard(cmd) {

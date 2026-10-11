@@ -626,6 +626,33 @@ mg "T-15d: glab_api opaque target guarded"      mcp__GitLab__glab_api '{"args":"
 run_test "T-15e: glab_api commit to a feature branch allowed (developer)" \
   '{"toolCall":{"name":"mcp__GitLab__glab_api","args":{"args":["projects/1/repository/commits"],"flags":{"method":"POST","field":"branch=feat"}}}}' developer allow
 
+# --- T-16: aliases/config defined and used in the same command line (QE finding on 73ae9da0) ---
+CFG_REPO="$(mktemp -d)"; git -C "$CFG_REPO" init -q -b feat/x; git -C "$CFG_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m i
+check_in "$CFG_REPO" "T-16a: git config alias.m merge; git m x"                        "git config alias.m merge; git m x" developer deny
+check_in "$CFG_REPO" "T-16b: GIT_CONFIG_COUNT/KEY/VALUE env alias"                     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.m GIT_CONFIG_VALUE_0=merge git m x" developer deny
+check_in "$CFG_REPO" "T-16c: append [alias] to .git/config then use it"               'echo "[alias] m = merge" >> .git/config; git m x' developer deny
+check_in "$CFG_REPO" "T-16d: git config --global --add alias"                          "git config --global --add alias.m merge" developer deny
+check_in "$CFG_REPO" "T-16e: git config include.path"                                  "git config include.path /tmp/evil" developer deny
+check_in "$CFG_REPO" "T-16f: GIT_CONFIG_PARAMETERS via env wrapper"                    "env GIT_CONFIG_PARAMETERS=\"'alias.m=merge'\" git m x" developer deny
+check_in "$CFG_REPO" "T-16g: export GIT_CONFIG_COUNT then use"                         "export GIT_CONFIG_COUNT=1; git m x" developer deny
+check_in "$CFG_REPO" "T-16h: HOME redirected for git"                                  "HOME=/tmp/evil git m x" developer deny
+check_in "$CFG_REPO" "T-16i: GIT_DIR pointing at another repo"                         "GIT_DIR=/tmp/evil/.git git m x" developer deny
+check_in "$CFG_REPO" "T-16j: heredoc into ~/.gitconfig"                                $'cat >> ~/.gitconfig <<EOF\n[alias]\n m = merge\nEOF' developer deny
+check_in "$CFG_REPO" "T-16k: tee -a .git/config"                                       'echo "[alias] m=merge" | tee -a .git/config' developer deny
+check_in "$CFG_REPO" "T-16l: cp over .git/config"                                      "cp evil .git/config" developer deny
+check_in "$CFG_REPO" "T-16m: sed -i .git/config"                                       "sed -i 's/a/b/' .git/config" developer deny
+check_in "$CFG_REPO" "T-16n: interpreter writing .git/config"                          "python3 -c \"open('.git/config','a').write('[alias]\\nm=merge')\"" developer deny
+check_in "$CFG_REPO" "T-16o: cd .git && append to config"                              'cd .git && echo "[alias] m=merge" >> config' developer deny
+check_in "$CFG_REPO" "T-16p: unknown subcommand in another repo (-C)"                  "git -C /tmp/evil m x" developer deny
+check_in "$CFG_REPO" "T-16q: git config --get alias.m (read) allowed"                  "git config --get alias.m" developer allow
+check_in "$CFG_REPO" "T-16r: git config alias.m (single key = read) allowed"           "git config alias.m" developer allow
+check_in "$CFG_REPO" "T-16s: git config user.name allowed"                             "git config user.name T" developer allow
+check_in "$CFG_REPO" "T-16t: cat .git/config allowed"                                  "cat .git/config" developer allow
+check_in "$CFG_REPO" "T-16u: grep alias .git/config allowed"                           "grep alias .git/config" developer allow
+check_in "$CFG_REPO" "T-16v: HOME for a non-git program allowed"                       "HOME=/tmp/x ls" developer allow
+check_in "$CFG_REPO" "T-16w: export PATH allowed"                                      'export PATH=$PATH:/opt/bin' developer allow
+rm -rf "$CFG_REPO"
+
 # Empty/missing command on every recognised shell tool name fails closed, for every role
 run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \
   '{"toolCall":{"name":"run_command","args":{"Other":"git merge x"}}}' developer "failing closed"

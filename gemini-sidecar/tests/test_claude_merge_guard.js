@@ -83,7 +83,9 @@ describe('Claude PreToolUse merge guard', () => {
     const s = await setup({ approved: false });
     try {
       for (const c of ['git merge x', 'git -C . merge x', 'gh -R o/r pr merge 1', 'git push origin main', 'git push',
-        'curl -X PUT https://api.github.com/repos/o/r/pulls/1/merge', 'echo "git merge x" | bash', 'git $SUB x']) {
+        'curl -X PUT https://api.github.com/repos/o/r/pulls/1/merge', 'echo "git merge x" | bash', 'git $SUB x',
+        'git config alias.m merge; git m x', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.m GIT_CONFIG_VALUE_0=merge git m x',
+        'echo "[alias] m = merge" >> .git/config; git m x']) {
         const r = await s.post(bash(c, repoMain));
         assert.equal(r.status, 200, c);
         assert.ok(denied(r), `expected deny for: ${c}`);
