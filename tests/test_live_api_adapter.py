@@ -159,26 +159,47 @@ async def test_handle_tool_call_exception_safety():
     result = await adapter._handle_tool_call("list_active_events", {})
     assert result == "Error: broken"
 
-# T-9: Resumption rejection fallback & replay
-@pytest.mark.asyncio
-async def test_reconnect_resumption_rejection_fallback():
+def _make_connect_adapter(handle=None, failures=0):
+    """Adapter wired so _connect() runs against a mocked Live API client."""
     adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
-    adapter._resumption_handle = "stale-handle"
+    adapter._project = "test"
+    adapter._location = "us-central1"
+    adapter._model = "test-model"
+    adapter._resumption_handle = handle
+    adapter._handle_connect_failures = failures
     adapter._last_pulse_event_id = "evt-1"
     adapter._replay_pending_context = AsyncMock()
     adapter._running = True
     adapter._session = None
-    adapter._brain = MagicMock()
-    adapter._generating_report = False
-
-    adapter._project = "test"
-    adapter._location = "us-central1"
-    adapter._model = "test-model"
-    
-    mock_ctx = AsyncMock()
-    mock_ctx.__aenter__.return_value = MagicMock()
+    adapter._session_ctx = None
+    adapter._idle_watchdog_task = None
+    adapter._receive_task = None
     adapter._client = MagicMock()
-    
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.find_active_event_by_source = AsyncMock(return_value=None)
+    adapter._broadcast_status = AsyncMock()
+    adapter._load_neuron_labels = AsyncMock()
+    adapter._shadow = False
+    adapter._neuron_labels = {}
+    adapter._build_live_tools = MagicMock(return_value=[])
+    adapter._receive_loop = AsyncMock()
+    adapter._idle_watchdog = AsyncMock()
+    return adapter
+
+
+def _mock_ctx():
+    ctx = AsyncMock()
+    ctx.__aenter__.return_value = MagicMock()
+    return ctx
+
+
+# T-9: Resumption handle is only dropped after consecutive failures
+@pytest.mark.asyncio
+async def test_reconnect_resumption_rejection_fallback():
+    """Second consecutive failure with a handle presumes it stale and retries fresh in the same call."""
+    adapter = _make_connect_adapter(handle="stale-handle", failures=1)
+    mock_ctx = _mock_ctx()
+
     connect_calls = []
     def mock_connect(*args, **kwargs):
         connect_calls.append(adapter._resumption_handle)
@@ -188,50 +209,196 @@ async def test_reconnect_resumption_rejection_fallback():
 
     adapter._client.aio.live.connect.side_effect = mock_connect
 
-    adapter._idle_watchdog_task = None
-    adapter._receive_task = None
-    adapter._blackboard = MagicMock()
-    adapter._blackboard.find_active_event_by_source = AsyncMock(return_value=None)
-    adapter._broadcast_status = AsyncMock()
-    adapter._load_neuron_labels = AsyncMock()
-    adapter._shadow = False
-    adapter._neuron_labels = {}
-    adapter._build_live_tools = MagicMock(return_value=[])
-
-    adapter._receive_loop = AsyncMock()
-    adapter._idle_watchdog = AsyncMock()
-
-    # To trigger the fallback logic, we have to call _try_reconnect
-    # because _connect() itself doesn't loop in the executor implementation,
-    # _try_reconnect catches exception from _connect and retries.
-    # Wait, the system message said "The fallback is implemented inside `_connect()` itself via a 2-attempt loop when `_resumption_handle` fails."
-    # If the executor put it inside `_connect()`, we just call `_connect()`.
     await adapter._connect()
 
     assert connect_calls == ["stale-handle", None]
     assert adapter._resumption_handle is None
-    adapter._replay_pending_context.assert_called_once()
+    assert adapter._handle_connect_failures == 0
+    assert adapter._session is not None
+    # Replay is owned by _try_reconnect, never by _connect
+    adapter._replay_pending_context.assert_not_called()
+    await asyncio.sleep(0.01)
+
 
 @pytest.mark.asyncio
-async def test_try_reconnect_does_not_call_replay_pending_context():
+async def test_connect_keeps_handle_on_single_transient_failure():
+    adapter = _make_connect_adapter(handle="good-handle", failures=0)
+    adapter._client.aio.live.connect.side_effect = Exception("503 backend unavailable")
+
+    await adapter._connect()
+
+    # No zero-backoff retry, handle retained, failure counted, session left unset
+    adapter._client.aio.live.connect.assert_called_once()
+    assert adapter._resumption_handle == "good-handle"
+    assert adapter._handle_connect_failures == 1
+    assert adapter._session is None
+    adapter._replay_pending_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_connect_drops_handle_only_on_second_consecutive_failure():
+    adapter = _make_connect_adapter(handle="h", failures=0)
+    handles = []
+    def failing_connect(*args, **kwargs):
+        handles.append(adapter._resumption_handle)
+        raise Exception("down")
+    adapter._client.aio.live.connect.side_effect = failing_connect
+
+    await adapter._connect()  # failure 1: handle kept, no retry
+    assert handles == ["h"]
+    assert adapter._resumption_handle == "h"
+
+    await adapter._connect()  # failure 2: handle dropped, one fresh retry (which also fails)
+    assert handles == ["h", "h", None]
+    assert adapter._resumption_handle is None
+    assert adapter._handle_connect_failures == 0
+    assert adapter._session is None
+
+
+@pytest.mark.asyncio
+async def test_connect_success_resets_failure_counter():
+    adapter = _make_connect_adapter(handle="h", failures=1)
+    adapter._client.aio.live.connect.return_value = _mock_ctx()
+
+    await adapter._connect()
+
+    assert adapter._resumption_handle == "h"
+    assert adapter._handle_connect_failures == 0
+    assert adapter._session is not None
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_connect_without_handle_does_not_retry_on_failure():
+    adapter = _make_connect_adapter(handle=None)
+    adapter._client.aio.live.connect.side_effect = Exception("down")
+
+    await adapter._connect()
+
+    adapter._client.aio.live.connect.assert_called_once()
+    assert adapter._session is None
+    assert adapter._handle_connect_failures == 0
+
+
+# Session leak: a failure after the session opened must close it before any retry
+@pytest.mark.asyncio
+async def test_connect_closes_session_opened_before_retry():
+    adapter = _make_connect_adapter(handle="stale-handle", failures=1)
+    ctx1, ctx2 = _mock_ctx(), _mock_ctx()
+    events = []
+
+    async def exit1(*args):
+        events.append("exit1")
+    ctx1.__aexit__.side_effect = exit1
+
+    async def enter2(*args):
+        events.append("enter2")
+        return MagicMock()
+    ctx2.__aenter__.side_effect = enter2
+
+    adapter._client.aio.live.connect.side_effect = [ctx1, ctx2]
+    adapter._load_neuron_labels = AsyncMock(side_effect=[Exception("labels failed"), None])
+
+    await adapter._connect()
+
+    assert adapter._client.aio.live.connect.call_count == 2
+    ctx1.__aexit__.assert_awaited_once()
+    ctx2.__aexit__.assert_not_awaited()
+    # First session torn down before the retry opened the second
+    assert events == ["exit1", "enter2"]
+    assert adapter._session_ctx is ctx2
+    assert adapter._resumption_handle is None
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_connect_closes_partial_session_without_retry():
+    adapter = _make_connect_adapter(handle=None)
+    ctx = _mock_ctx()
+    adapter._client.aio.live.connect.return_value = ctx
+    adapter._load_neuron_labels = AsyncMock(side_effect=Exception("labels failed"))
+
+    await adapter._connect()
+    await asyncio.sleep(0.01)
+
+    ctx.__aexit__.assert_awaited_once()
+    assert adapter._session is None
+    assert adapter._session_ctx is None
+    assert adapter._receive_task.done()
+    assert adapter._idle_watchdog_task.done()
+
+
+@pytest.mark.asyncio
+async def test_abort_partial_connect_swallows_close_error():
+    adapter = _make_connect_adapter()
+    ctx = _mock_ctx()
+    ctx.__aexit__.side_effect = RuntimeError("already closed")
+    adapter._session_ctx = ctx
+    adapter._session = MagicMock()
+
+    await adapter._abort_partial_connect()
+
+    assert adapter._session is None
+    assert adapter._session_ctx is None
+
+
+def _make_reconnect_adapter():
     adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
     adapter._running = True
     adapter._generating_report = False
     adapter._last_pulse_time = 1000.0
     adapter._session = None
     adapter._brain = MagicMock()
-    adapter._brain.pending_jarvis_event_ids.return_value = []
+    adapter._brain.pending_jarvis_event_ids.return_value = ["evt-1"]
     adapter._connect = AsyncMock()
     adapter._replay_pending_context = AsyncMock()
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_try_reconnect_calls_replay_pending_context_once():
+    adapter = _make_reconnect_adapter()
+
+    async def fake_connect():
+        adapter._session = MagicMock()
+    adapter._connect.side_effect = fake_connect
 
     with patch("time.time", return_value=1050.0), patch("asyncio.sleep", AsyncMock()):
-        async def fake_connect():
-            adapter._session = MagicMock()
-        adapter._connect.side_effect = fake_connect
         await adapter._try_reconnect()
 
     adapter._connect.assert_called_once()
+    adapter._brain.clear_jarvis_wait.assert_called_once_with("evt-1")
+    adapter._replay_pending_context.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_try_reconnect_replays_once_after_retry_succeeds():
+    adapter = _make_reconnect_adapter()
+    attempts = []
+
+    async def flaky_connect():
+        attempts.append(1)
+        if len(attempts) == 2:
+            adapter._session = MagicMock()
+    adapter._connect.side_effect = flaky_connect
+
+    with patch("time.time", return_value=1050.0), patch("asyncio.sleep", AsyncMock()):
+        await adapter._try_reconnect()
+
+    assert len(attempts) == 2
+    adapter._replay_pending_context.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_try_reconnect_no_replay_when_connect_fails():
+    adapter = _make_reconnect_adapter()  # _connect leaves _session unset
+
+    with patch("time.time", return_value=1050.0), patch("asyncio.sleep", AsyncMock()):
+        await adapter._try_reconnect()
+
+    assert adapter._connect.call_count == 3
     adapter._replay_pending_context.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_rotate_session_clears_resumption_handle():
