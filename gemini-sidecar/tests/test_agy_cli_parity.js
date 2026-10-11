@@ -435,6 +435,17 @@ describe('resolveModel routing and role fallback', () => {
     const selected = resolveModel({ role: 'Explorer' }, 'agy');
     assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
   });
+
+  it('falls back to gemini-3.8-flash for agy when no AGENT_MODEL or role override is set', () => {
+    setEnv('AGENT_CLI', 'agy');
+    setEnv('AGENT_ROLE', undefined);
+    setEnv('AGENT_MODEL', undefined);
+    setEnv('EPHEMERAL_MODEL_EXPLORER', undefined);
+    const { resolveModel } = freshModules();
+
+    const selected = resolveModel({}, 'agy');
+    assert.equal(selected, 'gemini-3.8-flash');
+  });
 });
 
 // =============================================================================

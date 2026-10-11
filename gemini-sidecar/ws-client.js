@@ -20,7 +20,7 @@ const {
   hasGitHubCredentials, discoverAndGenerateTokens, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
   setupArgoCDMCP, setupCLILogins, setupRemoteK8sMCPs, setupRegistryCredentials, GITLAB_HOST,
-  hasJenkinsCredentials, setupJenkinsMCP,
+  hasJenkinsCredentials, setupJenkinsMCP, hasGoogleServiceAccount, setupGoogleAuthForAgy,
 } = require('./credentials');
 const state = require('./state');
 const {
@@ -223,6 +223,14 @@ async function handleTask(ws, msg) {
   setupRemoteK8sMCPs();
   setupRegistryCredentials();
   await ensureEventDocument(workDir, eventId);
+  if (hasGoogleServiceAccount()) {
+    try {
+      await setupGoogleAuthForAgy();
+      sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'Google agy auth configured' });
+    } catch (err) {
+      sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: `Google agy auth failed: ${err.message}, continuing...` });
+    }
+  }
 
   const mode = msg.mode || '';
   const timeoutSec = mode.includes('implement')

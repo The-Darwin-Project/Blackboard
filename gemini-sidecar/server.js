@@ -19,7 +19,7 @@ const { stageEventDocument } = require('./event-transport');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
   setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
-  hasJenkinsCredentials, setupJenkinsMCP,
+  hasJenkinsCredentials, setupJenkinsMCP, hasGoogleServiceAccount, setupGoogleAuthForAgy,
 } = require('./credentials');
 
 initializeCLISettings();
@@ -64,9 +64,13 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);
   console.log(`[${new Date().toISOString()}] Kargo credentials: ${fs.existsSync('/secrets/kargo/auth-token') ? 'available' : 'not configured'}`);
   console.log(`[${new Date().toISOString()}] Registry credentials: ${hasRegistryCredentials() ? 'available' : 'not configured'}`);
+  console.log(`[${new Date().toISOString()}] Google Service Account: ${hasGoogleServiceAccount() ? 'available' : 'not configured'}`);
 
   setupRegistryCredentials();
   setupRemoteK8sMCPs();
+  setupGoogleAuthForAgy().catch((err) => {
+    console.log(`[${new Date().toISOString()}] Startup Google agy auth setup failed: ${err.message}`);
+  });
 
   setupArgoCDMCP(process.env.AGENT_ROLE || '').catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup ArgoCD MCP setup failed: ${err.message}`);

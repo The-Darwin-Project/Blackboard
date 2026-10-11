@@ -19,6 +19,8 @@
 //    TLS insecure flag is scoped to mcpConfig.env only (no direct HTTPS fetch() from this sidecar to Jenkins).
 
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
 const { resolveCommand, writeClaudeMcpServer, writeAgyMcpServer } = require('./cli-setup');
@@ -847,6 +849,162 @@ async function setupJenkinsMCP() {
   }
 }
 
+// --- Google Cloud / Antigravity CLI Auth ---
+const DEFAULT_GOOGLE_SA_PATH = '/var/secrets/google/agent-service-account.json';
+let _cachedGoogleAgyToken = null;
+
+/**
+ * Checks if a GCP service account file is available.
+ * @returns {string|null} Path to service account file or null
+ */
+function findGoogleServiceAccountPath() {
+  const customPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (customPath && fs.existsSync(customPath)) {
+    return customPath;
+  }
+  if (fs.existsSync(DEFAULT_GOOGLE_SA_PATH)) {
+    return DEFAULT_GOOGLE_SA_PATH;
+  }
+  return null;
+}
+
+/**
+ * Check if Google Service Account credentials exist.
+ * @returns {boolean}
+ */
+function hasGoogleServiceAccount() {
+  return findGoogleServiceAccountPath() !== null;
+}
+
+/**
+ * Mint a Google OAuth2 access token using RS256 JWT assertion and write it to
+ * ~/.gemini/antigravity-cli/antigravity-oauth-token and ~/.gemini/oauth_creds.json
+ * so that agy runs headlessly in container pods without D-Bus SecretService or browser OAuth.
+ *
+ * @param {Object} [options]
+ * @param {string} [options.saPath] Override service account path (for testing)
+ * @param {boolean} [options.force] Force renewal even if cached
+ * @returns {Promise<boolean>} True if credentials were written, false if skipped/failed
+ */
+async function setupGoogleAuthForAgy(options = {}) {
+  const saPath = options.saPath || findGoogleServiceAccountPath();
+  if (!saPath) {
+    return false;
+  }
+
+  const now = Date.now();
+  const tokenPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+  const oauthCredsPath = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
+
+  if (!options.force && _cachedGoogleAgyToken && _cachedGoogleAgyToken.expiresAt > now + 300 * 1000) {
+    if (fs.existsSync(tokenPath) && fs.existsSync(oauthCredsPath)) {
+      return true;
+    }
+  }
+
+  let sa;
+  try {
+    sa = JSON.parse(fs.readFileSync(saPath, 'utf8'));
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Failed to read Google service account at ${saPath}: ${err.message}`);
+    return false;
+  }
+
+  if (!sa.client_email || !sa.private_key) {
+    console.error(`[${new Date().toISOString()}] Google service account at ${saPath} missing client_email or private_key`);
+    return false;
+  }
+
+  try {
+    const nowSec = Math.floor(now / 1000);
+    const tokenUri = sa.token_uri || 'https://oauth2.googleapis.com/token';
+    const payload = {
+      iss: sa.client_email,
+      sub: sa.client_email,
+      aud: tokenUri,
+      scope: 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email openid',
+      iat: nowSec,
+      exp: nowSec + 3600,
+    };
+
+    const assertion = jwt.sign(payload, sa.private_key, { algorithm: 'RS256' });
+    const postBody = new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }).toString();
+
+    const response = await fetch(tokenUri, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: postBody,
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`Google token endpoint returned ${response.status}: ${errBody}`);
+    }
+
+    const tokenData = await response.json();
+    const expiresIn = Number(tokenData.expires_in) || 3600;
+    const expiryIso = new Date(now + expiresIn * 1000).toISOString();
+    const projectId = sa.project_id || process.env.GOOGLE_CLOUD_PROJECT || 'cnv-ai-insights';
+    const region = process.env.GOOGLE_CLOUD_LOCATION || 'global';
+
+    // 1. Write ~/.gemini/antigravity-cli/antigravity-oauth-token
+    const agyCliDir = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    fs.mkdirSync(agyCliDir, { recursive: true, mode: 0o700 });
+
+    const agyTokenPayload = {
+      auth_method: 'gcp',
+      project_id: projectId,
+      region,
+      token: {
+        access_token: tokenData.access_token,
+        token_type: 'Bearer',
+        expiry: expiryIso,
+      },
+      id_token: tokenData.id_token || '',
+    };
+    fs.writeFileSync(tokenPath, JSON.stringify(agyTokenPayload, null, 2), { mode: 0o600 });
+
+    // 2. Write ~/.gemini/oauth_creds.json
+    const geminiDir = path.join(os.homedir(), '.gemini');
+    fs.mkdirSync(geminiDir, { recursive: true, mode: 0o700 });
+    const oauthCredsPayload = {
+      access_token: tokenData.access_token,
+      token_type: 'Bearer',
+      expiry_date: now + expiresIn * 1000,
+      scope: 'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email openid',
+      id_token: tokenData.id_token || '',
+    };
+    fs.writeFileSync(oauthCredsPath, JSON.stringify(oauthCredsPayload, null, 2), { mode: 0o600 });
+
+    // 3. Ensure settings.json allows non-workspace access
+    const settingsPath = path.join(agyCliDir, 'settings.json');
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      } catch (_) {}
+    }
+    settings.allowNonWorkspaceAccess = true;
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
+
+    _cachedGoogleAgyToken = {
+      expiresAt: now + (expiresIn - 300) * 1000,
+      token: tokenData.access_token,
+    };
+
+    console.log(`[${new Date().toISOString()}] Configured agy GCP OAuth credentials for ${sa.client_email} (expires ${expiryIso})`);
+    return true;
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] setupGoogleAuthForAgy error: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
   buildArgoCDMcpConfig,
   hasGitHubCredentials,
@@ -866,6 +1024,10 @@ module.exports = {
   hasRegistryCredentials,
   hasJenkinsCredentials,
   setupJenkinsMCP,
+  hasGoogleServiceAccount,
+  findGoogleServiceAccountPath,
+  setupGoogleAuthForAgy,
+  _resetGoogleAgyTokenCache: () => { _cachedGoogleAgyToken = null; },
   GITLAB_HOST,
   CLI_LOGIN_INTERVAL_MS,
 };

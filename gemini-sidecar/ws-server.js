@@ -27,6 +27,8 @@ const {
   GITLAB_HOST,
   hasJenkinsCredentials,
   setupJenkinsMCP,
+  hasGoogleServiceAccount,
+  setupGoogleAuthForAgy,
 } = require('./credentials');
 const state = require('./state');
 const { DEFAULT_WORK_DIR } = require('./config');
@@ -112,6 +114,14 @@ function setupWSServer(wss) {
         setupRegistryCredentials();
         setupRemoteK8sMCPs();
         await ensureEventDocument(workDir, eventId);
+        if (hasGoogleServiceAccount()) {
+          try {
+            await setupGoogleAuthForAgy();
+            wsSend(ws, { type: 'progress', event_id: eventId, message: 'Google agy auth configured' });
+          } catch (err) {
+            wsSend(ws, { type: 'progress', event_id: eventId, message: `Google agy auth failed: ${err.message}, continuing...` });
+          }
+        }
 
         // Execute agent CLI with streaming progress (headless mode for both Gemini + Claude).
         // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event

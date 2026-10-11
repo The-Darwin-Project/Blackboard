@@ -33,6 +33,7 @@ const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
+const { setupGoogleAuthForAgy } = require('./credentials');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveEffectiveRole(role) {
@@ -46,7 +47,7 @@ function resolveModel(options, agentCli) {
   if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
     return process.env.EPHEMERAL_MODEL_EXPLORER;
   }
-  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-opus-4-6' : 'gemini-3.7-flash');
+  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-opus-4-6' : 'gemini-3.8-flash');
 }
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
@@ -353,6 +354,15 @@ function watchResultsDir(workDir) {
 }
 
 async function executeCLI(prompt, options = {}) {
+    const agentCli = options.agentCli || AGENT_CLI;
+    if (agentCli === 'agy') {
+        try {
+            await setupGoogleAuthForAgy();
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] setupGoogleAuthForAgy failed before executeCLI: ${err.message}`);
+        }
+    }
+
     // buildCLICommand can throw (fail-closed on a missing/invalid --settings file --
     // see ROLE_SETTINGS_FILE above). No try/catch needed HERE: a synchronous throw
     // inside a `new Promise((resolve, reject) => {...})` executor is caught by the
@@ -472,6 +482,15 @@ async function executeCLI(prompt, options = {}) {
 }
 
 async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
+    const agentCli = options.agentCli || AGENT_CLI;
+    if (agentCli === 'agy') {
+        try {
+            await setupGoogleAuthForAgy();
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] setupGoogleAuthForAgy failed before executeCLIStreaming: ${err.message}`);
+        }
+    }
+
     // Same guarantee as executeCLI above: a buildCLICommand throw auto-rejects this
     // Promise via the executor-throw-to-reject spec behavior. Every real caller
     // (ws-server.js task/followup handlers, ws-client.js reconnect path) already
