@@ -3,7 +3,7 @@
 // 1. [Pattern]: All shared state (_callbackResult, currentTask) accessed via state.js getters/setters -- NEVER direct variables.
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
-// 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
+// 3. [Pattern]: No agent should ever run in plan mode in autonomous sidecars. All agents execute with --dangerously-skip-permissions (when autoApprove !== false).
 // 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI and Antigravity CLI.
 // 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
@@ -20,9 +20,8 @@
 // 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
 //     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
 //     model-line-only, and match stderr only (stdout is model text and can mention these phrases).
-// 12. [Gotcha]: agy uses ~/.gemini/config/hooks.json for PreToolUse (validate-mutations.sh) and Stop (require-results.sh);
-//     `--mode plan` is its primary read-only layer backed by hook enforcement.
-//     Add read-only roles to AGY_READ_ONLY_ROLES (ROLE_SETTINGS_FILE keys are folded in automatically).
+// 12. [Gotcha]: agy uses ~/.gemini/config/hooks.json for PreToolUse (validate-mutations.sh) and Stop (require-results.sh) as defense-in-depth.
+//     Claude uses --settings permissions.deny files (ROLE_SETTINGS_FILE) for engine-level read-only enforcement.
 
 const cp = require('child_process');
 const spawn = (...args) => cp.spawn(...args);
@@ -73,20 +72,6 @@ function settingsFileForRole(role) {
     return undefined;
 }
 
-// Roles that must never run with write/approve-all permissions on the agy path. agy runs
-// `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
-// Any role that has an engine-enforced deny file (ROLE_SETTINGS_FILE) is read-only by definition,
-// so it is folded in here rather than maintained as a second list.
-const AGY_READ_ONLY_ROLES = new Set([...READ_ONLY_ROLES, ...Object.keys(ROLE_SETTINGS_FILE)]);
-
-// Whitelist of explicitly allowed mutating roles for agy. Mutating roles receive
-// --dangerously-skip-permissions but remain subject to the server-side merge-approval guard
-// via validate-mutations.sh. All other or unrecognized future roles fail closed to --mode plan
-// as a secondary trust boundary.
-const AGY_MUTATING_ROLES = new Set([
-    'developer', 'sysadmin', 'qe', 'tester', 'executor',
-]);
-
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
     claude: 'claude-opus-4-6',
@@ -119,28 +104,15 @@ function buildCLICommand(prompt, options = {}) {
     }
 
     const effectiveRole = resolveEffectiveRole(options.role);
-    const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
 
     if (agentCli === 'agy') {
         const args = [];
         const binary = AGY_CLI;
 
-        // Read-only roles or plan mode run under --mode plan, and plan always wins over
-        // autoApprove: a read-only role must never get --dangerously-skip-permissions.
-        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
-
-        const isKnownMutatingRole = AGY_MUTATING_ROLES.has(effectiveRole);
-
-        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
-        // read-only to receive --dangerously-skip-permissions. Unrecognized roles default to --mode plan.
-        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
-            args.push('--mode', 'plan');
-        } else if (options.autoApprove) {
+        // No agent runs in plan mode in autonomous sidecars.
+        // Safety boundaries are enforced by PreToolUse hook (validate-mutations.sh).
+        if (options.autoApprove !== false) {
             args.push('--dangerously-skip-permissions');
-        } else {
-            // In non-interactive sidecar piped stdio, if autoApprove is not granted,
-            // default to --mode plan rather than unhandled interactive TTY prompts.
-            args.push('--mode', 'plan');
         }
         args.push('--output-format', 'stream-json');
         // NOTE: Never pass --input-format stream-json; it conflicts with command-line -p prompt!
@@ -192,17 +164,10 @@ function buildCLICommand(prompt, options = {}) {
             }
             args.push('--settings', settingsFile);
         }
-        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
-        const isKnownMutatingRole = isMutatingRoleName(effectiveRole);
-
-        // Fail-closed permission model: must be an explicitly allowed mutating role AND not
-        // read-only to receive --dangerously-skip-permissions. Unrecognized/empty roles default to --permission-mode plan.
-        if (permissionMode === 'plan' || isReadOnlyRole || !isKnownMutatingRole) {
-            args.push('--permission-mode', 'plan');
-        } else if (options.autoApprove) {
+        // No agent runs in plan mode in autonomous sidecars.
+        // Read-only boundaries are enforced by --settings permissions.deny and hooks.
+        if (options.autoApprove !== false) {
             args.push('--dangerously-skip-permissions');
-        } else {
-            args.push('--permission-mode', 'plan');
         }
         args.push('--output-format', 'stream-json', '--verbose');
         const model = resolveModel(options, agentCli);

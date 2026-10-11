@@ -152,56 +152,51 @@ describe('agy buildCLICommand: model and effort normalization', () => {
 // 3. Security & Role Permissions (--mode plan vs --dangerously-skip-permissions)
 // =============================================================================
 
-describe('agy buildCLICommand: role security & permissions', () => {
-  it('enforces --mode plan for code_reviewer role even if autoApprove is true', () => {
+describe('agy buildCLICommand: autonomous execution permissions (no agent should be in plan mode)', () => {
+  it('enforces --dangerously-skip-permissions and never --mode plan for code_reviewer role when autoApprove is true', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review code', { role: 'code_reviewer', autoApprove: true });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--dangerously-skip-permissions'), true);
+    assert.equal(args.includes('--mode'), false);
   });
 
-  it('enforces --mode plan for explorer role', () => {
+  it('enforces --dangerously-skip-permissions and never --mode plan for explorer role when autoApprove is true', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('explore code', { role: 'explorer', autoApprove: true });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--dangerously-skip-permissions'), true);
+    assert.equal(args.includes('--mode'), false);
   });
 
-  it('enforces --mode plan for security_analyst role', () => {
+  it('enforces --dangerously-skip-permissions and never --mode plan for security_analyst role when autoApprove is true', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('analyze vulns', { role: 'security_analyst', autoApprove: true });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--dangerously-skip-permissions'), true);
+    assert.equal(args.includes('--mode'), false);
   });
 
-  it('enforces --mode plan when AGENT_PERMISSION_MODE=plan', () => {
+  it('never sets --mode plan even if AGENT_PERMISSION_MODE was set when autoApprove is true', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_PERMISSION_MODE', 'plan');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('develop fix', { role: 'developer', autoApprove: true });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--dangerously-skip-permissions'), true);
+    assert.equal(args.includes('--mode'), false);
   });
 
-  it('enforces --mode plan regardless of role casing (e.g. Code_Reviewer)', () => {
+  it('matches role regardless of casing (e.g. Code_Reviewer) without plan mode', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review code changes', { role: 'Code_Reviewer', autoApprove: true });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-    assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--dangerously-skip-permissions'), true);
+    assert.equal(args.includes('--mode'), false);
   });
 
   it('enforces --dangerously-skip-permissions for mutating roles when autoApprove is true', () => {
@@ -214,15 +209,14 @@ describe('agy buildCLICommand: role security & permissions', () => {
     assert.equal(args.includes('--mode'), false);
   });
 
-  it('defaults to --mode plan for mutating roles when autoApprove is false', () => {
+  it('omits --dangerously-skip-permissions when autoApprove is false and never enters plan mode', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_PERMISSION_MODE', undefined);
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('apply fix', { role: 'developer', autoApprove: false });
 
-    assert.equal(args.includes('--mode'), true);
-    assert.equal(args[args.indexOf('--mode') + 1], 'plan');
     assert.equal(args.includes('--dangerously-skip-permissions'), false);
+    assert.equal(args.includes('--mode'), false);
   });
 });
 

@@ -31,6 +31,7 @@ const {
 const state = require('./state');
 const { DEFAULT_WORK_DIR } = require('./config');
 const { wsSend } = require('./ws-utils');
+const { ensureEventDocument } = require('./event-transport');
 
 function setupWSServer(wss) {
   wss.on('connection', (ws) => {
@@ -110,6 +111,7 @@ function setupWSServer(wss) {
 
         setupRegistryCredentials();
         setupRemoteK8sMCPs();
+        await ensureEventDocument(workDir, eventId);
 
         // Execute agent CLI with streaming progress (headless mode for both Gemini + Claude).
         // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event

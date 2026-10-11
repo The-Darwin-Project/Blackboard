@@ -180,10 +180,10 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 
-# Copy server code (modular -- entrypoint + 13 modules + 4 MCP servers)
+# Copy server code (modular -- entrypoint + 14 modules + 4 MCP servers)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
-     team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
+     event-transport.js team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
      jenkins-mcp.js catalog-skills.js claude-guard.js roles.js ./
 
 # Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name

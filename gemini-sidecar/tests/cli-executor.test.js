@@ -222,10 +222,10 @@ describe('agy session retry (shared getRetryOptions)', () => {
     });
 });
 
-describe('claude read-only roles (engine-enforced permissions.deny, not just plan mode)', () => {
+describe('claude read-only roles (engine-enforced permissions.deny, not plan mode)', () => {
     const SETTINGS_DIR = path.resolve(__dirname, '..', 'claude-settings');
     for (const role of ['explorer', 'architect', 'security_analyst', 'code_reviewer', 'qa_reviewer_agent', 'ARCHITECT_LEAD', 'security-analyst']) {
-        it(`${role}: gets a --settings deny file even with autoApprove`, () => {
+        it(`${role}: gets a --settings deny file and runs with --dangerously-skip-permissions (no plan mode)`, () => {
             const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: SETTINGS_DIR });
             try {
                 const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
@@ -233,6 +233,8 @@ describe('claude read-only roles (engine-enforced permissions.deny, not just pla
                 assert.ok(file && file.startsWith(SETTINGS_DIR), `expected --settings under ${SETTINGS_DIR}, got ${file}`);
                 const deny = JSON.parse(fs.readFileSync(file, 'utf8')).permissions.deny;
                 for (const rule of ['Edit', 'Write', 'Bash(git push *)', 'Bash(git commit *)', 'Bash(rm *)']) assert.ok(deny.includes(rule), rule);
+                assert.equal(args.includes('--dangerously-skip-permissions'), true);
+                assert.equal(args.includes('--permission-mode'), false);
             } finally {
                 restore();
             }
@@ -258,47 +260,35 @@ describe('claude read-only roles (engine-enforced permissions.deny, not just pla
     });
 });
 
-describe('agy read-only roles (plan mode is the only enforcement layer)', () => {
-    for (const role of ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst']) {
-        it(`${role}: --mode plan, never --dangerously-skip-permissions, even with autoApprove`, () => {
+describe('autonomous sidecar permissions: no agent should ever be in plan mode', () => {
+    for (const role of ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst', 'developer', 'sysadmin']) {
+        it(`${role} (agy): runs with --dangerously-skip-permissions and never --mode plan when autoApprove is true`, () => {
             const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined });
             try {
                 const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
-                assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-                assert.equal(args.includes('--dangerously-skip-permissions'), false);
+                assert.equal(args.includes('--dangerously-skip-permissions'), true);
+                assert.equal(args.includes('--mode'), false);
+            } finally {
+                restore();
+            }
+        });
+
+        it(`${role} (claude): runs with --dangerously-skip-permissions and never --permission-mode plan when autoApprove is true`, () => {
+            const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined });
+            try {
+                const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
+                assert.equal(args.includes('--dangerously-skip-permissions'), true);
+                assert.equal(args.includes('--permission-mode'), false);
             } finally {
                 restore();
             }
         });
     }
 
-    it('role is matched case-insensitively and via AGENT_ROLE env', () => {
+    it('role is matched case-insensitively and via AGENT_ROLE env without plan mode', () => {
         const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_ROLE: 'Code_Reviewer', AGENT_PERMISSION_MODE: undefined });
         try {
             const { args } = mod.buildCLICommand('p', { autoApprove: true });
-            assert.equal(args[args.indexOf('--mode') + 1], 'plan');
-        } finally {
-            restore();
-        }
-    });
-
-    it('unnormalized role with whitespace or compound name falls back to --mode plan', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined });
-        try {
-            for (const r of ['  code_reviewer \n', 'security-analyst', 'qa_reviewer_agent', 'ARCHITECT_LEAD']) {
-                const { args } = mod.buildCLICommand('p', { role: r, autoApprove: true });
-                assert.equal(args[args.indexOf('--mode') + 1], 'plan', `Role ${r} should get --mode plan`);
-                assert.equal(args.includes('--dangerously-skip-permissions'), false, `Role ${r} must not get --dangerously-skip-permissions`);
-            }
-        } finally {
-            restore();
-        }
-    });
-
-    it('a mutating role still gets --dangerously-skip-permissions with autoApprove', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined, AGENT_ROLE: undefined });
-        try {
-            const { args } = mod.buildCLICommand('p', { role: 'developer', autoApprove: true });
             assert.equal(args.includes('--dangerously-skip-permissions'), true);
             assert.equal(args.includes('--mode'), false);
         } finally {
@@ -306,14 +296,23 @@ describe('agy read-only roles (plan mode is the only enforcement layer)', () => 
         }
     });
 
-    it('an unrecognized future role fails closed to --mode plan even with autoApprove', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined, AGENT_ROLE: undefined });
+    it('omits --dangerously-skip-permissions when autoApprove is false and never enters plan mode', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_PERMISSION_MODE: undefined });
         try {
-            for (const r of ['custom_worker', 'arbitrary_bot', 'assistant', 'unknown_agent']) {
-                const { args } = mod.buildCLICommand('p', { role: r, autoApprove: true });
-                assert.equal(args[args.indexOf('--mode') + 1], 'plan', `Role ${r} should fail-closed to --mode plan`);
-                assert.equal(args.includes('--dangerously-skip-permissions'), false, `Role ${r} must not get --dangerously-skip-permissions`);
-            }
+            const { args } = mod.buildCLICommand('p', { role: 'developer', autoApprove: false });
+            assert.equal(args.includes('--dangerously-skip-permissions'), false);
+            assert.equal(args.includes('--mode'), false);
+        } finally {
+            restore();
+        }
+    });
+
+    it('claude omits --dangerously-skip-permissions when autoApprove is false and never enters plan mode', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined });
+        try {
+            const { args } = mod.buildCLICommand('p', { role: 'developer', autoApprove: false });
+            assert.equal(args.includes('--dangerously-skip-permissions'), false);
+            assert.equal(args.includes('--permission-mode'), false);
         } finally {
             restore();
         }

@@ -30,6 +30,7 @@ const {
 } = require('./config');
 const { wsSend } = require('./ws-utils');
 const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
+const { ensureEventDocument } = require('./event-transport');
 
 const { startCatalogSync } = require('./catalog-skills');
 
@@ -221,6 +222,7 @@ async function handleTask(ws, msg) {
   await setupCLILogins();
   setupRemoteK8sMCPs();
   setupRegistryCredentials();
+  await ensureEventDocument(workDir, eventId);
 
   const mode = msg.mode || '';
   const timeoutSec = mode.includes('implement')

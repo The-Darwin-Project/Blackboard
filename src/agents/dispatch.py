@@ -163,13 +163,14 @@ async def dispatch_to_agent(
     accepted = False
 
     try:
+        default_cwd = "/data/workspace" if getattr(agent_conn, "ephemeral", False) else AGENT_VOLUME_PATHS.get(role, "/data/workspace")
         await agent_conn.ws.send_json({
             "type": "task",
             "task_id": task_id,
             "event_id": event_id,
             "role": role,
             "prompt": prompt,
-            "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/workspace"),
+            "cwd": cwd or default_cwd,
             "autoApprove": True,
             "session_id": session_id,
             "mode": mode,

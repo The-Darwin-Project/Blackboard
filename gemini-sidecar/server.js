@@ -15,6 +15,7 @@ const { initializeCLISettings } = require('./cli-setup');
 const { handleRequest } = require('./http-handler');
 const { setupWSServer } = require('./ws-server');
 const { startWSClient } = require('./ws-client');
+const { stageEventDocument } = require('./event-transport');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
   setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
@@ -33,10 +34,8 @@ async function fetchEventDocument() {
       return;
     }
     const content = await res.text();
-    const eventsDir = '/data/workspace/events';
-    fs.mkdirSync(eventsDir, { recursive: true });
-    fs.writeFileSync(`${eventsDir}/event-${EVENT_ID}.md`, content);
-    console.log(`[${new Date().toISOString()}] Event doc fetched: ${content.length} chars -> ${eventsDir}/event-${EVENT_ID}.md`);
+    await stageEventDocument(EVENT_ID, content);
+    console.log(`[${new Date().toISOString()}] Event doc fetched: ${content.length} chars -> staged event-${EVENT_ID}.md`);
   } catch (err) {
     console.log(`[${new Date().toISOString()}] Event doc fetch error: ${err.message}`);
   }

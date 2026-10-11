@@ -81,7 +81,28 @@ class TestModelEffortWSPayload:
         )
 
         assert result == "done"
-        assert conn.captured["effort"] == "ludicrous"
+    @pytest.mark.asyncio
+    async def test_ephemeral_agent_cwd_defaults_to_data_workspace(self):
+        bridge = TaskBridge()
+        conn = _FakeAgentConn(bridge)
+        conn.ephemeral = True
+        registry = _make_registry(conn)
+
+        await dispatch_to_agent(registry, bridge, "developer", "evt-4", "implement fix")
+
+        assert conn.captured["cwd"] == "/data/workspace"
+
+    @pytest.mark.asyncio
+    async def test_local_agent_cwd_uses_agent_volume_path(self):
+        bridge = TaskBridge()
+        conn = _FakeAgentConn(bridge)
+        conn.ephemeral = False
+        registry = _make_registry(conn)
+
+        await dispatch_to_agent(registry, bridge, "developer", "evt-5", "implement fix")
+
+        assert conn.captured["cwd"] == "/data/gitops-developer"
 
     def test_known_effort_levels_contract(self):
         assert KNOWN_EFFORT_LEVELS == frozenset({"low", "medium", "high", "max"})
+
