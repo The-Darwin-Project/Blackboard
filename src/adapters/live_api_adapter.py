@@ -29,8 +29,11 @@
 #     frozenset. Degrades gracefully via getattr when _skill_loader is unavailable.
 # 13b. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
-# 14. [Pattern]: Session resumption: _resumption_handle captured from
-#     session_resumption_update. NOT YET wired to LiveConnectConfig (Probe 2 pending).
+# 14. [Pattern]: Session resumption: _resumption_handle captured from session_resumption_update and
+#     passed to LiveConnectConfig. _connect() discards it only after _HANDLE_FAILURE_LIMIT consecutive
+#     connect failures (then retries fresh); one transient error keeps it. Context replay is owned by
+#     _try_reconnect (not _connect). A session that opens but fails later in _connect is closed
+#     via _abort_partial_connect before any retry.
 # 15. [Gotcha]: Handoff collection happens INSIDE _receive_loop. Do NOT
 #     cancel _receive_task during handoff — use flag-based accumulation.
 # 16. [Pattern]: Prompt constants live in agents/jarvis_instructions.py (extracted for
@@ -43,15 +46,15 @@
 # 18. [Pattern]: _build_live_tools() assembles the tool list for _connect(). When JARVIS_RAG_ENABLED
 #     and JARVIS_RAG_CORPUS_ID are set, adds Tool(retrieval=VertexRagStore(store_context=True))
 #     for implicit RAG grounding. store_context=True is Live API-specific (not for generateContent).
-#     Mutual exclusion: google_search is DROPPED when RAG retrieval is active -- the 3-way combo
-#     (functions+search+retrieval) has never been probe-verified against the Live API.
+#     google_web_search and all other FunctionDeclarations are added unconditionally alongside
+#     retrieval; runtime 3-way combination with active RAG retrieval remains unverified in shadow mode.
 # 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
 #     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect).
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks.
-# 21. [Constraint]: _redact_pii() is applied at session.send() sites that carry
-#     human/LLM/event-derived free text when MemoryCorpus store_context=True may persist
+# 21. [Constraint]: _redact_pii() is applied at session.send() sites and external search queries
+#     that carry human/LLM/event-derived free text when MemoryCorpus store_context=True may persist
 #     the session (receive_brain_response, send_pulse, wake priming, tool results,
-#     system-review context, handoff replay, rotate summary, session-report handoff).
+#     system-review context, handoff replay, rotate summary, session-report handoff, google_web_search).
 #     Static prompt constants and structured silent-event audit payloads (IDs/phases)
 #     are exempt. Shared via src/utils/pii_redaction.py.
 """
@@ -98,6 +101,7 @@ SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
+_HANDLE_FAILURE_LIMIT = 2  # consecutive connect failures with a resumption handle before presuming it stale
 _OPERATOR_PHASES = frozenset({"always", "dispatch", "post-agent", "source", "escalate", "close"})
 
 # SI attention pointers: map JARVIS tool/input channels to the relevant
@@ -149,7 +153,11 @@ class LiveAPIAdapter:
         self._session = None
         self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
-        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
+        try:
+            self._tool_timeout = max(1.0, float(os.getenv("SYSTEM2_TOOL_TIMEOUT", "60.0")))
+        except (ValueError, TypeError):
+            self._tool_timeout = 60.0
         self._project = os.getenv("GCP_PROJECT", "")
         self._location = os.getenv("GCP_LOCATION", "global")
         self._seen_neurons: set[str] = set()
@@ -160,6 +168,8 @@ class LiveAPIAdapter:
         self._receive_task: asyncio.Task | None = None
         self._idle_watchdog_task: asyncio.Task | None = None
         self._running = False
+        self._stopped = False
+        self._connect_lock = asyncio.Lock()
         self._client = None
         self._last_status_broadcast: float = 0
         self._last_was_watching: bool = False
@@ -176,6 +186,7 @@ class LiveAPIAdapter:
         self._collecting_handoff = False
         self._handoff_buffer: list[str] = []
         self._resumption_handle: str | None = None
+        self._handle_connect_failures = 0
         self._last_audit_sent: dict[str, float] = {}
         self._rag_corpus_id = os.getenv("JARVIS_RAG_CORPUS_ID", "")
         self._rag_enabled = os.getenv("JARVIS_RAG_ENABLED", "false").lower() == "true"
@@ -183,14 +194,16 @@ class LiveAPIAdapter:
     def _build_live_tools(self, types) -> list:
         """Build the Live API tool list.
 
-        Mutual exclusion: the untested 3-way combination (function_declarations +
-        google_search + retrieval) has never been probe-verified against the Live API.
-        When RAG retrieval is enabled, google_search is dropped in favor of
-        functions+retrieval.
+        Function declarations are built with Behavior.BLOCKING.
+        When RAG retrieval is enabled, a Retrieval tool with VertexRagStore is appended.
         """
-        tools = [types.Tool(function_declarations=[
-            types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
-        ])]
+        declarations = []
+        for td in TOOL_DECLARATIONS:
+            kwargs = dict(td)
+            if "behavior" in kwargs:
+                kwargs["behavior"] = types.Behavior(kwargs["behavior"])
+            declarations.append(types.FunctionDeclaration(**kwargs))
+        tools = [types.Tool(function_declarations=declarations)]
         rag_active = self._rag_enabled and bool(self._rag_corpus_id)
         if rag_active:
             tools.append(types.Tool(retrieval=types.Retrieval(
@@ -207,68 +220,160 @@ class LiveAPIAdapter:
             )
         return tools
 
+    def _start_tasks(self) -> None:
+        """Start or refresh the receive loop and idle watchdog background tasks."""
+        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
+            logger.debug("Cortex _connect: cancelling stale receive_task")
+            self._receive_task.cancel()
+        self._receive_task = asyncio.create_task(self._receive_loop())
+        logger.debug(
+            "Cortex _connect: receive_task created (name=%s, done=%s)",
+            self._receive_task.get_name(), self._receive_task.done(),
+        )
+        if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
+            self._idle_watchdog_task.cancel()
+        self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
+
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
+        if not hasattr(self, "_connect_lock"):
+            self._connect_lock = asyncio.Lock()
+        if getattr(self, "_stopped", False):
+            return
         try:
+            async with asyncio.timeout(30.0):
+                await self._connect_lock.acquire()
+        except TimeoutError:
+            logger.error("Cortex _connect aborted: timed out waiting for _connect_lock")
+            return
+
+        try:
+            if getattr(self, "_stopped", False) or getattr(self, "_session", None):
+                return
             from google import genai
             from google.genai import types
 
             if not self._client:
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=self._project,
-                    location=self._location,
-                )
+                try:
+                    self._client = genai.Client(
+                        vertexai=True,
+                        project=self._project,
+                        location=self._location,
+                    )
+                except Exception as e:
+                    logger.error("Cortex failed to initialize genai.Client: %s", e)
+                    return
 
-            config = types.LiveConnectConfig(
-                response_modalities=[types.Modality.TEXT],
-                generation_config=types.GenerationConfig(
-                    max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                    temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
-                ),
-                system_instruction=types.Content(
-                    parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-                ),
-                tools=self._build_live_tools(types),
-            )
+            for attempt in range(2):
+                if getattr(self, "_stopped", False):
+                    return
+                try:
+                    kwargs = {
+                        "response_modalities": [types.Modality.TEXT],
+                        "thinking_config": types.ThinkingConfig(include_thoughts=True),
+                        "generation_config": types.GenerationConfig(
+                            max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
+                            temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
+                        ),
+                        "system_instruction": types.Content(
+                            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                        ),
+                        "tools": self._build_live_tools(types),
+                        "context_window_compression": types.ContextWindowCompressionConfig(
+                            sliding_window=types.SlidingWindow()
+                        ),
+                    }
+                    if self._resumption_handle:
+                        kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
+                    config = types.LiveConnectConfig(**kwargs)
 
-            self._session_ctx = self._client.aio.live.connect(
-                model=self._model,
-                config=config,
-            )
-            self._session = await self._session_ctx.__aenter__()
-            self._running = True
-            if self._receive_task and not self._receive_task.done():
-                logger.debug("Cortex _connect: cancelling stale receive_task")
-                self._receive_task.cancel()
-            self._receive_task = asyncio.create_task(self._receive_loop())
-            logger.debug(
-                "Cortex _connect: receive_task created (name=%s, done=%s)",
-                self._receive_task.get_name(), self._receive_task.done(),
-            )
-            if self._idle_watchdog_task and not self._idle_watchdog_task.done():
-                self._idle_watchdog_task.cancel()
-            self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
-            await self._load_neuron_labels()
-            await self._broadcast_status("watching")
-            orphan = await self._blackboard.find_active_event_by_source("jarvis")
-            if orphan:
-                self._active_meta_event_id = orphan
-                active = await self._blackboard.get_active_events()
-                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
-            logger.info(
-                "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
-                self._model, self._shadow, len(self._neuron_labels),
-            )
-        except Exception as e:
-            logger.error("Cortex Live API failed to connect: %s", e)
-            self._session = None
+                    self._session_ctx = self._client.aio.live.connect(
+                        model=self._model,
+                        config=config,
+                    )
+                    async with asyncio.timeout(30.0):
+                        self._session = await self._session_ctx.__aenter__()
+
+                    if getattr(self, "_stopped", False):
+                        await self._abort_partial_connect()
+                        return
+
+                    self._running = True
+                    self._start_tasks()
+
+                    try:
+                        async with asyncio.timeout(15.0):
+                            await self._load_neuron_labels()
+                            await self._broadcast_status("watching")
+                            orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                            if orphan:
+                                self._active_meta_event_id = orphan
+                                active = await self._blackboard.get_active_events()
+                                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                                logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                    except (Exception, asyncio.CancelledError) as init_err:
+                        if isinstance(init_err, asyncio.CancelledError):
+                            raise
+                        logger.warning("Cortex post-connect initialization degraded (non-fatal): %s", init_err)
+
+                    logger.info(
+                        "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
+                        self._model, self._shadow, len(self._neuron_labels),
+                    )
+                    self._handle_connect_failures = 0
+                    return
+                except (Exception, asyncio.CancelledError) as e:
+                    await self._abort_partial_connect()
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    if self._resumption_handle:
+                        # A single failure is usually transient (network, quota, backend blip) and the
+                        # handle is still valid. Only presume it stale after consecutive failures, so an
+                        # outage never discards a good handle or doubles request volume on one attempt.
+                        self._handle_connect_failures += 1
+                        if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
+                            logger.warning(
+                                "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
+                                self._handle_connect_failures, e,
+                            )
+                            self._resumption_handle = None
+                            self._handle_connect_failures = 0
+                            continue
+                    logger.error("Cortex Live API failed to connect: %s", e)
+                    self._session = None
+                    return
+        finally:
+            self._connect_lock.release()
+
+    async def _abort_partial_connect(self) -> None:
+        """Tear down a session that opened or failed during connect so a retry cannot leak it."""
+        self._running = False
+        ctx, self._session_ctx = self._session_ctx, None
+        self._session = None
+        tasks_to_await = []
+        for task in (self._receive_task, self._idle_watchdog_task):
+            if task and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+                tasks_to_await.append(task)
+        for task in tasks_to_await:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if ctx:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception as e:
+                logger.debug("Cortex partial-connect cleanup failed (non-fatal): %s", e)
 
     async def stop(self) -> None:
         """Graceful shutdown -- called during app teardown."""
+        self._stopped = True
         self._running = False
-        await self._disconnect()
+        if not hasattr(self, "_connect_lock"):
+            self._connect_lock = asyncio.Lock()
+        async with self._connect_lock:
+            await self._disconnect()
         logger.info("Cortex Live API stopped")
 
     async def _disconnect(self) -> None:
@@ -542,11 +647,12 @@ class LiveAPIAdapter:
 
         if hasattr(msg, "session_resumption_update") and msg.session_resumption_update:
             update = msg.session_resumption_update
-            if getattr(update, "resumable", False) and getattr(update, "new_handle", None):
-                self._resumption_handle = update.new_handle
+            new_handle = getattr(update, "new_handle", None)
+            if getattr(update, "resumable", False) and isinstance(new_handle, str) and new_handle.strip():
+                self._resumption_handle = new_handle
                 logger.debug("Cortex session resumption handle updated")
 
-        eid = self._last_pulse_event_id
+        eid = getattr(self, "_last_pulse_event_id", None)
 
         if hasattr(msg, "server_content") and msg.server_content:
             try:
@@ -573,7 +679,28 @@ class LiveAPIAdapter:
             except Exception as e:
                 logger.debug("Cortex grounding_metadata parse failed (non-fatal): %s", e)
 
-        if hasattr(msg, "text") and msg.text:
+        model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+        raw_parts = getattr(model_turn, "parts", None)
+        parts_list = raw_parts if isinstance(raw_parts, (list, tuple)) else []
+        has_extracted_text = False
+        for part in parts_list:
+            thought = bool(getattr(part, "thought", False))
+            text = getattr(part, "text", None)
+            if thought and text:
+                try:
+                    target_eid = eid or getattr(self, "_active_meta_event_id", None)
+                    await self._broadcast({"type": "cortex_thinking", "thought": text, "event_id": target_eid})
+                except Exception as e:
+                    logger.debug("Failed to broadcast cortex_thinking chunk: %s", e)
+            elif not thought and text:
+                has_extracted_text = True
+                if self._collecting_handoff:
+                    self._handoff_buffer.append(text)
+                else:
+                    self._text_buffer.append(text)
+
+        has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
+        if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and msg.text:
             if self._collecting_handoff:
                 self._handoff_buffer.append(msg.text)
             else:
@@ -597,11 +724,14 @@ class LiveAPIAdapter:
             if is_idle_ack and not self._awaiting_jarvis_reply:
                 await self._broadcast_status("watching")
                 heartbeat_type = "spike" if full_text.lower().startswith("ok") else "wave"
-                await self._broadcast({
-                    "type": "cortex_heartbeat",
-                    "heartbeat": heartbeat_type,
-                    "timestamp": time.time(),
-                })
+                try:
+                    await self._broadcast({
+                        "type": "cortex_heartbeat",
+                        "heartbeat": heartbeat_type,
+                        "timestamp": time.time(),
+                    })
+                except Exception:
+                    pass
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False
@@ -682,44 +812,49 @@ class LiveAPIAdapter:
     async def _handle_tool_call(self, name: str, args: dict) -> str:
         """Route tool calls to implementations. Shadow flag gates write tools."""
         try:
-            if name == "list_active_events":
-                return await self._tool_list_active_events()
-            elif name == "view_event_blackboard":
-                return await self._tool_view_event_blackboard(args.get("event_id", ""))
-            elif name == "read_event_turns":
-                return await self._tool_read_event_turns(
-                    args.get("event_id", ""),
-                    args.get("from_turn"),
-                    args.get("to_turn"),
-                )
-            elif name == "get_pulse_history":
-                return await self._tool_get_pulse_history(
-                    args.get("event_id", ""),
-                    args.get("last_n_minutes", 10),
-                )
-            elif name == "get_neuron_details":
-                return await self._tool_get_neuron_details(args.get("neuron_id", ""))
-            elif name == "search_deep_memory":
-                return await self._tool_search_deep_memory(args.get("query", ""))
-            elif name == "send_event_message":
-                return await self._tool_send_event_message(
-                    args.get("event_id", ""), args.get("message", ""),
-                )
-            elif name == "propose_enhancement":
-                return await self._tool_propose_enhancement(
-                    args.get("event_id", ""),
-                    args.get("title", ""),
-                    args.get("description", ""),
-                    args.get("severity", "nice_to_have"),
-                )
-            elif name == "create_system_review":
-                return await self._tool_create_system_review(args.get("reason", ""))
-            elif name == "recall_handoff_notes":
-                return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
-            elif name == "google_web_search":
-                return await self._tool_google_web_search(args.get("query", ""))
-            else:
-                return f"Unknown tool: {name}"
+            async with asyncio.timeout(getattr(self, "_tool_timeout", 60.0)):
+                if name == "list_active_events":
+                    return await self._tool_list_active_events()
+                elif name == "view_event_blackboard":
+                    return await self._tool_view_event_blackboard(args.get("event_id", ""))
+                elif name == "read_event_turns":
+                    return await self._tool_read_event_turns(
+                        args.get("event_id", ""),
+                        args.get("from_turn"),
+                        args.get("to_turn"),
+                    )
+                elif name == "get_pulse_history":
+                    return await self._tool_get_pulse_history(
+                        args.get("event_id", ""),
+                        args.get("last_n_minutes", 10),
+                    )
+                elif name == "get_neuron_details":
+                    return await self._tool_get_neuron_details(args.get("neuron_id", ""))
+                elif name == "search_deep_memory":
+                    return await self._tool_search_deep_memory(args.get("query", ""))
+                elif name == "send_event_message":
+                    return await self._tool_send_event_message(
+                        args.get("event_id", ""), args.get("message", ""),
+                    )
+                elif name == "propose_enhancement":
+                    return await self._tool_propose_enhancement(
+                        args.get("event_id", ""),
+                        args.get("title", ""),
+                        args.get("description", ""),
+                        args.get("severity", "nice_to_have"),
+                    )
+                elif name == "create_system_review":
+                    return await self._tool_create_system_review(args.get("reason", ""))
+                elif name == "recall_handoff_notes":
+                    return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
+                elif name == "google_web_search":
+                    return await self._tool_google_web_search(args.get("query", ""))
+                else:
+                    return f"Unknown tool: {name}"
+        except TimeoutError:
+            timeout_val = getattr(self, "_tool_timeout", 60.0)
+            logger.warning("Cortex tool %s timed out after %.0fs", name, timeout_val)
+            return f"Error: Tool execution timed out after {timeout_val:.0f}s"
         except Exception as e:
             logger.warning("Cortex tool %s failed: %s", name, e)
             return f"Error: {e}"
@@ -1175,6 +1310,19 @@ class LiveAPIAdapter:
             "status": "pending",
         })
         try:
+            existing = await redis.lrange(key, -50, -1)
+            for raw in existing:
+                try:
+                    p = json.loads(raw)
+                    if (
+                        p.get("event_id") == event_id
+                        and p.get("title") == title
+                        and p.get("status") == "pending"
+                    ):
+                        if p.get("description") == description and p.get("severity") == severity:
+                            return f"Proposal '{title}' is already pending review for {event_id}."
+                except Exception:
+                    pass
             await redis.rpush(key, entry)
             logger.info(
                 "Enhancement proposal stored: %s (severity=%s, event=%s)",
@@ -1240,7 +1388,7 @@ class LiveAPIAdapter:
 
         if not query.strip():
             return "Error: query required"
-        query = query.strip()[:500]
+        query = _redact_pii(query.strip())[:500]
         model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
         project = os.getenv("GCP_PROJECT", "")
         location = os.getenv("GCP_LOCATION", "global")
@@ -1249,7 +1397,7 @@ class LiveAPIAdapter:
             from google.genai import types
 
             client = genai.Client(vertexai=True, project=project, location=location)
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(30):
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=query,
@@ -1317,7 +1465,7 @@ class LiveAPIAdapter:
                     else:
                         delay = 300
                         if t.thoughts:
-                            logger.debug("defer regex miss -- defaulting to 300s: %s", (t.thoughts or "")[:80])
+                            logger.debug("defer regex miss -- defaulting to 300s (has_thoughts=%s)", bool(t.thoughts))
                     defer_total_s += delay
                     last_defer_turn = t
                     last_defer_delay = delay
@@ -1617,7 +1765,18 @@ class LiveAPIAdapter:
             parts: list[str] = []
             async with asyncio.timeout(45):
                 async for msg in session.receive():
-                    if hasattr(msg, "text") and msg.text:
+                    model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+                    raw_parts = getattr(model_turn, "parts", None)
+                    parts_list = raw_parts if isinstance(raw_parts, (list, tuple)) else []
+                    has_extracted_text = False
+                    for part in parts_list:
+                        thought = bool(getattr(part, "thought", False))
+                        text = getattr(part, "text", None)
+                        if not thought and text:
+                            parts.append(text)
+                            has_extracted_text = True
+                    has_thought_parts = any(bool(getattr(p, "thought", False)) for p in parts_list)
+                    if not has_extracted_text and not has_thought_parts and hasattr(msg, "text") and isinstance(msg.text, str) and msg.text:
                         parts.append(msg.text)
                     if hasattr(msg, "server_content") and getattr(
                         msg.server_content, "turn_complete", False
@@ -1763,7 +1922,7 @@ class LiveAPIAdapter:
         self._go_away_received = False
         self._collecting_handoff = False
         self._handoff_buffer = []
-        if self._receive_task and not self._receive_task.done():
+        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
             self._receive_task.cancel()
             try:
                 await self._receive_task
@@ -1886,7 +2045,14 @@ class LiveAPIAdapter:
             )
             summary_parts = []
             async for msg in self._session.receive():
-                if hasattr(msg, "text") and msg.text:
+                model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
+                parts_list = getattr(model_turn, "parts", None) or []
+                extracted_part = False
+                for part in parts_list:
+                    if not getattr(part, "thought", False) and getattr(part, "text", None):
+                        summary_parts.append(part.text)
+                        extracted_part = True
+                if not extracted_part and hasattr(msg, "text") and msg.text:
                     summary_parts.append(msg.text)
                 if hasattr(msg, "server_content") and getattr(
                     msg.server_content, "turn_complete", False
@@ -1898,6 +2064,7 @@ class LiveAPIAdapter:
             summary = "(session rotated, previous context unavailable)"
 
         await self._disconnect()
+        self._resumption_handle = None
         await self._connect()
 
         if self._session and summary:

@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Standalone probe script. Zero imports from BlackBoard/src.
 # 2. [Pattern]: Same env var pattern as probe_gemini_chat.py (GCP_PROJECT, GCP_LOCATION).
-# 3. [Gotcha]: Live API models use "gemini-live-*" prefix, not "gemini-3-*".
+# 3. [Pattern]: Live API model (default gemini-3.8-live, VMER-2031).
 # 4. [Pattern]: Tests text-only Live API (response_modalities=["TEXT"]) with function calling.
 """
 Probe 0a: Validate Gemini Live API text session + function calling.
@@ -28,7 +28,7 @@ import traceback
 
 PROJECT = os.environ.get("GCP_PROJECT", "cnv-ai-insights")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
-MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
 SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS",
     os.path.join(os.path.dirname(__file__), "..", "cnv-ai-insights-8502f29094a2.json"))
 
@@ -42,6 +42,7 @@ REPORT_TOOL = {
         "Call this when you detect patterns like tool thrashing, "
         "hypothesis pivots, or the Brain being stuck."
     ),
+    "behavior": "BLOCKING",
     "parameters": {
         "type": "object",
         "properties": {
@@ -120,6 +121,7 @@ async def test_connect():
 async def test_tool_declaration():
     """Test 2: Can we declare a function tool and get it called?"""
     from google import genai
+    from google.genai import types
     from google.genai.types import (
         Content, FunctionResponse, LiveConnectConfig, Modality, Part,
     )
@@ -128,7 +130,14 @@ async def test_tool_declaration():
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": [REPORT_TOOL]}],
+        tools=[types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name=REPORT_TOOL["name"],
+                description=REPORT_TOOL.get("description", ""),
+                parameters=REPORT_TOOL.get("parameters"),
+                behavior=types.Behavior(REPORT_TOOL["behavior"]) if "behavior" in REPORT_TOOL else None,
+            )
+        ])],
     )
 
     async with client.aio.live.connect(model=MODEL, config=config) as session:
@@ -170,6 +179,7 @@ async def test_tool_declaration():
 async def test_friction_detection():
     """Test 3: Send a stream of pulses with escalating friction. Does the model detect it?"""
     from google import genai
+    from google.genai import types
     from google.genai.types import (
         Content, FunctionResponse, LiveConnectConfig, Modality, Part,
     )
@@ -178,7 +188,14 @@ async def test_friction_detection():
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": [REPORT_TOOL]}],
+        tools=[types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name=REPORT_TOOL["name"],
+                description=REPORT_TOOL.get("description", ""),
+                parameters=REPORT_TOOL.get("parameters"),
+                behavior=types.Behavior(REPORT_TOOL["behavior"]) if "behavior" in REPORT_TOOL else None,
+            )
+        ])],
     )
 
     async with client.aio.live.connect(model=MODEL, config=config) as session:

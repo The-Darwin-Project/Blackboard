@@ -27,7 +27,7 @@ import traceback
 
 PROJECT = os.environ.get("GCP_PROJECT", "cnv-ai-insights")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
-MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
 SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS",
     os.path.join(os.path.dirname(__file__), "..", "cnv-ai-insights-8502f29094a2.json"))
 
@@ -39,6 +39,7 @@ TOOL_DECLARATIONS = [
         "name": "list_active_events",
         "description": "List all currently active events being processed by the Brain.",
         "parameters": {"type": "object", "properties": {}},
+        "behavior": "BLOCKING",
     },
     {
         "name": "view_event_blackboard",
@@ -48,6 +49,7 @@ TOOL_DECLARATIONS = [
             "properties": {"event_id": {"type": "string"}},
             "required": ["event_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "get_pulse_history",
@@ -60,6 +62,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "get_neuron_details",
@@ -69,6 +72,7 @@ TOOL_DECLARATIONS = [
             "properties": {"neuron_id": {"type": "string"}},
             "required": ["neuron_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "surface_context",
@@ -81,6 +85,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "context"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "send_event_message",
@@ -93,6 +98,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "message"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "inject_system_insight",
@@ -106,6 +112,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "insight", "severity"],
         },
+        "behavior": "BLOCKING",
     },
 ]
 
@@ -189,6 +196,7 @@ HEAVY_FRICTION_SEQUENCE = [
 
 async def main():
     from google import genai
+    from google.genai import types
     from google.genai.types import Content, FunctionResponse, LiveConnectConfig, Modality, Part
 
     print(f"Probe 0c: Full Cortex Tool Suite Stress Test")
@@ -197,10 +205,19 @@ async def main():
     print(f"Tools declared: {len(TOOL_DECLARATIONS)}")
 
     client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+    tool_funcs = [
+        types.FunctionDeclaration(
+            name=t["name"],
+            description=t.get("description", ""),
+            parameters=t.get("parameters"),
+            behavior=types.Behavior(t["behavior"]) if "behavior" in t else None,
+        )
+        for t in TOOL_DECLARATIONS
+    ]
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": TOOL_DECLARATIONS}],
+        tools=[types.Tool(function_declarations=tool_funcs)],
     )
 
     tool_call_log = []
