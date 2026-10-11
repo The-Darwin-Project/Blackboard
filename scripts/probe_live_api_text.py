@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Standalone probe script. Zero imports from BlackBoard/src.
 # 2. [Pattern]: Same env var pattern as probe_gemini_chat.py (GCP_PROJECT, GCP_LOCATION).
-# 3. [Gotcha]: Live API models use "gemini-live-*" prefix, not "gemini-3-*".
+# 3. [Pattern]: Live API model (default gemini-3.8-live, VMER-2031).
 # 4. [Pattern]: Tests text-only Live API (response_modalities=["TEXT"]) with function calling.
 """
 Probe 0a: Validate Gemini Live API text session + function calling.

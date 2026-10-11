@@ -408,7 +408,10 @@ async def test_rotate_session_clears_resumption_handle():
     
     async def mock_receive():
         mock_msg = MagicMock()
-        mock_msg.text = "Session summary text"
+        mock_part = MagicMock()
+        mock_part.thought = False
+        mock_part.text = "Session summary text"
+        mock_msg.server_content.model_turn.parts = [mock_part]
         mock_msg.server_content.turn_complete = True
         yield mock_msg
         
@@ -429,6 +432,7 @@ async def test_rotate_session_clears_resumption_handle():
 @pytest.mark.asyncio
 async def test_handle_tool_call_timeout():
     adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._tool_timeout = 60.0
     adapter._tool_list_active_events = AsyncMock()
     
     with patch("asyncio.timeout", side_effect=TimeoutError):

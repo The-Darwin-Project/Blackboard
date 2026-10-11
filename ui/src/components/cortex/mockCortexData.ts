@@ -92,7 +92,7 @@ export const MOCK_WHISPERS: WhisperMessage[] = [
 export const MOCK_CORTEX_STATUS: CortexStatusMessage = {
   type: 'cortex_status',
   status: 'watching',
-  model: 'gemini-live-2.5-flash',
+  model: 'gemini-3.8-live',
   shadow: false,
   timestamp: now,
 };

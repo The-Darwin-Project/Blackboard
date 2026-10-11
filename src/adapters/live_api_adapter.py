@@ -154,6 +154,7 @@ class LiveAPIAdapter:
         self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
         self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-3.8-live")
+        self._tool_timeout = float(os.getenv("SYSTEM2_TOOL_TIMEOUT", "60.0"))
         self._project = os.getenv("GCP_PROJECT", "")
         self._location = os.getenv("GCP_LOCATION", "global")
         self._seen_neurons: set[str] = set()
@@ -313,7 +314,7 @@ class LiveAPIAdapter:
         for task in tasks_to_await:
             try:
                 await task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
         if ctx:
             try:
@@ -761,7 +762,7 @@ class LiveAPIAdapter:
     async def _handle_tool_call(self, name: str, args: dict) -> str:
         """Route tool calls to implementations. Shadow flag gates write tools."""
         try:
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(getattr(self, "_tool_timeout", 60.0)):
                 if name == "list_active_events":
                     return await self._tool_list_active_events()
                 elif name == "view_event_blackboard":
@@ -1971,9 +1972,13 @@ class LiveAPIAdapter:
             async for msg in self._session.receive():
                 model_turn = getattr(getattr(msg, "server_content", None), "model_turn", None)
                 parts_list = getattr(model_turn, "parts", None) or []
+                extracted_part = False
                 for part in parts_list:
                     if not getattr(part, "thought", False) and getattr(part, "text", None):
                         summary_parts.append(part.text)
+                        extracted_part = True
+                if not extracted_part and hasattr(msg, "text") and msg.text:
+                    summary_parts.append(msg.text)
                 
                 if hasattr(msg, "server_content") and getattr(
                     msg.server_content, "turn_complete", False

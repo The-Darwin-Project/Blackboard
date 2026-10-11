@@ -39,6 +39,7 @@ TOOL_DECLARATIONS = [
         "name": "list_active_events",
         "description": "List all currently active events being processed by the Brain.",
         "parameters": {"type": "object", "properties": {}},
+        "behavior": "BLOCKING",
     },
     {
         "name": "view_event_blackboard",
@@ -48,6 +49,7 @@ TOOL_DECLARATIONS = [
             "properties": {"event_id": {"type": "string"}},
             "required": ["event_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "get_pulse_history",
@@ -60,6 +62,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "get_neuron_details",
@@ -69,6 +72,7 @@ TOOL_DECLARATIONS = [
             "properties": {"neuron_id": {"type": "string"}},
             "required": ["neuron_id"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "surface_context",
@@ -81,6 +85,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "context"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "send_event_message",
@@ -93,6 +98,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "message"],
         },
+        "behavior": "BLOCKING",
     },
     {
         "name": "inject_system_insight",
@@ -106,6 +112,7 @@ TOOL_DECLARATIONS = [
             },
             "required": ["event_id", "insight", "severity"],
         },
+        "behavior": "BLOCKING",
     },
 ]
 
