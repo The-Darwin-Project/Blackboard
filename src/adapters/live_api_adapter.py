@@ -46,8 +46,7 @@
 # 18. [Pattern]: _build_live_tools() assembles the tool list for _connect(). When JARVIS_RAG_ENABLED
 #     and JARVIS_RAG_CORPUS_ID are set, adds Tool(retrieval=VertexRagStore(store_context=True))
 #     for implicit RAG grounding. store_context=True is Live API-specific (not for generateContent).
-#     Mutual exclusion: google_search is DROPPED when RAG retrieval is active -- the 3-way combo
-#     (functions+search+retrieval) has never been probe-verified against the Live API.
+#     google_web_search is declared as a standard FunctionDeclaration alongside retrieval.
 # 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
 #     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect).
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks.
@@ -168,6 +167,7 @@ class LiveAPIAdapter:
         self._receive_task: asyncio.Task | None = None
         self._idle_watchdog_task: asyncio.Task | None = None
         self._running = False
+        self._connect_lock = asyncio.Lock()
         self._client = None
         self._last_status_broadcast: float = 0
         self._last_was_watching: bool = False
@@ -220,94 +220,99 @@ class LiveAPIAdapter:
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
-        from google import genai
-        from google.genai import types
-
-        if not self._client:
-            try:
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=self._project,
-                    location=self._location,
-                )
-            except Exception as e:
-                logger.error("Cortex failed to initialize genai.Client: %s", e)
+        if not hasattr(self, "_connect_lock"):
+            self._connect_lock = asyncio.Lock()
+        async with self._connect_lock:
+            if getattr(self, "_session", None):
                 return
+            from google import genai
+            from google.genai import types
 
-        for attempt in range(2):
-            session_opened = False
-            try:
-                kwargs = {
-                    "response_modalities": [types.Modality.TEXT],
-                    "thinking_config": types.ThinkingConfig(include_thoughts=True),
-                    "generation_config": types.GenerationConfig(
-                        max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                        temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
-                    ),
-                    "system_instruction": types.Content(
-                        parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-                    ),
-                    "tools": self._build_live_tools(types),
-                    "context_window_compression": types.ContextWindowCompressionConfig(
-                        sliding_window=types.SlidingWindow()
-                    ),
-                }
-                if self._resumption_handle:
-                    kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
-                config = types.LiveConnectConfig(**kwargs)
+            if not self._client:
+                try:
+                    self._client = genai.Client(
+                        vertexai=True,
+                        project=self._project,
+                        location=self._location,
+                    )
+                except Exception as e:
+                    logger.error("Cortex failed to initialize genai.Client: %s", e)
+                    return
 
-                self._session_ctx = self._client.aio.live.connect(
-                    model=self._model,
-                    config=config,
-                )
-                self._session = await self._session_ctx.__aenter__()
-                session_opened = True
-                self._running = True
+            for attempt in range(2):
+                session_opened = False
+                try:
+                    kwargs = {
+                        "response_modalities": [types.Modality.TEXT],
+                        "thinking_config": types.ThinkingConfig(include_thoughts=True),
+                        "generation_config": types.GenerationConfig(
+                            max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
+                            temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
+                        ),
+                        "system_instruction": types.Content(
+                            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                        ),
+                        "tools": self._build_live_tools(types),
+                        "context_window_compression": types.ContextWindowCompressionConfig(
+                            sliding_window=types.SlidingWindow()
+                        ),
+                    }
+                    if self._resumption_handle:
+                        kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
+                    config = types.LiveConnectConfig(**kwargs)
 
-                if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
-                    logger.debug("Cortex _connect: cancelling stale receive_task")
-                    self._receive_task.cancel()
-                self._receive_task = asyncio.create_task(self._receive_loop())
-                logger.debug(
-                    "Cortex _connect: receive_task created (name=%s, done=%s)",
-                    self._receive_task.get_name(), self._receive_task.done(),
-                )
-                if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
-                    self._idle_watchdog_task.cancel()
-                self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
-                await self._load_neuron_labels()
-                await self._broadcast_status("watching")
-                orphan = await self._blackboard.find_active_event_by_source("jarvis")
-                if orphan:
-                    self._active_meta_event_id = orphan
-                    active = await self._blackboard.get_active_events()
-                    self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                    logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
-                logger.info(
-                    "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
-                    self._model, self._shadow, len(self._neuron_labels),
-                )
-                self._handle_connect_failures = 0
-                return
-            except Exception as e:
-                if session_opened:
-                    await self._abort_partial_connect()
-                if self._resumption_handle:
-                    # A single failure is usually transient (network, quota, backend blip) and the
-                    # handle is still valid. Only presume it stale after consecutive failures, so an
-                    # outage never discards a good handle or doubles request volume on one attempt.
-                    self._handle_connect_failures += 1
-                    if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
-                        logger.warning(
-                            "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
-                            self._handle_connect_failures, e,
-                        )
-                        self._resumption_handle = None
-                        self._handle_connect_failures = 0
-                        continue
-                logger.error("Cortex Live API failed to connect: %s", e)
-                self._session = None
-                return
+                    self._session_ctx = self._client.aio.live.connect(
+                        model=self._model,
+                        config=config,
+                    )
+                    self._session = await self._session_ctx.__aenter__()
+                    session_opened = True
+                    self._running = True
+
+                    if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
+                        logger.debug("Cortex _connect: cancelling stale receive_task")
+                        self._receive_task.cancel()
+                    self._receive_task = asyncio.create_task(self._receive_loop())
+                    logger.debug(
+                        "Cortex _connect: receive_task created (name=%s, done=%s)",
+                        self._receive_task.get_name(), self._receive_task.done(),
+                    )
+                    if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
+                        self._idle_watchdog_task.cancel()
+                    self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
+                    await self._load_neuron_labels()
+                    await self._broadcast_status("watching")
+                    orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                    if orphan:
+                        self._active_meta_event_id = orphan
+                        active = await self._blackboard.get_active_events()
+                        self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                        logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                    logger.info(
+                        "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
+                        self._model, self._shadow, len(self._neuron_labels),
+                    )
+                    self._handle_connect_failures = 0
+                    return
+                except Exception as e:
+                    if session_opened:
+                        await self._abort_partial_connect()
+                    if self._resumption_handle:
+                        # A single failure is usually transient (network, quota, backend blip) and the
+                        # handle is still valid. Only presume it stale after consecutive failures, so an
+                        # outage never discards a good handle or doubles request volume on one attempt.
+                        self._handle_connect_failures += 1
+                        if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
+                            logger.warning(
+                                "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
+                                self._handle_connect_failures, e,
+                            )
+                            self._resumption_handle = None
+                            self._handle_connect_failures = 0
+                            continue
+                    logger.error("Cortex Live API failed to connect: %s", e)
+                    self._session = None
+                    return
 
     async def _abort_partial_connect(self) -> None:
         """Tear down a session that opened but failed later in _connect() so a retry cannot leak it."""
@@ -809,8 +814,9 @@ class LiveAPIAdapter:
                 else:
                     return f"Unknown tool: {name}"
         except TimeoutError:
-            logger.warning("Cortex tool %s timed out after 60s", name)
-            return "Error: Tool execution timed out after 60s"
+            timeout_val = getattr(self, "_tool_timeout", 60.0)
+            logger.warning("Cortex tool %s timed out after %.0fs", name, timeout_val)
+            return f"Error: Tool execution timed out after {timeout_val:.0f}s"
         except Exception as e:
             logger.warning("Cortex tool %s failed: %s", name, e)
             return f"Error: {e}"

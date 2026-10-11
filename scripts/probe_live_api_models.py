@@ -34,13 +34,14 @@ if os.path.exists(SA_KEY):
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SA_KEY
 
 MODELS = [
+    os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.8-live"),
     "gemini-live-2.5-flash",
-    "gemini-3.1-flash-live-preview",
 ]
 
 REPORT_TOOL = {
     "name": "report_observation",
     "description": "Report a cognitive friction observation about an event.",
+    "behavior": "BLOCKING",
     "parameters": {
         "type": "object",
         "properties": {
