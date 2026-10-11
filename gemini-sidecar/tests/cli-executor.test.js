@@ -87,14 +87,14 @@ describe('CLI Executor', () => {
 });
 
 describe('invalid-model fallback (shared getRetryOptions)', () => {
-    it('T-17: agy falls back to gemini-2.5-flash exactly once', async (t) => {
+    it('T-17: agy falls back to gemini-3.8-flash exactly once', async (t) => {
         const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', EPHEMERAL_MODEL_EXPLORER: 'invalid-model-that-fails' });
         try {
             const calls = mockSpawn(t, (args) => args.includes('invalid-model-that-fails')
                 ? { code: 1, stderr: 'INVALID_ARGUMENT: model not found' }
                 : { code: 0, stdout: '{"ok":true}' });
             const result = await mod.executeCLI('test', { role: 'explorer' });
-            assert.equal(result.usedModel, 'gemini-2.5-flash');
+            assert.equal(result.usedModel, 'gemini-3.8-flash');
             assert.equal(calls.length, 2);
         } finally {
             restore();
@@ -119,7 +119,7 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
             const calls = mockSpawn(t, () => ({ code: 1, stderr: 'model not found' }));
             const result = await mod.executeCLI('test', {});
             assert.equal(result.status, 'failed');
-            assert.equal(calls.length, 1, 'retrying claude-opus-4-6 with claude-opus-4-6 is pointless');
+            assert.equal(calls.length, 1, 'retrying claude-sonnet-5-5 with claude-sonnet-5-5 is pointless');
         } finally {
             restore();
         }
@@ -146,7 +146,7 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
             const ws = { readyState: 1, send() {} };
             const result = await mod.executeCLIStreaming(ws, 'evt-1', 'test', {});
             assert.equal(result.status, 'success');
-            assert.deepEqual(calls.map(modelOf), ['gemini-bad', 'gemini-2.5-flash']);
+            assert.deepEqual(calls.map(modelOf), ['gemini-bad', 'gemini-3.8-flash']);
         } finally {
             restore();
         }
@@ -385,7 +385,7 @@ describe('CLI Executor - Timeout and Process Resolution (T-7)', () => {
         }
     });
 
-    it('Claude buildCLICommand: still uses --effort (not prompt prefix) and the claude-opus-4-6 fallback', () => {
+    it('Claude buildCLICommand: still uses --effort (not prompt prefix) and the claude-sonnet-5-5 fallback', () => {
         const { mod, restore } = freshExecutor({
             AGENT_CLI: 'claude',
             AGENT_MODEL: undefined,
@@ -399,7 +399,7 @@ describe('CLI Executor - Timeout and Process Resolution (T-7)', () => {
             assert.notEqual(effortIdx, -1);
             assert.equal(args[effortIdx + 1], 'high');
             const modelIdx = args.indexOf('--model');
-            assert.equal(args[modelIdx + 1], 'claude-opus-4-6');
+            assert.equal(args[modelIdx + 1], 'claude-sonnet-5-5');
         } finally {
             restore();
         }

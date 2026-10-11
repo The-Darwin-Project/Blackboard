@@ -103,9 +103,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
 # Install Antigravity CLI (agy) with strict SHA512 verification (maintained via scripts/update-agy.sh and CI)
-ARG AGY_VERSION="1.3.2"
-ARG AGY_URL="https://storage.googleapis.com/antigravity-public/antigravity-cli/1.3.2-5813501495738368/linux-x64/cli_linux_x64.tar.gz"
-ARG AGY_SHA512="8dc2bb8471cfa6326e29e2896add767ad2d1f3714304b70fbae720d68af011182e7afde43964a7a3f54c604ab72c4fad772c8595608b059cfc582fb6798a25d2"
+ARG AGY_VERSION="1.3.3"
+ARG AGY_URL="https://storage.googleapis.com/antigravity-public/antigravity-cli/1.3.3-5524738307653632/linux-x64/cli_linux_x64.tar.gz"
+ARG AGY_SHA512="abe3ddf5cf30d3adaa586acf505221aa19702f5ca71af3c8b1f9b1a5976bd8e5c151c41ea33b39c41675d25843462a3e8c382c054f580e9d7e1688919d3b5110"
 RUN curl -fsSL "${AGY_URL}" -o /tmp/agy.tar.gz && \
     echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c - && \
     tar -xz -C /usr/local/bin -f /tmp/agy.tar.gz antigravity && \

@@ -100,14 +100,14 @@ describe('agy buildCLICommand: model and effort normalization', () => {
     assert.equal(args[effortIdx + 1], 'high');
   });
 
-  it('normalizes suffixed model names e.g. gemini-2.5-pro-max into model and effort', () => {
+  it('normalizes suffixed model names e.g. gemini-3.8-pro-max into model and effort', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
-    const { args } = buildCLICommand('test task', { model: 'gemini-2.5-pro-max' });
+    const { args } = buildCLICommand('test task', { model: 'gemini-3.8-pro-max' });
 
     const modelIdx = args.indexOf('--model');
     assert.notEqual(modelIdx, -1);
-    assert.equal(args[modelIdx + 1], 'gemini-2.5-pro');
+    assert.equal(args[modelIdx + 1], 'gemini-3.8-pro');
 
     const effortIdx = args.indexOf('--effort');
     assert.notEqual(effortIdx, -1);
@@ -129,7 +129,7 @@ describe('agy buildCLICommand: model and effort normalization', () => {
   it('respects explicit options.effort over default', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
-    const { args } = buildCLICommand('test task', { model: 'gemini-2.5-pro', effort: 'medium' });
+    const { args } = buildCLICommand('test task', { model: 'gemini-3.8-pro', effort: 'medium' });
 
     const effortIdx = args.indexOf('--effort');
     assert.notEqual(effortIdx, -1);
@@ -138,13 +138,13 @@ describe('agy buildCLICommand: model and effort normalization', () => {
 
   it('routes EPHEMERAL_MODEL_EXPLORER for explorer role when model is omitted', () => {
     setEnv('AGENT_CLI', 'agy');
-    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-2.5-flash');
+    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-3.8-flash');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('explore repo', { role: 'explorer' });
 
     const modelIdx = args.indexOf('--model');
     assert.notEqual(modelIdx, -1);
-    assert.equal(args[modelIdx + 1], 'gemini-2.5-flash');
+    assert.equal(args[modelIdx + 1], 'gemini-3.8-flash');
   });
 });
 
@@ -419,21 +419,21 @@ describe('resolveModel routing and role fallback', () => {
   it('picks up EPHEMERAL_MODEL_EXPLORER when process.env.AGENT_ROLE is explorer', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_ROLE', 'explorer');
-    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-2.5-flash-explorer-custom');
+    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-3.8-flash-explorer-custom');
     const { resolveModel } = freshModules();
 
     const selected = resolveModel({}, 'agy');
-    assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
+    assert.equal(selected, 'gemini-3.8-flash-explorer-custom');
   });
 
   it('picks up EPHEMERAL_MODEL_EXPLORER when options.role is Explorer (case-insensitive)', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_ROLE', undefined);
-    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-2.5-flash-explorer-custom');
+    setEnv('EPHEMERAL_MODEL_EXPLORER', 'gemini-3.8-flash-explorer-custom');
     const { resolveModel } = freshModules();
 
     const selected = resolveModel({ role: 'Explorer' }, 'agy');
-    assert.equal(selected, 'gemini-2.5-flash-explorer-custom');
+    assert.equal(selected, 'gemini-3.8-flash-explorer-custom');
   });
 
   it('falls back to gemini-3.8-flash for agy when no AGENT_MODEL or role override is set', () => {
@@ -537,7 +537,7 @@ describe('getRetryOptions retry bounding and model fallback', () => {
     assert.equal(result, null);
   });
 
-  it('falls back to claude-opus-4-6 under claude CLI even for explorer role', () => {
+  it('falls back to claude-sonnet-5-5 under claude CLI even for explorer role', () => {
     const { getRetryOptions } = freshModules();
     const result = getRetryOptions(
       { role: 'explorer', model: 'invalid-model' },
@@ -546,12 +546,12 @@ describe('getRetryOptions retry bounding and model fallback', () => {
       'claude'
     );
     assert.notEqual(result, null);
-    assert.equal(result.options.model, 'claude-opus-4-6');
+    assert.equal(result.options.model, 'claude-sonnet-5-5');
     assert.equal(result.options._retriedModel, true);
     assert.equal(result.options._retryCount, 1);
   });
 
-  it('falls back to gemini-2.5-flash under agy CLI for explorer role', () => {
+  it('falls back to gemini-3.8-flash under agy CLI for explorer role', () => {
     const { getRetryOptions } = freshModules();
     const result = getRetryOptions(
       { role: 'explorer', model: 'invalid-model' },
@@ -560,7 +560,7 @@ describe('getRetryOptions retry bounding and model fallback', () => {
       'agy'
     );
     assert.notEqual(result, null);
-    assert.equal(result.options.model, 'gemini-2.5-flash');
+    assert.equal(result.options.model, 'gemini-3.8-flash');
     assert.equal(result.options._retriedModel, true);
     assert.equal(result.options._retryCount, 1);
   });

@@ -47,7 +47,7 @@ function resolveModel(options, agentCli) {
   if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
     return process.env.EPHEMERAL_MODEL_EXPLORER;
   }
-  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-opus-4-6' : 'gemini-3.8-flash');
+  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-sonnet-5-5' : 'gemini-3.8-flash');
 }
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
@@ -75,8 +75,8 @@ function settingsFileForRole(role) {
 
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
-    claude: 'claude-opus-4-6',
-    agy: 'gemini-2.5-flash',
+    claude: 'claude-sonnet-5-5',
+    agy: 'gemini-3.8-flash',
 };
 
 // Minimum load-bearing deny rules the settings-validity check requires (below) --
@@ -700,7 +700,7 @@ function getRetryOptions(options, exitCode, stderr, agentCli = AGENT_CLI) {
         const effectiveRole = String(options.role || AGENT_ROLE || '').trim().toLowerCase();
         // Explorer falls back to flash on Gemini/Agy, or claude default on Claude CLI
         const fallbackModel = (effectiveRole === 'explorer' && agentCli !== 'claude')
-            ? 'gemini-2.5-flash'
+            ? 'gemini-3.8-flash'
             : FALLBACK_MODEL[agentCli];
         // Retrying the model that just failed (e.g. claude already on the default) is pointless.
         if (fallbackModel && fallbackModel !== resolveModel(options, agentCli)) {
