@@ -75,7 +75,7 @@ The `currentTask` object is loosely typed with these observed fields:
 | `FINDINGS_FRESHNESS_MS` | 34 | `30000` | Max age (ms) for `findings.md` to be considered fresh in `readFindings` |
 | `DEFAULT_WORK_DIR` | 35 | `'/data/gitops'` | Default CWD for CLI execution |
 | `AGENT_CLI` | 43 | `process.env.AGENT_CLI \|\| 'gemini'` | Which CLI binary to spawn (`gemini` or `claude`) |
-| `AGENT_MODEL` | 44 | `process.env.AGENT_MODEL \|\| process.env.GEMINI_MODEL \|\| ''` | Model override for CLI |
+| `AGENT_MODEL` | 44 | `process.env.AGENT_MODEL \|\| ''` | Model override for CLI |
 | `ANSI_RE` | 48 | Regex | Pattern matching ANSI escape sequences |
 | `AGENT_ROLE` | 51 | `process.env.AGENT_ROLE \|\| ''` | Agent role (architect, sysadmin, developer, qe) |
 | `claudeDir` | 54 | `~/.claude` | Claude config directory |

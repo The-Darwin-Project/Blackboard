@@ -103,7 +103,7 @@ wrapper in the event. Omitting it means no wrapper cooldown is set at all.
 
 ## Automatic Blackboard Updates
 
-The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.
+The PostToolUse (Antigravity) / PreToolUse (Claude) hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.
 
 ## Mode Boundaries
 

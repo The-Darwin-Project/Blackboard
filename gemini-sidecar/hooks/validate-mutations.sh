@@ -157,7 +157,7 @@ elif [ "$IS_SHELL" = 1 ]; then
 fi
 
 if [ "$NEEDS_GUARD" = 1 ]; then
-    APPROVAL_JSON=$(curl -sf --connect-timeout 0.5 --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time 5 "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
     LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
     GUARD_DECISION=$(node -e "
       let raw = process.argv[1] || '';
@@ -171,14 +171,14 @@ if [ "$NEEDS_GUARD" = 1 ]; then
       } else {
         process.stdout.write('ALLOW|||');
       }
-    " "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    " -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
     GUARD_RESULT="${GUARD_DECISION%%|||*}"
     GUARD_REASON="${GUARD_DECISION#*|||}"
     if [ "$GUARD_RESULT" != "ALLOW" ]; then
         [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
         node -e "
           process.stdout.write(JSON.stringify({decision: 'deny', reason: process.argv[1]}));
-        " "$GUARD_REASON"
+        " -- "$GUARD_REASON"
         exit 0
     fi
     # Approved and SHA matches -- fall through to the role-based checks below.
@@ -250,7 +250,7 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
         reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
                 process.argv[2].slice(0, 120)
       }));
-    " "$ROLE" "$LOG_CMD"
+    " -- "$ROLE" "$LOG_CMD"
     exit 0
 fi
 
@@ -264,7 +264,7 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE '\bcurl\b.*((-X|--request)\s*(POST|PUT
         reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
                 process.argv[2].slice(0, 120)
       }));
-    " "$ROLE" "$LOG_CMD"
+    " -- "$ROLE" "$LOG_CMD"
     exit 0
 fi
 

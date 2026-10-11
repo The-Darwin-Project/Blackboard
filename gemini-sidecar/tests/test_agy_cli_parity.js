@@ -621,7 +621,7 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
 
     const res = spawnSync('bash', [hookPath], {
       input,
-      env: { ...process.env, AGENT_CLI: 'agy' },
+      env: { ...process.env, AGENT_CLI: 'agy', SIDECAR_PORT: '19090' },
       encoding: 'utf8'
     });
 

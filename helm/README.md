@@ -84,7 +84,7 @@ Default Ingress annotations include WebSocket timeout overrides (3600s) for `/ws
 
 ## Agent Sidecars
 
-Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supports `gemini` or `claude` CLI:
+Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supports `claude` or `agy` CLI:
 
 ```bash
 --set sidecars.architect.cliType=claude

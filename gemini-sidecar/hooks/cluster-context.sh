@@ -18,7 +18,7 @@ for f in "$META_DIR"/*.json; do
     if (c.namespacePattern) l += '\\n  Namespace pattern: ' + c.namespacePattern;
     if (c.namespaces?.length) l += '\\n  Accessible namespaces: ' + c.namespaces.join(', ');
     process.stdout.write(l);
-  " "$f")
+  " -- "$f")
   CONTEXT+=$'\n'
 done
 
@@ -29,5 +29,5 @@ node -e "
     decision: 'allow',
     systemMessage: 'Remote K8s Clusters:\\n' + process.argv[1] + '\\nUse resources_list with namespace param. namespaces_list and events_list may not work on multi-tenant clusters.'
   }));
-" "$CONTEXT"
+" -- "$CONTEXT"
 exit 0

@@ -25,8 +25,9 @@ COUNTER_FILE="${COUNTER_DIR}/require-results-${SIDECAR_PORT:-9090}-${TASK_ID:-de
 # Defend against symlink attacks: remove if it is a symlink
 [ -L "$COUNTER_FILE" ] && rm -f "$COUNTER_FILE" 2>/dev/null
 
-# Drop stale counters older than TTL
+# Drop stale counters older than TTL (both current file and sweep of older files in directory)
 [ -f "$COUNTER_FILE" ] && [ -n "$(find "$COUNTER_FILE" -mmin +"$COUNTER_TTL_MIN" 2>/dev/null)" ] && rm -f "$COUNTER_FILE" 2>/dev/null
+find "$COUNTER_DIR" -maxdepth 1 -name "*.count" -mmin +"$COUNTER_TTL_MIN" -delete 2>/dev/null || true
 
 allow_stop() {
     rm -f "$COUNTER_FILE" 2>/dev/null
