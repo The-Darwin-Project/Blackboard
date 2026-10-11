@@ -459,6 +459,10 @@ spec:
             {{- end }}
             - name: SYSTEM2_MAX_TOKENS
               value: {{ .Values.cortex.system2.maxOutputTokens | default "8192" | quote }}
+            {{- if .Values.cortex.system2.toolTimeout }}
+            - name: SYSTEM2_TOOL_TIMEOUT
+              value: {{ .Values.cortex.system2.toolTimeout | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- if .Values.nightwatcher }}

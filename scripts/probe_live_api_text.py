@@ -121,6 +121,7 @@ async def test_connect():
 async def test_tool_declaration():
     """Test 2: Can we declare a function tool and get it called?"""
     from google import genai
+    from google.genai import types
     from google.genai.types import (
         Content, FunctionResponse, LiveConnectConfig, Modality, Part,
     )
@@ -129,7 +130,14 @@ async def test_tool_declaration():
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": [REPORT_TOOL]}],
+        tools=[types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name=REPORT_TOOL["name"],
+                description=REPORT_TOOL.get("description", ""),
+                parameters=REPORT_TOOL.get("parameters"),
+                behavior=types.Behavior(REPORT_TOOL["behavior"]) if "behavior" in REPORT_TOOL else None,
+            )
+        ])],
     )
 
     async with client.aio.live.connect(model=MODEL, config=config) as session:
@@ -171,6 +179,7 @@ async def test_tool_declaration():
 async def test_friction_detection():
     """Test 3: Send a stream of pulses with escalating friction. Does the model detect it?"""
     from google import genai
+    from google.genai import types
     from google.genai.types import (
         Content, FunctionResponse, LiveConnectConfig, Modality, Part,
     )
@@ -179,7 +188,14 @@ async def test_friction_detection():
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": [REPORT_TOOL]}],
+        tools=[types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name=REPORT_TOOL["name"],
+                description=REPORT_TOOL.get("description", ""),
+                parameters=REPORT_TOOL.get("parameters"),
+                behavior=types.Behavior(REPORT_TOOL["behavior"]) if "behavior" in REPORT_TOOL else None,
+            )
+        ])],
     )
 
     async with client.aio.live.connect(model=MODEL, config=config) as session:

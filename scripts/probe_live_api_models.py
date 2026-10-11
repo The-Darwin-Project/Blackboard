@@ -190,30 +190,33 @@ async def main():
     print(f"\n{'='*60}")
     print("COMPARISON SUMMARY")
     print(f"{'='*60}")
-    print(f"{'Feature':<25} | {'2.5 Flash (GA)':<20} | {'3.1 Flash (Preview)':<20}")
-    print(f"{'-'*25}-+-{'-'*20}-+-{'-'*20}")
+    label0 = f"{MODELS[0]} (Primary)"
+    label1 = f"{MODELS[1]} (Fallback)" if len(MODELS) > 1 else "N/A"
+    print(f"{'Feature':<25} | {label0:<25} | {label1:<25}")
+    print(f"{'-'*25}-+-{'-'*25}-+-{'-'*25}")
 
-    r25 = all_results.get(MODELS[0], {})
-    r31 = all_results.get(MODELS[1], {})
+    r0 = all_results.get(MODELS[0], {})
+    r1 = all_results.get(MODELS[1], {}) if len(MODELS) > 1 else {}
     for feat in ["connect", "text_io", "tool_call", "session_rotation"]:
-        v25 = "PASS" if r25.get(feat) else "FAIL"
-        v31 = "PASS" if r31.get(feat) else "FAIL"
-        print(f"{feat:<25} | {v25:<20} | {v31:<20}")
+        v0 = "PASS" if r0.get(feat) else "FAIL"
+        v1 = "PASS" if r1.get(feat) else "FAIL"
+        print(f"{feat:<25} | {v0:<25} | {v1:<25}")
 
-    avg25 = r25.get("avg_latency_ms", "N/A")
-    avg31 = r31.get("avg_latency_ms", "N/A")
-    print(f"{'avg_latency_ms':<25} | {str(avg25):<20} | {str(avg31):<20}")
+    avg0 = r0.get("avg_latency_ms", "N/A")
+    avg1 = r1.get("avg_latency_ms", "N/A")
+    print(f"{'avg_latency_ms':<25} | {str(avg0):<25} | {str(avg1):<25}")
 
     # Recommendation
     print(f"\n{'='*60}")
     print("RECOMMENDATION")
     print(f"{'='*60}")
-    if r31.get("connect") and r31.get("tool_call"):
-        print(f"Use {MODELS[1]} (3.1 Flash) as primary -- better instruction following.")
-        print(f"Keep {MODELS[0]} (2.5 Flash) as fallback.")
-    elif r25.get("connect") and r25.get("tool_call"):
-        print(f"Use {MODELS[0]} (2.5 Flash GA) -- 3.1 not available or tool calling broken.")
-    elif r25.get("connect"):
+    if r0.get("connect") and r0.get("tool_call"):
+        print(f"Use {MODELS[0]} as primary -- full tool-calling and thinking support.")
+        if len(MODELS) > 1:
+            print(f"Keep {MODELS[1]} as fallback.")
+    elif r1.get("connect") and r1.get("tool_call"):
+        print(f"Use {MODELS[1]} -- {MODELS[0]} not available or tool calling broken.")
+    elif r0.get("connect"):
         print(f"{MODELS[0]} connects but tool calling doesn't work.")
         print("System 2 needs explicit analysis prompts instead of proactive detection.")
     else:

@@ -196,6 +196,7 @@ HEAVY_FRICTION_SEQUENCE = [
 
 async def main():
     from google import genai
+    from google.genai import types
     from google.genai.types import Content, FunctionResponse, LiveConnectConfig, Modality, Part
 
     print(f"Probe 0c: Full Cortex Tool Suite Stress Test")
@@ -204,10 +205,19 @@ async def main():
     print(f"Tools declared: {len(TOOL_DECLARATIONS)}")
 
     client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
+    tool_funcs = [
+        types.FunctionDeclaration(
+            name=t["name"],
+            description=t.get("description", ""),
+            parameters=t.get("parameters"),
+            behavior=types.Behavior(t["behavior"]) if "behavior" in t else None,
+        )
+        for t in TOOL_DECLARATIONS
+    ]
     config = LiveConnectConfig(
         response_modalities=[Modality.TEXT],
         system_instruction=Content(parts=[Part(text=SYSTEM_INSTRUCTION)]),
-        tools=[{"function_declarations": TOOL_DECLARATIONS}],
+        tools=[types.Tool(function_declarations=tool_funcs)],
     )
 
     tool_call_log = []

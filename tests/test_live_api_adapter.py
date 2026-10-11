@@ -1,6 +1,7 @@
 """Tests for LiveAPIAdapter duplicate review handling."""
 import pytest
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from src.adapters.live_api_adapter import LiveAPIAdapter
 
@@ -23,17 +24,25 @@ def test_build_live_tools_blocking():
     adapter._rag_enabled = False
     adapter._rag_corpus_id = ""
     
-    class MockTypes:
-        Tool = MagicMock()
-        FunctionDeclaration = MagicMock()
-        Behavior = MagicMock(side_effect=lambda x: f"Behavior.{x}")
-        Behavior.BLOCKING = "Behavior.BLOCKING"
-            
-    adapter._build_live_tools(MockTypes)
-    
-    assert MockTypes.FunctionDeclaration.call_count == 11
-    for call in MockTypes.FunctionDeclaration.call_args_list:
-        assert call.kwargs.get("behavior") == MockTypes.Behavior.BLOCKING
+    try:
+        from google.genai import types
+        tools = adapter._build_live_tools(types)
+        assert len(tools) >= 1
+        funcs = tools[0].function_declarations
+        assert len(funcs) == 11
+        for f in funcs:
+            assert f.behavior == types.Behavior.BLOCKING
+    except ImportError:
+        class MockTypes:
+            Tool = MagicMock()
+            FunctionDeclaration = MagicMock()
+            Behavior = MagicMock(side_effect=lambda x: f"Behavior.{x}")
+            Behavior.BLOCKING = "Behavior.BLOCKING"
+                
+        adapter._build_live_tools(MockTypes)
+        assert MockTypes.FunctionDeclaration.call_count == 11
+        for call in MockTypes.FunctionDeclaration.call_args_list:
+            assert call.kwargs.get("behavior") == MockTypes.Behavior.BLOCKING
 
 # T-2: LiveConnectConfig construction (fresh)
 @pytest.mark.asyncio
@@ -331,7 +340,7 @@ async def test_connect_closes_session_opened_before_retry():
     ctx2.__aenter__.side_effect = enter2
 
     adapter._client.aio.live.connect.side_effect = [ctx1, ctx2]
-    adapter._load_neuron_labels = AsyncMock(side_effect=[Exception("labels failed"), None])
+    adapter._start_tasks = MagicMock(side_effect=[Exception("tasks failed"), None])
 
     await adapter._connect()
 
@@ -350,7 +359,13 @@ async def test_connect_closes_partial_session_without_retry():
     adapter = _make_connect_adapter(handle=None)
     ctx = _mock_ctx()
     adapter._client.aio.live.connect.return_value = ctx
-    adapter._load_neuron_labels = AsyncMock(side_effect=Exception("labels failed"))
+    
+    def failing_start_tasks():
+        adapter._receive_task = MagicMock(done=MagicMock(return_value=True))
+        adapter._idle_watchdog_task = MagicMock(done=MagicMock(return_value=True))
+        raise Exception("tasks failed")
+
+    adapter._start_tasks = MagicMock(side_effect=failing_start_tasks)
 
     await adapter._connect()
     await asyncio.sleep(0.01)
@@ -533,7 +548,7 @@ async def test_connect_failure_cleans_up_transport_and_resets_running():
 
 
 @pytest.mark.asyncio
-async def test_handle_tool_call_mutating_shielded():
+async def test_handle_tool_call_mutating_direct():
     adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
     adapter._tool_timeout = 60.0
     adapter._tool_send_event_message = AsyncMock(return_value="Message sent")
@@ -541,4 +556,56 @@ async def test_handle_tool_call_mutating_shielded():
     result = await adapter._handle_tool_call("send_event_message", {"event_id": "evt-1", "message": "hello"})
     assert result == "Message sent"
     adapter._tool_send_event_message.assert_awaited_once_with("evt-1", "hello")
+
+
+@pytest.mark.asyncio
+async def test_connect_cancelled_cleans_up_and_reraises():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._project = "test"
+    adapter._location = "us-central1"
+    adapter._model = "test-model"
+    adapter._connect_lock = asyncio.Lock()
+    adapter._resumption_handle = None
+    adapter._idle_watchdog_task = None
+    adapter._receive_task = None
+    adapter._build_live_tools = MagicMock(return_value=[])
+
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.side_effect = asyncio.CancelledError()
+    mock_ctx.__aexit__ = AsyncMock()
+    adapter._client = MagicMock()
+    adapter._client.aio.live.connect.return_value = mock_ctx
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._connect()
+
+    assert adapter._session is None
+    assert adapter._running is False
+    assert adapter._session_ctx is None
+    mock_ctx.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_propose_enhancement_idempotent():
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.redis = AsyncMock()
+
+    existing_entry = json.dumps({
+        "event_id": "evt-dup",
+        "title": "Fix memory leak",
+        "status": "pending",
+    })
+    adapter._blackboard.redis.lrange.return_value = [existing_entry]
+
+    result = await adapter._tool_propose_enhancement(
+        event_id="evt-dup",
+        title="Fix memory leak",
+        description="Duplicate proposal",
+        severity="blocking",
+    )
+
+    assert "already pending review" in result
+    adapter._blackboard.redis.rpush.assert_not_called()
+
 

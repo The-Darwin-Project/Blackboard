@@ -46,15 +46,15 @@
 # 18. [Pattern]: _build_live_tools() assembles the tool list for _connect(). When JARVIS_RAG_ENABLED
 #     and JARVIS_RAG_CORPUS_ID are set, adds Tool(retrieval=VertexRagStore(store_context=True))
 #     for implicit RAG grounding. store_context=True is Live API-specific (not for generateContent).
-#     google_web_search is declared as a standard FunctionDeclaration alongside retrieval (the Live API
-#     supports tool declarations with BLOCKING behavior alongside Vertex RAG retrieval).
+#     google_web_search and all other FunctionDeclarations are added unconditionally alongside
+#     retrieval; runtime 3-way combination with active RAG retrieval remains unverified in shadow mode.
 # 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
 #     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect).
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks.
-# 21. [Constraint]: _redact_pii() is applied at session.send() sites that carry
-#     human/LLM/event-derived free text when MemoryCorpus store_context=True may persist
+# 21. [Constraint]: _redact_pii() is applied at session.send() sites and external search queries
+#     that carry human/LLM/event-derived free text when MemoryCorpus store_context=True may persist
 #     the session (receive_brain_response, send_pulse, wake priming, tool results,
-#     system-review context, handoff replay, rotate summary, session-report handoff).
+#     system-review context, handoff replay, rotate summary, session-report handoff, google_web_search).
 #     Static prompt constants and structured silent-event audit payloads (IDs/phases)
 #     are exempt. Shared via src/utils/pii_redaction.py.
 """
@@ -219,99 +219,118 @@ class LiveAPIAdapter:
             )
         return tools
 
+    def _start_tasks(self) -> None:
+        """Start or refresh the receive loop and idle watchdog background tasks."""
+        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
+            logger.debug("Cortex _connect: cancelling stale receive_task")
+            self._receive_task.cancel()
+        self._receive_task = asyncio.create_task(self._receive_loop())
+        logger.debug(
+            "Cortex _connect: receive_task created (name=%s, done=%s)",
+            self._receive_task.get_name(), self._receive_task.done(),
+        )
+        if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
+            self._idle_watchdog_task.cancel()
+        self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
+
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
         if not hasattr(self, "_connect_lock"):
             self._connect_lock = asyncio.Lock()
-        async with self._connect_lock:
-            if getattr(self, "_session", None):
-                return
-            from google import genai
-            from google.genai import types
+        try:
+            async with asyncio.timeout(60.0):
+                async with self._connect_lock:
+                    if getattr(self, "_session", None):
+                        return
+                    from google import genai
+                    from google.genai import types
 
-            if not self._client:
-                try:
-                    self._client = genai.Client(
-                        vertexai=True,
-                        project=self._project,
-                        location=self._location,
-                    )
-                except Exception as e:
-                    logger.error("Cortex failed to initialize genai.Client: %s", e)
-                    return
-
-            for attempt in range(2):
-                try:
-                    kwargs = {
-                        "response_modalities": [types.Modality.TEXT],
-                        "thinking_config": types.ThinkingConfig(include_thoughts=True),
-                        "generation_config": types.GenerationConfig(
-                            max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                            temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
-                        ),
-                        "system_instruction": types.Content(
-                            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-                        ),
-                        "tools": self._build_live_tools(types),
-                        "context_window_compression": types.ContextWindowCompressionConfig(
-                            sliding_window=types.SlidingWindow()
-                        ),
-                    }
-                    if self._resumption_handle:
-                        kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
-                    config = types.LiveConnectConfig(**kwargs)
-
-                    self._session_ctx = self._client.aio.live.connect(
-                        model=self._model,
-                        config=config,
-                    )
-                    async with asyncio.timeout(30.0):
-                        self._session = await self._session_ctx.__aenter__()
-                        self._running = True
-
-                        if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
-                            logger.debug("Cortex _connect: cancelling stale receive_task")
-                            self._receive_task.cancel()
-                        self._receive_task = asyncio.create_task(self._receive_loop())
-                        logger.debug(
-                            "Cortex _connect: receive_task created (name=%s, done=%s)",
-                            self._receive_task.get_name(), self._receive_task.done(),
-                        )
-                        if self._idle_watchdog_task and not self._idle_watchdog_task.done() and self._idle_watchdog_task is not asyncio.current_task():
-                            self._idle_watchdog_task.cancel()
-                        self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
-                        await self._load_neuron_labels()
-                        await self._broadcast_status("watching")
-                        orphan = await self._blackboard.find_active_event_by_source("jarvis")
-                        if orphan:
-                            self._active_meta_event_id = orphan
-                            active = await self._blackboard.get_active_events()
-                            self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
-                            logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
-                    logger.info(
-                        "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
-                        self._model, self._shadow, len(self._neuron_labels),
-                    )
-                    self._handle_connect_failures = 0
-                    return
-                except Exception as e:
-                    await self._abort_partial_connect()
-                    if self._resumption_handle:
-                        # A single failure is usually transient (network, quota, backend blip) and the
-                        # handle is still valid. Only presume it stale after consecutive failures, so an
-                        # outage never discards a good handle or doubles request volume on one attempt.
-                        self._handle_connect_failures += 1
-                        if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
-                            logger.warning(
-                                "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
-                                self._handle_connect_failures, e,
+                    if not self._client:
+                        try:
+                            self._client = genai.Client(
+                                vertexai=True,
+                                project=self._project,
+                                location=self._location,
                             )
-                            self._resumption_handle = None
+                        except Exception as e:
+                            logger.error("Cortex failed to initialize genai.Client: %s", e)
+                            return
+
+                    for attempt in range(2):
+                        try:
+                            kwargs = {
+                                "response_modalities": [types.Modality.TEXT],
+                                "thinking_config": types.ThinkingConfig(include_thoughts=True),
+                                "generation_config": types.GenerationConfig(
+                                    max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
+                                    temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
+                                ),
+                                "system_instruction": types.Content(
+                                    parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                                ),
+                                "tools": self._build_live_tools(types),
+                                "context_window_compression": types.ContextWindowCompressionConfig(
+                                    sliding_window=types.SlidingWindow()
+                                ),
+                            }
+                            if self._resumption_handle:
+                                kwargs["session_resumption"] = types.SessionResumptionConfig(handle=self._resumption_handle)
+                            config = types.LiveConnectConfig(**kwargs)
+
+                            self._session_ctx = self._client.aio.live.connect(
+                                model=self._model,
+                                config=config,
+                            )
+                            async with asyncio.timeout(30.0):
+                                self._session = await self._session_ctx.__aenter__()
+                            self._running = True
+
+                            self._start_tasks()
+
+                            try:
+                                async with asyncio.timeout(15.0):
+                                    await self._load_neuron_labels()
+                                    await self._broadcast_status("watching")
+                                    orphan = await self._blackboard.find_active_event_by_source("jarvis")
+                                    if orphan:
+                                        self._active_meta_event_id = orphan
+                                        active = await self._blackboard.get_active_events()
+                                        self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                                        logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                            except (Exception, asyncio.CancelledError) as init_err:
+                                if isinstance(init_err, asyncio.CancelledError):
+                                    raise
+                                logger.warning("Cortex post-connect initialization degraded (non-fatal): %s", init_err)
+
+                            logger.info(
+                                "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
+                                self._model, self._shadow, len(self._neuron_labels),
+                            )
                             self._handle_connect_failures = 0
-                            continue
-                    logger.error("Cortex Live API failed to connect: %s", e)
-                    self._session = None
-                    return
+                            return
+                        except (Exception, asyncio.CancelledError) as e:
+                            await self._abort_partial_connect()
+                            if isinstance(e, asyncio.CancelledError):
+                                raise
+                            if self._resumption_handle:
+                                # A single failure is usually transient (network, quota, backend blip) and the
+                                # handle is still valid. Only presume it stale after consecutive failures, so an
+                                # outage never discards a good handle or doubles request volume on one attempt.
+                                self._handle_connect_failures += 1
+                                if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
+                                    logger.warning(
+                                        "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
+                                        self._handle_connect_failures, e,
+                                    )
+                                    self._resumption_handle = None
+                                    self._handle_connect_failures = 0
+                                    continue
+                            logger.error("Cortex Live API failed to connect: %s", e)
+                            self._session = None
+                            return
+        except TimeoutError:
+            logger.error("Cortex _connect aborted: timed out waiting for _connect_lock")
+            return
 
     async def _abort_partial_connect(self) -> None:
         """Tear down a session that opened or failed during connect so a retry cannot leak it."""
@@ -337,7 +356,14 @@ class LiveAPIAdapter:
     async def stop(self) -> None:
         """Graceful shutdown -- called during app teardown."""
         self._running = False
-        await self._disconnect()
+        if not hasattr(self, "_connect_lock"):
+            self._connect_lock = asyncio.Lock()
+        try:
+            async with asyncio.timeout(10.0):
+                async with self._connect_lock:
+                    await self._disconnect()
+        except Exception:
+            await self._disconnect()
         logger.info("Cortex Live API stopped")
 
     async def _disconnect(self) -> None:
@@ -797,18 +823,18 @@ class LiveAPIAdapter:
                 elif name == "search_deep_memory":
                     return await self._tool_search_deep_memory(args.get("query", ""))
                 elif name == "send_event_message":
-                    return await asyncio.shield(self._tool_send_event_message(
+                    return await self._tool_send_event_message(
                         args.get("event_id", ""), args.get("message", ""),
-                    ))
+                    )
                 elif name == "propose_enhancement":
-                    return await asyncio.shield(self._tool_propose_enhancement(
+                    return await self._tool_propose_enhancement(
                         args.get("event_id", ""),
                         args.get("title", ""),
                         args.get("description", ""),
                         args.get("severity", "nice_to_have"),
-                    ))
+                    )
                 elif name == "create_system_review":
-                    return await asyncio.shield(self._tool_create_system_review(args.get("reason", "")))
+                    return await self._tool_create_system_review(args.get("reason", ""))
                 elif name == "recall_handoff_notes":
                     return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
                 elif name == "google_web_search":
@@ -1274,6 +1300,18 @@ class LiveAPIAdapter:
             "status": "pending",
         })
         try:
+            existing = await redis.lrange(key, -50, -1)
+            for raw in existing:
+                try:
+                    p = json.loads(raw)
+                    if (
+                        p.get("event_id") == event_id
+                        and p.get("title") == title
+                        and p.get("status") == "pending"
+                    ):
+                        return f"Proposal '{title}' is already pending review for {event_id}."
+                except Exception:
+                    pass
             await redis.rpush(key, entry)
             logger.info(
                 "Enhancement proposal stored: %s (severity=%s, event=%s)",
@@ -1339,7 +1377,7 @@ class LiveAPIAdapter:
 
         if not query.strip():
             return "Error: query required"
-        query = query.strip()[:500]
+        query = _redact_pii(query.strip())[:500]
         model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
         project = os.getenv("GCP_PROJECT", "")
         location = os.getenv("GCP_LOCATION", "global")
@@ -1348,7 +1386,7 @@ class LiveAPIAdapter:
             from google.genai import types
 
             client = genai.Client(vertexai=True, project=project, location=location)
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(30):
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=query,
