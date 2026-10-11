@@ -10,7 +10,7 @@
 Covers:
 - T-1: Explorer always routes via ephemeral (Tier-0, never local)
 - T-2: Explorer model resolves to gemini-3.5-flash-lite
-- T-3: Explorer CLI resolves to agy
+- T-3: Explorer CLI resolves to claude
 - T-4: Explorer present in select_agent schema enum
 - T-5: Busy local sidecar + aligner event -> ephemeral overflow
 - T-6: Busy local sidecar + provisioner circuit break -> graceful defer
@@ -247,14 +247,14 @@ class TestExplorerModelResolution:
 # ---------------------------------------------------------------------------
 
 class TestExplorerCLIResolution:
-    """Explorer resolves to 'agy' in the role CLI map."""
+    """Explorer resolves to 'claude' in the role CLI map."""
 
     def test_role_cli_map_has_explorer(self):
-        """T-3: _ROLE_CLI_MAP["explorer"] == "agy"."""
+        """T-3: _ROLE_CLI_MAP["explorer"] == "claude"."""
         from src.agents.brain import _ROLE_CLI_MAP
 
         assert "explorer" in _ROLE_CLI_MAP
-        assert _ROLE_CLI_MAP["explorer"] == "agy"
+        assert _ROLE_CLI_MAP["explorer"] == "claude"
 
     def test_role_cli_map_defaults_to_claude(self):
         """T-3 corollary: non-explorer roles get "claude" as CLI default."""

@@ -337,7 +337,7 @@ spec:
             - name: EPHEMERAL_EFFORT_EXPLORER
               value: {{ .Values.ephemeralAgents.roleEffort.explorer | quote }}
             - name: EPHEMERAL_CLI_EXPLORER
-              value: {{ .Values.ephemeralAgents.roleCli.explorer | default "agy" | quote }}
+              value: {{ .Values.ephemeralAgents.roleCli.explorer | default "claude" | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
