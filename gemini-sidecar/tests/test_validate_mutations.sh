@@ -568,6 +568,64 @@ PY
   else ERRORS+=("FAIL [T-13b]: elapsed=${ELAPSED}s out=$OUT"); ((FAIL++)); fi
 fi
 
+# --- T-14: tokenizer evasions found in review round 5 ---
+sh_merge "T-14a: heredoc with apostrophe cannot swallow a later merge"   $'cat <<EOF\nit\'s fine\nEOF\ngit merge x' developer
+sh_merge "T-14b: <<- heredoc (tab-stripped terminator) then merge"        $'cat <<-EOF\n\tbody\n\tEOF\ngit merge x' developer
+sh_merge "T-14c: unquoted heredoc executes \$( )"                          $'cat <<EOF\n$(git merge x)\nEOF' developer
+sh_merge "T-14d: comment containing an apostrophe cannot hide a merge"    $'echo hi # it\'s\ngit merge x' developer
+sh_merge "T-14e: comment with ')' inside \$( ) cannot hide a merge"       $'echo $(echo x # )\n git merge x)' developer
+sh_merge "T-14f: ANSI-C \\x escape decodes to merge"                       "git \$'m\\x65rge' x" developer
+sh_merge "T-14g: ANSI-C quoted subcommand"                                "git \$'merge' x" developer
+sh_merge "T-14h: locale-quoted subcommand"                                "git \$\"merge\" x" developer
+sh_merge "T-14i: \$'..' containing ')' inside \$( )"                       "echo \$(echo \$'a)' ; git merge x)" developer
+sh_merge "T-14j: quoted '>' before '&' still separates commands"          'echo ">" & git merge x' developer
+sh_merge "T-14k: quoted '>' as a git -C value is not a redirection"       'git -C ">" merge x' developer
+sh_merge "T-14l: gh api -XPUT (attached method) merge"                    "gh api -XPUT repos/o/r/pulls/1/merge" developer
+sh_merge "T-14m: glab api -XPUT (attached method) merge"                  "glab api -XPUT projects/1/merge_requests/2/merge" developer
+sh_merge "T-14n: push to heads/main normalised"                           "git push origin heads/main" developer
+sh_merge "T-14o: push HEAD:heads/main normalised"                         "git push origin HEAD:heads/main" developer
+sh_merge "T-14p: contents API write without branch (default branch)"      "gh api -X PUT repos/o/r/contents/f.txt -f message=x -f content=y" developer
+sh_merge "T-14q: contents API write to main"                              "gh api -X PUT repos/o/r/contents/f.txt -f branch=main -f message=x" developer
+sh_merge "T-14r: git/refs PATCH of main via curl"                         "curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main -d '{}'" developer
+sh_merge "T-14s: GitLab repository/commits to main"                       "curl -X POST https://gitlab.example/api/v4/projects/1/repository/commits -d branch=main" developer
+sh_merge "T-14t: fully dynamic non-GET target"                            'curl -X POST $URL' developer
+sh_merge "T-14u: dynamic group/action in gh"                              'gh pr $A 5' developer
+for pair in \
+  'T-14v|cat <<EOF\nplain git merge text\nEOF\ngit status' \
+  'T-14w|echo hi # git merge x' \
+  'T-14x|gh api -X PUT repos/o/r/contents/f.txt -f message=x -f branch=feat/x' \
+  'T-14y|curl -X POST https://api.github.com/repos/o/r/git/refs -d {"ref":"refs/heads/feat"}' \
+  'T-14z|curl -X POST "$API/merge_requests" -d title=x' \
+  'T-14aa|curl -s -H "Authorization: Bearer $TOKEN" https://api.github.com/user' \
+  'T-14ab|gh pr view "$PR"' \
+  'T-14ac|glab mr list --label "$L"' \
+  'T-14ad|git foo'; do
+  cmd="${pair#*|}"; cmd="${cmd//\\n/$'\n'}"
+  check_in "$PWD" "${pair%%|*}: ${cmd//$'\n'/ ; }" "$cmd" developer allow
+done
+# alias/budget: an unknown git subcommand whose alias lookup cannot be answered must be guarded (fail closed)
+GA="$(mktemp -d)"; git -C "$GA" init -q -b feat/x; git -C "$GA" config alias.mm merge
+check_in "$GA" "T-14ae: alias resolving to merge blocked"                  "git mm x" developer deny
+check_in "$GA" "T-14af: unknown subcommand without alias allowed"          "git zzz" developer allow
+NOREPO="$(mktemp -d)"
+check_in "$NOREPO" "T-14ag: bare push where branch cannot be resolved (not a repo) => guarded" "git push" developer deny
+rm -rf "$GA" "$NOREPO"
+
+# --- T-15: MCP allowlist tightening ---
+for t in mcp__X__create_api_key mcp__Playwright__browser_evaluate mcp__Playwright__browser_type mcp__Playwright__browser_fill_form \
+         mcp__Playwright__browser_press_key mcp__Playwright__browser_select_option mcp__Playwright__browser_file_upload; do
+  run_test_deny_with_reason "T-15a: read-only role denied for $t" \
+    "{\"toolCall\":{\"name\":\"$t\",\"args\":{}}}" explorer "read-only"
+done
+for t in mcp__Playwright__browser_navigate mcp__Playwright__browser_click mcp__Playwright__browser_take_screenshot \
+         mcp__Playwright__browser_network_requests mcp__Playwright__browser_wait_for mcp__X__get_api_docs; do
+  run_test "T-15b: read-only role allowed for $t" "{\"toolCall\":{\"name\":\"$t\",\"args\":{}}}" explorer allow
+done
+mg "T-15c: glab_api commit to main via fields"  mcp__GitLab__glab_api '{"args":["projects/1/repository/commits"],"flags":{"method":"POST","field":"branch=main"}}' developer
+mg "T-15d: glab_api opaque target guarded"      mcp__GitLab__glab_api '{"args":"$URL","flags":"-X POST"}' developer
+run_test "T-15e: glab_api commit to a feature branch allowed (developer)" \
+  '{"toolCall":{"name":"mcp__GitLab__glab_api","args":{"args":["projects/1/repository/commits"],"flags":{"method":"POST","field":"branch=feat"}}}}' developer allow
+
 # Empty/missing command on every recognised shell tool name fails closed, for every role
 run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \
   '{"toolCall":{"name":"run_command","args":{"Other":"git merge x"}}}' developer "failing closed"

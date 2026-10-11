@@ -222,6 +222,42 @@ describe('agy session retry (shared getRetryOptions)', () => {
     });
 });
 
+describe('claude read-only roles (engine-enforced permissions.deny, not just plan mode)', () => {
+    const SETTINGS_DIR = path.resolve(__dirname, '..', 'claude-settings');
+    for (const role of ['explorer', 'architect', 'security_analyst', 'code_reviewer', 'qa_reviewer_agent', 'ARCHITECT_LEAD', 'security-analyst']) {
+        it(`${role}: gets a --settings deny file even with autoApprove`, () => {
+            const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: SETTINGS_DIR });
+            try {
+                const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
+                const file = args[args.indexOf('--settings') + 1];
+                assert.ok(file && file.startsWith(SETTINGS_DIR), `expected --settings under ${SETTINGS_DIR}, got ${file}`);
+                const deny = JSON.parse(fs.readFileSync(file, 'utf8')).permissions.deny;
+                for (const rule of ['Edit', 'Write', 'Bash(git push *)', 'Bash(git commit *)', 'Bash(rm *)']) assert.ok(deny.includes(rule), rule);
+            } finally {
+                restore();
+            }
+        });
+    }
+    it('mutating roles (developer, sysadmin, qe) get no --settings file', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: SETTINGS_DIR });
+        try {
+            for (const role of ['developer', 'sysadmin', 'qe']) {
+                assert.equal(mod.buildCLICommand('p', { role, autoApprove: true }).args.includes('--settings'), false, role);
+            }
+        } finally {
+            restore();
+        }
+    });
+    it('fails closed when the read-only settings file is missing', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', AGENT_PERMISSION_MODE: undefined, CLAUDE_SETTINGS_DIR: '/nonexistent-dir' });
+        try {
+            assert.throws(() => mod.buildCLICommand('p', { role: 'explorer', autoApprove: true }), /refusing to launch/);
+        } finally {
+            restore();
+        }
+    });
+});
+
 describe('agy read-only roles (plan mode is the only enforcement layer)', () => {
     for (const role of ['architect', 'explorer', 'code_reviewer', 'reviewer', 'security_analyst']) {
         it(`${role}: --mode plan, never --dangerously-skip-permissions, even with autoApprove`, () => {
@@ -371,7 +407,7 @@ describe('CLI Executor - Timeout and Process Resolution (T-7)', () => {
     });
 
     it('Claude buildCLICommand: still uses the ultrathink prefix for architect, not the Gemini prefix', () => {
-        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude' });
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', CLAUDE_SETTINGS_DIR: path.resolve(__dirname, '..', 'claude-settings') });
         try {
             const { args } = mod.buildCLICommand('review', { role: 'architect' });
             const promptIdx = args.indexOf('-p');

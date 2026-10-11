@@ -18,12 +18,17 @@
 //    HTTP PreToolUse hook (payload `cwd` -> git lookups). `--verdict` CLI mode shares approvalVerdict with the
 //    agy shell hook. Dynamic words ($ { ` * ?) in the command/sub-command position, stdin-fed shells
 //    (`| bash`, heredocs, `bash -s`) and `-c "$(...)"` payloads are treated as merge-class (fail closed).
+// 7. [Contract]: Tokenizer handles heredocs (<<, <<-, quoted/unquoted delimiters; unquoted bodies' $( ) are analyzed),
+//    # comments, $'..' ANSI-C (escapes decoded), $"..", quoted vs unquoted < > (only unquoted ones are redirections).
+//    git state is read via gitQuery(): ok=false (budget/spawn-cap/timeout/not-a-repo) is UNKNOWN and always guards;
+//    at most MAX_GIT_SPAWNS git processes per call. `--json` mode (+ MERGE_GUARD_CWD) is how the Claude HTTP hook
+//    runs classification in a child process so git never blocks the sidecar event loop.
 // 6. [Pattern]: MCP tools are classified by NAME TOKENS (camelCase + snake_case split), so `mergePullRequest`,
 //    `merge_pull_request` and `glab_mr_merge` all yield the verb `merge`; `merge_request` (the noun) does not.
 //    The read-only allowlist is verb-based -- extend READ/SAFE sets here, or set HOOK_EXTRA_ALLOWED_TOOLS in
 //    validate-mutations.sh's env, rather than loosening the shell wrapper.
 'use strict';
-const { execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 const PROTECTED = new Set(['main', 'master']);
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash']);
@@ -33,32 +38,33 @@ const MAX_DEPTH = 4;
 // ---------------------------------------------------------------------------------------------
 // Shell tokenizer
 // ---------------------------------------------------------------------------------------------
-// Quote- and nesting-aware: returns the index just past the ')' matching the '(' before `start`.
-// A ')' inside '...' / "..." or escaped must not close the substitution (otherwise the remainder of the
-// command is re-parsed with the wrong quote state and a trailing `git merge` hides inside a "token").
-function matchParen(str, start) {
-  const n = str.length;
-  let depth = 1;
-  let j = start;
-  while (j < n && depth > 0) {
-    const c = str[j];
-    if (c === '\\') { j += 2; continue; }
-    if (c === "'") { const k = str.indexOf("'", j + 1); j = k === -1 ? n : k + 1; continue; }
-    if (c === '"') {
-      j++;
-      while (j < n && str[j] !== '"') {
-        if (str[j] === '\\') { j += 2; continue; }
-        if (str[j] === '$' && str[j + 1] === '(') { j = matchParen(str, j + 2); continue; }
-        j++;
-      }
-      j++; continue;
+// Decode the body of an ANSI-C quoted string $'...' (\xHH, \NNN, \uHHHH, \n ...): `git $'m\x65rge'` IS `git merge`.
+function decodeAnsiC(s) {
+  const simple = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c !== '\\' || i + 1 >= s.length) { out += c; continue; }
+    const d = s[++i];
+    if (Object.prototype.hasOwnProperty.call(simple, d)) { out += simple[d]; continue; }
+    let m;
+    if (d === 'x' && (m = /^[0-9a-fA-F]{1,2}/.exec(s.slice(i + 1)))) { out += String.fromCharCode(parseInt(m[0], 16)); i += m[0].length; continue; }
+    if ((d === 'u' || d === 'U') && (m = new RegExp(`^[0-9a-fA-F]{1,${d === 'u' ? 4 : 8}}`).exec(s.slice(i + 1)))) {
+      try { out += String.fromCodePoint(parseInt(m[0], 16)); } catch { /* invalid code point */ }
+      i += m[0].length; continue;
     }
-    if (c === '$' && str[j + 1] === '(') { depth++; j += 2; continue; }
-    if (c === '(') depth++;
-    else if (c === ')') depth--;
-    j++;
+    if (/[0-7]/.test(d) && (m = /^[0-7]{1,3}/.exec(s.slice(i)))) { out += String.fromCharCode(parseInt(m[0], 8) & 0xff); i += m[0].length - 1; continue; }
+    if (d === 'c' && i + 1 < s.length) { out += String.fromCharCode(s[++i].charCodeAt(0) & 0x1f); continue; }
+    out += `\\${d}`;
   }
-  return j; // == n (unterminated) or index after ')'
+  return out;
+}
+// Index just past the closing quote of an ANSI-C string whose body starts at `start` (\' is an escaped quote).
+function scanAnsiC(str, start) {
+  let j = start;
+  while (j < str.length && str[j] !== "'") j += str[j] === '\\' ? 2 : 1;
+  const end = Math.min(j, str.length);
+  return { text: decodeAnsiC(str.slice(start, end)), end: Math.min(end + 1, str.length) };
 }
 
 // Index of the closing backtick (honouring \` escapes), or n if unterminated.
@@ -68,16 +74,72 @@ function matchBacktick(str, start) {
   return Math.min(j, str.length);
 }
 
-// Returns { cmds: string[][], nested: string[] }. `nested` holds the bodies of $(...), `...`, <(...), >(...)
-// so they can be analyzed as commands of their own.
+const isWordStart = (str, j, lo) => j === lo || /[\s;&|()]/.test(str[j - 1]);
+
+// Quote-, comment- and nesting-aware: returns the index just past the ')' matching the '(' before `start`.
+// Quotes ('..', "..", $'..'), backticks, ${..}, `# comments` and nested $( ) must not close the substitution early;
+// otherwise the remainder of the command is re-parsed with the wrong state and a trailing `git merge` hides.
+function matchParen(str, start) {
+  const n = str.length;
+  let depth = 1;
+  let j = start;
+  while (j < n && depth > 0) {
+    const c = str[j];
+    if (c === '\\') { j += 2; continue; }
+    if (c === "'") { const k = str.indexOf("'", j + 1); j = k === -1 ? n : k + 1; continue; }
+    if (c === '$' && str[j + 1] === "'") { j = scanAnsiC(str, j + 2).end; continue; }
+    if (c === '"') {
+      j++;
+      while (j < n && str[j] !== '"') {
+        if (str[j] === '\\') { j += 2; continue; }
+        if (str[j] === '$' && str[j + 1] === '(') { j = matchParen(str, j + 2); continue; }
+        if (str[j] === '`') { j = matchBacktick(str, j + 1) + 1; continue; }
+        j++;
+      }
+      j++; continue;
+    }
+    if (c === '`') { j = matchBacktick(str, j + 1) + 1; continue; }
+    if (c === '$' && str[j + 1] === '{') { const k = str.indexOf('}', j + 2); j = k === -1 ? n : k + 1; continue; }
+    if (c === '#' && isWordStart(str, j, start)) { const k = str.indexOf('\n', j); j = k === -1 ? n : k; continue; }
+    if (c === '$' && str[j + 1] === '(') { depth++; j += 2; continue; }
+    if (c === '(') depth++;
+    else if (c === ')') depth--;
+    j++;
+  }
+  return j; // == n (unterminated) or index after ')'
+}
+
+// Collect $( ) / backtick substitutions that an UNQUOTED heredoc body would execute.
+function bodySubstitutions(body, nested) {
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '\\') { i++; continue; }
+    if (body[i] === '$' && body[i + 1] === '(') {
+      const end = matchParen(body, i + 2);
+      nested.push(body.slice(i + 2, Math.max(i + 2, end - 1)));
+      i = end - 1;
+    } else if (body[i] === '`') {
+      const end = matchBacktick(body, i + 1);
+      nested.push(body.slice(i + 1, end));
+      i = end;
+    }
+  }
+}
+
+// Returns { cmds: {t: string[], f: boolean[]}[], nested: string[] }. `f[k]` marks token k as a redirection operator
+// (built from an UNQUOTED < or >, so a quoted '>' argument is never mistaken for one). `nested` holds the bodies of
+// $(...), `...`, <(...), >(...) and of command substitutions inside unquoted heredocs, to be analyzed as commands.
 function parseShell(str) {
   const cmds = [];
   const nested = [];
+  const pending = []; // heredocs whose bodies start after the next newline
   let tokens = [];
+  let flags = [];
   let cur = '';
   let has = false; // a token is in progress (so '' counts as a token)
-  const pushTok = () => { if (has) { tokens.push(cur); } cur = ''; has = false; };
-  const pushCmd = () => { pushTok(); if (tokens.length) cmds.push(tokens); tokens = []; };
+  let curRedir = false;
+  let redirTail = false; // previous char appended was an unquoted < or >
+  const pushTok = () => { if (has) { tokens.push(cur); flags.push(curRedir); } cur = ''; has = false; curRedir = false; };
+  const pushCmd = () => { pushTok(); if (tokens.length) cmds.push({ t: tokens, f: flags }); tokens = []; flags = []; };
   const n = str.length;
   let i = 0;
 
@@ -95,9 +157,26 @@ function parseShell(str) {
     nested.push(str.slice(start, end));
     return end + 1;
   };
+  const readHeredocBodies = () => {
+    for (const hd of pending) {
+      const body = [];
+      while (i < n) {
+        let e = str.indexOf('\n', i);
+        if (e === -1) e = n;
+        const line = str.slice(i, e);
+        i = Math.min(e + 1, n);
+        if ((hd.strip ? line.replace(/^\t+/, '') : line) === hd.delim) break;
+        body.push(line);
+      }
+      if (!hd.quoted) bodySubstitutions(body.join('\n'), nested);
+    }
+    pending.length = 0;
+  };
 
   while (i < n) {
     const c = str[i];
+    const prevRedir = redirTail;
+    redirTail = false;
     if (c === '\\') {
       if (str[i + 1] === '\n') { i += 2; continue; }
       cur += str[i + 1] ?? ''; has = true; i += 2; continue;
@@ -107,6 +186,8 @@ function parseShell(str) {
       const end = j === -1 ? n : j;
       cur += str.slice(i + 1, end); has = true; i = end + 1; continue;
     }
+    if (c === '$' && str[i + 1] === "'") { const r = scanAnsiC(str, i + 2); cur += r.text; has = true; i = r.end; continue; }
+    if (c === '$' && str[i + 1] === '"') { i++; continue; } // $"..." locale quoting: same as "..."
     if (c === '"') {
       i++; has = true;
       while (i < n && str[i] !== '"') {
@@ -120,26 +201,55 @@ function parseShell(str) {
     if (c === '$' && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; has = true; continue; }
     if ((c === '<' || c === '>') && str[i + 1] === '(') { i = grabParen(i + 2); cur += '$SUBST'; has = true; continue; }
     if (c === '`') { i = grabTick(i + 1); cur += '$SUBST'; has = true; continue; }
+    if (c === '#' && !has) { const e = str.indexOf('\n', i); i = e === -1 ? n : e; continue; } // comment to end of line
+    if (c === '<' && str[i + 1] === '<' && str[i + 2] !== '<') { // heredoc: <<WORD / <<-WORD / <<'WORD'
+      if (/^\d+$/.test(cur)) { cur = ''; has = false; } // fd prefix (3<<EOF)
+      pushTok();
+      let j = i + 2;
+      const strip = str[j] === '-';
+      if (strip) j++;
+      while (str[j] === ' ' || str[j] === '\t') j++;
+      let delim = '';
+      let quoted = false;
+      while (j < n && !/[\s;&|()<>]/.test(str[j])) {
+        const ch = str[j];
+        if (ch === "'" || ch === '"') {
+          quoted = true;
+          const k = str.indexOf(ch, j + 1);
+          const e = k === -1 ? n : k;
+          delim += str.slice(j + 1, e); j = e + 1; continue;
+        }
+        if (ch === '\\') { quoted = true; delim += str[j + 1] ?? ''; j += 2; continue; }
+        delim += ch; j++;
+      }
+      pending.push({ delim, strip, quoted });
+      i = j; continue;
+    }
     if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') {
-      // `>&` / `2>&1` / `&>` are redirections, not command separators
-      if (c === '&' && (/[<>]$/.test(cur) || str[i + 1] === '>')) { cur += c; has = true; i++; continue; }
-      pushCmd(); i++; continue;
+      // `>&` / `2>&1` / `&>` are redirections, not command separators. Only an UNQUOTED < or > counts, so
+      // `echo ">" & git merge` still splits at the '&'.
+      if (c === '&' && (prevRedir || str[i + 1] === '>')) { cur += c; has = true; i++; continue; }
+      pushCmd(); i++;
+      if (c === '\n' && pending.length) readHeredocBodies();
+      continue;
     }
     if (c === ' ' || c === '\t' || c === '\r') { pushTok(); i++; continue; }
+    if ((c === '<' || c === '>') && (!has || /^\d*$/.test(cur) || cur === '&')) curRedir = true;
+    if (c === '<' || c === '>') redirTail = true;
     cur += c; has = true; i++;
   }
   pushCmd();
 
-  // Drop redirections (`> file`, `2>/dev/null`, `<<EOF`) so they don't pollute positional parsing.
-  const cleaned = cmds.map((toks) => {
+  // Drop redirections (`> file`, `2>/dev/null`, `<<<`) so they don't pollute positional parsing. A bare operator
+  // token consumes the next token (its target). Quoted '>' arguments are NOT flagged and are kept.
+  const cleaned = cmds.map(({ t, f }) => {
     const out = [];
-    for (let k = 0; k < toks.length; k++) {
-      const t = toks[k];
-      if (/^\d*(>>?|<<?<?|>&|<&|&>>?)/.test(t)) {
-        if (/^\d*(>>?|<<?<?|>&|<&|&>>?)$/.test(t)) k++; // bare operator: next token is its target
+    for (let k = 0; k < t.length; k++) {
+      if (f[k]) {
+        if (/^\d*(>>?|<<?<?|>&|<&|&>>?)$/.test(t[k])) k++;
         continue;
       }
-      out.push(t);
+      out.push(t[k]);
     }
     return out;
   }).filter((t) => t.length);
@@ -198,38 +308,49 @@ function stripPrefix(tokens) {
 // ---------------------------------------------------------------------------------------------
 // git / gh / glab / http-client analysis
 // ---------------------------------------------------------------------------------------------
-// Per-invocation context. cwd: directory of the agent's repo (Claude HTTP hook passes the payload cwd; the
-// agy command hook inherits it). deadline: absolute ms; once passed, git lookups return null => fail closed.
-const CTX = { cwd: undefined, deadline: Infinity };
+// Per-invocation context. cwd: directory of the agent's repo (the agy command hook inherits it; the Claude HTTP
+// hook runs this file as a child process with MERGE_GUARD_CWD). deadline: absolute ms. spawns: git processes
+// started so far. Once the deadline passed or the spawn cap is hit, git lookups report "unknown" => fail closed.
+const CTX = { cwd: undefined, deadline: Infinity, spawns: 0, aliasCache: new Map() };
 const GIT_TIMEOUT_MS = 500;
-function gitOut(args) {
-  if (Date.now() >= CTX.deadline) return null;
-  try {
-    return execFileSync('git', args, {
-      encoding: 'utf8', timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', cwd: CTX.cwd, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch { return null; }
+const MAX_GIT_SPAWNS = 8;
+
+// Run a read-only git query. ok=false means the answer is UNKNOWN (budget/cap/timeout/spawn error/not a repo) and
+// callers must treat that as "guarded". ok=true with out==='' means the key/match is genuinely absent (exit 1).
+function gitQuery(args) {
+  if (Date.now() >= CTX.deadline || CTX.spawns >= MAX_GIT_SPAWNS) return { ok: false, out: '' };
+  CTX.spawns++;
+  const r = spawnSync('git', args, {
+    encoding: 'utf8', timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL', cwd: CTX.cwd, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (r.error || r.signal) return { ok: false, out: '' };
+  const out = String(r.stdout || '').trim();
+  if (r.status === 0) return { ok: true, out };
+  if (r.status === 1 && !out) return { ok: true, out: '' }; // `git config --get` / --get-regexp: no such key
+  return { ok: false, out: '' };
 }
 
-const normRef = (r) => r.trim().replace(/^\+/, '').replace(/^refs\/heads\//, '').toLowerCase();
+// `heads/main`, `refs/heads/main`, `+main` all name the same branch.
+const normRef = (r) => r.trim().replace(/^\+/, '').replace(/^(refs\/)?heads\//, '').toLowerCase();
 const isProtected = (r) => PROTECTED.has(normRef(r));
 
 function bareBranchProtected(hasDirOverride) {
   if (hasDirOverride) return true; // -C/--git-dir: cwd's repo state is not the target's
-  const br = gitOut(['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (br === null || br === 'HEAD' || isProtected(br)) return true; // unknown/detached => fail closed
-  const pd = (gitOut(['config', '--get', 'push.default']) || 'simple').toLowerCase();
+  const head = gitQuery(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!head.ok || head.out === 'HEAD' || isProtected(head.out)) return true; // unknown/detached/main => guarded
+  const pdq = gitQuery(['config', '--get', 'push.default']);
+  if (!pdq.ok) return true;
+  const pd = (pdq.out || 'simple').toLowerCase();
   if (pd === 'matching') return true;
   if (pd === 'upstream' || pd === 'tracking') {
-    const m = gitOut(['config', '--get', `branch.${br}.merge`]);
-    if (!m || isProtected(m)) return true;
+    const m = gitQuery(['config', '--get', `branch.${head.out}.merge`]);
+    if (!m.ok || !m.out || isProtected(m.out)) return true;
   }
-  const rp = gitOut(['config', '--get-regexp', '^remote\\..*\\.push$']);
-  if (rp) {
-    for (const line of rp.split('\n')) {
-      // HEAD-style values resolve to the current branch, already checked above
-      if (refspecNamesProtected(line.split(/\s+/).slice(1).join(' '))) return true;
-    }
+  const rp = gitQuery(['config', '--get-regexp', '^remote\\..*\\.push$']);
+  if (!rp.ok) return true;
+  for (const line of rp.out ? rp.out.split('\n') : []) {
+    // HEAD-style values resolve to the current branch, already checked above
+    if (refspecNamesProtected(line.split(/\s+/).slice(1).join(' '))) return true;
   }
   return false;
 }
@@ -277,7 +398,10 @@ const GIT_BUILTINS = new Set(['status', 'log', 'diff', 'commit', 'add', 'checkou
   'clone', 'rev-parse', 'show', 'config', 'remote', 'stash', 'rebase', 'reset', 'tag', 'cherry-pick', 'blame', 'grep',
   'ls-files', 'ls-tree', 'describe', 'cat-file', 'worktree', 'apply', 'am', 'restore', 'mv', 'rm', 'clean', 'init',
   'submodule', 'bisect', 'reflog', 'shortlog', 'format-patch', 'merge-base', 'rev-list', 'symbolic-ref',
-  'for-each-ref', 'show-ref', 'diff-tree', 'update-ref', 'version', 'help', 'archive', 'gc', 'fsck', 'notes', 'bundle']);
+  'for-each-ref', 'show-ref', 'diff-tree', 'update-ref', 'version', 'help', 'archive', 'gc', 'fsck', 'notes', 'bundle',
+  'ls-remote', 'cherry', 'count-objects', 'name-rev', 'merge-tree', 'diff-index', 'diff-files', 'write-tree', 'read-tree',
+  'commit-tree', 'mktree', 'hash-object', 'verify-commit', 'verify-tag', 'stripspace', 'check-ignore', 'sparse-checkout',
+  'maintenance', 'range-diff', 'whatchanged', 'revert', 'difftool', 'request-pull', 'prune', 'repack', 'pack-refs']);
 
 function gitGuard(args, depth) {
   let i = 0;
@@ -299,11 +423,18 @@ function gitGuard(args, depth) {
   if (DYN.test(sub)) return true; // git $SUB / ${X} / m{er,}ge / mer*: dynamic subcommand
   if (sub === 'merge') return true;
   if (sub === 'push') return pushGuard(rest, dirOverride);
-  if (sub && !GIT_BUILTINS.has(sub) && depth < MAX_DEPTH) {
-    const alias = gitOut(['config', '--get', `alias.${args[i]}`]);
-    if (alias) {
-      if (alias.startsWith('!')) return analyzeString(alias.slice(1) + ' ' + rest.join(' '), depth + 1, true);
-      return gitGuard(parseShell(alias).cmds.flat().concat(rest), depth + 1);
+  if (sub && !GIT_BUILTINS.has(sub)) {
+    if (depth >= MAX_DEPTH) return true; // alias chain too deep to follow => guarded
+    let alias = CTX.aliasCache.get(args[i]);
+    if (alias === undefined) {
+      alias = gitQuery(['config', '--get', `alias.${args[i]}`]);
+      CTX.aliasCache.set(args[i], alias);
+    }
+    // Unknown (budget/cap/timeout/not a repo) must NOT read as "no alias": that would fail open.
+    if (!alias.ok) return true;
+    if (alias.out) {
+      if (alias.out.startsWith('!')) return analyzeString(alias.out.slice(1) + ' ' + rest.join(' '), depth + 1, true);
+      return gitGuard(parseShell(alias.out).cmds.flat().concat(rest), depth + 1);
     }
   }
   return false;
@@ -311,7 +442,7 @@ function gitGuard(args, depth) {
 
 // Positional tokens of gh/glab, skipping the values of flags that take one.
 const API_VALUED = new Set(['-R', '--repo', '--hostname', '-H', '--header', '-X', '--method', '-f', '--raw-field', '-F',
-  '--field', '--input', '-q', '--jq', '-t', '--template', '--cache', '-p', '--preview', '-b', '--branch', '--hostname']);
+  '--field', '--input', '-q', '--jq', '-t', '--template', '--cache', '-p', '--preview', '-b', '--branch']);
 function positionals(args) {
   const out = [];
   for (let i = 0; i < args.length; i++) {
@@ -323,18 +454,44 @@ function positionals(args) {
 }
 const hasSubseq = (arr, seq) => { let k = 0; for (const x of arr) { if (x.toLowerCase() === seq[k]) k++; if (k === seq.length) return true; } return false; };
 
+// Endpoints/mutations that merge or rewrite a branch regardless of which branch the body names.
 const MERGE_ENDPOINT_RE = new RegExp([
   '\\/merges?(?![A-Za-z0-9_-])', '\\/merge-upstream', 'merge_when_pipeline_succeeds', 'mergePullRequest',
-  'enablePullRequestAutoMerge', 'mergeBranch', 'merge_pull_request', '\\/auto[-_]?merge', 'git\\/refs\\/heads\\/(main|master)(?![A-Za-z0-9_-])',
+  'enablePullRequestAutoMerge', 'mergeBranch', 'merge_pull_request', '\\/auto[-_]?merge', 'createCommitOnBranch', 'updateRef',
 ].join('|'), 'i');
+// Direct writes to the default branch's ref / branch resource.
+const REFS_MAIN_RE = /refs\/heads\/(main|master)(?![\w.-])|\/git\/refs\/(heads\/)?(main|master)(?![\w.-])|\/branches\/(main|master)(?![\w.-])/i;
+// Contents/commit APIs write to the DEFAULT branch unless a non-default `branch` is given.
+const CONTENTS_RE = /\/contents\/|\/repository\/files\/|\/repository\/commits(?![\w-])/i;
+function branchValues(text) {
+  const out = [];
+  const re = /\bbranch(?:Name)?["']?\s*[:=]\s*["']?([^"'&\s,}]+)/gi;
+  let m;
+  while ((m = re.exec(text))) out.push(m[1]);
+  return out;
+}
+// text = URL + body/fields of a NON-GET API call (shell curl/wget/gh api/glab api and the glab_api MCP tool).
+function apiWriteNeedsGuard(text) {
+  if (MERGE_ENDPOINT_RE.test(text) || REFS_MAIN_RE.test(text)) return true;
+  if (CONTENTS_RE.test(text)) {
+    const b = branchValues(text);
+    return !(b.length && b.every((v) => !isProtected(v)));
+  }
+  return false;
+}
 
 const BODY_FLAG = {
   curl: /^(-d|--data|--data-[a-z]+|--json|-F|--form|--form-string|-T|--upload-file)(=.*)?$|^-[dFT]./,
   wget: /^--(post-data|post-file|body-data|body-file)(=.*)?$/,
   api: /^(-f|-F|--field|--raw-field|--input)(=.*)?$|^-[fF]./,
 };
+// Flags whose NEXT token is a value, not the request target (used to find the URL/endpoint candidates).
+const HTTP_VALUED = new Set(['-H', '--header', '-d', '--data', '--data-raw', '--data-binary', '--data-urlencode', '-X', '--request',
+  '--method', '-o', '--output', '-u', '--user', '-F', '--form', '--form-string', '-T', '--upload-file', '-A', '--user-agent', '-e',
+  '--referer', '-b', '--cookie', '-c', '--cookie-jar', '-w', '--write-out', '-m', '--max-time', '--connect-timeout', '--json',
+  '-O', '-U', '--post-data', '--post-file', '--body-data', '--body-file', '--password', '--proxy', '-x', ...API_VALUED]);
 
-// Non-GET request whose URL/body references a merge endpoint (or default-branch ref update).
+// Request method of an http-client invocation: explicit flag (incl. attached -XPUT for curl, gh and glab) or implied by body flags.
 function httpMethod(bin, args) {
   let method = null;
   let body = false;
@@ -358,7 +515,7 @@ function httpMethod(bin, args) {
     }
     if (a === '-X' || a === '--request' || a === '--method') { method = (args[i + 1] || '').toUpperCase(); i++; continue; }
     if (/^--(request|method)=/.test(a)) { method = a.split('=')[1].toUpperCase(); continue; }
-    if (bin === 'curl' && /^-X./.test(a)) { method = a.slice(2).toUpperCase(); continue; }
+    if ((bin === 'curl' || kind === 'api') && /^-X./.test(a)) { method = a.slice(2).toUpperCase().replace(/^=/, ''); continue; } // -XPUT (curl, gh api, glab api)
     if (bin === 'curl' && (a === '-G' || a === '--get')) getFlag = true;
     if (kind && BODY_FLAG[kind].test(a)) body = true;
     if (!kind && /^[A-Za-z0-9_.-]+(=|:=|=@|@)/.test(a) && !/[:/]\/|^\//.test(a)) body = true; // httpie items
@@ -368,9 +525,19 @@ function httpMethod(bin, args) {
 }
 const isReadMethod = (m) => m === 'GET' || m === 'HEAD' || m === 'OPTIONS';
 
+// A request target that is ENTIRELY runtime-determined ($URL) cannot be checked against the endpoint lists.
+function hasOpaqueTarget(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('-')) { if (HTTP_VALUED.has(a)) i++; continue; }
+    if (DYN.test(a) && !a.includes('/') && !a.includes('=')) return true;
+  }
+  return false;
+}
+
 function httpGuard(bin, args) {
   if (isReadMethod(httpMethod(bin, args))) return false;
-  return MERGE_ENDPOINT_RE.test(args.join(' '));
+  return apiWriteNeedsGuard(args.join(' ')) || hasOpaqueTarget(args);
 }
 
 function analyzeTokens(tokens, depth, strict) {
@@ -405,7 +572,9 @@ function analyzeTokens(tokens, depth, strict) {
   if (bin === 'git') return gitGuard(rest, depth);
   if (bin === 'gh' || bin === 'glab') {
     const pos = positionals(rest);
-    if (pos.slice(0, 3).some((x) => DYN.test(x))) return true; // gh $GRP $ACT: dynamic command path
+    // Only the command path (group/action) being dynamic is suspicious (`gh pr $ACT 5`); a dynamic ID/arg in a
+    // read-style call (`gh pr view "$PR"`, `glab mr list --label "$L"`) is not.
+    if (pos.slice(0, 2).some((x) => DYN.test(x))) return true;
     if (hasSubseq(pos, bin === 'gh' ? ['pr', 'merge'] : ['mr', 'merge'])) return true;
     if (pos[0] && pos[0].toLowerCase() === 'api') return httpGuard(bin, rest);
     return false;
@@ -442,6 +611,10 @@ const WRITE = new Set(['create', 'update', 'write', 'set', 'add', 'run', 'sync',
   'approve', 'upload', 'login', 'bootstrap', 'import', 'edit', 'save', 'amend', 'rebase', 'subscribe', 'unsubscribe', 'send',
   'execute', 'exec', 'start', 'stop', 'apply', 'patch', 'scale', 'rollback', 'promote', 'deploy', 'put', 'post', 'commit', 'upsert', 'submit']);
 const FAMILY_TOKENS = new Set(['team', 'bb', 'svc', 'ka']); // comms / blackboard / journal / kubearchive MCPs
+// Tokens allowed after `browser_` for read-only roles (snapshot, take_screenshot, console_messages, network_requests,
+// network_request, find, tabs, wait_for, navigate, navigate_back, resize, hover, click, close).
+const BROWSER_READ = new Set(['snapshot', 'take', 'screenshot', 'console', 'messages', 'network', 'requests', 'request', 'find',
+  'tabs', 'wait', 'for', 'navigate', 'back', 'resize', 'hover', 'click', 'close']);
 const NATIVE_ALLOW = new Set(['task_boundary', 'notify_user', 'browser_subagent']);
 // Native file-mutation tools: handled by validate-mutations.sh MUTATION_TOOLS (keep the two lists in sync).
 const NATIVE_MUTATION = new Set(['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'edit_file']);
@@ -489,20 +662,22 @@ function classifyTool(name, args) {
   }
   // remote file/commit writes: default branch (or unspecified branch) needs approval
   const writeish = [...set].some((t) => WRITE.has(t) || t === 'delete');
-  const isFileWrite = !readFirst && (set.has('push')
+  const isFileWrite = !readFirst && verb !== 'browser' && (set.has('push')
     || ((set.has('file') || set.has('files') || set.has('contents') || set.has('commit') || set.has('commits')) && writeish));
   if (isFileWrite) {
     const br = a.branch ?? a.ref ?? a.target_branch ?? a.base_branch;
     if (typeof br !== 'string' || !br.trim() || isProtected(br)) guard = true;
   }
   // generic API tool (glab_api): non-GET against a merge endpoint
-  const isApi = set.has('api');
+  // Only a tool that IS the generic API caller (glab_api / gh_api / api) -- not any name that merely contains `api`
+  // (create_api_key, get_api_docs): those go through the normal verb logic below.
+  const isApi = tokens.filter((t) => !PREFIX_TOKENS.has(t)).join('_') === 'api';
   let apiRead = false;
   if (isApi) {
     const toks = apiTokens(args);
     const m = httpMethod('glab', toks);
     apiRead = isReadMethod(m);
-    if (!apiRead && MERGE_ENDPOINT_RE.test(toks.join(' '))) guard = true;
+    if (!apiRead && (apiWriteNeedsGuard(toks.join(' ')) || hasOpaqueTarget(toks))) guard = true;
   }
 
   // Action tokens: server-name prefixes dropped, and `merge` dropped when it is only the noun
@@ -518,7 +693,9 @@ function classifyTool(name, args) {
     else if (isApi) readok = apiRead;
     else if (act.some((t) => HARD_WRITE.has(t))) readok = false;
     else if (family) readok = true;
-    else if (verb === 'browser') readok = !['run', 'unsafe', 'upload', 'drop'].some((t) => set.has(t));
+    // Playwright: observation + navigation only. Anything that evaluates JS, types/fills/uploads/drags, or presses
+    // keys can submit forms or act on logged-in pages, so read-only roles don't get it.
+    else if (verb === 'browser') readok = tokens.slice(tokens.indexOf('browser') + 1).every((t) => BROWSER_READ.has(t));
     else if (act.some((t) => SAFE_TOKENS.has(t))) readok = true;
     // read-verb-first tools (get_commit, get_workflow_run, list_*) may carry write-ish nouns (commit, run)
     else if (!readFirst && act.some((t) => WRITE.has(t))) readok = false;
@@ -550,6 +727,8 @@ const SHELL_TOOLS = new Set(['bash', 'shell', 'run_in_terminal', 'execute_comman
 // Returns null if malformed, else { name, guard, readok, cmd, isShell }.
 function classify(d, opts = {}) {
   CTX.cwd = opts.cwd || undefined;
+  CTX.spawns = 0;
+  CTX.aliasCache = new Map();
   CTX.deadline = Date.now() + (opts.budgetMs || 1500);
   if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
   let name = d.toolCall?.name || d.tool_name || d.functionCall?.name || '';
@@ -572,7 +751,18 @@ function main(raw) {
 }
 
 if (require.main === module) {
-  if (process.argv[2] === '--verdict') {
+  if (process.argv[2] === '--json') {
+    // node merge-guard.js --json < payload  =>  JSON classify() result, or `null` if malformed.
+    // MERGE_GUARD_CWD: directory git lookups must run in (the Claude HTTP hook runs us as a child process so the
+    // sidecar's event loop never blocks on git).
+    let raw = '';
+    process.stdin.on('data', (c) => { raw += c; });
+    process.stdin.on('end', () => {
+      let out = 'null';
+      try { out = JSON.stringify(classify(JSON.parse(raw), { cwd: process.env.MERGE_GUARD_CWD || undefined, budgetMs: 1500 })); } catch { out = 'null'; }
+      process.stdout.write(out);
+    });
+  } else if (process.argv[2] === '--verdict') {
     // node merge-guard.js --verdict -- <approval-json> <local-sha>  =>  ALLOW||| | BLOCK|||<reason>
     const [, , , , rawApproval, sha] = process.argv;
     let approval = null;

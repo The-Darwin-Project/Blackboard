@@ -12,8 +12,10 @@
 // 9. [Pattern]: options.model/effort/role override env (AGENT_MODEL/AGENT_EFFORT_LEVEL/AGENT_ROLE) at the per-task level.
 //    Stored on state.getCurrentTask() (model/role) so resolveResult -> requestFindings can read them without threading
 //    extra params through the whole call chain -- mirrors the existing sessionId bridging pattern.
-// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
-//     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
+// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code permissions.deny).
+//     Read-only roles explorer/architect/security_analyst share readonly-role-permissions.json, and any other
+//     read-only-looking role name falls back to it via settingsFileForRole. CLAUDE_SETTINGS_DIR overrides
+//     /app/claude-settings (tests). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
 //     here (not a hardcoded role check) when a future role needs its own permission boundary.
 // 11. [Pattern]: executeCLI and executeCLIStreaming share getRetryOptions() for the agy session retry and the
 //     invalid-model fallback -- change the triggers THERE, never inline. Both are one-shot (flag-bounded), agy-only /
@@ -49,9 +51,25 @@ function resolveModel(options, agentCli) {
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
 // Only roles listed here get --settings; all other roles are unaffected.
+const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || '/app/claude-settings';
+const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
 const ROLE_SETTINGS_FILE = {
-    code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+    code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
+    // Read-only roles on the Claude path (the agy path enforces these via --mode plan + validate-mutations.sh).
+    // Claude has no mutation hook, so without a deny file these roles ran with --dangerously-skip-permissions.
+    explorer: READONLY_SETTINGS_FILE,
+    architect: READONLY_SETTINGS_FILE,
+    security_analyst: READONLY_SETTINGS_FILE,
 };
+
+// Same name heuristics the agy path uses: an unlisted-but-read-only-looking role (qa_reviewer_agent,
+// ARCHITECT_LEAD, security-analyst) must not silently fall through to an unrestricted Claude session.
+function isReadOnlyRoleName(role) {
+    return AGY_READ_ONLY_ROLES.has(role) || /review|analyst|explorer|architect/.test(role);
+}
+function settingsFileForRole(role) {
+    return ROLE_SETTINGS_FILE[role] || (isReadOnlyRoleName(role) ? READONLY_SETTINGS_FILE : undefined);
+}
 
 // Roles that must never run with write/approve-all permissions on the agy path. agy runs
 // `--mode plan` backed by ~/.gemini/config/hooks.json (validate-mutations.sh) as defense-in-depth.
@@ -110,11 +128,7 @@ function buildCLICommand(prompt, options = {}) {
 
         // Read-only roles or plan mode run under --mode plan, and plan always wins over
         // autoApprove: a read-only role must never get --dangerously-skip-permissions.
-        const isReadOnlyRole = AGY_READ_ONLY_ROLES.has(effectiveRole) ||
-            effectiveRole.includes('review') ||
-            effectiveRole.includes('analyst') ||
-            effectiveRole.includes('explorer') ||
-            effectiveRole.includes('architect');
+        const isReadOnlyRole = isReadOnlyRoleName(effectiveRole);
 
         const isKnownMutatingRole = AGY_MUTATING_ROLES.has(effectiveRole);
 
@@ -154,7 +168,7 @@ function buildCLICommand(prompt, options = {}) {
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const settingsFile = ROLE_SETTINGS_FILE[effectiveRole];
+        const settingsFile = settingsFileForRole(effectiveRole);
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
