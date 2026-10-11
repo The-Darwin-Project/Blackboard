@@ -29,8 +29,11 @@
 #     frozenset. Degrades gracefully via getattr when _skill_loader is unavailable.
 # 13b. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
-# 14. [Pattern]: Session resumption: _resumption_handle captured from
-#     session_resumption_update. NOT YET wired to LiveConnectConfig (Probe 2 pending).
+# 14. [Pattern]: Session resumption: _resumption_handle captured from session_resumption_update and
+#     passed to LiveConnectConfig. _connect() discards it only after _HANDLE_FAILURE_LIMIT consecutive
+#     connect failures (then retries fresh); one transient error keeps it. Context replay is owned by
+#     _try_reconnect (not _connect). A session that opens but fails later in _connect is closed
+#     via _abort_partial_connect before any retry.
 # 15. [Gotcha]: Handoff collection happens INSIDE _receive_loop. Do NOT
 #     cancel _receive_task during handoff — use flag-based accumulation.
 # 16. [Pattern]: Prompt constants live in agents/jarvis_instructions.py (extracted for
@@ -98,6 +101,7 @@ SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
+_HANDLE_FAILURE_LIMIT = 2  # consecutive connect failures with a resumption handle before presuming it stale
 _OPERATOR_PHASES = frozenset({"always", "dispatch", "post-agent", "source", "escalate", "close"})
 
 # SI attention pointers: map JARVIS tool/input channels to the relevant
@@ -176,6 +180,7 @@ class LiveAPIAdapter:
         self._collecting_handoff = False
         self._handoff_buffer: list[str] = []
         self._resumption_handle: str | None = None
+        self._handle_connect_failures = 0
         self._last_audit_sent: dict[str, float] = {}
         self._rag_corpus_id = os.getenv("JARVIS_RAG_CORPUS_ID", "")
         self._rag_enabled = os.getenv("JARVIS_RAG_ENABLED", "false").lower() == "true"
@@ -222,6 +227,7 @@ class LiveAPIAdapter:
             )
 
         for attempt in range(2):
+            session_opened = False
             try:
                 kwargs = {
                     "response_modalities": [types.Modality.TEXT],
@@ -247,10 +253,8 @@ class LiveAPIAdapter:
                     config=config,
                 )
                 self._session = await self._session_ctx.__aenter__()
+                session_opened = True
                 self._running = True
-
-                if attempt == 1 and self._last_pulse_event_id:
-                    await self._replay_pending_context()
 
                 if self._receive_task and not self._receive_task.done() and self._receive_task is not asyncio.current_task():
                     logger.debug("Cortex _connect: cancelling stale receive_task")
@@ -275,15 +279,40 @@ class LiveAPIAdapter:
                     "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                     self._model, self._shadow, len(self._neuron_labels),
                 )
+                self._handle_connect_failures = 0
                 return
             except Exception as e:
-                if self._resumption_handle and attempt == 0:
-                    logger.warning("Cortex Live API connect failed with handle, retrying fresh: %s", e)
-                    self._resumption_handle = None
-                    continue
+                if session_opened:
+                    await self._abort_partial_connect()
+                if self._resumption_handle:
+                    # A single failure is usually transient (network, quota, backend blip) and the
+                    # handle is still valid. Only presume it stale after consecutive failures, so an
+                    # outage never discards a good handle or doubles request volume on one attempt.
+                    self._handle_connect_failures += 1
+                    if attempt == 0 and self._handle_connect_failures >= _HANDLE_FAILURE_LIMIT:
+                        logger.warning(
+                            "Cortex Live API connect failed %d times with handle, retrying fresh: %s",
+                            self._handle_connect_failures, e,
+                        )
+                        self._resumption_handle = None
+                        self._handle_connect_failures = 0
+                        continue
                 logger.error("Cortex Live API failed to connect: %s", e)
                 self._session = None
                 return
+
+    async def _abort_partial_connect(self) -> None:
+        """Tear down a session that opened but failed later in _connect() so a retry cannot leak it."""
+        ctx, self._session_ctx = self._session_ctx, None
+        self._session = None
+        for task in (self._receive_task, self._idle_watchdog_task):
+            if task and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+        if ctx:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception as e:
+                logger.debug("Cortex partial-connect cleanup failed (non-fatal): %s", e)
 
     async def stop(self) -> None:
         """Graceful shutdown -- called during app teardown."""
@@ -1870,6 +1899,7 @@ class LiveAPIAdapter:
                             for eid in self._brain.pending_jarvis_event_ids():
                                 self._brain.clear_jarvis_wait(eid)
                             logger.info("Cortex reconnect: cleared stale JARVIS wait states")
+                        await self._replay_pending_context()
                         return
                 except Exception as e:
                     logger.warning("Cortex reconnect failed: %s", e)
