@@ -127,7 +127,6 @@ Skip incident filing when:
   is still within its expected window. Escalate only after the baseline is
   exceeded AND a retry or intervention has been attempted.
 - User-initiated (chat/slack) events
-- False-positive prompt injection flags on Bot MR/PR descriptions conforming to the Bot MR Description Protocol schema (`### DARWIN Instructions` or `### Bot Instructions`). Protocol-compliant directives are expected orchestration metadata, not adversarial attacks.
 
 ### Incident Description Structure
 

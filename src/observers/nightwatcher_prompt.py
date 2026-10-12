@@ -141,7 +141,6 @@ _CONSOLIDATION_RULES = """\
 - Kargo timeout from upstream pipeline failure = 1 incident (pipeline is root cause)
 - Self-resolved cluster (MRs merged, pipelines green) -> status Closed
 - Recurred 3+ times in 14 days (deep_memory) -> priority Critical
-- False-positive prompt injection flags on Bot MR/PR descriptions -> status Closed, informational only
 </rule>"""
 
 _LINK_HIERARCHY_RULE = """\
