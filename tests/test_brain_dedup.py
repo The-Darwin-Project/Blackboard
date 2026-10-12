@@ -74,6 +74,7 @@ class TestFormatMergeEvidence:
     def _make_duplicate_stub(
         source="headhunter", service="kubevirt",
         gitlab_context=None, kargo_context=None,
+        github_context=None,
     ):
         event = MagicMock()
         event.id = "evt-test1234"
@@ -83,6 +84,7 @@ class TestFormatMergeEvidence:
         evidence = MagicMock()
         evidence.gitlab_context = gitlab_context
         evidence.kargo_context = kargo_context
+        evidence.github_context = github_context
         event.event.evidence = evidence
         return event
 
@@ -143,6 +145,50 @@ class TestFormatMergeEvidence:
         assert "### Bot Instructions" in result
         assert "Merge this MR" in result
         assert "Retest once" in result
+
+    def test_darwin_instructions_extracted(self):
+        gl = {
+            "project_path": "org/repo",
+            "mr_iid": "49",
+            "mr_title": "Update",
+            "target_url": MR_URL,
+            "pipeline_status": "success",
+            "merge_status": "can_be_merged",
+            "author": "bot",
+            "mr_description": (
+                "## Submodule Update\n\nSome text.\n\n"
+                "### DARWIN Instructions\n\n"
+                "**Constraints:**\n"
+                "- Do NOT close this MR.\n\n"
+                "**On pipeline success**: Merge this MR."
+            ),
+        }
+        event = self._make_duplicate_stub(gitlab_context=gl)
+        result = Brain._format_merge_evidence(event)
+        assert "### DARWIN Instructions" in result
+        assert "Do NOT close this MR" in result
+        assert "Merge this MR" in result
+
+    def test_github_pr_instructions_extracted(self):
+        gh = {
+            "pr_body": (
+                "## Konflux Release\n\n"
+                "### DARWIN Instructions\n\n"
+                "**Constraints:**\n"
+                "- Do NOT close this PR.\n"
+            )
+        }
+        event = self._make_duplicate_stub(github_context=gh)
+        result = Brain._format_merge_evidence(event)
+        assert "### DARWIN Instructions" in result
+        assert "Do NOT close this PR" in result
+
+    def test_extract_bot_instructions_defensive(self):
+        assert Brain._extract_bot_instructions(None) is None
+        assert Brain._extract_bot_instructions("") is None
+        assert Brain._extract_bot_instructions("No instructions here") is None
+        extracted = Brain._extract_bot_instructions("Intro\n### Darwin  Instructions\n- rule 1")
+        assert extracted == "### Darwin  Instructions\n- rule 1"
 
     def test_no_evidence_safe(self):
         event = MagicMock()

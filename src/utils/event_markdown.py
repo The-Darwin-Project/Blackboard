@@ -42,6 +42,9 @@ _MD_SUBJECT_LABEL = {
     "jira": "Jira Issue",
     "github_issue": "GitHub Issue",
     "ci_gating": "CI Gating",
+    "gitlab_mr": "Merge Request",
+    "github_pr": "Pull Request",
+    "code_review": "Code Review",
 }
 
 

@@ -17,8 +17,8 @@ document's GitLab Context section.
 ## Fixing Pipeline Failures on an MR
 
 Before modifying an MR's source branch, read the MR description for Bot Instructions
-(`### Bot Instructions` section). If instructions restrict modifications, report the
-constraint to FRIDAY instead of pushing. Even when no Bot Instructions are present,
+(`### DARWIN Instructions` section, or legacy `### Bot Instructions`). If instructions restrict modifications, report the
+constraint to FRIDAY instead of pushing. Even when no Bot/DARWIN Instructions are present,
 the source mutation approval gate still applies — report the proposed fix to FRIDAY
 and let FRIDAY authorize the push.
 

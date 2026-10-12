@@ -32,6 +32,9 @@ ESCALATION_SCOPE_MAP: dict[str, str] = {
     "jira": "health",
     "github_issue": "health",
     "ci_gating": "jenkins",
+    "gitlab_mr": "review",
+    "github_pr": "review",
+    "code_review": "review",
 }
 """Maps subject_type -> escalation scope field suffix.
 
@@ -434,8 +437,11 @@ class EventDocument(BaseModel):
             return None
         return _PHASE_ALIASES.get(v, v)
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage", "system", "jira", "github_issue", "ci_gating"] = Field(
-        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, Jira issue, GitHub Issue, or CI gating check"
+    subject_type: Literal[
+        "service", "kargo_stage", "system", "jira", "github_issue", "ci_gating",
+        "gitlab_mr", "github_pr", "code_review"
+    ] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, Jira issue, GitHub Issue, CI gating check, GitLab MR, GitHub PR, or code review"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)

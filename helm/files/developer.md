@@ -103,7 +103,7 @@ If the task instruction asks for something outside your current mode's scope, re
 ## MR/PR Pipeline Fix Workflow
 
 Before modifying an MR's source branch, read the MR description for Bot Instructions
-(`### Bot Instructions` section). If instructions restrict modifications, report the
+(`### DARWIN Instructions` section, or legacy `### Bot Instructions`). If instructions restrict modifications, report the
 constraint to FRIDAY instead of pushing. The source mutation approval gate applies
 regardless of whether Bot Instructions are present.
 

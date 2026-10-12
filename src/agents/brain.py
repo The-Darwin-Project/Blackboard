@@ -969,6 +969,16 @@ class Brain:
         return None
 
     @staticmethod
+    def _extract_bot_instructions(text: Optional[str]) -> Optional[str]:
+        """Extract Bot or DARWIN Instructions section conforming to protocol."""
+        if not text:
+            return None
+        match = re.search(r"###\s*(DARWIN|Bot)\s+Instructions", text, re.IGNORECASE)
+        if match:
+            return text[match.start():].strip()
+        return None
+
+    @staticmethod
     def _format_merge_evidence(duplicate: EventDocument) -> str:
         """Format duplicate event's evidence as markdown for conversation injection.
 
@@ -999,11 +1009,17 @@ class Brain:
                 emails = maintainer.get("emails", [])
                 lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
             mr_desc = gl.get("mr_description", "")
-            if "Bot Instructions" in mr_desc:
-                bot_start = mr_desc.find("### Bot Instructions")
-                if bot_start >= 0:
-                    lines.append("")
-                    lines.append(mr_desc[bot_start:].strip())
+            instr = Brain._extract_bot_instructions(mr_desc)
+            if instr:
+                lines.append("")
+                lines.append(instr)
+        gh = getattr(evidence, "github_context", None) or (isinstance(evidence, dict) and evidence.get("github_context"))
+        if gh:
+            body = gh.get("pr_body", "") if isinstance(gh, dict) else getattr(gh, "pr_body", "")
+            instr = Brain._extract_bot_instructions(body)
+            if instr:
+                lines.append("")
+                lines.append(instr)
         if evidence and hasattr(evidence, "kargo_context") and evidence.kargo_context:
             kc = evidence.kargo_context
             lines.append("")
@@ -5892,4 +5908,7 @@ class Brain:
         if event:
             return len(event.conversation) + 1
         return 1
+
+
+_extract_bot_instructions = Brain._extract_bot_instructions
 

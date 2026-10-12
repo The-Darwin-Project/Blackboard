@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventType
+from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventDocument, EventType
 from ..utils.event_markdown import event_to_markdown
 
 if TYPE_CHECKING:
@@ -335,6 +335,24 @@ async def handle_message_agent(
     return False
 
 
+def _resolve_escalation_scope(event_doc: EventDocument) -> str:
+    """Resolve escalation scope with review-context fallback.
+
+    Events carrying gitlab_context or github_context in evidence are review-related
+    and must map to scope="review", preventing review escalations from writing
+    escalation_flag:health in Redis and starving ArgoCD health/sync alerts.
+    """
+    ev = event_doc.event.evidence if event_doc.event else None
+    if ev:
+        if getattr(ev, "gitlab_context", None) or getattr(ev, "github_context", None):
+            return "review"
+        if isinstance(ev, dict) and (ev.get("gitlab_context") or ev.get("github_context")):
+            return "review"
+    if event_doc.subject_type in ("gitlab_mr", "github_pr", "code_review"):
+        return "review"
+    return ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
+
+
 # ---------------------------------------------------------------------------
 # report_incident
 # ---------------------------------------------------------------------------
@@ -391,7 +409,7 @@ async def handle_report_incident(
             workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
             slack_thread_url = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
         evidence = event_doc.event.evidence
-        esc_scope = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
+        esc_scope = _resolve_escalation_scope(event_doc)
         staged = StagedEscalation(
             event_id=event_id,
             service=event_doc.service,
@@ -457,7 +475,7 @@ async def handle_report_incident(
                 result = await adapter.create_incident(fields)
                 ctx.mark_incident_created(event_id)
                 if event_doc.service:
-                    esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
+                    esc_scope_jira = _resolve_escalation_scope(event_doc)
                     try:
                         await bb.set_escalation_flag(
                             event_doc.service, event_id,
