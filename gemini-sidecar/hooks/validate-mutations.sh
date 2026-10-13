@@ -25,10 +25,8 @@ READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 # Shell tools supported by agents
 SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
 
-# Native file mutation tools (denied for read-only roles; denied for unresolved roles)
-# Note: Denylist covers known mutation tools (write_to_file, replace_file_content, multi_replace_file_content,
-# edit_file; keep in sync with NATIVE_MUTATION in merge-guard.js);
-# future iterations should migrate to an authoritative tool allowlist per role.
+# Native file mutation tools: allowed for local workspace files; gated if targeting sensitive configuration or credentials.
+# Keep in sync with NATIVE_MUTATION in merge-guard.js.
 MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content edit_file Write Edit MultiEdit NotebookEdit"
 
 # Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
@@ -174,9 +172,35 @@ if ! is_readonly_role "$ROLE"; then
     exit 0
 fi
 
-# Native mutation tools check for read-only roles
+# Native file mutation tools are local container workspace tools — allowed for all roles,
+# UNLESS they target sensitive git configuration, hooks, user profiles, or credentials.
 if [ "$IS_MUTATION" = 1 ]; then
-    echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only and not permitted to mutate files\"}"
+    TARGET_PATH=$(printf '%s' "$INPUT" | timeout -k 1 2 node -e '
+      let s = "";
+      process.stdin.on("data", c => s += c);
+      process.stdin.on("end", () => {
+        try {
+          const d = JSON.parse(s);
+          const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
+          const p = args.TargetFile || args.file_path || args.path || args.notebook_path || "";
+          process.stdout.write(String(p));
+        } catch (_) {
+          process.stdout.write("");
+        }
+      });
+    ' 2>/dev/null)
+
+    SENSITIVE_WRITE_PATTERN="((^|[[:space:]/]|~|\$HOME/)\.(git|ssh|aws|kube|config/git|config/gh|config/glab-cli|bashrc|profile|bash_profile|zshrc|gitconfig)(\b|/)|(/tmp/git-creds|/tmp/gh-token-map|/tmp/vertex-sa|/tmp/[^[:space:]]*token|/tmp/[^[:space:]]*credential|/secrets/|(/var)?/run/secrets/|^/app/))"
+    if [ -n "$TARGET_PATH" ] && printf '%s\n' "$TARGET_PATH" | grep -qiE "$SENSITIVE_WRITE_PATTERN"; then
+        node -e "
+          process.stdout.write(JSON.stringify({
+            decision: 'deny',
+            reason: 'Read-only role (' + process.argv[1] + '): mutation of sensitive or configuration file blocked: ' + process.argv[2]
+          }));
+        " -- "$ROLE" "$TARGET_PATH"
+        exit 0
+    fi
+    echo '{"decision":"allow"}'
     exit 0
 fi
 
@@ -190,12 +214,33 @@ fi
 # Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
 CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
 
-# --- Mutation denylist (infrastructure + filesystem + git + network mutations) ---
+# Normalize quotes and escapes so quote-splitting (e.g. `p"u"sh`, `d\"e\"lete`) cannot hide tokens,
+# while converting whitespace inside quotes to underscores to preserve flag-token boundaries.
+NORM_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
+  let s = "";
+  process.stdin.on("data", c => s += c);
+  process.stdin.on("end", () => {
+    s = s.replace(/\\ /g, "_");
+    s = s.replace(/\\(.)/g, "$1");
+    s = s.replace(/"([^"]*)"/g, (m, g) => g.replace(/\s+/g, "_"));
+    s = s.replace(/\x27([^\x27]*)\x27/g, (m, g) => g.replace(/\s+/g, "_"));
+    process.stdout.write(s);
+  });
+' 2>/dev/null || printf '%s' "$CHECK_CMD")
+
+# --- Mutation denylist (infrastructure + end-of-flow git + network mutations) ---
 BLOCK_PATTERN=''
-# Git mutations
-BLOCK_PATTERN+="\\bgit${_G}[[:space:]]+(commit|push|merge|rebase|reset[[:space:]]+.*--hard|tag\\b|clean\\b|apply\\b|am\\b)\\b"
+# End-of-flow Git mutations (commit, push, merge, send-pack, config, credential). Local git operations (clone, fetch, checkout, branch, clean, apply) are allowed.
+BLOCK_PATTERN+="\\bgit${_G}[[:space:]]+(commit|push|merge|send-pack|config|credential\\b)\\b"
+# Direct credential helper execution and CLI auth dumps
+BLOCK_PATTERN+="|\\b(git-credential-[a-zA-Z0-9_-]+)\\b|([^[:space:]]*/)?git-credential-darwin\\b"
+BLOCK_PATTERN+="|\\b(gh|glab)([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+auth\\b"
+# Git alias and config injection bypasses
+BLOCK_PATTERN+='|\bgit\s+.*(-c\s*(alias|credential|core\.hooksPath|core\.sshCommand|http\.proxy|uploadpack|receivepack)\b|--config-env\b)|\b(GIT_CONFIG_[A-Za-z0-9_]*|GIT_SSH_COMMAND)\b'
+# Config and hook file redirection/writes or copy/moves
+BLOCK_PATTERN+='|(>>?|[|;&][[:space:]]*tee([[:space:]]+-[a-zA-Z]+)*)[[:space:]]*[^[:space:]]*(\.git/config|\.gitconfig|\.git/hooks)|\b(cp|mv|install|ln)\b.*(\.git/config|\.gitconfig|\.git/hooks)'
 # K8s/OCP mutations (with flag-gap tolerance)
-BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create)\b)'
+BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create|run|exec|replace|rollout)\b)'
 # Helm mutations
 BLOCK_PATTERN+='|\bhelm\s+(install|upgrade|delete|rollback|uninstall)\b'
 # ArgoCD mutations
@@ -204,23 +249,21 @@ BLOCK_PATTERN+='|\bargocd\s+app\s+(sync|delete|set)\b'
 BLOCK_PATTERN+='|\btkn\s+(pipeline\s+start|taskrun\s+create|pipelinerun\s+cancel)\b'
 # Kargo mutations
 BLOCK_PATTERN+='|\bkargo\s+(promote|verify)\b'
-# Filesystem mutations
-BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
-# File write redirects (exclude /dev/null and fd duplication)
-BLOCK_PATTERN+='|\btee\b'
-# Shell redirection to a real file
-BLOCK_PATTERN+='|>>?[[:space:]]*[^&[:space:]]'
-# Piping output into an interpreter
-BLOCK_PATTERN+='|\|\s*(sudo\s+)?(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\b'
-# Package publish
-BLOCK_PATTERN+='|\bnpm\s+publish\b'
+# PR / MR merge via CLI
+BLOCK_PATTERN+='|\b(gh|glab)([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+(pr|mr)([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:]]+)?)*[[:space:]]+merge\b'
+# Package publish and versioning
+BLOCK_PATTERN+='|\bnpm\s+(publish|version)\b'
+# Symlinking sensitive directories
+BLOCK_PATTERN+='|\bln\s+.*-[a-zA-Z]*s[a-zA-Z]*\s+.*(/tmp/git-creds|/secrets|/var/run/secrets|/\.ssh|/\.kube|/\.aws|/\.git-credentials)'
+# Raw reverse-shell pseudo-devices
+BLOCK_PATTERN+='|/dev/(tcp|udp)/'
 
 # Credential file paths — block read access to sensitive token stores
-CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|/tmp/vertex-sa|/tmp/[^[:space:]]*token|/tmp/[^[:space:]]*credential|(/var)?/run/secrets|/secrets/|(/[^[:space:]]+|~|\$HOME)?/\.(ssh|git-credentials|gitconfig|aws|netrc|claude|gemini|docker|kube|config/(gh|glab-cli|gcloud|git)))'
+CRED_READ_PATTERN='(/tmp/gh[-_a-zA-Z0-9*?]*|/tmp/git-creds(\b|[-/])|/tmp/vertex-sa|/tmp/[^[:space:]]*token|/tmp/[^[:space:]]*credential|(/var)?/run/secrets|/secrets/|(/[^[:space:]]+|~|\$HOME)?/\.(ssh|git-credentials|gitconfig|aws|netrc|claude|gemini|docker|kube|config/(gh|glab-cli|gcloud|git)))'
 BLOCK_PATTERN+="|${CRED_READ_PATTERN}"
 
-# Case-insensitive check for the main denylist
-if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
+# Case-insensitive check for the main denylist against both raw and normalized commands
+if printf '%s\n' "$NORM_CMD" "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "
       process.stdout.write(JSON.stringify({
