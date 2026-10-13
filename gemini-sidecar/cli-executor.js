@@ -56,8 +56,8 @@ const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || path.join(__dirna
 const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
 const ROLE_SETTINGS_FILE = {
     code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
-    // Read-only roles on the Claude path (the agy path enforces these via --mode plan + validate-mutations.sh).
-    // Claude has no mutation hook, so without a deny file these roles ran with --dangerously-skip-permissions.
+    // Read-only roles on the Claude path (the agy path enforces these via validate-mutations.sh).
+    // Claude uses engine-enforced deny settings files to block perimeter mutations and credential reads.
     explorer: READONLY_SETTINGS_FILE,
     architect: READONLY_SETTINGS_FILE,
     security_analyst: READONLY_SETTINGS_FILE,
@@ -80,12 +80,11 @@ const FALLBACK_MODEL = {
 };
 
 // Minimum load-bearing deny rules the settings-validity check requires (below) --
-// a near-empty-but-shape-valid file (e.g. `{"permissions":{"deny":["Edit"]}}`) would
-// previously pass a bare "non-empty array" check while providing almost no real
-// restriction. Checking for a representative sample across categories (tool-level,
-// git mutation, filesystem mutation, network exfil) catches wholesale content
+// a near-empty-but-shape-valid file would previously pass a bare "non-empty array" check
+// while providing almost no real restriction. Checking for a representative sample across
+// perimeter categories (git commit, git push, cluster mutations) catches wholesale content
 // tampering/corruption without needing to enumerate every rule in the real file.
-const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git push *)', 'Bash(rm *)'];
+const REQUIRED_DENY_RULES = ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'];
 
 // agy rejects a model name that already carries an effort suffix alongside --effort, so
 // peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.

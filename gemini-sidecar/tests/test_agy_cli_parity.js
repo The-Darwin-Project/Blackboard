@@ -578,7 +578,7 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
     const input = JSON.stringify({
       toolCall: {
         name: 'run_command',
-        args: { CommandLine: 'rm -rf /tmp/important_data' }
+        args: { CommandLine: 'git commit -m "prohibited commit"' }
       }
     });
 

@@ -77,10 +77,35 @@ describe('readonly-role-permissions.json (Claude engine-enforced deny list)', ()
       assert.ok(deny.includes(r), r);
     }
   });
-  it('denies WebFetch and WebSearch to prevent external network exfiltration', () => {
+  it('allows WebFetch and WebSearch (not denied to preserve autonomous network capabilities)', () => {
     for (const tool of ['WebFetch', 'WebSearch']) {
-      assert.ok(deny.includes(tool), tool);
+      assert.equal(deny.includes(tool), false, tool);
     }
+  });
+  it('denies wildcard credential extraction rules', () => {
+    for (const r of [
+      'Bash(git* credential*)',
+      'Bash(*git* credential*)',
+      'Bash(*git-credential-darwin*)',
+      'Bash(*git-credential-*)',
+      'Bash(gh auth*)',
+      'Bash(*gh*auth*)',
+      'Bash(glab auth*)',
+      'Bash(*glab*auth*)',
+      'Bash(*git commit*)',
+      'Bash(*git push*)',
+      'Bash(*git merge*)',
+      'Bash(*git config*)',
+      'Bash(*gh*pr*merge*)',
+      'Bash(*glab*mr*merge*)',
+    ]) {
+      assert.ok(deny.includes(r), r);
+    }
+  });
+  it('maintains exact parity with code-reviewer-permissions.json', () => {
+    const reviewerFile = path.resolve(__dirname, '..', 'claude-settings', 'code-reviewer-permissions.json');
+    const reviewerDeny = JSON.parse(fs.readFileSync(reviewerFile, 'utf8')).permissions.deny;
+    assert.deepEqual(deny, reviewerDeny);
   });
   it('denies Bash(cat ...) for all sensitive credential stores', () => {
     for (const r of [
@@ -90,9 +115,32 @@ describe('readonly-role-permissions.json (Claude engine-enforced deny list)', ()
       'Bash(cat ~/.config/git/*)', 'Bash(cat ~/.netrc*)', 'Bash(cat ~/.aws/*)', 'Bash(cat ~/.kube/config*)',
       'Bash(cat ~/.kube/*)', 'Bash(cat ~/.config/gh/*)', 'Bash(cat ~/.config/glab-cli/*)', 'Bash(cat ~/.config/gcloud/*)',
       'Bash(cat /tmp/vertex-sa*)', 'Bash(cat /tmp/*token*)', 'Bash(cat /tmp/*credential*)',
-      'Bash(cat /tmp/git-creds-*)', 'Bash(cat /tmp/gh-token-map*)',
+      'Bash(cat /tmp/git-creds-*)', 'Bash(cat /tmp/git-creds/**)', 'Bash(cat /tmp/gh-token-map*)',
     ]) {
       assert.ok(deny.includes(r), r);
     }
   });
+  it('denies sensitive configuration and credential writes', () => {
+    for (const r of [
+      'Write(**/.git/**)', 'Edit(**/.git/**)',
+      'Write(~/.gitconfig*)', 'Edit(~/.gitconfig*)',
+      'Write(~/.bashrc*)', 'Edit(~/.bashrc*)',
+      'Write(~/.profile*)', 'Edit(~/.profile*)',
+      'Write(//tmp/git-creds/**)', 'Edit(//tmp/git-creds/**)',
+      'Write(//tmp/gh-token-map*)', 'Edit(//tmp/gh-token-map*)',
+      'Write(//secrets/**)', 'Edit(//secrets/**)',
+    ]) {
+      assert.ok(deny.includes(r), r);
+    }
+  });
+  it('allows local container workspace operations (not denied)', () => {
+    for (const tool of [
+      'Bash(git clone *)', 'Bash(git checkout *)', 'Bash(git branch *)',
+      'Bash(rm *)', 'Bash(mkdir *)', 'Bash(touch *)', 'Bash(cp *)', 'Bash(mv *)',
+      'Bash(npm install *)', 'Bash(pip install *)', 'Bash(make *)',
+    ]) {
+      assert.equal(deny.includes(tool), false, tool);
+    }
+  });
 });
+

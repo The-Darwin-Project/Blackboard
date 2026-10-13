@@ -134,8 +134,8 @@ run_test_deny_with_reason \
   "explorer"
 
 run_test_deny_with_reason \
-  "T-1b: rm -rf blocked for security_analyst" \
-  '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /data/workspace/"}}}' \
+  "T-1b: git commit blocked for security_analyst" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m \"update\""}}}' \
   "security_analyst"
 
 run_test_deny_with_reason \
@@ -165,7 +165,7 @@ run_test_deny_with_reason \
   "Merge REFUSED"
 
 # Protocol schema compliance: must be 'deny' (never 'block') with non-empty reason
-RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test"}}}' | SIDECAR_PORT=1 AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK" 2>/dev/null)
+RES=$(echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin main"}}}' | SIDECAR_PORT=1 AGENT_ROLE=explorer AGENT_CLI=agy bash "$HOOK" 2>/dev/null)
 DECISION=$(echo "$RES" | jq -r '.decision // empty')
 REASON=$(echo "$RES" | jq -r '.reason // empty')
 if [[ "$DECISION" == "deny" ]] && [[ -n "$REASON" ]]; then
@@ -284,28 +284,32 @@ run_test_deny_with_reason \
   "Malformed or unrecognized tool payload"
 
 # =============================================================================
-# T-4: Native Mutation Tool Blocking (write_to_file, replace_file_content, edit_file)
+# T-4: Native Mutation Tools Allowed for Local Workspace Operations
 # =============================================================================
 
-run_test_deny_with_reason \
-  "T-4a: write_to_file denied for explorer" \
-  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/exploit.sh","CodeContent":"evil"}}}' \
-  "explorer"
+run_test \
+  "T-4a: write_to_file allowed for explorer" \
+  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/scratch.sh","CodeContent":"test"}}}' \
+  "explorer" \
+  "allow"
 
-run_test_deny_with_reason \
-  "T-4b: replace_file_content denied for explorer" \
-  '{"toolCall":{"name":"replace_file_content","args":{"TargetFile":"/tmp/exploit.sh"}}}' \
-  "explorer"
+run_test \
+  "T-4b: replace_file_content allowed for explorer" \
+  '{"toolCall":{"name":"replace_file_content","args":{"TargetFile":"/tmp/scratch.sh"}}}' \
+  "explorer" \
+  "allow"
 
-run_test_deny_with_reason \
-  "T-4c: edit_file denied for explorer" \
-  '{"toolCall":{"name":"edit_file","args":{"TargetFile":"/tmp/exploit.sh"}}}' \
-  "explorer"
+run_test \
+  "T-4c: edit_file allowed for explorer" \
+  '{"toolCall":{"name":"edit_file","args":{"TargetFile":"/tmp/scratch.sh"}}}' \
+  "explorer" \
+  "allow"
 
-run_test_deny_with_reason \
-  "T-4d: write_to_file denied for security_analyst" \
-  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/exploit.sh","CodeContent":"evil"}}}' \
-  "security_analyst"
+run_test \
+  "T-4d: write_to_file allowed for security_analyst" \
+  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/scratch.sh","CodeContent":"test"}}}' \
+  "security_analyst" \
+  "allow"
 
 run_test \
   "T-4e: write_to_file allowed for developer" \
@@ -313,10 +317,11 @@ run_test \
   "developer" \
   "allow"
 
-run_test_deny_with_reason \
-  "T-4f: whitespace padded tool name denied for explorer" \
-  '{"toolCall":{"name":"  write_to_file  ","args":{"TargetFile":"/tmp/exploit.sh","CodeContent":"evil"}}}' \
-  "explorer"
+run_test \
+  "T-4f: whitespace padded tool name allowed for explorer" \
+  '{"toolCall":{"name":"  write_to_file  ","args":{"TargetFile":"/tmp/scratch.sh","CodeContent":"test"}}}' \
+  "explorer" \
+  "allow"
 
 # =============================================================================
 # T-6: Merge-approval guard bypass regressions (global flags, MCP tools, empty command)
@@ -384,8 +389,8 @@ run_test "T-7h: push to main-fix feature branch allowed" \
 
 run_test_deny_with_reason "T-7i: git -C . commit denylisted for explorer" \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":"git -C . commit -am x"}}}' explorer "mutation blocked"
-run_test_deny_with_reason "T-7j: git --no-pager tag denylisted for explorer" \
-  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git --no-pager tag v1"}}}' explorer "mutation blocked"
+run_test_deny_with_reason "T-7j: git --no-pager push denylisted for explorer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git --no-pager push origin feat"}}}' explorer "mutation blocked"
 
 # --- T-9: bare `git push`, HTTP clients, API verbs, camelCase / verb-based MCP matching ---
 # Bare push resolves the current branch, so run these inside throwaway repos.
@@ -465,7 +470,7 @@ run_test "T-9al: list_merge_requests allowed for explorer" \
 for t in mcp__GitHub__push_files mcp__GitHub__create_or_update_file mcp__GitHub__create_branch mcp__GitHub__create_pull_request \
          mcp__GitHub__issue_write mcp__GitHub__fork_repository mcp__ArgoCD__sync_application mcp__ArgoCD__create_application \
          mcp__Jenkins__jenkins_trigger_build mcp__GitLab__glab_mr_approve mcp__GitLab__glab_ci_run mcp__GitLab__glab_mr_note_delete \
-         mcp__Playwright__browser_run_code_unsafe some_unknown_tool multi_replace_file_content \
+         mcp__Playwright__browser_run_code_unsafe some_unknown_tool \
          mcp__GitHub__pull_request_review_write mcp__GitHub__create_team_discussion mcp__GitHub__create_commit mcp__GitHub__request_copilot_review; do
   run_test_deny_with_reason "T-10a: read-only role denied for $t" \
     "{\"toolCall\":{\"name\":\"$t\",\"args\":{\"branch\":\"feat/x\"}}}" explorer "read-only"
@@ -474,7 +479,7 @@ for t in mcp__GitHub__get_file_contents mcp__GitHub__list_pull_requests mcp__Git
          mcp__GitHub__add_comment_to_pending_review mcp__GitHub__add_issue_comment mcp__GitHub__get_commit mcp__GitHub__get_workflow_run \
          mcp__GitLab__glab_mr_view mcp__GitLab__glab_mr_note_create mcp__ArgoCD__get_application mcp__K8s_konflux__pods_log \
          mcp__KubeArchive_konflux__ka_get_log mcp__DarwinBlackboard__bb_catch_up mcp__DarwinJournal__svc_get_service \
-         mcp__TeamChat__team_send_results mcp__Playwright__browser_snapshot view_file grep_search; do
+         mcp__TeamChat__team_send_results mcp__Playwright__browser_snapshot view_file grep_search multi_replace_file_content; do
   run_test "T-10b: read-only role allowed for $t" \
     "{\"toolCall\":{\"name\":\"$t\",\"args\":{}}}" explorer allow
 done
@@ -699,15 +704,59 @@ for t in Read Grep Glob LS Task Agent WebFetch WebSearch TodoWrite Skill BashOut
   run_test "T-17b${t}: explorer allowed Claude tool $t" "{\"tool_name\":\"$t\",\"tool_input\":{}}" explorer allow
 done
 for t in Write Edit MultiEdit NotebookEdit; do
-  run_test_deny_with_reason "T-17c${t}: explorer denied Claude tool $t" "{\"tool_name\":\"$t\",\"tool_input\":{}}" explorer "read-only"
+  run_test "T-17c${t}: explorer allowed Claude tool $t" "{\"tool_name\":\"$t\",\"tool_input\":{}}" explorer allow
 done
 run_test "T-17d: developer may use Write (Claude)" '{"tool_name":"Write","tool_input":{}}' developer allow
 run_test_deny_with_reason "T-17e: name-heuristic read-only role (qa_reviewer_agent) gets the shell denylist" \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -am x"}}}' qa_reviewer_agent "mutation blocked"
-run_test_deny_with_reason "T-17f: ARCHITECT_LEAD denied native file mutation" \
-  '{"toolCall":{"name":"write_to_file","args":{}}}' ARCHITECT_LEAD "read-only"
+run_test "T-17f: ARCHITECT_LEAD allowed native file mutation" \
+  '{"toolCall":{"name":"write_to_file","args":{}}}' ARCHITECT_LEAD allow
 run_test "T-17g: unlisted non-read-only role stays a mutating role" \
   '{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -am x"}}}' release_manager allow
+
+# --- T-18: Local container operations allowed vs perimeter boundaries blocked ---
+run_test "T-18a: git clone allowed for code_reviewer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git clone https://github.com/org/repo.git"}}}' code_reviewer allow
+
+run_test "T-18b: git checkout -b allowed for code_reviewer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git checkout -b test-branch"}}}' code_reviewer allow
+
+run_test "T-18c: git clean -fd allowed for code_reviewer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git clean -fd"}}}' code_reviewer allow
+
+run_test "T-18d: local rm, mkdir, touch, cp allowed for code_reviewer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"mkdir -p /tmp/test && touch /tmp/test/f && cp /tmp/test/f /tmp/test/f2 && rm -rf /tmp/test"}}}' code_reviewer allow
+
+run_test "T-18e: npm test / npm run build allowed for code_reviewer" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"npm test && npm run build"}}}' code_reviewer allow
+
+run_test "T-18f: native write_to_file to workspace file allowed for code_reviewer" \
+  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/scratchpad.py"}}}' code_reviewer allow
+
+run_test_deny_with_reason "T-18g: native write_to_file to .git/config blocked" \
+  '{"toolCall":{"name":"write_to_file","args":{"TargetFile":"/workspace/.git/config"}}}' code_reviewer "sensitive or configuration file blocked"
+
+run_test_deny_with_reason "T-18h: native edit_file to ~/.bashrc blocked" \
+  '{"toolCall":{"name":"edit_file","args":{"path":"~/.bashrc"}}}' code_reviewer "sensitive or configuration file blocked"
+
+run_test_deny_with_reason "T-18i: native write to /tmp/git-creds/credentials blocked" \
+  '{"tool_name":"Write","tool_input":{"file_path":"/tmp/git-creds/credentials"}}' code_reviewer "sensitive or configuration file blocked"
+
+run_test_deny_with_reason "T-18j: git send-pack blocked" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git send-pack origin main"}}}' code_reviewer "mutation blocked"
+
+run_test_deny_with_reason "T-18k: git config alias injection blocked" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git -c alias.p=push p origin main"}}}' code_reviewer
+
+run_test_deny_with_reason "T-18l: quote-split git push blocked" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"git \"push\" origin main"}}}' code_reviewer
+
+run_test_deny_with_reason "T-18m: npm version blocked" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"npm version minor"}}}' code_reviewer "mutation blocked"
+
+run_test_deny_with_reason "T-18n: cat /tmp/git-creds/credentials blocked" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"cat /tmp/git-creds/credentials"}}}' code_reviewer "mutation blocked"
+
 
 # Empty/missing command on every recognised shell tool name fails closed, for every role
 run_test_deny_with_reason "T-8a: missing CommandLine (developer) fails closed" \

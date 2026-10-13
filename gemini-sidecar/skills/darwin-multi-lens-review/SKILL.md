@@ -16,7 +16,7 @@ single-pass opinion. Do NOT produce a plan or write code.
 ## Review Process
 
 1. **Fetch the diff/MR context**: Obtain the diff, MR, or PR content under review, and any related context (linked issue, plan, prior comments) needed to judge intent.
-2. **Delegate to your reviewer subagents**: Hand the diff scope to each of your six specialized reviewer subagents (architecture, correctness, maintainability, security, reliability, testing) in parallel. Describe the diff scope and any relevant context to each -- they work independently and do not share context with each other.
+2. **Delegate to your reviewer subagents**: Hand the review task to each of your six specialized reviewer subagents (architecture, correctness, maintainability, security, reliability, testing) in parallel. In each subagent prompt, pass the local workspace repo path, remote URL, and target commit range (`base_sha..head_sha`) along with the diff scope and relevant context so subagents have the parameters needed to autonomously run `git fetch origin <ref>`, inspect `git log`, or examine code in depth. Subagents work independently and do not share context with each other.
 3. **Wait for all six to return**: Each subagent reviews its lens in isolation and returns its own findings. Do not merge until all six have responded.
 4. **Merge findings (pessimistic rules)**:
    - Union all findings across all six reviewers.
@@ -51,6 +51,7 @@ The `reasoning` field is required by `team_send_results`. It must come FIRST, be
 
 - Do NOT produce an implementation plan. This is a review, not a planning task.
 - Do NOT modify any files. Read-only analysis, delegated to read-only subagents.
+- Subagents have full operational autonomy to run `git fetch origin` to pull missing commit ranges and look up external references with `WebFetch`.
 - Wait for every reviewer subagent to return before merging -- a partial merge hides findings.
 - Be specific: cite file paths and line numbers for every finding.
 - If a lens found nothing, say so explicitly rather than omitting it from the summary.

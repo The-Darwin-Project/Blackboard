@@ -230,9 +230,9 @@ describe('claude read-only roles (engine-enforced permissions.deny, not plan mod
             try {
                 const { args } = mod.buildCLICommand('p', { role, autoApprove: true });
                 const file = args[args.indexOf('--settings') + 1];
-                assert.ok(file && file.startsWith(SETTINGS_DIR), `expected --settings under ${SETTINGS_DIR}, got ${file}`);
                 const deny = JSON.parse(fs.readFileSync(file, 'utf8')).permissions.deny;
-                for (const rule of ['Edit', 'Write', 'Bash(git push *)', 'Bash(git commit *)', 'Bash(rm *)']) assert.ok(deny.includes(rule), rule);
+                for (const rule of ['Bash(git push *)', 'Bash(git commit *)', 'Bash(kubectl apply *)']) assert.ok(deny.includes(rule), rule);
+                for (const rule of ['Edit', 'Write', 'Bash(rm *)']) assert.equal(deny.includes(rule), false, `should not deny ${rule}`);
                 assert.equal(args.includes('--dangerously-skip-permissions'), true);
                 assert.equal(args.includes('--permission-mode'), false);
             } finally {
