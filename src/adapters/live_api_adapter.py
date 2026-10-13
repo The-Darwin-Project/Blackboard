@@ -134,6 +134,27 @@ _REPORT_REFS = _build_skill_refs(["shift-report"])
 _RESUME_REFS = _build_skill_refs(["shared-context", "darwin-ecosystem"])
 
 
+async def _is_event_closed_or_missing(blackboard: Any, event_id: str) -> bool:
+    """Return True if the event does not exist or has a closed/resolved status."""
+    import inspect
+    if not blackboard or not hasattr(blackboard, "get_event"):
+        return True
+    try:
+        res = blackboard.get_event(event_id)
+        event = await res if inspect.isawaitable(res) else res
+        if event is None:
+            return True
+        if isinstance(event, dict):
+            status_val = event.get("status", "")
+        else:
+            status_attr = getattr(event, "status", None)
+            status_val = getattr(status_attr, "value", str(status_attr or ""))
+        return str(status_val).lower() in ("closed", "resolved")
+    except Exception as exc:
+        logger.warning("Failed to verify event %s status: %s", event_id, exc)
+        return True
+
+
 class LiveAPIAdapter:
     """Adapter for the Gemini Live API session (Cortex observer)."""
 
@@ -315,11 +336,15 @@ class LiveAPIAdapter:
                             await self._load_neuron_labels()
                             await self._broadcast_status("watching")
                             orphan = await self._blackboard.find_active_event_by_source("jarvis")
-                            if orphan:
+                            if orphan and not await _is_event_closed_or_missing(self._blackboard, orphan):
                                 self._active_meta_event_id = orphan
                                 active = await self._blackboard.get_active_events()
-                                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                                active_ids = [eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid) for eid in active]
+                                self._meta_event_parked_set = frozenset(eid for eid in active_ids if eid != orphan)
                                 logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
+                            else:
+                                self._active_meta_event_id = None
+                                self._meta_event_parked_set = frozenset()
                     except (Exception, asyncio.CancelledError) as init_err:
                         if isinstance(init_err, asyncio.CancelledError):
                             raise
@@ -577,7 +602,10 @@ class LiveAPIAdapter:
                         )
                         if not self._running:
                             break
-                        await self._process_message(msg)
+                        try:
+                            await self._process_message(msg)
+                        except Exception as exc:
+                            logger.error("Error processing Live message: %s", exc)
                 finally:
                     watchdog.cancel()
                     try:
@@ -762,8 +790,11 @@ class LiveAPIAdapter:
                     self._awaiting_jarvis_reply = False
                     self._awaiting_jarvis_event_id = None
                     logger.info("Auto-wrapping JARVIS text reply as send_event_message to %s", target_eid)
-                    await self._tool_send_event_message(target_eid, full_text)
-                    auto_wrapped = True
+                    try:
+                        await self._tool_send_event_message(target_eid, full_text)
+                        auto_wrapped = True
+                    except Exception as exc:
+                        logger.warning("Auto-wrap send message to %s failed: %s", target_eid, exc)
                 else:
                     self._awaiting_jarvis_reply = False
                 try:
@@ -783,50 +814,70 @@ class LiveAPIAdapter:
         if hasattr(msg, "tool_call") and msg.tool_call:
             self._awaiting_jarvis_reply = False
             self._awaiting_jarvis_event_id = None
-            for fc in msg.tool_call.function_calls:
-                args = dict(fc.args) if fc.args else {}
-                tool_eid = args.get("event_id", eid)
+            function_calls = getattr(msg.tool_call, "function_calls", None) or []
+            responses: list[types.FunctionResponse] = []
+            for fc in function_calls:
+                raw_id = getattr(fc, "id", None)
+                call_id = raw_id if isinstance(raw_id, str) else None
+                raw_name = getattr(fc, "name", None)
+                fc_name = raw_name if isinstance(raw_name, str) else "unknown"
                 try:
-                    await self._broadcast({
-                        "type": "cortex_thinking",
-                        "event_id": tool_eid,
-                        "content_type": "tool_call",
-                        "tool": fc.name,
-                        "args": args,
-                        "timestamp": time.time(),
-                    })
-                except Exception:
-                    pass
-
-                result = await self._handle_tool_call(fc.name, args)
-
-                try:
-                    await self._broadcast({
-                        "type": "cortex_thinking",
-                        "event_id": tool_eid,
-                        "content_type": "tool_result",
-                        "tool": fc.name,
-                        "result_preview": result[:300] if result else "",
-                        "timestamp": time.time(),
-                    })
-                except Exception:
-                    pass
-
-                if self._session:
+                    args = dict(fc.args) if getattr(fc, "args", None) else {}
+                    tool_eid = args.get("event_id") or eid
                     try:
-                        refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc.name, []))
-                        result_with_refs = _redact_pii(f"{refs}{result}" if refs else result)
-                        tool_response = types.LiveClientToolResponse(
-                            function_responses=[
-                                types.FunctionResponse(
-                                    name=fc.name,
-                                    response={"result": result_with_refs},
-                                )
-                            ]
+                        await self._broadcast({
+                            "type": "cortex_thinking",
+                            "event_id": tool_eid,
+                            "content_type": "tool_call",
+                            "tool": fc_name,
+                            "args": args,
+                            "timestamp": time.time(),
+                        })
+                    except Exception:
+                        pass
+
+                    result = await self._handle_tool_call(fc_name, args)
+
+                    try:
+                        await self._broadcast({
+                            "type": "cortex_thinking",
+                            "event_id": tool_eid,
+                            "content_type": "tool_result",
+                            "tool": fc_name,
+                            "result_preview": result[:300] if result else "",
+                            "timestamp": time.time(),
+                        })
+                    except Exception:
+                        pass
+
+                    refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc_name, []))
+                    result_with_refs = _redact_pii(f"{refs}{result}" if refs else result)
+                    responses.append(
+                        types.FunctionResponse(
+                            name=fc_name,
+                            response={"result": result_with_refs},
+                            id=call_id,
                         )
-                        await self._session.send(input=tool_response)
-                    except Exception as e:
-                        logger.debug("Cortex tool response send failed: %s", e)
+                    )
+                except Exception as exc:
+                    logger.warning("Cortex tool %s handling failed: %s", fc_name, exc)
+                    try:
+                        sanitized_err = _redact_pii(f"Error: {exc}")
+                    except Exception:
+                        sanitized_err = "Error: Tool execution failed"
+                    responses.append(
+                        types.FunctionResponse(
+                            name=fc_name,
+                            response={"result": sanitized_err},
+                            id=call_id,
+                        )
+                    )
+
+            if responses and self._session:
+                try:
+                    await self._session.send_tool_response(function_responses=responses)
+                except Exception as e:
+                    logger.warning("Cortex tool response send failed: %s", e)
 
     async def _handle_tool_call(self, name: str, args: dict) -> str:
         """Route tool calls to implementations. Shadow flag gates write tools."""
@@ -1366,6 +1417,12 @@ class LiveAPIAdapter:
             return "Error: reason required — what cross-event pattern justifies this review?"
         if self._brain and self._brain.has_jarvis_waiters():
             return "Cannot create review: FRIDAY is currently waiting for your response on an active event."
+        if getattr(self, "_active_meta_event_id", None):
+            if await _is_event_closed_or_missing(self._blackboard, self._active_meta_event_id):
+                self._active_meta_event_id = None
+                self._meta_event_parked_set = frozenset()
+            else:
+                return f"Review already active (event_id={self._active_meta_event_id}) — use send_event_message to contribute to the existing one."
         try:
             active_ids = await self._blackboard.get_active_events()
         except Exception as e:
@@ -1461,14 +1518,28 @@ class LiveAPIAdapter:
             reason: Cross-event observation justifying the review (from JARVIS tool call).
             from_tool: When True, skip session.send (JARVIS already gets tool response).
         """
+        if getattr(self, "_active_meta_event_id", None):
+            if await _is_event_closed_or_missing(self._blackboard, self._active_meta_event_id):
+                self._active_meta_event_id = None
+                self._meta_event_parked_set = frozenset()
+            else:
+                return None
+
         existing = await self._blackboard.find_active_event_by_source("jarvis")
         if existing:
-            self._active_meta_event_id = existing
-            return None
+            if await _is_event_closed_or_missing(self._blackboard, existing):
+                self._active_meta_event_id = None
+                self._meta_event_parked_set = frozenset()
+            else:
+                self._active_meta_event_id = existing
+                active_normalized = [eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid) for eid in active_ids]
+                self._meta_event_parked_set = frozenset(eid for eid in active_normalized if eid != existing)
+                return None
 
         summary_lines = []
         for eid in active_ids[:10]:
-            event = await self._blackboard.get_event(eid)
+            eid_str = eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid)
+            event = await self._blackboard.get_event(eid_str)
             if not event:
                 continue
             defer_count = 0
@@ -1500,7 +1571,7 @@ class LiveAPIAdapter:
                 else:
                     defer_remaining_str = " | defer_expired"
             summary_lines.append(
-                f"- {eid}: phase={_resolve_phase(event.brain_phase)}, status={event.status.value}, "
+                f"- {eid_str}: phase={_resolve_phase(event.brain_phase)}, status={event.status.value}, "
                 f"age={elapsed}m, defers={defer_count}, defer_total={defer_total_s // 60}m{defer_remaining_str}, "
                 f"reason: {(last_defer or '')[:80]}"
             )
@@ -1558,7 +1629,7 @@ class LiveAPIAdapter:
             subject_type="system",
         )
         self._active_meta_event_id = event_id
-        self._meta_event_parked_set = frozenset(active_ids)
+        self._meta_event_parked_set = frozenset(eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid) for eid in active_ids)
         logger.info("JARVIS created system_review event: %s", event_id)
 
         # Inform JARVIS Live session unless this was tool-initiated (JARVIS

@@ -1,7 +1,9 @@
+# BlackBoard/tests/test_live_api_adapter.py
 """Tests for LiveAPIAdapter duplicate review handling."""
 import pytest
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from src.adapters.live_api_adapter import LiveAPIAdapter
 
@@ -13,6 +15,7 @@ async def test_duplicate_system_review_returns_existing():
     adapter._blackboard = MagicMock()
     adapter._blackboard.get_active_events = AsyncMock(return_value=["evt-1"])
     adapter._blackboard.find_active_event_by_source = AsyncMock(return_value="evt-12345")
+    adapter._blackboard.get_event = AsyncMock(return_value=MagicMock(status="active"))
     
     result = await adapter._tool_create_system_review(reason="test review pattern")
     assert "evt-12345" in result
@@ -798,5 +801,399 @@ def test_location_resolution():
         assert adapter._location == "europe-west4"
 
 
+# =============================================================================
+# T-1 through T-4, T-6: Live API Adapter Tool Call & Orphan Lifecycle Tests
+# =============================================================================
 
 
+@pytest.mark.asyncio
+async def test_process_message_single_tool_call():
+    """T-1: Single tool call dispatches send_tool_response with 1:1 call ID parity."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = True
+    adapter._awaiting_jarvis_event_id = "evt-await"
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-100"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+    adapter._handle_tool_call = AsyncMock(return_value="Handoff notes summary")
+
+    fc = types.FunctionCall(name="recall_handoff_notes", id="call-1", args={"last_n": 3})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc]
+
+    await adapter._process_message(msg)
+
+    assert adapter._awaiting_jarvis_reply is False
+    assert adapter._awaiting_jarvis_event_id is None
+    adapter._handle_tool_call.assert_awaited_once_with("recall_handoff_notes", {"last_n": 3})
+
+    adapter._session.send_tool_response.assert_awaited_once()
+    _, kwargs = adapter._session.send_tool_response.call_args
+    assert "function_responses" in kwargs
+    responses = kwargs["function_responses"]
+    assert len(responses) == 1
+    resp = responses[0]
+    assert resp.name == "recall_handoff_notes"
+    assert resp.id == "call-1"
+    assert "Handoff notes summary" in resp.response.get("result", "")
+
+
+@pytest.mark.asyncio
+async def test_process_message_parallel_tool_calls():
+    """T-2: Parallel tool calls are batched atomically into single send_tool_response."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-200"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+
+    async def mock_handle_tool(name, args):
+        if name == "recall_handoff_notes":
+            return "Handoff notes result"
+        elif name == "list_active_events":
+            return "Active events: [evt-1, evt-2]"
+        return "Unknown"
+
+    adapter._handle_tool_call = AsyncMock(side_effect=mock_handle_tool)
+
+    fc1 = types.FunctionCall(name="recall_handoff_notes", id="c1", args={"last_n": 2})
+    fc2 = types.FunctionCall(name="list_active_events", id="c2", args={})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc1, fc2]
+
+    await adapter._process_message(msg)
+
+    adapter._session.send_tool_response.assert_awaited_once()
+    _, kwargs = adapter._session.send_tool_response.call_args
+    assert "function_responses" in kwargs
+    responses = kwargs["function_responses"]
+    assert len(responses) == 2
+
+    assert responses[0].id == "c1"
+    assert responses[0].name == "recall_handoff_notes"
+    assert "Handoff notes result" in responses[0].response.get("result", "")
+
+    assert responses[1].id == "c2"
+    assert responses[1].name == "list_active_events"
+    assert "Active events: [evt-1, evt-2]" in responses[1].response.get("result", "")
+
+
+@pytest.mark.asyncio
+async def test_process_message_tool_execution_error():
+    """T-3: Tool execution timeout or failure returns error string in FunctionResponse with matching id."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-300"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+    adapter._handle_tool_call = AsyncMock(return_value="Error: Tool execution timed out after 60s")
+
+    fc = types.FunctionCall(name="list_active_events", id="call-timeout-1", args={})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc]
+
+    await adapter._process_message(msg)
+
+    adapter._session.send_tool_response.assert_awaited_once()
+    _, kwargs = adapter._session.send_tool_response.call_args
+    assert "function_responses" in kwargs
+    responses = kwargs["function_responses"]
+    assert len(responses) == 1
+    resp = responses[0]
+    assert resp.id == "call-timeout-1"
+    assert resp.name == "list_active_events"
+    assert "Error: Tool execution timed out after 60s" in resp.response.get("result", "")
+
+
+@pytest.mark.asyncio
+async def test_process_message_tool_execution_exception_fallback():
+    """T-3: Tool execution exception caught by per-tool boundary and emits fallback FunctionResponse."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-301"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+    adapter._handle_tool_call = AsyncMock(
+        side_effect=RuntimeError("Handler crashed with secret: api_key=sk-1234567890abcdef and user@secret.com")
+    )
+
+    fc = types.FunctionCall(name="google_web_search", id="call-exc-1", args={"query": "k8s"})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc]
+
+    await adapter._process_message(msg)
+
+    adapter._session.send_tool_response.assert_awaited_once()
+    _, kwargs = adapter._session.send_tool_response.call_args
+    assert "function_responses" in kwargs
+    responses = kwargs["function_responses"]
+    assert len(responses) == 1
+    resp = responses[0]
+    assert resp.id == "call-exc-1"
+    assert resp.name == "google_web_search"
+    result_str = resp.response.get("result", "")
+    assert "Handler crashed with secret:" in result_str
+    assert "api_key=[redacted-secret]" in result_str
+    assert "[redacted-email]" in result_str
+    assert "sk-1234567890abcdef" not in result_str
+    assert "user@secret.com" not in result_str
+
+
+@pytest.mark.asyncio
+async def test_process_message_formatting_error_fallback():
+    """Formatting or PII redaction failure falls back to error FunctionResponse with call_id preserved."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-400"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+    adapter._handle_tool_call = AsyncMock(return_value="valid raw result")
+
+    fc = types.FunctionCall(name="recall_handoff_notes", id="call-fmt-err", args={"last_n": 1})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc]
+
+    with patch("src.adapters.live_api_adapter._redact_pii", side_effect=ValueError("PII redactor corrupted")):
+        await adapter._process_message(msg)
+
+    adapter._session.send_tool_response.assert_awaited_once()
+    _, kwargs = adapter._session.send_tool_response.call_args
+    assert "function_responses" in kwargs
+    responses = kwargs["function_responses"]
+    assert len(responses) == 1
+    resp = responses[0]
+    assert resp.id == "call-fmt-err"
+    assert resp.name == "recall_handoff_notes"
+    assert resp.response.get("result", "") == "Error: Tool execution failed"
+
+
+@pytest.mark.asyncio
+async def test_process_message_send_failure_resilience():
+    """T-4: send_tool_response failure logs warning and does not crash _process_message."""
+    from google.genai import types
+
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-500"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock(side_effect=RuntimeError("WebSocket dropped"))
+    adapter._handle_tool_call = AsyncMock(return_value="some result")
+
+    fc = types.FunctionCall(name="list_active_events", id="call-drop-1", args={})
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = [fc]
+
+    # Must complete cleanly without raising
+    await adapter._process_message(msg)
+    adapter._session.send_tool_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_empty_function_calls():
+    """Empty or None function_calls does not invoke send_tool_response."""
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._awaiting_jarvis_reply = False
+    adapter._awaiting_jarvis_event_id = None
+    adapter._collecting_handoff = False
+    adapter._handoff_buffer = []
+    adapter._text_buffer = []
+    adapter._last_pulse_event_id = "evt-600"
+    adapter._broadcast = AsyncMock()
+    adapter._session = MagicMock()
+    adapter._session.send_tool_response = AsyncMock()
+
+    msg = MagicMock()
+    msg.server_content = None
+    msg.go_away = None
+    msg.session_resumption_update = None
+    msg.text = None
+    msg.tool_call = MagicMock()
+    msg.tool_call.function_calls = []
+
+    await adapter._process_message(msg)
+    adapter._session.send_tool_response.assert_not_called()
+
+    # Also test msg.tool_call.function_calls is None
+    msg.tool_call.function_calls = None
+    await adapter._process_message(msg)
+    adapter._session.send_tool_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_system_review_ignores_stale_closed_orphan():
+    """T-6: If active meta-event orphan is closed, clears state, resets parked set, and creates review."""
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._shadow = False
+    adapter._brain = None
+    adapter._active_meta_event_id = "evt-stale-closed"
+    adapter._meta_event_parked_set = frozenset(["evt-stale-closed", "evt-other"])
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.get_active_events = AsyncMock(return_value=["evt-active-1"])
+    adapter._blackboard.find_active_event_by_source = AsyncMock(return_value=None)
+
+    stale_event = MagicMock()
+    stale_event.status.value = "closed"
+
+    active_event = MagicMock()
+    active_event.conversation = []
+    active_event.brain_phase = "analysis"
+    active_event.status = MagicMock()
+    active_event.status.value = "active"
+    active_event.queued_at = time.time()
+
+    async def mock_get_event(eid):
+        if eid == "evt-stale-closed":
+            return stale_event
+        return active_event
+
+    adapter._blackboard.get_event = AsyncMock(side_effect=mock_get_event)
+    adapter._blackboard.create_event = AsyncMock(return_value="evt-new-999")
+
+    result = await adapter._tool_create_system_review(reason="Cross-event stall detected")
+
+    assert "System review created: evt-new-999" in result
+    assert adapter._active_meta_event_id == "evt-new-999"
+    assert adapter._meta_event_parked_set == frozenset(["evt-active-1"])
+    adapter._blackboard.create_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_connect_discards_closed_orphan_and_resets_parked_set():
+    """Step 4: _connect validates orphan against get_event, resetting parked set if closed."""
+    adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+    adapter._project = "test"
+    adapter._location = "us-central1"
+    adapter._model = "test-model"
+    adapter._connect_lock = asyncio.Lock()
+    adapter._resumption_handle = None
+    adapter._idle_watchdog_task = None
+    adapter._receive_task = None
+    adapter._shadow = False
+    adapter._neuron_labels = {}
+    adapter._broadcast_status = AsyncMock()
+    adapter._load_neuron_labels = AsyncMock()
+    adapter._build_live_tools = MagicMock(return_value=[])
+    adapter._receive_loop = AsyncMock()
+    adapter._idle_watchdog = AsyncMock()
+
+    adapter._active_meta_event_id = "evt-old-orphan"
+    adapter._meta_event_parked_set = frozenset(["evt-1"])
+
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = MagicMock()
+    adapter._client = MagicMock()
+    adapter._client.aio.live.connect.return_value = mock_ctx
+
+    stale_event = MagicMock()
+    stale_event.status = "closed"
+
+    adapter._blackboard = MagicMock()
+    adapter._blackboard.find_active_event_by_source = AsyncMock(return_value="evt-old-orphan")
+    adapter._blackboard.get_event = AsyncMock(return_value=stale_event)
+    adapter._blackboard.get_active_events = AsyncMock(return_value=[])
+
+    await adapter._connect()
+
+    assert adapter._active_meta_event_id is None
+    assert adapter._meta_event_parked_set == frozenset()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_is_event_closed_or_missing():
+    """Unit test for _is_event_closed_or_missing verifying dicts, exceptions, and missing attributes."""
+    from src.adapters.live_api_adapter import _is_event_closed_or_missing
+
+    # Returns True for dict {"status": "closed"}
+    bb_closed = MagicMock()
+    bb_closed.get_event = AsyncMock(return_value={"status": "closed"})
+    assert await _is_event_closed_or_missing(bb_closed, "evt-closed") is True
+
+    # Returns False for dict {"status": "active"}
+    bb_active = MagicMock()
+    bb_active.get_event = AsyncMock(return_value={"status": "active"})
+    assert await _is_event_closed_or_missing(bb_active, "evt-active") is False
+
+    # Returns True when get_event raises an Exception (fail-safe)
+    bb_err = MagicMock()
+    bb_err.get_event = AsyncMock(side_effect=RuntimeError("Transient DB error"))
+    assert await _is_event_closed_or_missing(bb_err, "evt-err") is True
+
+    # Returns True when blackboard has no get_event
+    assert await _is_event_closed_or_missing(object(), "evt-no-method") is True
+    assert await _is_event_closed_or_missing(None, "evt-none-bb") is True
