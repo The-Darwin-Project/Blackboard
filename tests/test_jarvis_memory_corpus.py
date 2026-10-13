@@ -310,8 +310,12 @@ class TestRedactionCoverageAcrossSendSites:
 
         await adapter._process_message(msg)
 
-        sent_input = adapter._session.send.await_args.kwargs.get("input") or adapter._session.send.await_args.args[0]
-        response_text = sent_input.function_responses[0].response["result"]
+        if hasattr(adapter._session, "send_tool_response") and adapter._session.send_tool_response.await_count:
+            sent_responses = adapter._session.send_tool_response.await_args.kwargs.get("function_responses")
+            response_text = sent_responses[0].response["result"]
+        else:
+            sent_input = adapter._session.send.await_args.kwargs.get("input") or adapter._session.send.await_args.args[0]
+            response_text = sent_input.function_responses[0].response["result"]
         assert "dave@example.com" not in response_text
         assert "[redacted-email]" in response_text
 

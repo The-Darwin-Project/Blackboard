@@ -1509,7 +1509,8 @@ return 1
 
     async def get_active_events(self) -> list[str]:
         """Get all active event IDs."""
-        return list(await self.redis.smembers(self.EVENT_ACTIVE))
+        members = await self.redis.smembers(self.EVENT_ACTIVE)
+        return [eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid) for eid in members]
 
     async def get_active_events_with_status(self) -> dict[str, str]:
         """Get all active event IDs with their current status.
@@ -1538,14 +1539,24 @@ return 1
     async def find_active_event_by_source(self, source: str) -> str | None:
         """Find an active event by source. Returns event_id or None."""
         for eid in await self.redis.smembers(self.EVENT_ACTIVE):
-            data = await self.redis.get(f"{self.EVENT_PREFIX}{eid}")
-            if data:
-                try:
-                    event = json.loads(data)
-                except (json.JSONDecodeError, TypeError):
+            eid_str = eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid)
+            data = await self.redis.get(f"{self.EVENT_PREFIX}{eid_str}")
+            if not data:
+                await self.redis.srem(self.EVENT_ACTIVE, eid)
+                logger.debug("Pruned stale event %s from %s (missing=%s)", eid_str, self.EVENT_ACTIVE, not data)
+                continue
+            try:
+                event = json.loads(data)
+                if not isinstance(event, dict):
                     continue
-                if event.get("source") == source:
-                    return eid
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if str(event.get("status", "")).lower() in ("closed", "resolved"):
+                await self.redis.srem(self.EVENT_ACTIVE, eid)
+                logger.debug("Pruned stale event %s from %s (missing=%s)", eid_str, self.EVENT_ACTIVE, not data)
+                continue
+            if event.get("source") == source:
+                return eid_str
         return None
 
     async def get_flow_metrics(self) -> dict:
