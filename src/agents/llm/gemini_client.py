@@ -39,18 +39,48 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import os
 from collections.abc import AsyncIterator
+from typing import Any
 
 from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
 
 
+def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
+    """Parse and validate LLM_STREAM_DRAIN_TIMEOUT_SEC.
+
+    Ensures the value is a valid finite positive float within (0.0, 300.0].
+    Falls back to default on parse errors, NaN/Inf, or out-of-bounds values.
+    """
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw)
+        if math.isnan(val) or math.isinf(val) or val <= 0.0 or val > 300.0:
+            logger.warning(
+                "Invalid LLM_STREAM_DRAIN_TIMEOUT_SEC=%r; using default %.1fs",
+                raw,
+                default,
+            )
+            return default
+        return val
+    except (ValueError, TypeError):
+        logger.warning(
+            "Malformed LLM_STREAM_DRAIN_TIMEOUT_SEC=%r; using default %.1fs",
+            raw,
+            default,
+        )
+        return default
+
+
 class GeminiAdapter:
     """Vertex AI Gemini adapter implementing LLMPort."""
 
     # Max seconds to wait for the stream tail after a function_call chunk (terminal usage_metadata).
-    DRAIN_TIMEOUT_S: float = 15.0
+    DRAIN_TIMEOUT_S: float = _parse_drain_timeout(os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=15.0)
     # Bound on closing the SDK stream in generate_stream's finally (same value as Brain's _ACLOSE_TIMEOUT).
     ACLOSE_TIMEOUT_S: float = 5.0
 
@@ -318,15 +348,23 @@ class GeminiAdapter:
                 }
         return parts, thoughts, grounding
 
-    async def _close_stream(self, stream_iter) -> None:
+    async def _close_stream(self, stream_iter: Any) -> None:
         """Best-effort bounded aclose of the SDK stream; failures are logged, never raised."""
-        aclose = getattr(stream_iter, "aclose", None)
-        if aclose is None:
+        aclose_fn = getattr(stream_iter, "aclose", None)
+        if not callable(aclose_fn):
             return
+
+        async def _bounded_close() -> None:
+            try:
+                await asyncio.wait_for(aclose_fn(), timeout=self.ACLOSE_TIMEOUT_S)
+            except Exception as e:
+                logger.warning("Gemini stream close failed (%s: %s)", type(e).__name__, e)
+
         try:
-            await asyncio.wait_for(aclose(), timeout=self.ACLOSE_TIMEOUT_S)
-        except Exception as e:
-            logger.warning(f"Gemini stream close failed ({type(e).__name__}: {e})")
+            close_task = asyncio.create_task(_bounded_close())
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError as e:
+            logger.warning("Gemini stream close failed (%s: %s)", type(e).__name__, e)
 
     async def generate_stream(
         self,
@@ -350,6 +388,10 @@ class GeminiAdapter:
             contents=self._convert_contents(contents),
             config=config,
         )
+        drain_timeout = _parse_drain_timeout(
+            os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=self.DRAIN_TIMEOUT_S
+        )
+        token_usage: TokenUsage | None = None
         thought_parts: list = []
         last_parts = None
         last_usage = None
@@ -365,36 +407,43 @@ class GeminiAdapter:
                     if pending_fc is None:
                         chunk = await stream_iter.__anext__()
                     else:
-                        # Function call already received: bound the wait for the tail (terminal usage).
-                        chunk = await asyncio.wait_for(
-                            stream_iter.__anext__(), timeout=max(0.0, drain_deadline - loop.time()),
-                        )
+                        remaining = drain_deadline - loop.time()
+                        if remaining <= 0:
+                            logger.warning(
+                                "Gemini stream drain timeout expired (%.1fs); emitting function_call without trailing metadata",
+                                drain_timeout,
+                            )
+                            break
+                        chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
                 except StopAsyncIteration:
                     break
-                except Exception as e:
+                except (Exception, asyncio.CancelledError) as e:
                     if pending_fc is None:
                         raise
-                    # Never lose a received function call to a tail failure (CancelledError is not caught).
+                    # Never lose a received function call to a tail failure or mid-drain cancellation.
+                    err_detail = str(e) or ("timed out" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else "cancelled")
                     logger.warning(
-                        f"Gemini stream drain aborted after function_call ({type(e).__name__}: {e}); "
-                        "emitting call with usage captured so far"
+                        "Gemini stream drain interrupted (%s: %s); emitting function_call without trailing metadata",
+                        type(e).__name__,
+                        err_detail,
                     )
                     break
 
-                if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                    last_usage = chunk.usage_metadata
-
                 # Parse before touching state (and before any yield) so a malformed chunk during the drain
-                # can't drop the held call. last_usage above is captured first so terminal usage still counts.
+                # can't drop the held call. Terminal usage is captured if present.
                 try:
+                    if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                        last_usage = chunk.usage_metadata
                     chunk_parts, chunk_thoughts, chunk_grounding = self._read_candidates(chunk)
                     chunk_fcs = chunk.function_calls or []
-                except Exception as e:
+                except (Exception, asyncio.CancelledError) as e:
                     if pending_fc is None:
                         raise
+                    err_detail = str(e) or ("timed out" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else "cancelled")
                     logger.warning(
-                        f"Gemini stream drain hit unreadable chunk ({type(e).__name__}: {e}); "
-                        "emitting call with usage captured so far"
+                        "Gemini stream drain candidate parsing failed (%s: %s); emitting function_call without trailing metadata",
+                        type(e).__name__,
+                        err_detail,
                     )
                     break
 
@@ -420,7 +469,7 @@ class GeminiAdapter:
                 if chunk_fcs:
                     pending_fc = chunk_fcs[0]
                     dropped_fcs += len(chunk_fcs) - 1
-                    drain_deadline = loop.time() + self.DRAIN_TIMEOUT_S
+                    drain_deadline = loop.time() + drain_timeout
         finally:
             # Runs on clean end, drain abort, error, cancel and aclose (@ai-rules 15). Usage first: it is
             # synchronous, so a second cancel can't skip it; then close the SDK stream.
