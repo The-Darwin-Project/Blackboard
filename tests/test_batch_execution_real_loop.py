@@ -437,3 +437,83 @@ class TestSingleFCTerminalNarrationSplit:
         assert response.action == "response", f"terminal FC text flush should be a response turn, got {response.action!r}"
         assert response.thoughts == "I'll defer this while CI runs."
         assert "evt-test" in brain._response_emitted_for
+
+
+# ---------------------------------------------------------------------------
+# evt-996e33ec Batch D2: RECALL gate never blocks a batch containing classify_event
+# ---------------------------------------------------------------------------
+
+class TestBatchReflexExempt:
+
+    @pytest.mark.asyncio
+    async def test_batch_with_exempt_fc_skips_reflex_gate(self):
+        """D2-T3: [classify_event, set_phase] with lessons available -> RECALL must not
+        return True for the batch; classify_event executes and the gate stays armed."""
+        fcs = [_fc("classify_event", {"domain": "clear"}), _fc("set_phase", {"phase": "dispatch"})]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        searcher = MagicMock()
+        searcher.gather = AsyncMock(return_value=[{"payload": {"title": "past incident"}, "score": 0.91}])
+        searcher.fire = MagicMock()
+        chunker = MagicMock()
+        chunker.feed = MagicMock(return_value=None)
+        chunker.flush = MagicMock(return_value=None)
+        brain._create_reflex_pair = MagicMock(return_value=(chunker, searcher))
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["classify_event", "set_phase"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", event)
+
+        brain.blackboard.update_event_domain.assert_awaited_once()
+        assert "evt-test" not in brain._reflex_fired_for
+        assert "evt-test" not in brain._recall_lessons
+        searcher.gather.assert_not_awaited()
+
+    @staticmethod
+    def _reflex_brain(fcs):
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        searcher = MagicMock()
+        searcher.gather = AsyncMock(return_value=[{"payload": {"title": "past incident"}, "score": 0.91}])
+        searcher.fire = MagicMock()
+        chunker = MagicMock()
+        chunker.feed = MagicMock(return_value=None)
+        chunker.flush = MagicMock(return_value=None)
+        brain._create_reflex_pair = MagicMock(return_value=(chunker, searcher))
+        return brain, searcher
+
+    @pytest.mark.asyncio
+    async def test_batch_with_exempt_fc_in_non_first_position_skips_reflex_gate(self):
+        """D2-T4: the exemption is batch-wide -- [set_phase, classify_event] (exempt FC NOT
+        first) must not arm/trigger the RECALL gate either."""
+        fcs = [_fc("set_phase", {"phase": "dispatch"}), _fc("classify_event", {"domain": "clear"})]
+        brain, searcher = self._reflex_brain(fcs)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["set_phase", "classify_event"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+
+        brain.blackboard.update_event_domain.assert_awaited_once()
+        assert "evt-test" not in brain._reflex_fired_for
+        assert "evt-test" not in brain._recall_lessons
+        searcher.gather.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_batch_without_exempt_fc_still_hits_reflex_gate(self):
+        """D2-T5 (negative control): a batch with NO exempt FC and lessons available is
+        blocked by RECALL (returns True, lessons stored, nothing executed). Proves the
+        exempt tests above are not passing because the gate is simply inert."""
+        fcs = [_fc("set_phase", {"phase": "dispatch"}), _fc("set_phase", {"phase": "triage"})]
+        brain, searcher = self._reflex_brain(fcs)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["set_phase"]), _gate_ctx_patch():
+            should_continue = await brain._process_with_llm("evt-test", _make_event())
+
+        assert should_continue is True
+        searcher.gather.assert_awaited_once()
+        assert "evt-test" in brain._reflex_fired_for
+        assert brain._recall_lessons["evt-test"][0]["payload"]["title"] == "past incident"
+        brain.blackboard.update_event_domain.assert_not_awaited()

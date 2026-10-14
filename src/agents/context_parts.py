@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from src.utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text
+
 if TYPE_CHECKING:
     from src.models import ConversationTurn
 
@@ -293,8 +295,11 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
         action_suffix = f" ({turn.action})" if turn.action and turn.action != "message" else ""
-        if turn.user_name:
-            prefix = f"[USER {turn.user_name}{action_suffix}]"
+        # user_name is operator/Slack-supplied: sanitize + cap so a crafted display name
+        # cannot break out of the [USER ...] prefix or inject lines into the turn text.
+        safe_name = sanitize_prompt_text(turn.user_name, max_len=PROMPT_NAME_MAX_LEN).strip()
+        if safe_name:
+            prefix = f"[USER {safe_name}{action_suffix}]"
         else:
             prefix = f"[USER{action_suffix}]"
         text = f"{prefix}: {raw}" if raw else prefix

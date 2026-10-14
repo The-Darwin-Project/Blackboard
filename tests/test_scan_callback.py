@@ -6,7 +6,7 @@ Each test validates one decision branch from the original start_event_loop scan.
 """
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agents.brain import Brain
@@ -617,6 +617,55 @@ class TestGuard1NoRetrigger:
         assert "evt-1" not in result, (
             "Guard 1 must NOT enqueue when only brain-authored turns are SENT"
         )
+
+
+class TestScanBypassContract:
+    """evt-996e33ec Batch C': the user-message bypass has NO wall-clock guard. A DELIVERED user
+    turn means "no completed cycle saw AND answered it" -- drives the real scan method."""
+
+    @staticmethod
+    def _brain_for(event: EventDocument, parked_at: float) -> Brain:
+        bb = AsyncMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={event.id: "active"})
+        bb.get_event = AsyncMock(return_value=event)
+        brain = Brain(blackboard=bb, agents={})
+        brain._waiting_for_user[event.id] = parked_at
+        brain._last_processed[event.id] = time.time()
+        return brain
+
+    @pytest.mark.asyncio
+    async def test_bypass_clears_park_for_message_landing_during_final_call(self):
+        """C-T1: the park timestamp is LATER than the user turn's timestamp (message landed
+        during the final LLM call, then the text-only path parked). The bypass must still
+        fire -- pins against wall-clock guards that would strand the message."""
+        now = time.time()
+        turns = [
+            _make_turn(actor="brain", action="response", status="processed", timestamp=now - 20),
+            _make_turn(actor="user", action="message", status="delivered", timestamp=now - 5),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._brain_for(event, parked_at=now)  # parked after the user turn arrived
+
+        result = await brain._scan_active_for_reconcile()
+
+        assert "evt-1" in result
+        assert "evt-1" not in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_no_bypass_when_cycle_processed_everything(self):
+        """C-T2: every turn PROCESSED (answered interrupt) -> the park is kept, nothing enqueued."""
+        now = time.time()
+        turns = [
+            _make_turn(actor="user", action="message", status="processed", timestamp=now - 20),
+            _make_turn(actor="brain", action="response", status="processed", timestamp=now - 10),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._brain_for(event, parked_at=now)
+
+        result = await brain._scan_active_for_reconcile()
+
+        assert "evt-1" not in result
+        assert "evt-1" in brain._waiting_for_user
 
 
 def _scan_logic(

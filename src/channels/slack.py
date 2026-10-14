@@ -48,7 +48,7 @@ from .formatter import (
     format_turn, format_event_summary, get_turn_attachment_color,
     get_agent_notification_text, extract_tables,
 )
-from ..models import EventEvidence
+from ..models import ConversationTurn, EventEvidence
 
 if TYPE_CHECKING:
     from ..agents.brain import Brain
@@ -215,8 +215,18 @@ class SlackChannel:
 
         Returns the new event ID. Caller handles UI-specific actions (set_title, react).
         """
-        from ..models import ConversationTurn
         prior_context = self._build_prior_context(event_doc)
+        # Seeded WITH the event (create_event persists them before LPUSH) so the Brain
+        # never pops a blank event (evt-996e33ec). create_event renumbers them 1..N.
+        ctx_turn = ConversationTurn(
+            turn=1, actor="brain", action="context",
+            thoughts=prior_context, source="system",
+        )
+        user_turn = ConversationTurn(
+            turn=2, actor="user", action="message",
+            thoughts=text, source="slack",
+            user_name=display_name,
+        )
         new_event_id = await self._blackboard.create_event(
             source="slack",
             service=event_doc.service,
@@ -231,19 +241,9 @@ class SlackChannel:
             slack_channel_id=channel,
             slack_thread_ts=thread_ts,
             slack_user_id=user_id,
+            initial_turns=[ctx_turn, user_turn],
         )
         await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
-        ctx_turn = ConversationTurn(
-            turn=1, actor="brain", action="context",
-            thoughts=prior_context, source="system",
-        )
-        await self._blackboard.append_turn(new_event_id, ctx_turn)
-        user_turn = ConversationTurn(
-            turn=2, actor="user", action="message",
-            thoughts=text, source="slack",
-            user_name=display_name,
-        )
-        await self._blackboard.append_turn(new_event_id, user_turn)
         return new_event_id
 
     def _register_handlers(self) -> None:
@@ -276,6 +276,11 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                initial_turns=[ConversationTurn(
+                    turn=1, actor="user", action="message",
+                    thoughts=text, source="slack",
+                    user_name=display_name,
+                )],
             )
 
             # Post visible thread-parent message
@@ -336,7 +341,6 @@ class SlackChannel:
                     return
                 elif event_doc and event_doc.status != "closed":
                     display_name = await self._resolve_display_name(client, user_id)
-                    from ..models import ConversationTurn
                     turn = ConversationTurn(
                         turn=len(event_doc.conversation) + 1,
                         actor="user", action="message",
@@ -363,11 +367,16 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                slack_channel_id=channel,
+                slack_thread_ts=thread_ts,
+                slack_user_id=user_id,
+                initial_turns=[ConversationTurn(
+                    turn=1, actor="user", action="message",
+                    thoughts=text, source="slack",
+                    user_name=display_name,
+                )],
             )
 
-            await self._blackboard.update_event_slack_context(
-                event_id, channel, thread_ts, user_id,
-            )
             await self._blackboard.set_slack_mapping(channel, thread_ts, event_id)
 
             self._quiet_events.add(event_id)
@@ -439,6 +448,11 @@ class SlackChannel:
                     slack_channel_id=channel,
                     slack_thread_ts=thread_ts,
                     slack_user_id=user,
+                    initial_turns=[ConversationTurn(
+                        turn=1, actor="user", action="message",
+                        thoughts=text, source="slack",
+                        user_name=display_name,
+                    )],
                 )
                 self._dm_context[event_id] = {
                     "channel": channel, "thread_ts": thread_ts,
@@ -499,7 +513,6 @@ class SlackChannel:
 
             is_channel_thread = channel_type != "im"
 
-            from ..models import ConversationTurn
             turn = ConversationTurn(
                 turn=len(event_doc.conversation) + 1,
                 actor="user", action="message",
@@ -539,7 +552,6 @@ class SlackChannel:
             channel = body["channel"]["id"]
             thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
 
-            from ..models import ConversationTurn
             from ..auth import get_user_from_slack, can_approve_event, resolve_approval_identity, DEX_ENABLED, TRUSTED_PROXY_ENABLED
             from ..utils.vcs_approval import resolve_live_head_sha
 
@@ -604,7 +616,6 @@ class SlackChannel:
             channel = body["channel"]["id"]
             thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
 
-            from ..models import ConversationTurn
             from ..auth import get_user_from_slack, can_approve_event, DEX_ENABLED, TRUSTED_PROXY_ENABLED
             event_doc = await self._blackboard.get_event(event_id)
             if not event_doc:
@@ -748,6 +759,11 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                initial_turns=[ConversationTurn(
+                    turn=1, actor="user", action="message",
+                    thoughts=text.strip(), source="slack",
+                    user_name=display_name,
+                )],
             )
             event_doc = await self._blackboard.get_event(event_id)
             blocks = format_event_summary(event_doc) if event_doc else []
@@ -1025,7 +1041,6 @@ class SlackChannel:
         event_doc = await self._blackboard.get_event(event_id)
         if not event_doc:
             return
-        from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
 
         if turn.actor == "brain" and turn.action == "response":

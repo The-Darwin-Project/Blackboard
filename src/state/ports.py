@@ -354,6 +354,7 @@ class EventRepository(Protocol):
         slack_channel_id: Optional[str] = None,
         slack_thread_ts: Optional[str] = None,
         slack_user_id: Optional[str] = None,
+        initial_turns: Optional[list[ConversationTurn]] = None,
     ) -> str: ...
 
     async def get_event(self, event_id: str) -> Optional[EventDocument]: ...

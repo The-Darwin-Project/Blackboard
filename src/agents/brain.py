@@ -135,6 +135,10 @@
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
 #     In-memory only -- assumes single Brain instance per cluster. Multi-replica makes cap best-effort.
+#     [Gotcha]: "Brain touched this event" is _has_non_user_turns(), NOT "conversation non-empty":
+#     user-initiated events are seeded with their first turn(s) at creation (evt-996e33ec), and
+#     Slack follow-ups also seed a brain.context(source=system) turn -- _is_seed_turn() exempts both.
+#     Restart cleanup and the first-error path key off it, so a seed must never read as Brain activity.
 #     [Pattern]: NEW events with no conversation are WIP-gated. The scan re-attempts process_event()
 #     each cycle so they are admitted as soon as capacity opens. process_event() re-checks the WIP
 #     gate internally -- no risk of bypassing admission control.
@@ -167,16 +171,23 @@
 #     to re-invoke LLM with RECALL block in SI. BRAIN_MEMORY_REFLEX env var. Max 1 gate per cycle.
 #     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
 #     _REFLEX_EXEMPT tools (classify_event) bypass the gate — they are state mutations that must
-#     execute or the event document stays inconsistent (e.g., domain never set).
+#     execute or the event document stays inconsistent (e.g., domain never set). In a parallel batch
+#     ONE exempt FC anywhere skips the gate for the WHOLE batch (blocking it would block the exempt
+#     FC too), without arming _reflex_fired_for, so the gate stays available for the next batch.
 # 44. [Pattern]: _resolve_terminal_prompt(active_phases, domain) resolves the terminal user prompt from
 #     _phase.yaml metadata (terminal_prompt/terminal_prompts keys). Priority-wins (same as _resolve_llm_params).
 #     Falls back to _TERMINAL_PROMPT_FALLBACK when no phase declares one. Domain cross via terminal_prompts dict.
 #     Reflex gate logs individual match scores with source tag (L=lesson, K=knowledge) for observability.
-# 43. [Pattern]: User interrupt injection in LLM iteration loop. After re-fetch (iteration > 0),
-#     detect new user turns beyond turn_snapshot. If found (and not intermediate), inject PRIORITY
-#     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
-#     NOT expanded — safety net: if LLM ignores, user turn stays DELIVERED for next scan cycle.
-#     response_emitted + _response_emitted_for reset on interrupt (fresh response cycle).
+# 43. [Pattern]: User interrupt handling in LLM iteration loop. After re-fetch (iteration > 0),
+#     detect new user turns beyond turn_snapshot. If found (and not intermediate), the RESPOND TO THIS
+#     marker (commit 71fc829) puts them in view; the turn is recorded in acknowledged_interrupts
+#     {user turn -> len(conversation) at detection}. turn_snapshot is NOT expanded. After the loop,
+#     _compute_processed_up_to() extends PROCESSED over brain turns AND over acknowledged interrupts
+#     answered by a brain.response or wait_for_user park (action="wait", waitingFor="user") appended
+#     at/after the acknowledgement point (a response flushed BEFORE the ack never saw the interrupt
+#     and does not count). Unseen or ignored user turns stay
+#     DELIVERED so the scan safety net still re-processes them (evt-996e33ec: an answered interrupt
+#     left DELIVERED caused a duplicate reply). response_emitted + _response_emitted_for reset on interrupt.
 # 46. [Pattern]: _close_and_broadcast unevaluated-message re-check runs only for LLM-driven closes
 #     (close_reason="resolved"). System-driven closes (duplicate, timeout, error, force_closed,
 #     stream_close) bypass intentionally — safety-valve closes must always win regardless of pending messages.
@@ -454,6 +465,44 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "request_user_approval",
 })
 
+# Tools the memory-reflex (RECALL) gate must never block (@ai-rules #40).
+# Currently only classify_event: a state mutation that must execute or the event
+# document stays inconsistent (e.g., domain never set).
+_REFLEX_EXEMPT = frozenset({"classify_event"})
+
+
+# Grace window for the blank-user-event consumer guard in _process_event_inner.
+_BLANK_USER_EVENT_GRACE_SECONDS = 10.0
+
+
+def _is_seed_turn(turn: ConversationTurn) -> bool:
+    """True for turns that do not represent Brain/agent processing output.
+
+    Returns True for any ``actor == "user"`` turn, and for the creation-time
+    ``brain.context`` turn with ``source == "system"`` (prior thread context seeded
+    alongside the user's message; slack.py create-followup). Everything else counts
+    as processing output.
+    """
+    if turn.actor == "user":
+        return True
+    return (
+        turn.actor == "brain"
+        and turn.action == "context"
+        and turn.source == "system"
+    )
+
+
+def _has_non_user_turns(conversation: list[ConversationTurn]) -> bool:
+    """True once anything other than the creation-seeded turns is on the event.
+
+    Chat/Slack events are created with their first user turn(s) (evt-996e33ec), so
+    "conversation is non-empty" no longer means "the Brain touched this event".
+    Slack follow-ups also seed a brain.context turn, which must not read as the Brain
+    having answered (restart cleanup / first-error path would drop the user's message).
+    Other sources keep their legacy meaning: any agent/system turn counts.
+    """
+    return any(not _is_seed_turn(t) for t in conversation)
+
 
 import re as _re
 
@@ -465,6 +514,40 @@ _ERROR_TEXT_MAX = 300
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
 _MAX_BATCH_SIZE = 4
+
+
+def _compute_processed_up_to(
+    conversation: list[ConversationTurn],
+    turn_snapshot: int,
+    acknowledged_interrupts: dict[int, int],
+) -> int:
+    """Exclusive index up to which turns become PROCESSED after an LLM cycle.
+
+    Extends past turn_snapshot over (a) brain-authored turns and (b) user
+    interrupts the loop acknowledged AND answered by a brain.response (or a
+    wait_for_user park, whose summary is the user-facing reply) appended
+    at/after the acknowledgement point (conversation length at detection).
+    Stops at the first turn that is neither, so unseen or ignored input stays
+    DELIVERED for the scan safety net (@ai-rules #43).
+    """
+    processed_up_to = turn_snapshot
+    for idx in range(turn_snapshot, len(conversation)):
+        t = conversation[idx]
+        if t.actor == "brain":
+            processed_up_to = idx + 1
+            continue
+        ack_len = acknowledged_interrupts.get(t.turn)
+        if ack_len is not None and any(
+            b.actor == "brain" and (
+                b.action == "response"
+                or (b.action == "wait" and b.waitingFor == "user")
+            )
+            for b in conversation[ack_len:]
+        ):
+            processed_up_to = idx + 1
+            continue
+        break
+    return processed_up_to
 
 # Tools with side effects that are NOT safe to blindly re-issue (dispatching an
 # agent, deferring an event). When a batch FC's turn never got persisted before
@@ -1077,6 +1160,22 @@ class Brain:
             logger.debug(f"Skipping closed event {event_id}")
             return
 
+        # evt-996e33ec: user-initiated events are created with their first turn
+        # (create_event(initial_turns=...)). A blank chat/slack event inside the grace
+        # window means a caller regressed -- let the resync scan retry (blank NEW events
+        # are re-enqueued by the scan) instead of triaging a context-free event.
+        if (
+            not event.conversation
+            and event.source in ("chat", "slack")
+            and event.processing_started_at is None
+            and time.time() - (event.queued_at or 0) < _BLANK_USER_EVENT_GRACE_SECONDS
+        ):
+            logger.warning(
+                "Blank %s event %s popped before its first turn; deferring to resync scan",
+                event.source, event_id,
+            )
+            return
+
         # Mirror active meta-event ID on first process of a jarvis event
         if event.source == "jarvis" and self._active_meta_event_id != event_id:
             self._active_meta_event_id = event_id
@@ -1191,7 +1290,7 @@ class Brain:
         if event.processing_started_at is None:
             await self.blackboard.stamp_event(event_id, processing_started_at=time.time())
 
-        if not event.conversation:
+        if event.processing_started_at is None:  # in-memory doc predates the stamp above
             await self.blackboard.record_event(
                 EventType.BRAIN_EVENT_CREATED,
                 {"event_id": event_id, "service": event.service, "source": event.source},
@@ -1367,7 +1466,7 @@ class Brain:
                 is_intermediate = False
             max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
             response_emitted = False  # Track if brain.response was already flushed this cycle
-            acknowledged_interrupts: set[int] = set()
+            acknowledged_interrupts: dict[int, int] = {}  # user turn -> len(conversation) at detection
             for iteration in range(max_llm_iterations):
                 # Re-fetch event to pick up turns appended by the previous iteration
                 if iteration > 0:
@@ -1387,7 +1486,8 @@ class Brain:
                     ]
                     if new_user_turns:
                         user_interrupt_turn = new_user_turns[-1].turn
-                        acknowledged_interrupts.update(t.turn for t in new_user_turns)
+                        for t in new_user_turns:
+                            acknowledged_interrupts[t.turn] = len(event.conversation)
                         response_emitted = False
                         self._response_emitted_for.discard(event_id)
                         logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
@@ -1411,17 +1511,12 @@ class Brain:
             # Brain turns appended during the loop (tool results) also get PROCESSED.
             # Non-brain turns after turn_snapshot stay SENT/DELIVERED for next cycle.
             event_after = await self.blackboard.get_event(event_id)
-            extra_brain_count = 0
-            if event_after:
-                extra_brain_turns = []
-                for t in event_after.conversation[turn_snapshot:]:
-                    if t.actor == "brain":
-                        extra_brain_turns.append(t.turn)
-                    else:
-                        break
-                if extra_brain_turns:
-                    extra_brain_count = len(extra_brain_turns)
-            processed_up_to = turn_snapshot + extra_brain_count
+            processed_up_to = (
+                _compute_processed_up_to(
+                    event_after.conversation, turn_snapshot, acknowledged_interrupts,
+                )
+                if event_after else turn_snapshot
+            )
             await self.blackboard.mark_turns_status(
                 event_id, up_to_turn=processed_up_to,
                 status=MessageStatus.PROCESSED,
@@ -1437,18 +1532,24 @@ class Brain:
             )
         except Exception as e:
             event_fresh = await self.blackboard.get_event(event_id)
-            if event_fresh and not event_fresh.conversation:
+            if event_fresh and not _has_non_user_turns(event_fresh.conversation):
                 error_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="error",
                     thoughts=f"Brain failed on first processing: {type(e).__name__}: {_sanitize_error_text(e)}",
                 )
-                await self._append_and_broadcast(event_id, error_turn)
+                assigned = await self._append_and_broadcast(event_id, error_turn)
                 await self.blackboard.mark_turns_status(
-                    event_id, up_to_turn=turn_snapshot + 1,
+                    event_id, up_to_turn=turn_snapshot,
                     status=MessageStatus.PROCESSED,
                 )
+                # Mark the error turn by number so a user turn that arrived mid-failure
+                # is not swept to PROCESSED.
+                if assigned:
+                    await self.blackboard.mark_turn_status(
+                        event_id, assigned, MessageStatus.PROCESSED,
+                    )
             raise
 
     async def _process_with_llm(
@@ -1879,7 +1980,12 @@ class Brain:
                 if final_window:
                     reflex_searcher.fire(final_window)
 
-            if reflex_searcher and event_id not in self._reflex_fired_for:
+            # An exempt FC anywhere in the batch skips the gate: blocking the batch would block it too.
+            if (
+                reflex_searcher
+                and event_id not in self._reflex_fired_for
+                and not any(fc["functionCall"]["name"] in _REFLEX_EXEMPT for fc in batch_fcs)
+            ):
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
@@ -2049,8 +2155,14 @@ class Brain:
                 if final_window:
                     reflex_searcher.fire(final_window)
 
-            # Memory reflex gate: check for lesson matches before executing tool
-            if reflex_searcher and event_id not in self._reflex_fired_for:
+            # Memory reflex gate: check for lesson matches before executing tool.
+            # _REFLEX_EXEMPT tools skip the gate WITHOUT arming _reflex_fired_for, so it
+            # stays available for the next (non-exempt) tool in the cycle.
+            if (
+                reflex_searcher
+                and event_id not in self._reflex_fired_for
+                and function_call.name not in _REFLEX_EXEMPT
+            ):
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
@@ -5249,7 +5361,7 @@ class Brain:
             # Close only ACTIVE events that had in-flight agent work. Deferred events
             # survive restart — their timer will wake them naturally. Events in
             # waiting_approval also survive — the human hasn't responded yet.
-            if event.conversation:
+            if _has_non_user_turns(event.conversation):  # Brain/agents touched it
                 # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
                 if (
                     event.source == "jarvis"
@@ -5320,7 +5432,7 @@ class Brain:
                     asyncio.create_task(archivist.archive_event(event))
                 stale_count += 1
             else:
-                # No turns yet -- re-queue for fresh processing
+                # Never processed by the Brain (blank, or only seeded user turns) -- re-queue
                 await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, eid)
                 logger.info(f"Re-queued untouched event {eid} for fresh processing")
 
@@ -5765,11 +5877,21 @@ class Brain:
             # the user IS the response — their message invalidates the wait state.
             # Scoped to recent turns to avoid matching stale history if mark_turns_evaluated fails.
             # Auth boundary: actor=="user" is set by authenticated ingestion (chat/slack endpoints).
+            # Contract (post evt-996e33ec): a DELIVERED user turn is one no completed cycle has
+            # seen AND answered (_compute_processed_up_to). Do NOT add a wall-clock guard vs. the
+            # park time -- it strands messages that land during the final LLM call (enqueue is
+            # dropped while the event is in flight; user parks have no idle backstop).
             has_user_unread = has_unread and any(
                 t.status.value == "delivered" and t.actor == "user"
                 for t in event.conversation[-10:]
             )
             if has_user_unread and is_waiting:
+                logger.info(
+                    "Scan bypass: delivered user turn(s) %s cleared wait_for_user for %s",
+                    [t.turn for t in event.conversation[-10:]
+                     if t.actor == "user" and t.status.value == "delivered"],
+                    eid,
+                )
                 self.clear_waiting(eid)
                 is_waiting = False
 

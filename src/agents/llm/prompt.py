@@ -23,24 +23,19 @@
 """Source-aware event header builder for Brain triage prompts."""
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from src.models import CIAnalysis
+from src.utils.prompt_sanitize import sanitize_prompt_text
 
 if TYPE_CHECKING:
     from src.models import EventDocument, Service
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-
 def _safe_prompt_field(value: object, *, max_len: int = 60) -> str:
-    """Coerce an untrusted scalar to a short, single-line, control-char-free string
-    before it is embedded in a Brain/FRIDAY prompt."""
-    text = "" if value is None else str(value)
-    text = text.replace("\n", " ").replace("\r", " ")
-    text = _CONTROL_CHARS.sub("", text)
-    return text[:max_len]
+    """Coerce an untrusted scalar to a short, single-line string with control chars,
+    line/paragraph separators and bidi/zero-width formatting chars removed, before it
+    is embedded in a Brain/FRIDAY prompt."""
+    return sanitize_prompt_text(value, max_len=max_len)
 
 
 def build_event_header(
@@ -102,6 +97,14 @@ def _build_identity_block(
             lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
         eff_severity = ev.brain_severity or ev.severity
         lines.append(f"Severity: {eff_severity}")
+        # evt-996e33ec: anchor the operator's identity in the deterministic header so
+        # "use the operator's name" does not depend on inference. Input is sanitized
+        # (single-line, control chars stripped, length-capped).
+        if event.source in ("chat", "slack"):
+            who = _safe_prompt_field(ev.triggered_by, max_len=80).strip()
+            email = _safe_prompt_field(event.created_by_email, max_len=120).strip()
+            if who or email:
+                lines.append(f"Requester: {who or email}" + (f" <{email}>" if who and email else ""))
     return lines
 
 

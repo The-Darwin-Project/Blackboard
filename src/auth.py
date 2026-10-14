@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Optional
 import jwt
 from starlette.requests import Request
 
+from .utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text
+
 if TYPE_CHECKING:
     from .adapters.oidc_adapter import OIDCKeyAdapter
 
@@ -82,10 +84,29 @@ class UserContext:
     email: Optional[str] = None
     source: str = "dashboard"
     roles: list[str] = field(default_factory=list)
+    full_name: Optional[str] = None  # JWT "name" claim (profile scope) -- prompt display only
 
     @property
     def label(self) -> str:
         return self.display_name or self.user_id
+
+
+def prompt_display_name(user) -> Optional[str]:
+    """Human name for prompts/turn labels: full_name > label (never 'anonymous').
+
+    isinstance checks keep duck-typed test doubles (MagicMock) from leaking
+    non-string values into pydantic-validated fields. label/display_name are NOT
+    changed -- approval stamping and audit use them.
+    """
+    full = getattr(user, "full_name", None)
+    if isinstance(full, str):
+        cleaned = sanitize_prompt_text(full, max_len=PROMPT_NAME_MAX_LEN).strip()
+        if cleaned:
+            return cleaned
+    label = getattr(user, "label", None)
+    if isinstance(label, str) and label != "anonymous":
+        return sanitize_prompt_text(label, max_len=PROMPT_NAME_MAX_LEN).strip() or None
+    return None
 
 
 def _validate_jwt(token: str) -> dict:
@@ -119,6 +140,7 @@ def _claims_to_user(claims: dict) -> UserContext:
         email=claims.get("email"),
         source="dashboard",
         roles=claims.get("groups", []),
+        full_name=claims.get("name"),
     )
 
 
