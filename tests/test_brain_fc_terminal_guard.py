@@ -433,7 +433,7 @@ class TestRecallContinuation:
     async def test_recall_continuation_single_response(self):
         iter0_chunks = [
             _Chunk(text="Let me check for similar issues first."),
-            _Chunk(function_call=FunctionCall(name="classify_event", args={})),
+            _Chunk(function_call=FunctionCall(name="lookup_service", args={})),
         ]
         iter1_chunks = [_Chunk(text="Based on a past incident, this is a config drift issue.")]
         streams = iter([MockStream(iter0_chunks), MockStream(iter1_chunks)])
@@ -449,7 +449,7 @@ class TestRecallContinuation:
         mock_chunker.flush = MagicMock(return_value=None)
         brain._create_reflex_pair = MagicMock(return_value=(mock_chunker, mock_searcher))
 
-        with _gate_patch(["classify_event", "wait_for_user"]), _gate_ctx_patch():
+        with _gate_patch(["lookup_service", "wait_for_user"]), _gate_ctx_patch():
             # Iteration 0: non-terminal FC -- RECALL fires before the tool executes.
             should_continue = await brain._process_with_llm(
                 "evt-cc105cc5", event, iteration=0, response_emitted=False,
@@ -654,3 +654,50 @@ class TestClearWaitingResetsResponseEmittedAcrossCycles:
             "_response_emitted_for flag from the prior park/resume cycle"
         )
         assert "[GATE]" in tool_results[0].thoughts
+
+
+def _recall_brain(stream_factory) -> Brain:
+    """Brain whose reflex searcher always reports a matching lesson."""
+    brain = _make_brain(stream_factory)
+    mock_searcher = MagicMock()
+    mock_searcher.gather = AsyncMock(return_value=[{"payload": {"title": "past incident"}, "score": 0.91}])
+    mock_searcher.fire = MagicMock()
+    mock_chunker = MagicMock()
+    mock_chunker.feed = MagicMock(return_value=None)
+    mock_chunker.flush = MagicMock(return_value=None)
+    brain._create_reflex_pair = MagicMock(return_value=(mock_chunker, mock_searcher))
+    return brain
+
+
+class TestReflexExempt:
+    """evt-996e33ec Batch D2: RECALL must never block classify_event (a state mutation)."""
+
+    @pytest.mark.asyncio
+    async def test_reflex_gate_exempts_classify_event(self):
+        """D2-T1: lessons available + classify_event FC -> the tool executes; gate stays armed."""
+        chunks = [_Chunk(function_call=FunctionCall(name="classify_event", args={}))]
+        brain = _recall_brain(lambda **kw: MockStream(chunks))
+        event = _make_event(source="chat")
+
+        with _gate_patch(["classify_event", "wait_for_user"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", event, iteration=0, response_emitted=False)
+
+        brain._execute_function_call.assert_awaited_once()
+        assert "evt-cc105cc5" not in brain._reflex_fired_for
+        assert "evt-cc105cc5" not in brain._recall_lessons
+
+    @pytest.mark.asyncio
+    async def test_reflex_gate_still_blocks_non_exempt(self):
+        """D2-T2: a non-exempt tool is still intercepted by RECALL."""
+        chunks = [_Chunk(function_call=FunctionCall(name="lookup_service", args={}))]
+        brain = _recall_brain(lambda **kw: MockStream(chunks))
+        event = _make_event(source="chat")
+
+        with _gate_patch(["lookup_service", "wait_for_user"]), _gate_ctx_patch():
+            should_continue = await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=0, response_emitted=False,
+            )
+
+        assert should_continue is True
+        brain._execute_function_call.assert_not_awaited()
+        assert "evt-cc105cc5" in brain._reflex_fired_for

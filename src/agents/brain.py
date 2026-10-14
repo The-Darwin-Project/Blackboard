@@ -458,6 +458,10 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "request_user_approval",
 })
 
+# Tools the memory-reflex (RECALL) gate must never block (@ai-rules #40, #130):
+# state mutations that must execute or the event document stays inconsistent.
+_REFLEX_EXEMPT = frozenset({"classify_event"})
+
 
 # Grace window for the blank-user-event consumer guard in _process_event_inner.
 _BLANK_USER_EVENT_GRACE_SECONDS = 10.0
@@ -1944,7 +1948,12 @@ class Brain:
                 if final_window:
                     reflex_searcher.fire(final_window)
 
-            if reflex_searcher and event_id not in self._reflex_fired_for:
+            # An exempt FC anywhere in the batch skips the gate: blocking the batch would block it too.
+            if (
+                reflex_searcher
+                and event_id not in self._reflex_fired_for
+                and not any(fc["functionCall"]["name"] in _REFLEX_EXEMPT for fc in batch_fcs)
+            ):
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
@@ -2114,8 +2123,14 @@ class Brain:
                 if final_window:
                     reflex_searcher.fire(final_window)
 
-            # Memory reflex gate: check for lesson matches before executing tool
-            if reflex_searcher and event_id not in self._reflex_fired_for:
+            # Memory reflex gate: check for lesson matches before executing tool.
+            # _REFLEX_EXEMPT tools skip the gate WITHOUT arming _reflex_fired_for, so it
+            # stays available for the next (non-exempt) tool in the cycle.
+            if (
+                reflex_searcher
+                and event_id not in self._reflex_fired_for
+                and function_call.name not in _REFLEX_EXEMPT
+            ):
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
