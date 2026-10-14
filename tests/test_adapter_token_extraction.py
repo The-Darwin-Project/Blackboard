@@ -433,3 +433,113 @@ class TestGeminiGenerateStreamDrainHardening:
         chunks = self._collect(self._adapter(stream))
 
         assert chunks[-1].grounding_metadata == {"queries": ["q"], "chunks": [{"title": "T", "uri": "http://x"}]}
+
+    # --- Stream close on every exit (@ai-rules 15) ---
+
+    @staticmethod
+    def _spy(chunks, *, hang_after=None, raise_after=None, aclose_exc=None):
+        import asyncio
+
+        class SpyStream:
+            """SDK stream stand-in that records whether aclose() was awaited."""
+
+            def __init__(self):
+                self.aclose_awaited = 0
+                self._i = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hang_after is not None and self._i >= hang_after:
+                    await asyncio.Event().wait()
+                if raise_after is not None and self._i >= raise_after:
+                    raise ConnectionError("read failed")
+                if self._i >= len(chunks):
+                    raise StopAsyncIteration
+                self._i += 1
+                return chunks[self._i - 1]
+
+            async def aclose(self):
+                self.aclose_awaited += 1
+                if aclose_exc:
+                    raise aclose_exc
+
+        return SpyStream()
+
+    def test_consumer_aclose_mid_stream_closes_sdk_stream_and_records_usage(self):
+        import asyncio
+        tracker = self._tracker()
+        spy = self._spy([
+            _chunk(parts=[_part("partial")], text="partial", usage=_usage(total=77)),
+            _chunk(parts=[_part("more")], text="more"),
+        ])
+        adapter = self._adapter(lambda: spy, tracker=tracker)
+
+        async def run():
+            gen = adapter.generate_stream("sys", "prompt")
+            await gen.__anext__()
+            await gen.aclose()
+
+        asyncio.run(run())
+
+        assert spy.aclose_awaited == 1
+        tracker.record.assert_called_once_with(77, 50)
+
+    def test_brain_style_timeout_while_stalled_closes_sdk_stream_and_records_usage(self):
+        import asyncio
+        tracker = self._tracker()
+        spy = self._spy([_chunk(parts=[_part("hi")], text="hi", usage=_usage(total=64))], hang_after=1)
+        adapter = self._adapter(lambda: spy, tracker=tracker)
+
+        async def run():
+            gen = adapter.generate_stream("sys", "prompt")
+            await asyncio.wait_for(gen.__anext__(), timeout=1)
+            with __import__("pytest").raises(asyncio.TimeoutError):
+                await asyncio.wait_for(gen.__anext__(), timeout=0.05)  # Brain's per-chunk wait_for
+
+        asyncio.run(run())
+
+        assert spy.aclose_awaited == 1
+        tracker.record.assert_called_once_with(64, 50)
+
+    def test_read_error_before_function_call_propagates_and_closes_sdk_stream(self):
+        import pytest
+        spy = self._spy([_chunk(parts=[_part("hi")], text="hi")], raise_after=1)
+        adapter = self._adapter(lambda: spy)
+
+        with pytest.raises(ConnectionError):
+            self._collect(adapter)
+
+        assert spy.aclose_awaited == 1
+
+    def test_malformed_trailing_grounding_during_drain_emits_function_call(self):
+        tracker = self._tracker()
+        bad_grounding = SimpleNamespace(web_search_queries=["q"], grounding_chunks=[SimpleNamespace(web=object())])
+        spy = self._spy([
+            _chunk(parts=[_part()], function_calls=[_fc()]),
+            # web has no .title/.uri -> AttributeError while parsing; terminal usage rides on the same chunk
+            _chunk(grounding=bad_grounding, usage=_usage(total=135)),
+        ])
+        adapter = self._adapter(lambda: spy, tracker=tracker)
+
+        chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert chunks[0].function_call.name == "classify_event"
+        assert chunks[0].usage.total_tokens == 135
+        tracker.record.assert_called_once_with(135, 50)
+        assert spy.aclose_awaited == 1
+
+    def test_aclose_failure_is_logged_not_raised(self, caplog):
+        import logging
+        spy = self._spy([_chunk(parts=[_part()], function_calls=[_fc()], usage=_usage())],
+                        aclose_exc=RuntimeError("boom"))
+        adapter = self._adapter(lambda: spy)
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks = self._collect(adapter)
+
+        assert chunks[-1].function_call.name == "classify_event"
+        assert spy.aclose_awaited == 1
+        assert "Gemini stream close failed" in caplog.text

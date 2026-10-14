@@ -19,8 +19,10 @@
 # 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12b. [Pattern]: Per-chunk stream timeout: asyncio.wait_for(anext(it), timeout=LLM_STREAM_CHUNK_TIMEOUT_SEC).
-#     On timeout: bounded aclose(stream, 5s) + retry once (dedicated timeout_retries counter, independent
-#     from transient retries). On exhaustion: clear all accumulators, write timeout-specific error turn.
+#     On timeout: retry once (dedicated timeout_retries counter, independent from transient retries). On
+#     exhaustion: clear all accumulators, write timeout-specific error turn. The stream is closed (bounded
+#     aclose, 5s) in a finally on EVERY exit where it was not fully consumed (stream_exhausted False): timeout,
+#     repetition-collapse break, error, cancel. Normal completion never calls aclose.
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 13b. [Pattern]: ReconcileScheduler (src/scheduling/) replaces monolithic event loop. start_event_loop() is a
@@ -1674,6 +1676,7 @@ class Brain:
 
                 try:
                     stream = None
+                    stream_exhausted = False
                     try:
                         stream = self._adapter.generate_stream(
                             system_prompt=system_prompt,
@@ -1688,6 +1691,7 @@ class Brain:
                             try:
                                 chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
                             except StopAsyncIteration:
+                                stream_exhausted = True
                                 break
                             if chunk.text:
                                 if chunk.is_thought:
@@ -1732,12 +1736,15 @@ class Brain:
                         break
                     except asyncio.TimeoutError:
                         logger.warning(f"Brain LLM stream timed out for {event_id} after {chunk_timeout}s (attempt {attempt+1})")
-                        if stream is not None and hasattr(stream, 'aclose'):
+                        raise
+                    finally:
+                        # Any exit where the stream was not fully consumed (timeout, repetition-collapse break,
+                        # error, cancel): close it so the SDK response/quota is released while we still hold the ref.
+                        if stream is not None and not stream_exhausted and hasattr(stream, 'aclose'):
                             try:
                                 await asyncio.wait_for(stream.aclose(), timeout=_ACLOSE_TIMEOUT)
                             except (asyncio.TimeoutError, Exception) as cleanup_err:
                                 logger.warning(f"Stream cleanup failed for {event_id}: {cleanup_err}")
-                        raise
                 except Exception as e:
                     last_error = e
                     if isinstance(e, asyncio.TimeoutError):

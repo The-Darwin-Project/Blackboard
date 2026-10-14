@@ -20,10 +20,15 @@
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
 #     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
 # 14. [Gotcha]: After the first function_calls chunk, keep consuming the stream (single loop) to capture terminal
-#     usage_metadata, thought parts and grounding. The call is held and emitted once in the final done chunk. Drain errors
-#     and DRAIN_TIMEOUT_S expiry must NOT lose the call (emit it with usage so far); _record_usage runs in a finally.
-#     last_parts is frozen at the function-call chunk (later parts would displace the thought_signature carrier);
-#     later text is dropped and extra function calls are logged and dropped.
+#     usage_metadata, thought parts and grounding. The call is held and emitted once in the final done chunk. Drain
+#     errors, unreadable trailing chunks (_read_candidates / function_calls parse) and DRAIN_TIMEOUT_S expiry must NOT
+#     lose the call (emit it with usage so far); errors before the call still propagate. last_parts is frozen at the
+#     function-call chunk (later parts would displace the thought_signature carrier); later text is dropped and extra
+#     function calls are logged and dropped.
+# 15. [Constraint]: generate_stream closes the SDK stream in the outer finally on EVERY exit (clean end, drain abort,
+#     parse error, GeneratorExit, CancelledError) via _close_stream (bounded by ACLOSE_TIMEOUT_S, failures logged).
+#     _record_usage runs FIRST in that finally: it is synchronous, so a second cancel cannot skip it. The SDK nests
+#     ~6 async generators with bare `async for` (no aclosing), so nothing else closes the HTTP response deterministically.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -46,6 +51,8 @@ class GeminiAdapter:
 
     # Max seconds to wait for the stream tail after a function_call chunk (terminal usage_metadata).
     DRAIN_TIMEOUT_S: float = 15.0
+    # Bound on closing the SDK stream in generate_stream's finally (same value as Brain's _ACLOSE_TIMEOUT).
+    ACLOSE_TIMEOUT_S: float = 5.0
 
     def __init__(self, project: str, location: str, model_name: str, quota_tracker=None):
         from google import genai
@@ -285,6 +292,42 @@ class GeminiAdapter:
     def _is_thought_part(part) -> bool:
         return hasattr(part, 'thought') and part.thought
 
+    def _read_candidates(self, chunk) -> tuple[list | None, list, dict | None]:
+        """Parse a chunk's candidates without mutating adapter/stream state.
+
+        Returns (parts, thought_parts, grounding): parts of the last candidate that has any (None if none),
+        thought parts in wire order, and the last grounding summary (None if none). May raise on malformed
+        chunks -- the caller decides whether that is fatal (@ai-rules 14).
+        """
+        parts = None
+        thoughts: list = []
+        grounding = None
+        for candidate in chunk.candidates or []:
+            if candidate.content and candidate.content.parts:
+                parts = candidate.content.parts
+                thoughts.extend(p for p in parts if self._is_thought_part(p))
+            if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+                gm = candidate.grounding_metadata
+                grounding = {
+                    "queries": list(gm.web_search_queries or []),
+                    "chunks": [
+                        {"title": c.web.title, "uri": c.web.uri}
+                        for c in (gm.grounding_chunks or [])
+                        if hasattr(c, "web") and c.web
+                    ],
+                }
+        return parts, thoughts, grounding
+
+    async def _close_stream(self, stream_iter) -> None:
+        """Best-effort bounded aclose of the SDK stream; failures are logged, never raised."""
+        aclose = getattr(stream_iter, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await asyncio.wait_for(aclose(), timeout=self.ACLOSE_TIMEOUT_S)
+        except Exception as e:
+            logger.warning(f"Gemini stream close failed ({type(e).__name__}: {e})")
+
     async def generate_stream(
         self,
         system_prompt: str,
@@ -336,55 +379,55 @@ class GeminiAdapter:
                         f"Gemini stream drain aborted after function_call ({type(e).__name__}: {e}); "
                         "emitting call with usage captured so far"
                     )
-                    aclose = getattr(stream_iter, "aclose", None)
-                    if aclose:
-                        try:
-                            await aclose()
-                        except Exception:
-                            pass
                     break
 
                 if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                     last_usage = chunk.usage_metadata
 
-                if chunk.candidates:
-                    for candidate in chunk.candidates:
-                        if candidate.content and candidate.content.parts:
-                            # Frozen once a function call is held: a later chunk's parts would replace the
-                            # function_call part (carrier of thought_signature) in raw_parts (@ai-rules 14).
-                            if pending_fc is None:
-                                last_parts = candidate.content.parts
-                            for part in candidate.content.parts:
-                                if self._is_thought_part(part):
-                                    thought_parts.append(part)
-                                    if hasattr(part, "text") and part.text:
-                                        yield LLMChunk(text=part.text, is_thought=True)
-                        if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
-                            gm = candidate.grounding_metadata
-                            last_grounding = {
-                                "queries": list(gm.web_search_queries or []),
-                                "chunks": [
-                                    {"title": c.web.title, "uri": c.web.uri}
-                                    for c in (gm.grounding_chunks or [])
-                                    if hasattr(c, "web") and c.web
-                                ],
-                            }
+                # Parse before touching state (and before any yield) so a malformed chunk during the drain
+                # can't drop the held call. last_usage above is captured first so terminal usage still counts.
+                try:
+                    chunk_parts, chunk_thoughts, chunk_grounding = self._read_candidates(chunk)
+                    chunk_fcs = chunk.function_calls or []
+                except Exception as e:
+                    if pending_fc is None:
+                        raise
+                    logger.warning(
+                        f"Gemini stream drain hit unreadable chunk ({type(e).__name__}: {e}); "
+                        "emitting call with usage captured so far"
+                    )
+                    break
+
+                # Frozen once a function call is held: a later chunk's parts would replace the
+                # function_call part (carrier of thought_signature) in raw_parts (@ai-rules 14).
+                if chunk_parts is not None and pending_fc is None:
+                    last_parts = chunk_parts
+                thought_parts.extend(chunk_thoughts)
+                if chunk_grounding is not None:
+                    last_grounding = chunk_grounding
+                for part in chunk_thoughts:
+                    if hasattr(part, "text") and part.text:
+                        yield LLMChunk(text=part.text, is_thought=True)
 
                 if pending_fc is not None:
                     # Draining: only usage, thoughts and grounding are kept; text and extra calls are dropped.
-                    dropped_fcs += len(chunk.function_calls or [])
+                    dropped_fcs += len(chunk_fcs)
                     continue
 
                 if chunk.text:
                     yield LLMChunk(text=chunk.text)
 
-                if chunk.function_calls:
-                    pending_fc = chunk.function_calls[0]
-                    dropped_fcs += len(chunk.function_calls) - 1
+                if chunk_fcs:
+                    pending_fc = chunk_fcs[0]
+                    dropped_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + self.DRAIN_TIMEOUT_S
         finally:
-            # Runs on clean end, drain abort, error, cancel and aclose so the shared TPM bucket is settled.
-            token_usage = self._record_usage(last_usage, estimate)
+            # Runs on clean end, drain abort, error, cancel and aclose (@ai-rules 15). Usage first: it is
+            # synchronous, so a second cancel can't skip it; then close the SDK stream.
+            try:
+                token_usage = self._record_usage(last_usage, estimate)
+            finally:
+                await self._close_stream(stream_iter)
 
         if dropped_fcs:
             logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")

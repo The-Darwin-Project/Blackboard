@@ -391,6 +391,19 @@ class TestStreamTimeout:
 
         assert not stream.aclose_called, "aclose() should NOT be called on normal stream exhaustion"
 
+    @pytest.mark.asyncio
+    async def test_11b_aclose_on_repetition_collapse_break(self):
+        """Repetition-collapse abort leaves the stream unexhausted -- it must be closed (@ai-rules 12b)."""
+        stream = MockStream([_Chunk(text="abcdefghi" * 300), _Chunk(text="never read")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", event)
+
+        assert stream._yielded == 1, "collapse must abort after the first chunk"
+        assert stream.aclose_called, "aclose() must be called when the stream is abandoned mid-way"
+
     # --- Reflex factory ---
 
     @pytest.mark.asyncio
