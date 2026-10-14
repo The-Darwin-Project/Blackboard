@@ -5845,11 +5845,21 @@ class Brain:
             # the user IS the response — their message invalidates the wait state.
             # Scoped to recent turns to avoid matching stale history if mark_turns_evaluated fails.
             # Auth boundary: actor=="user" is set by authenticated ingestion (chat/slack endpoints).
+            # Contract (post evt-996e33ec): a DELIVERED user turn is one no completed cycle has
+            # seen AND answered (_compute_processed_up_to). Do NOT add a wall-clock guard vs. the
+            # park time -- it strands messages that land during the final LLM call (enqueue is
+            # dropped while the event is in flight; user parks have no idle backstop).
             has_user_unread = has_unread and any(
                 t.status.value == "delivered" and t.actor == "user"
                 for t in event.conversation[-10:]
             )
             if has_user_unread and is_waiting:
+                logger.info(
+                    "Scan bypass: delivered user turn(s) %s cleared wait_for_user for %s",
+                    [t.turn for t in event.conversation[-10:]
+                     if t.actor == "user" and t.status.value == "delivered"],
+                    eid,
+                )
                 self.clear_waiting(eid)
                 is_waiting = False
 
