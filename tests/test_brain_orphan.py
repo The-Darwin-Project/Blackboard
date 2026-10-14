@@ -8,9 +8,8 @@
 """Tests for blank event orphan recovery, first-turn error catch-all, and brain_phase initialization."""
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -369,7 +368,7 @@ class TestPhaseInitialization:
         evidence = EventEvidence(
             display_text="test", source_type="chat", severity="info",
         )
-        event_id = await real_bb.create_event(
+        await real_bb.create_event(
             source="chat", service="test-svc", reason="test", evidence=evidence,
         )
 

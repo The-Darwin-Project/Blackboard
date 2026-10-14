@@ -19,7 +19,7 @@ import pytest
 from src.agents import brain as brain_mod
 from src.agents.brain import Brain
 from src.models import (
-    ConversationTurn, EventDocument, EventEvidence, EventInput, EventStatus, MessageStatus,
+    ConversationTurn, EventDocument, EventEvidence, EventStatus, MessageStatus,
 )
 from src.state.blackboard import BlackboardState
 

@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from src.adapters.dashboard_ws import DashboardWSAdapter
 from src.models import EventDocument, EventInput, EventEvidence
 from src import auth

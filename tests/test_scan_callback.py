@@ -6,7 +6,7 @@ Each test validates one decision branch from the original start_event_loop scan.
 """
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agents.brain import Brain
