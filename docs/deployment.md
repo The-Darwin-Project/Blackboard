@@ -81,7 +81,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `REDIS_PASSWORD` | Redis password | (empty) |
 | `GCP_PROJECT` | GCP project ID | (required) |
 | `GCP_LOCATION` | Vertex AI location | `global` |
-| `LLM_MODEL_BRAIN` | Brain model | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_BRAIN` | Brain model | `gemini-4-argon` (rollback: `gemini-3.1-pro-preview-customtools`) |
 | `LLM_MODEL_MANAGER` | Manager (DevTeam) model | `gemini-3.1-pro-preview` |
 | `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-3.1-pro-preview` |
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | (none) |

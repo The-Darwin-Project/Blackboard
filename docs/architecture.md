@@ -199,7 +199,7 @@ The Brain and in-process daemons use `google-genai` Python SDK. Sidecar agents u
 
 | Component | SDK | Default Model |
 | --- | --- | --- |
-| Brain | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
+| Brain | `google-genai` Python SDK | `gemini-4-argon` |
 | Aligner | `google-genai` Python SDK | `gemini-3.5-flash` |
 | Archivist | `google-genai` + `AnthropicVertex` | Gemini (digest) + Claude (archive/extraction) |
 | Headhunter (GitLab) | `google-genai` Python SDK | `gemini-3.5-flash` |

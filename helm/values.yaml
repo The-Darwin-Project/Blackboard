@@ -150,7 +150,7 @@ gcp:
   # Per-component LLM configuration
   llm:
     brain:
-      model: "gemini-3.1-pro-preview-customtools" # If provider=claude, set to "claude-opus-5-5"
+      model: "gemini-4-argon" # If provider=claude, set to "claude-opus-5-5". Rollback: "gemini-3.1-pro-preview-customtools"
       temperature: "1.5"
       maxOutputTokens: "65000"
     aligner:
