@@ -19,7 +19,11 @@
 #     with models that don't clear thought history.
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
 #     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
-# 14. [Gotcha]: When function_calls is emitted mid-stream, drain remaining chunks to capture terminal usage_metadata and thought parts.
+# 14. [Gotcha]: After the first function_calls chunk, keep consuming the stream (single loop) to capture terminal
+#     usage_metadata, thought parts and grounding. The call is held and emitted once in the final done chunk. Drain errors
+#     and DRAIN_TIMEOUT_S expiry must NOT lose the call (emit it with usage so far); _record_usage runs in a finally.
+#     last_parts is frozen at the function-call chunk (later parts would displace the thought_signature carrier);
+#     later text is dropped and extra function calls are logged and dropped.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -28,6 +32,7 @@ generate_content / generate_content_stream.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 
@@ -38,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 class GeminiAdapter:
     """Vertex AI Gemini adapter implementing LLMPort."""
+
+    # Max seconds to wait for the stream tail after a function_call chunk (terminal usage_metadata).
+    DRAIN_TIMEOUT_S: float = 15.0
 
     def __init__(self, project: str, location: str, model_name: str, quota_tracker=None):
         from google import genai
@@ -303,62 +311,91 @@ class GeminiAdapter:
         last_parts = None
         last_usage = None
         last_grounding = None
-        async for chunk in stream:
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                last_usage = chunk.usage_metadata
+        pending_fc = None
+        dropped_fcs = 0
+        drain_deadline = 0.0
+        stream_iter = stream.__aiter__()
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                try:
+                    if pending_fc is None:
+                        chunk = await stream_iter.__anext__()
+                    else:
+                        # Function call already received: bound the wait for the tail (terminal usage).
+                        chunk = await asyncio.wait_for(
+                            stream_iter.__anext__(), timeout=max(0.0, drain_deadline - loop.time()),
+                        )
+                except StopAsyncIteration:
+                    break
+                except Exception as e:
+                    if pending_fc is None:
+                        raise
+                    # Never lose a received function call to a tail failure (CancelledError is not caught).
+                    logger.warning(
+                        f"Gemini stream drain aborted after function_call ({type(e).__name__}: {e}); "
+                        "emitting call with usage captured so far"
+                    )
+                    aclose = getattr(stream_iter, "aclose", None)
+                    if aclose:
+                        try:
+                            await aclose()
+                        except Exception:
+                            pass
+                    break
 
-            if chunk.candidates:
-                for candidate in chunk.candidates:
-                    if candidate.content and candidate.content.parts:
-                        last_parts = candidate.content.parts
-                        for part in candidate.content.parts:
-                            if self._is_thought_part(part):
-                                thought_parts.append(part)
-                                if hasattr(part, 'text') and part.text:
-                                    yield LLMChunk(text=part.text, is_thought=True)
-                    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                        gm = candidate.grounding_metadata
-                        last_grounding = {
-                            "queries": list(gm.web_search_queries or []),
-                            "chunks": [
-                                {"title": c.web.title, "uri": c.web.uri}
-                                for c in (gm.grounding_chunks or [])
-                                if hasattr(c, 'web') and c.web
-                            ],
-                        }
+                if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                    last_usage = chunk.usage_metadata
 
-            if chunk.text:
-                yield LLMChunk(text=chunk.text)
+                if chunk.candidates:
+                    for candidate in chunk.candidates:
+                        if candidate.content and candidate.content.parts:
+                            # Frozen once a function call is held: a later chunk's parts would replace the
+                            # function_call part (carrier of thought_signature) in raw_parts (@ai-rules 14).
+                            if pending_fc is None:
+                                last_parts = candidate.content.parts
+                            for part in candidate.content.parts:
+                                if self._is_thought_part(part):
+                                    thought_parts.append(part)
+                                    if hasattr(part, "text") and part.text:
+                                        yield LLMChunk(text=part.text, is_thought=True)
+                        if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+                            gm = candidate.grounding_metadata
+                            last_grounding = {
+                                "queries": list(gm.web_search_queries or []),
+                                "chunks": [
+                                    {"title": c.web.title, "uri": c.web.uri}
+                                    for c in (gm.grounding_chunks or [])
+                                    if hasattr(c, "web") and c.web
+                                ],
+                            }
 
-            if chunk.function_calls:
-                fc = chunk.function_calls[0]
-                # Drain remaining chunks to capture terminal usage metadata and thought parts
-                async for remaining in stream:
-                    if hasattr(remaining, "usage_metadata") and remaining.usage_metadata:
-                        last_usage = remaining.usage_metadata
-                    if remaining.candidates:
-                        for candidate in remaining.candidates:
-                            if candidate.content and candidate.content.parts:
-                                for part in candidate.content.parts:
-                                    if self._is_thought_part(part):
-                                        thought_parts.append(part)
-                                        if hasattr(part, 'text') and part.text:
-                                            yield LLMChunk(text=part.text, is_thought=True)
-                token_usage = self._record_usage(last_usage, estimate)
-                output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
-                all_parts = thought_parts + output_parts
-                yield LLMChunk(
-                    function_call=FunctionCall(name=fc.name, args=fc.args or {}),
-                    done=True,
-                    raw_parts=all_parts,
-                    grounding_metadata=last_grounding,
-                    usage=token_usage,
-                )
-                return
+                if pending_fc is not None:
+                    # Draining: only usage, thoughts and grounding are kept; text and extra calls are dropped.
+                    dropped_fcs += len(chunk.function_calls or [])
+                    continue
 
-        token_usage = self._record_usage(last_usage, estimate)
+                if chunk.text:
+                    yield LLMChunk(text=chunk.text)
+
+                if chunk.function_calls:
+                    pending_fc = chunk.function_calls[0]
+                    dropped_fcs += len(chunk.function_calls) - 1
+                    drain_deadline = loop.time() + self.DRAIN_TIMEOUT_S
+        finally:
+            # Runs on clean end, drain abort, error, cancel and aclose so the shared TPM bucket is settled.
+            token_usage = self._record_usage(last_usage, estimate)
+
+        if dropped_fcs:
+            logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")
         if last_grounding:
             logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
         output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
         all_parts = thought_parts + output_parts
-        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding, usage=token_usage)
+        yield LLMChunk(
+            function_call=FunctionCall(name=pending_fc.name, args=pending_fc.args or {}) if pending_fc else None,
+            done=True,
+            raw_parts=all_parts,
+            grounding_metadata=last_grounding,
+            usage=token_usage,
+        )
