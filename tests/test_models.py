@@ -141,7 +141,7 @@ async def test_create_event_seeds_initial_turns_before_queue_visible():
     redis = _fake_redis()
     bb = BlackboardState(redis=redis)
     event_id = await bb.create_event(
-        source="chat", service="general", reason="Hi Friday", evidence="Hi Friday",
+        source="chat", service="general", reason="Hi Friday", evidence=EventEvidence(display_text="Hi Friday"),
         initial_turns=[ConversationTurn(turn=1, actor="user", action="message", thoughts="Hi Friday")],
     )
 
@@ -180,7 +180,7 @@ async def test_create_event_is_one_transaction():
 
     with patch.object(redis, "pipeline", side_effect=spy_pipeline):
         with pytest.raises(RuntimeError):
-            await bb.create_event(source="chat", service="general", reason="r", evidence="e")
+            await bb.create_event(source="chat", service="general", reason="r", evidence=EventEvidence(display_text="e"))
 
     assert seen_transaction_flags == [True]
     assert await redis.llen(BlackboardState.EVENT_QUEUE) == 0
@@ -196,7 +196,7 @@ async def test_create_event_numbers_multiple_initial_turns():
 
     bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
-        source="slack", service="general", reason="follow-up", evidence="follow-up",
+        source="slack", service="general", reason="follow-up", evidence=EventEvidence(display_text="follow-up"),
         initial_turns=[
             ConversationTurn(turn=99, actor="brain", action="context", thoughts="ctx", source="system"),
             ConversationTurn(turn=7, actor="user", action="message", thoughts="hello", source="slack"),
@@ -215,7 +215,7 @@ async def test_create_event_without_initial_turns_is_blank():
 
     bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
-        source="aligner", service="svc", reason="CPU spike", evidence="x",
+        source="aligner", service="svc", reason="CPU spike", evidence=EventEvidence(display_text="x"),
     )
 
     event = await bb.get_event(event_id)

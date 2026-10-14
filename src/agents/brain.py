@@ -171,7 +171,9 @@
 #     to re-invoke LLM with RECALL block in SI. BRAIN_MEMORY_REFLEX env var. Max 1 gate per cycle.
 #     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
 #     _REFLEX_EXEMPT tools (classify_event) bypass the gate — they are state mutations that must
-#     execute or the event document stays inconsistent (e.g., domain never set).
+#     execute or the event document stays inconsistent (e.g., domain never set). In a parallel batch
+#     ONE exempt FC anywhere skips the gate for the WHOLE batch (blocking it would block the exempt
+#     FC too), without arming _reflex_fired_for, so the gate stays available for the next batch.
 # 44. [Pattern]: _resolve_terminal_prompt(active_phases, domain) resolves the terminal user prompt from
 #     _phase.yaml metadata (terminal_prompt/terminal_prompts keys). Priority-wins (same as _resolve_llm_params).
 #     Falls back to _TERMINAL_PROMPT_FALLBACK when no phase declares one. Domain cross via terminal_prompts dict.
@@ -474,10 +476,12 @@ _BLANK_USER_EVENT_GRACE_SECONDS = 10.0
 
 
 def _is_seed_turn(turn: ConversationTurn) -> bool:
-    """True for turns written WITH the event at creation, not by Brain processing.
+    """True for turns that do not represent Brain/agent processing output.
 
-    The user's own turns, plus the Slack follow-up ``brain.context`` turn (prior
-    thread context seeded alongside the user's message; slack.py create-followup).
+    Returns True for any ``actor == "user"`` turn, and for the creation-time
+    ``brain.context`` turn with ``source == "system"`` (prior thread context seeded
+    alongside the user's message; slack.py create-followup). Everything else counts
+    as processing output.
     """
     if turn.actor == "user":
         return True
