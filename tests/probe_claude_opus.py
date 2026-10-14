@@ -303,7 +303,7 @@ What action should you take?"""
         from google.genai import types
 
         g_client = genai.Client(vertexai=True, project=project, location=region)
-        gemini_model = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
+        gemini_model = os.getenv("LLM_MODEL_BRAIN", "gemini-4-argon")
 
         # Convert to google-genai format
         g_tools = types.Tool(function_declarations=[

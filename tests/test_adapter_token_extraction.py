@@ -139,3 +139,66 @@ class TestClaudeExtractUsage:
         adapter = self._make_adapter()
         msg = SimpleNamespace()
         assert adapter._extract_usage(msg) is None
+
+
+class TestGeminiGenerateStreamUsageDrain:
+    """Test that GeminiAdapter.generate_stream drains remaining chunks on function_calls."""
+
+    def test_function_call_drains_stream_for_usage(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from src.agents.llm.types import FunctionCall
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-argon"
+        adapter._tracker = None
+        adapter._is_thought_part = lambda part: getattr(part, "thought", False)
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+
+        chunk1 = SimpleNamespace(
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(text=None, thought=False)]))],
+            text=None,
+            function_calls=[SimpleNamespace(name="classify_event", args={"domain": "complicated"})],
+            usage_metadata=None,
+        )
+        chunk2 = SimpleNamespace(
+            candidates=[],
+            text=None,
+            function_calls=[],
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=100,
+                candidates_token_count=20,
+                thoughts_token_count=15,
+                total_token_count=135,
+            ),
+        )
+
+        async def mock_stream_iter():
+            yield chunk1
+            yield chunk2
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content_stream = AsyncMock(return_value=mock_stream_iter())
+        adapter._client = mock_client
+
+        async def run_test():
+            chunks = []
+            async for c in adapter.generate_stream("sys", "prompt", tools=[{"name": "classify_event"}]):
+                chunks.append(c)
+            return chunks
+
+        chunks = asyncio.run(run_test())
+
+        assert len(chunks) == 1
+        fc_chunk = chunks[0]
+        assert fc_chunk.function_call == FunctionCall(name="classify_event", args={"domain": "complicated"})
+        assert fc_chunk.done is True
+        assert fc_chunk.usage is not None
+        assert fc_chunk.usage.total_tokens == 135
+        assert fc_chunk.usage.thinking_tokens == 15
+        assert fc_chunk.usage.output_tokens == 20
+        assert fc_chunk.usage.input_tokens == 100
+

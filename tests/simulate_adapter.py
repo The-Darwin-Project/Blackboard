@@ -270,7 +270,7 @@ async def main():
     project = os.getenv("GCP_PROJECT", "")
     location = os.getenv("GCP_LOCATION", "global")
 
-    gemini_model = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
+    gemini_model = os.getenv("LLM_MODEL_BRAIN", "gemini-4-argon")
     claude_model = "claude-opus-4-6"
 
     gemini = GeminiAdapter(project, location, gemini_model)

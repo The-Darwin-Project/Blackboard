@@ -19,6 +19,7 @@
 #     with models that don't clear thought history.
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
 #     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
+# 14. [Gotcha]: When function_calls is emitted mid-stream, drain remaining chunks to capture terminal usage_metadata and thought parts.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -331,6 +332,18 @@ class GeminiAdapter:
 
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
+                # Drain remaining chunks to capture terminal usage metadata and thought parts
+                async for remaining in stream:
+                    if hasattr(remaining, "usage_metadata") and remaining.usage_metadata:
+                        last_usage = remaining.usage_metadata
+                    if remaining.candidates:
+                        for candidate in remaining.candidates:
+                            if candidate.content and candidate.content.parts:
+                                for part in candidate.content.parts:
+                                    if self._is_thought_part(part):
+                                        thought_parts.append(part)
+                                        if hasattr(part, 'text') and part.text:
+                                            yield LLMChunk(text=part.text, is_thought=True)
                 token_usage = self._record_usage(last_usage, estimate)
                 output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
                 all_parts = thought_parts + output_parts

@@ -821,7 +821,7 @@ class Brain:
         self.location = os.getenv("GCP_LOCATION", "global")
         self.provider = os.getenv("LLM_PROVIDER", "gemini")
         self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
-        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
+        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-4-argon")
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         # CLI stdout is not bounded by an LLM's maxOutputTokens -- this is the
         # only configurable ceiling on agent result turn size (Goal 1, truncation-search-destroy).
@@ -2250,7 +2250,7 @@ class Brain:
     def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
         """Legacy adaptive thinking -- fallback when progressive skills are disabled.
 
-        Gemini 3.1 Pro supports 'low', 'medium', and 'high'.
+        Gemini 4 Argon (and Gemini 3.1 Pro) supports 'low', 'medium', and 'high'.
         Use 'high' for analysis, 'low' for mechanical routing.
         Returns (thinking_level, temperature).
         """
