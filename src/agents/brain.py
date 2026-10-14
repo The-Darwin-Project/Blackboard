@@ -455,6 +455,20 @@ _CYCLE_ENDING_TOOLS = frozenset({
 })
 
 
+# Grace window for the blank-user-event consumer guard in _process_event_inner.
+_BLANK_USER_EVENT_GRACE_SECONDS = 10.0
+
+
+def _has_non_user_turns(conversation: list[ConversationTurn]) -> bool:
+    """True once anything other than the user's own (seeded) turns is on the event.
+
+    Chat/Slack events are created with their first user turn(s) (evt-996e33ec), so
+    "conversation is non-empty" no longer means "the Brain touched this event".
+    Other sources keep their legacy meaning: any agent/system turn counts.
+    """
+    return any(t.actor != "user" for t in conversation)
+
+
 import re as _re
 
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
@@ -1077,6 +1091,22 @@ class Brain:
             logger.debug(f"Skipping closed event {event_id}")
             return
 
+        # evt-996e33ec: user-initiated events are created with their first turn
+        # (create_event(initial_turns=...)). A blank chat/slack event inside the grace
+        # window means a caller regressed -- let the resync scan retry (blank NEW events
+        # are re-enqueued by the scan) instead of triaging a context-free event.
+        if (
+            not event.conversation
+            and event.source in ("chat", "slack")
+            and event.processing_started_at is None
+            and time.time() - (event.queued_at or 0) < _BLANK_USER_EVENT_GRACE_SECONDS
+        ):
+            logger.warning(
+                "Blank %s event %s popped before its first turn; deferring to resync scan",
+                event.source, event_id,
+            )
+            return
+
         # Mirror active meta-event ID on first process of a jarvis event
         if event.source == "jarvis" and self._active_meta_event_id != event_id:
             self._active_meta_event_id = event_id
@@ -1191,7 +1221,7 @@ class Brain:
         if event.processing_started_at is None:
             await self.blackboard.stamp_event(event_id, processing_started_at=time.time())
 
-        if not event.conversation:
+        if event.processing_started_at is None:  # in-memory doc predates the stamp above
             await self.blackboard.record_event(
                 EventType.BRAIN_EVENT_CREATED,
                 {"event_id": event_id, "service": event.service, "source": event.source},
@@ -1437,18 +1467,24 @@ class Brain:
             )
         except Exception as e:
             event_fresh = await self.blackboard.get_event(event_id)
-            if event_fresh and not event_fresh.conversation:
+            if event_fresh and not _has_non_user_turns(event_fresh.conversation):
                 error_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="error",
                     thoughts=f"Brain failed on first processing: {type(e).__name__}: {_sanitize_error_text(e)}",
                 )
-                await self._append_and_broadcast(event_id, error_turn)
+                assigned = await self._append_and_broadcast(event_id, error_turn)
                 await self.blackboard.mark_turns_status(
-                    event_id, up_to_turn=turn_snapshot + 1,
+                    event_id, up_to_turn=turn_snapshot,
                     status=MessageStatus.PROCESSED,
                 )
+                # Mark the error turn by number so a user turn that arrived mid-failure
+                # is not swept to PROCESSED.
+                if assigned:
+                    await self.blackboard.mark_turn_status(
+                        event_id, assigned, MessageStatus.PROCESSED,
+                    )
             raise
 
     async def _process_with_llm(
@@ -5249,7 +5285,7 @@ class Brain:
             # Close only ACTIVE events that had in-flight agent work. Deferred events
             # survive restart — their timer will wake them naturally. Events in
             # waiting_approval also survive — the human hasn't responded yet.
-            if event.conversation:
+            if _has_non_user_turns(event.conversation):  # Brain/agents touched it
                 # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
                 if (
                     event.source == "jarvis"
@@ -5320,7 +5356,7 @@ class Brain:
                     asyncio.create_task(archivist.archive_event(event))
                 stale_count += 1
             else:
-                # No turns yet -- re-queue for fresh processing
+                # Never processed by the Brain (blank, or only seeded user turns) -- re-queue
                 await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, eid)
                 logger.info(f"Re-queued untouched event {eid} for fresh processing")
 

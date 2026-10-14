@@ -7,7 +7,7 @@
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is NOT deleted on event close -- delete_slack_mapping() sets a 14-day archival-retention TTL (SLACK_MAPPING_TTL) instead, so follow-up replies in the thread can still resolve to the closed event for smart continuation routing.
-# 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
+# 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None. User-initiated sources MUST seed their first turn(s) via create_event(initial_turns=...), never via a follow-up append_turn (evt-996e33ec).
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 # 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag) and atomic observation rename-and-reindex.
 # 11. [Pattern]: Field Notes Notebook (darwin:notebook HASH). RENAMENX for atomic drain; ResponseError for missing-source guard. Quarantine via RENAME after MAX_DIGEST_RETRIES. Retry counter is Redis INCR with TTL (survives pod restart).
@@ -1150,6 +1150,7 @@ return 1
         slack_channel_id: Optional[str] = None,
         slack_thread_ts: Optional[str] = None,
         slack_user_id: Optional[str] = None,
+        initial_turns: Optional[list[ConversationTurn]] = None,
     ) -> str:
         """Create a new event and add to the queue for Brain triage.
 
@@ -1177,7 +1178,13 @@ return 1
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
             slack_user_id=slack_user_id,
+            conversation=list(initial_turns or []),
         )
+        # Seeded turns are numbered 1..N and persisted WITH the document before
+        # SADD/LPUSH, so a queue pop can never observe a blank user-initiated event
+        # (evt-996e33ec: LPUSH-before-append_turn gave Run 1 turn_snapshot=0).
+        for i, t in enumerate(event.conversation, start=1):
+            t.turn = i
         # Store event document
         await self.redis.set(
             f"{self.EVENT_PREFIX}{event.id}",
@@ -1187,7 +1194,10 @@ return 1
         await self.redis.sadd(self.EVENT_ACTIVE, event.id)
         # Push to queue for Brain
         await self.redis.lpush(self.EVENT_QUEUE, event.id)
-        logger.info(f"Created event: {event.id} ({source}) for {service}")
+        logger.info(
+            f"Created event: {event.id} ({source}) for {service} "
+            f"({len(event.conversation)} seeded turn(s))"
+        )
         return event.id
 
     async def get_event(self, event_id: str) -> Optional[EventDocument]:

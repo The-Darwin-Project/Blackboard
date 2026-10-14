@@ -115,6 +115,15 @@ async def create_chat_event(
             if getattr(user, "label", None) and user.label != "anonymous"
             else "dashboard"
         )
+        # Seed the first user turn WITH the event so the Brain can never pop a blank
+        # chat event (evt-996e33ec). Mirrors the WS create path.
+        user_turn = ConversationTurn(
+            turn=1,
+            actor="user",
+            action="message",
+            thoughts=request.message,
+            user_name=user.label if user.label != "anonymous" else None,
+        )
         event_id = await blackboard.create_event(
             source="chat",
             service=request.service,
@@ -127,15 +136,8 @@ async def create_chat_event(
                 severity="info",
             ),
             created_by_email=user.email,
+            initial_turns=[user_turn],
         )
-        # Add user message as the first conversation turn
-        user_turn = ConversationTurn(
-            turn=1,
-            actor="user",
-            action="message",
-            thoughts=request.message,
-        )
-        await blackboard.append_turn(event_id, user_turn)
         logger.info(f"Chat event created: {event_id} for service {request.service}")
         return ChatEventResponse(event_id=event_id)
     except HTTPException:

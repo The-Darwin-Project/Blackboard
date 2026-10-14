@@ -6,7 +6,7 @@
 # 4. [Constraint]: Brain and Blackboard injected via constructor. No app.state access.
 # 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
 # 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
-# 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership.
+# 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership, and seeds the first user turn via create_event(initial_turns=...) -- never a follow-up append_turn (evt-996e33ec).
 # 8. [Pattern]: ArgoCDObserver injected post-init via set_argocd_observer(), same shape as Kargo. No UI
 #    consumer sends argocd_health_update yet (v1 dead wire) -- no _send_initial_argocd_state needed.
 # 9. [Pattern]: websocket_handler accepts() FIRST, then validates auth and closes with 4001 if rejected.
@@ -136,6 +136,20 @@ class DashboardWSAdapter:
             if getattr(user, "label", None) and user.label != "anonymous"
             else user.source
         )
+        image = data.get("image")
+        image_rejected = bool(image and len(image) > 1_400_000)
+        if image_rejected:
+            image = None
+        # Seed the first user turn WITH the event (create_event persists it before LPUSH)
+        # so the Brain can never pop a blank chat event (evt-996e33ec).
+        user_turn = ConversationTurn(
+            turn=1,
+            actor="user",
+            action="message",
+            thoughts=message,
+            image=image,
+            user_name=user.label if user.label != "anonymous" else None,
+        )
         event_id = await self._blackboard.create_event(
             source="chat",
             service=service,
@@ -148,23 +162,13 @@ class DashboardWSAdapter:
                 severity="info",
             ),
             created_by_email=user.email,
+            initial_turns=[user_turn],
         )
-        image = data.get("image")
-        if image and len(image) > 1_400_000:
+        if image_rejected:
             await ws.send_json({
                 "type": "error", "kind": "invalid_payload",
                 "event_id": event_id, "message": "Image too large (max 1MB). Image was not attached.",
             })
-            image = None
-        user_turn = ConversationTurn(
-            turn=1,
-            actor="user",
-            action="message",
-            thoughts=message,
-            image=image,
-            user_name=user.label if user.label != "anonymous" else None,
-        )
-        await self._blackboard.append_turn(event_id, user_turn)
         await ws.send_json({
             "type": "event_created",
             "event_id": event_id,

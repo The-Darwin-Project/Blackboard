@@ -226,3 +226,52 @@ async def test_dashboard_ws_handle_emergency_stop_ignores_ownership(monkeypatch)
     await adapter.websocket_handler(ws)
     
     mock_brain.emergency_stop.assert_awaited()
+
+
+def _chat_adapter(create_event_id="evt-newws001"):
+    mock_blackboard = MagicMock()
+    mock_blackboard.create_event = AsyncMock(return_value=create_event_id)
+    mock_blackboard.append_turn = AsyncMock()
+    adapter = DashboardWSAdapter(brain=MagicMock(), blackboard=mock_blackboard, auth_enabled=False)
+    return adapter, mock_blackboard
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_creates_event_with_seeded_user_turn():
+    """B-T4 (evt-996e33ec): first user turn is seeded via create_event, not a follow-up append."""
+    adapter, bb = _chat_adapter()
+    ws = AsyncMock()
+    user = MagicMock(label="thason@redhat.com", email="thason@redhat.com", source="dex")
+
+    await adapter._handle_chat(ws, {"message": "Hi Friday", "service": "general"}, user)
+
+    bb.create_event.assert_awaited_once()
+    seeded = bb.create_event.await_args.kwargs["initial_turns"]
+    assert len(seeded) == 1
+    assert seeded[0].turn == 1
+    assert seeded[0].actor == "user"
+    assert seeded[0].thoughts == "Hi Friday"
+    assert seeded[0].user_name == "thason@redhat.com"
+    bb.append_turn.assert_not_awaited()
+    ws.send_json.assert_awaited_once()
+    assert ws.send_json.await_args.args[0]["type"] == "event_created"
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_oversized_image_seeded_without_image():
+    """B-T5: oversized image is dropped before create_event; error carries the new event_id."""
+    adapter, bb = _chat_adapter("evt-bigimg01")
+    ws = AsyncMock()
+    user = MagicMock(label="thason@redhat.com", email="thason@redhat.com", source="dex")
+
+    await adapter._handle_chat(
+        ws, {"message": "look", "service": "general", "image": "x" * 1_400_001}, user,
+    )
+
+    seeded = bb.create_event.await_args.kwargs["initial_turns"]
+    assert seeded[0].image is None
+    sent = [c.args[0] for c in ws.send_json.await_args_list]
+    assert [m["type"] for m in sent] == ["error", "event_created"]
+    assert sent[0]["kind"] == "invalid_payload"
+    assert sent[0]["event_id"] == "evt-bigimg01"
+    bb.append_turn.assert_not_awaited()

@@ -53,6 +53,7 @@ def _make_brain() -> Brain:
     bb.record_event = AsyncMock()
     bb.mark_turns_evaluated = AsyncMock()
     bb.mark_turns_status = AsyncMock()
+    bb.mark_turn_status = AsyncMock()
     bb.stamp_event = AsyncMock()
     bb.update_event_phase = AsyncMock()
     bb.get_active_events = AsyncMock(return_value=[])
@@ -228,6 +229,115 @@ class TestErrorTurnOnFailure:
         for call in brain.blackboard.append_turn.await_args_list:
             written_turn = call.args[1]
             assert written_turn.action != "error", "Error turn should NOT be written when conversation exists"
+
+
+# =========================================================================
+# evt-996e33ec: seeded user turns (atomic ingestion)
+# =========================================================================
+
+def _make_seeded_chat_event(
+    event_id: str = "evt-seeded-1",
+    processing_started_at: float | None = None,
+    queued_at: float | None = None,
+) -> EventDocument:
+    """A chat event as create_event(initial_turns=[T1]) now produces it."""
+    event = EventDocument(
+        id=event_id,
+        source="chat",
+        service="general",
+        brain_phase="triage",
+        event=EventInput(
+            reason="Hi Friday",
+            evidence=EventEvidence(display_text="Hi Friday", source_type="chat", severity="info"),
+        ),
+        conversation=[ConversationTurn(turn=1, actor="user", action="message", thoughts="Hi Friday")],
+        processing_started_at=processing_started_at,
+        queued_at=queued_at if queued_at is not None else time.time(),
+    )
+    event.status = EventStatus.ACTIVE
+    return event
+
+
+class TestSeededUserTurnLifecycle:
+    @pytest.mark.asyncio
+    async def test_event_created_recorded_once_with_seeded_turn(self):
+        """B-T10: BRAIN_EVENT_CREATED keys off processing_started_at, not blank conversation."""
+        from src.models import EventType
+
+        brain = _make_brain()
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("stop here"))
+
+        first = _make_seeded_chat_event(processing_started_at=None)
+        brain.blackboard.get_event = AsyncMock(return_value=first)
+        with pytest.raises(RuntimeError, match="stop here"):
+            await brain._process_event_inner("evt-seeded-1")
+        created = [
+            c for c in brain.blackboard.record_event.await_args_list
+            if c.args[0] == EventType.BRAIN_EVENT_CREATED
+        ]
+        assert len(created) == 1
+        brain.blackboard.stamp_event.assert_awaited()
+
+        brain.blackboard.record_event.reset_mock()
+        second = _make_seeded_chat_event(processing_started_at=time.time() - 5)
+        brain.blackboard.get_event = AsyncMock(return_value=second)
+        with pytest.raises(RuntimeError, match="stop here"):
+            await brain._process_event_inner("evt-seeded-1")
+        assert not [
+            c for c in brain.blackboard.record_event.await_args_list
+            if c.args[0] == EventType.BRAIN_EVENT_CREATED
+        ]
+
+    @pytest.mark.asyncio
+    async def test_first_processing_error_with_seeded_turn_writes_error_turn(self):
+        """B-T12: a chat event holding only T1 still gets the first-processing error turn,
+        and T1 plus the error turn (by number) are PROCESSED."""
+        from src.models import MessageStatus
+
+        brain = _make_brain()
+        event = _make_seeded_chat_event(processing_started_at=time.time())
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.append_turn = AsyncMock(return_value=2)
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+
+        with pytest.raises(RuntimeError, match="LLM unavailable"):
+            await brain._process_event_inner("evt-seeded-1")
+
+        written = brain.blackboard.append_turn.await_args_list[-1].args[1]
+        assert written.action == "error"
+        brain.blackboard.mark_turns_status.assert_awaited_with(
+            "evt-seeded-1", up_to_turn=1, status=MessageStatus.PROCESSED,
+        )
+        brain.blackboard.mark_turn_status.assert_awaited_with(
+            "evt-seeded-1", 2, MessageStatus.PROCESSED,
+        )
+
+    @pytest.mark.asyncio
+    async def test_blank_chat_event_within_grace_defers(self):
+        """B-T13a: a blank chat event inside the grace window returns before stamping."""
+        brain = _make_brain()
+        event = _make_seeded_chat_event(queued_at=time.time())
+        event.conversation = []
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+
+        await brain._process_event_inner("evt-seeded-1")
+
+        brain.blackboard.stamp_event.assert_not_awaited()
+        brain.blackboard.record_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_blank_chat_event_after_grace_processes(self):
+        """B-T13b: past the grace window the legacy behaviour resumes (nothing loops forever)."""
+        brain = _make_brain()
+        event = _make_seeded_chat_event(queued_at=time.time() - 60)
+        event.conversation = []
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("stop here"))
+
+        with pytest.raises(RuntimeError, match="stop here"):
+            await brain._process_event_inner("evt-seeded-1")
+
+        brain.blackboard.stamp_event.assert_awaited()
 
 
 # =========================================================================

@@ -74,6 +74,13 @@ async def test_chat_without_event_id_creates_new_event():
     assert data["status"] == "created"
     mock_bb.create_event.assert_awaited_once()
     mock_bb.get_event.assert_not_called()
+    # B-T6 (evt-996e33ec): first turn is seeded with the event, never appended afterwards
+    seeded = mock_bb.create_event.await_args.kwargs["initial_turns"]
+    assert len(seeded) == 1
+    assert seeded[0].turn == 1
+    assert seeded[0].actor == "user"
+    assert seeded[0].thoughts == "hello"
+    mock_bb.append_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -127,6 +134,8 @@ async def test_chat_with_unknown_event_id_falls_back_to_new_event():
     assert data["event_id"] == "evt-new00002"
     assert data["status"] == "created"
     mock_bb.create_event.assert_awaited_once()
+    assert mock_bb.create_event.await_args.kwargs["initial_turns"][0].thoughts == "hello again"
+    mock_bb.append_turn.assert_not_called()
 
 
 @pytest.mark.asyncio

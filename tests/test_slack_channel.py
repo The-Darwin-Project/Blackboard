@@ -201,6 +201,28 @@ class TestOnDmMessage:
         )
 
     @pytest.mark.asyncio
+    async def test_top_level_dm_seeds_user_turn(self):
+        """B-T7 (evt-996e33ec): top-level DM creates the event WITH its first user turn."""
+        sc, captured = _make_channel()
+        on_dm = captured["event:message"]
+
+        sc._blackboard.get_event_by_slack_thread.return_value = None
+        sc._blackboard.create_event.return_value = "evt-seed0001"
+
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Alice")
+
+        await on_dm(_dm_event(text="Hi Friday", thread_ts=None), client)
+
+        seeded = sc._blackboard.create_event.call_args.kwargs["initial_turns"]
+        assert len(seeded) == 1
+        assert seeded[0].actor == "user"
+        assert seeded[0].source == "slack"
+        assert seeded[0].thoughts == "Hi Friday"
+        assert seeded[0].user_name == "Alice"
+        sc._blackboard.append_turn.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_im_with_thread_ts_no_mapping_creates_event(self):
         """IM with thread_ts but no slack mapping → creates event (widened cutover gate)."""
         sc, captured = _make_channel()
@@ -313,6 +335,76 @@ class TestAppMentionReplyEnqueues:
         sc._brain.clear_waiting.assert_called_once_with("evt-open0001")
         sc._brain.resume_if_parked.assert_called_once_with("evt-open0001")
         sc._brain.enqueue_for_processing.assert_called_once_with("evt-open0001")
+
+
+class TestSlackEventSeeding:
+    """evt-996e33ec: user-initiated Slack events are created with their turns (no append race)."""
+
+    @pytest.mark.asyncio
+    async def test_followup_event_seeds_context_and_user_turns(self):
+        """B-T8: closed-thread follow-up seeds [brain.context, user.message]; no append_turn."""
+        sc, captured = _make_channel()
+        on_mention = captured["event:app_mention"]
+
+        closed_doc = _mock_event_doc(event_id="evt-closed01", status="closed")
+        sc._blackboard.get_event_by_slack_thread.return_value = "evt-closed01"
+        sc._blackboard.get_event.return_value = closed_doc
+        sc._blackboard.create_event.return_value = "evt-follow01"
+
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Dana")
+
+        await on_mention(
+            {
+                "channel": "C_INFRA", "user": "U_USER",
+                "text": "<@BOT> one more thing", "ts": "1700000002.000001",
+                "thread_ts": "1700000001.000001",
+            },
+            client,
+        )
+
+        kwargs = sc._blackboard.create_event.call_args.kwargs
+        seeded = kwargs["initial_turns"]
+        assert [(t.actor, t.action) for t in seeded] == [("brain", "context"), ("user", "message")]
+        assert seeded[0].source == "system"
+        assert seeded[1].source == "slack"
+        assert seeded[1].thoughts == "one more thing"
+        assert seeded[1].user_name == "Dana"
+        sc._blackboard.append_turn.assert_not_called()
+        sc._blackboard.set_slack_mapping.assert_called_once_with(
+            "C_INFRA", "1700000001.000001", "evt-follow01",
+        )
+
+    @pytest.mark.asyncio
+    async def test_app_mention_passes_slack_context_and_seed(self):
+        """B-T9: new @mention event gets slack context + first turn at create time."""
+        sc, captured = _make_channel()
+        on_mention = captured["event:app_mention"]
+
+        sc._blackboard.get_event_by_slack_thread.return_value = None
+        sc._blackboard.create_event.return_value = "evt-mention1"
+
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Eve")
+
+        await on_mention(
+            {
+                "channel": "C_INFRA", "user": "U_USER",
+                "text": "<@BOT> please look", "ts": "1700000009.000001",
+            },
+            client,
+        )
+
+        kwargs = sc._blackboard.create_event.call_args.kwargs
+        assert kwargs["slack_channel_id"] == "C_INFRA"
+        assert kwargs["slack_thread_ts"] == "1700000009.000001"
+        assert kwargs["slack_user_id"] == "U_USER"
+        assert kwargs["initial_turns"][0].thoughts == "please look"
+        sc._blackboard.update_event_slack_context.assert_not_called()
+        sc._blackboard.append_turn.assert_not_called()
+        sc._blackboard.set_slack_mapping.assert_called_once_with(
+            "C_INFRA", "1700000009.000001", "evt-mention1",
+        )
 
 
 class TestApproveRejectActionsEnqueue:

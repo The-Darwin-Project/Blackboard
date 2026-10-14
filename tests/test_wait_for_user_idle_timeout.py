@@ -500,3 +500,42 @@ class TestWaitForUserParkSurvivesRestartAndResumes:
         # Still ACTIVE (not WAITING_APPROVAL), so the re-arm branch is a no-op --
         # confirms resumption doesn't accidentally reintroduce an idle timer.
         ctx.get_idle_timeout.assert_not_called()
+
+
+class TestRestartRequeuesSeededUserEvent:
+    @pytest.mark.asyncio
+    async def test_restart_requeues_event_with_only_seeded_user_turn(self):
+        """B-T11 (evt-996e33ec): a chat event holding only its seeded T1 was never touched by
+        the Brain -- restart cleanup must re-queue it, not stale-close it."""
+        from src.agents.brain import Brain
+
+        event = EventDocument(
+            id="evt-seeded-only",
+            source="chat",
+            service="general",
+            event=EventInput(
+                reason="Hi Friday",
+                evidence=EventEvidence(display_text="Hi Friday", source_type="chat", severity="info"),
+            ),
+            conversation=[ConversationTurn(turn=1, actor="user", action="message", thoughts="Hi Friday")],
+        )
+        event.status = EventStatus.ACTIVE
+
+        bb = MagicMock()
+        bb.EVENT_ACTIVE = "darwin:event:active"
+        bb.EVENT_QUEUE = "darwin:queue"
+        bb.redis = MagicMock()
+        bb.redis.srem = AsyncMock()
+        bb.redis.lpush = AsyncMock()
+        bb.get_active_events = AsyncMock(return_value=["evt-seeded-only"])
+        bb.get_event = AsyncMock(return_value=event)
+        bb.close_event = AsyncMock()
+
+        brain = Brain(blackboard=bb, agents={})
+        brain._broadcast = AsyncMock()
+
+        await brain._cleanup_stale_events()
+
+        bb.redis.lpush.assert_awaited_once_with("darwin:queue", "evt-seeded-only")
+        bb.close_event.assert_not_awaited()
+        brain._broadcast.assert_not_awaited()
