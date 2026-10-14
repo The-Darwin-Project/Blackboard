@@ -172,11 +172,15 @@
 #     _phase.yaml metadata (terminal_prompt/terminal_prompts keys). Priority-wins (same as _resolve_llm_params).
 #     Falls back to _TERMINAL_PROMPT_FALLBACK when no phase declares one. Domain cross via terminal_prompts dict.
 #     Reflex gate logs individual match scores with source tag (L=lesson, K=knowledge) for observability.
-# 43. [Pattern]: User interrupt injection in LLM iteration loop. After re-fetch (iteration > 0),
-#     detect new user turns beyond turn_snapshot. If found (and not intermediate), inject PRIORITY
-#     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
-#     NOT expanded — safety net: if LLM ignores, user turn stays DELIVERED for next scan cycle.
-#     response_emitted + _response_emitted_for reset on interrupt (fresh response cycle).
+# 43. [Pattern]: User interrupt handling in LLM iteration loop. After re-fetch (iteration > 0),
+#     detect new user turns beyond turn_snapshot. If found (and not intermediate), the RESPOND TO THIS
+#     marker (commit 71fc829) puts them in view; the turn is recorded in acknowledged_interrupts
+#     {user turn -> len(conversation) at detection}. turn_snapshot is NOT expanded. After the loop,
+#     _compute_processed_up_to() extends PROCESSED over brain turns AND over acknowledged interrupts
+#     answered by a brain.response appended at/after the acknowledgement point (a response flushed
+#     BEFORE the ack never saw the interrupt and does not count). Unseen or ignored user turns stay
+#     DELIVERED so the scan safety net still re-processes them (evt-996e33ec: an answered interrupt
+#     left DELIVERED caused a duplicate reply). response_emitted + _response_emitted_for reset on interrupt.
 # 46. [Pattern]: _close_and_broadcast unevaluated-message re-check runs only for LLM-driven closes
 #     (close_reason="resolved"). System-driven closes (duplicate, timeout, error, force_closed,
 #     stream_close) bypass intentionally — safety-valve closes must always win regardless of pending messages.
@@ -479,6 +483,35 @@ _ERROR_TEXT_MAX = 300
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
 _MAX_BATCH_SIZE = 4
+
+
+def _compute_processed_up_to(
+    conversation: list[ConversationTurn],
+    turn_snapshot: int,
+    acknowledged_interrupts: dict[int, int],
+) -> int:
+    """Exclusive index up to which turns become PROCESSED after an LLM cycle.
+
+    Extends past turn_snapshot over (a) brain-authored turns and (b) user
+    interrupts the loop acknowledged AND answered by a brain.response appended
+    at/after the acknowledgement point (conversation length at detection).
+    Stops at the first turn that is neither, so unseen or ignored input stays
+    DELIVERED for the scan safety net (@ai-rules #43).
+    """
+    processed_up_to = turn_snapshot
+    for idx in range(turn_snapshot, len(conversation)):
+        t = conversation[idx]
+        if t.actor == "brain":
+            processed_up_to = idx + 1
+            continue
+        ack_len = acknowledged_interrupts.get(t.turn)
+        if ack_len is not None and any(
+            b.actor == "brain" and b.action == "response" for b in conversation[ack_len:]
+        ):
+            processed_up_to = idx + 1
+            continue
+        break
+    return processed_up_to
 
 # Tools with side effects that are NOT safe to blindly re-issue (dispatching an
 # agent, deferring an event). When a batch FC's turn never got persisted before
@@ -1397,7 +1430,7 @@ class Brain:
                 is_intermediate = False
             max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
             response_emitted = False  # Track if brain.response was already flushed this cycle
-            acknowledged_interrupts: set[int] = set()
+            acknowledged_interrupts: dict[int, int] = {}  # user turn -> len(conversation) at detection
             for iteration in range(max_llm_iterations):
                 # Re-fetch event to pick up turns appended by the previous iteration
                 if iteration > 0:
@@ -1417,7 +1450,8 @@ class Brain:
                     ]
                     if new_user_turns:
                         user_interrupt_turn = new_user_turns[-1].turn
-                        acknowledged_interrupts.update(t.turn for t in new_user_turns)
+                        for t in new_user_turns:
+                            acknowledged_interrupts[t.turn] = len(event.conversation)
                         response_emitted = False
                         self._response_emitted_for.discard(event_id)
                         logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
@@ -1441,17 +1475,12 @@ class Brain:
             # Brain turns appended during the loop (tool results) also get PROCESSED.
             # Non-brain turns after turn_snapshot stay SENT/DELIVERED for next cycle.
             event_after = await self.blackboard.get_event(event_id)
-            extra_brain_count = 0
-            if event_after:
-                extra_brain_turns = []
-                for t in event_after.conversation[turn_snapshot:]:
-                    if t.actor == "brain":
-                        extra_brain_turns.append(t.turn)
-                    else:
-                        break
-                if extra_brain_turns:
-                    extra_brain_count = len(extra_brain_turns)
-            processed_up_to = turn_snapshot + extra_brain_count
+            processed_up_to = (
+                _compute_processed_up_to(
+                    event_after.conversation, turn_snapshot, acknowledged_interrupts,
+                )
+                if event_after else turn_snapshot
+            )
             await self.blackboard.mark_turns_status(
                 event_id, up_to_turn=processed_up_to,
                 status=MessageStatus.PROCESSED,

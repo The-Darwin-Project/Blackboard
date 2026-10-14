@@ -1072,3 +1072,72 @@ class TestAgentErrorCircuitBreaker:
         assert "evt-err" not in brain._agent_error_streak, (
             "Streak must reset to allow a fresh error streak after a successful result"
         )
+
+
+# =========================================================================
+# evt-996e33ec Batch A: PROCESSED scope covers answered interrupts
+# =========================================================================
+def _conv(*specs) -> list[ConversationTurn]:
+    """Build a conversation from (actor, action) pairs, numbered 1..N."""
+    return [
+        _make_turn(turn=i, actor=actor, action=action, status="delivered")
+        for i, (actor, action) in enumerate(specs, start=1)
+    ]
+
+
+class TestProcessedScope:
+    def test_answered_interrupt_snapshot0(self):
+        """A-T1: evt-996e33ec replay -- Run 1 started at snapshot 0, T1 was acked as an
+        interrupt, T2..T6 are brain turns ending in the response -> everything PROCESSED."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(
+            ("user", "message"), ("brain", "triage"), ("brain", "tool_result"),
+            ("brain", "phase"), ("brain", "thoughts"), ("brain", "response"),
+        )
+        assert _compute_processed_up_to(conv, 0, {1: 1}) == 6
+
+    def test_ignored_interrupt_stays_delivered(self):
+        """A-T2: acked interrupt followed only by a non-response brain turn is NOT processed."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(("user", "message"), ("brain", "triage"), ("user", "message"), ("brain", "route"))
+        assert _compute_processed_up_to(conv, 2, {3: 3}) == 2
+
+    def test_pre_ack_response_does_not_count(self):
+        """A-T3: a response flushed BEFORE the acknowledgement never saw the interrupt."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(("user", "message"), ("user", "message"), ("brain", "response"), ("brain", "tool_result"))
+        assert _compute_processed_up_to(conv, 1, {2: 4}) == 1
+
+    @pytest.mark.parametrize(
+        "specs,snapshot,expected",
+        [
+            ([("user", "message")], 1, 1),
+            ([("user", "message"), ("brain", "response")], 1, 2),
+            ([("user", "message"), ("brain", "triage"), ("brain", "response")], 1, 3),
+            ([("user", "message"), ("brain", "response"), ("user", "message")], 1, 2),
+            ([("user", "message"), ("brain", "triage"), ("user", "message"), ("brain", "response")], 1, 2),
+            ([], 0, 0),
+        ],
+    )
+    def test_no_interrupts_matches_legacy(self, specs, snapshot, expected):
+        """A-T4: with no acknowledged interrupts the result equals snapshot + contiguous brain turns."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(*specs)
+        legacy = snapshot
+        for t in conv[snapshot:]:
+            if t.actor != "brain":
+                break
+            legacy += 1
+        assert _compute_processed_up_to(conv, snapshot, {}) == legacy == expected
+
+    def test_unseen_user_turn_mid_final_call(self):
+        """A-T5: a user turn that landed during the final LLM call (never acked) stays DELIVERED
+        even though a brain.response follows it."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(("user", "message"), ("brain", "triage"), ("user", "message"), ("brain", "response"))
+        assert _compute_processed_up_to(conv, 2, {}) == 2
