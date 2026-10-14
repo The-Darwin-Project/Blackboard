@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Optional
 import jwt
 from starlette.requests import Request
 
+from .utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text
+
 if TYPE_CHECKING:
     from .adapters.oidc_adapter import OIDCKeyAdapter
 
@@ -97,10 +99,14 @@ def prompt_display_name(user) -> Optional[str]:
     changed -- approval stamping and audit use them.
     """
     full = getattr(user, "full_name", None)
-    if isinstance(full, str) and full.strip():
-        return full.strip()
+    if isinstance(full, str):
+        cleaned = sanitize_prompt_text(full, max_len=PROMPT_NAME_MAX_LEN).strip()
+        if cleaned:
+            return cleaned
     label = getattr(user, "label", None)
-    return label if isinstance(label, str) and label != "anonymous" else None
+    if isinstance(label, str) and label != "anonymous":
+        return sanitize_prompt_text(label, max_len=PROMPT_NAME_MAX_LEN).strip() or None
+    return None
 
 
 def _validate_jwt(token: str) -> dict:

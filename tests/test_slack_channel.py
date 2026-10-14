@@ -407,6 +407,51 @@ class TestSlackEventSeeding:
         )
 
 
+class TestSlackCommandAndModalSeeding:
+    """evt-996e33ec: slash-command and Home-modal events are created WITH their first turn."""
+
+    @pytest.mark.asyncio
+    async def test_slash_command_seeds_user_turn(self):
+        sc, captured = _make_channel()
+        on_command = captured["command:/darwin"]
+        sc._blackboard.create_event.return_value = "evt-slash001"
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Frank")
+        client.chat_postMessage.return_value = {"ts": "1700000010.000001"}
+        respond = AsyncMock()
+
+        await on_command(
+            AsyncMock(), {"text": " check the store ", "user_id": "U_USER", "channel_id": "C_INFRA"},
+            client, respond,
+        )
+
+        seeded = sc._blackboard.create_event.call_args.kwargs["initial_turns"]
+        assert len(seeded) == 1
+        assert (seeded[0].actor, seeded[0].action, seeded[0].source) == ("user", "message", "slack")
+        assert seeded[0].thoughts == "check the store"
+        assert seeded[0].user_name == "Frank"
+        sc._blackboard.append_turn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_home_modal_seeds_user_turn(self):
+        sc, captured = _make_channel()
+        on_modal = captured["view:darwin_create_event_modal"]
+        sc._blackboard.create_event.return_value = "evt-modal001"
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Gina")
+        client.chat_postMessage.return_value = {"ts": "1700000011.000001", "channel": "D_GINA"}
+        view = {"state": {"values": {"event_description": {"description_input": {"value": "  store is down "}}}}}
+
+        await on_modal(AsyncMock(), {"user": {"id": "U_GINA"}}, client, view)
+
+        seeded = sc._blackboard.create_event.call_args.kwargs["initial_turns"]
+        assert len(seeded) == 1
+        assert (seeded[0].actor, seeded[0].action, seeded[0].source) == ("user", "message", "slack")
+        assert seeded[0].thoughts == "store is down"
+        assert seeded[0].user_name == "Gina"
+        sc._blackboard.append_turn.assert_not_called()
+
+
 class TestApproveRejectActionsEnqueue:
     """darwin_approve / darwin_reject Block Kit actions (RC-1 ingestion paths #2, #3)."""
 

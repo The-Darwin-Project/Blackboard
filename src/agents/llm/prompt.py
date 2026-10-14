@@ -23,24 +23,19 @@
 """Source-aware event header builder for Brain triage prompts."""
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from src.models import CIAnalysis
+from src.utils.prompt_sanitize import sanitize_prompt_text
 
 if TYPE_CHECKING:
     from src.models import EventDocument, Service
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-
 def _safe_prompt_field(value: object, *, max_len: int = 60) -> str:
-    """Coerce an untrusted scalar to a short, single-line, control-char-free string
-    before it is embedded in a Brain/FRIDAY prompt."""
-    text = "" if value is None else str(value)
-    text = text.replace("\n", " ").replace("\r", " ")
-    text = _CONTROL_CHARS.sub("", text)
-    return text[:max_len]
+    """Coerce an untrusted scalar to a short, single-line string with control chars,
+    line/paragraph separators and bidi/zero-width formatting chars removed, before it
+    is embedded in a Brain/FRIDAY prompt."""
+    return sanitize_prompt_text(value, max_len=max_len)
 
 
 def build_event_header(

@@ -135,6 +135,10 @@
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
 #     In-memory only -- assumes single Brain instance per cluster. Multi-replica makes cap best-effort.
+#     [Gotcha]: "Brain touched this event" is _has_non_user_turns(), NOT "conversation non-empty":
+#     user-initiated events are seeded with their first turn(s) at creation (evt-996e33ec), and
+#     Slack follow-ups also seed a brain.context(source=system) turn -- _is_seed_turn() exempts both.
+#     Restart cleanup and the first-error path key off it, so a seed must never read as Brain activity.
 #     [Pattern]: NEW events with no conversation are WIP-gated. The scan re-attempts process_event()
 #     each cycle so they are admitted as soon as capacity opens. process_event() re-checks the WIP
 #     gate internally -- no risk of bypassing admission control.
@@ -177,8 +181,9 @@
 #     marker (commit 71fc829) puts them in view; the turn is recorded in acknowledged_interrupts
 #     {user turn -> len(conversation) at detection}. turn_snapshot is NOT expanded. After the loop,
 #     _compute_processed_up_to() extends PROCESSED over brain turns AND over acknowledged interrupts
-#     answered by a brain.response appended at/after the acknowledgement point (a response flushed
-#     BEFORE the ack never saw the interrupt and does not count). Unseen or ignored user turns stay
+#     answered by a brain.response or wait_for_user park (action="wait", waitingFor="user") appended
+#     at/after the acknowledgement point (a response flushed BEFORE the ack never saw the interrupt
+#     and does not count). Unseen or ignored user turns stay
 #     DELIVERED so the scan safety net still re-processes them (evt-996e33ec: an answered interrupt
 #     left DELIVERED caused a duplicate reply). response_emitted + _response_emitted_for reset on interrupt.
 # 46. [Pattern]: _close_and_broadcast unevaluated-message re-check runs only for LLM-driven closes
@@ -458,8 +463,9 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "request_user_approval",
 })
 
-# Tools the memory-reflex (RECALL) gate must never block (@ai-rules #40, #130):
-# state mutations that must execute or the event document stays inconsistent.
+# Tools the memory-reflex (RECALL) gate must never block (@ai-rules #40).
+# Currently only classify_event: a state mutation that must execute or the event
+# document stays inconsistent (e.g., domain never set).
 _REFLEX_EXEMPT = frozenset({"classify_event"})
 
 
@@ -467,14 +473,31 @@ _REFLEX_EXEMPT = frozenset({"classify_event"})
 _BLANK_USER_EVENT_GRACE_SECONDS = 10.0
 
 
+def _is_seed_turn(turn: ConversationTurn) -> bool:
+    """True for turns written WITH the event at creation, not by Brain processing.
+
+    The user's own turns, plus the Slack follow-up ``brain.context`` turn (prior
+    thread context seeded alongside the user's message; slack.py create-followup).
+    """
+    if turn.actor == "user":
+        return True
+    return (
+        turn.actor == "brain"
+        and turn.action == "context"
+        and turn.source == "system"
+    )
+
+
 def _has_non_user_turns(conversation: list[ConversationTurn]) -> bool:
-    """True once anything other than the user's own (seeded) turns is on the event.
+    """True once anything other than the creation-seeded turns is on the event.
 
     Chat/Slack events are created with their first user turn(s) (evt-996e33ec), so
     "conversation is non-empty" no longer means "the Brain touched this event".
+    Slack follow-ups also seed a brain.context turn, which must not read as the Brain
+    having answered (restart cleanup / first-error path would drop the user's message).
     Other sources keep their legacy meaning: any agent/system turn counts.
     """
-    return any(t.actor != "user" for t in conversation)
+    return any(not _is_seed_turn(t) for t in conversation)
 
 
 import re as _re
@@ -497,7 +520,8 @@ def _compute_processed_up_to(
     """Exclusive index up to which turns become PROCESSED after an LLM cycle.
 
     Extends past turn_snapshot over (a) brain-authored turns and (b) user
-    interrupts the loop acknowledged AND answered by a brain.response appended
+    interrupts the loop acknowledged AND answered by a brain.response (or a
+    wait_for_user park, whose summary is the user-facing reply) appended
     at/after the acknowledgement point (conversation length at detection).
     Stops at the first turn that is neither, so unseen or ignored input stays
     DELIVERED for the scan safety net (@ai-rules #43).
@@ -510,7 +534,11 @@ def _compute_processed_up_to(
             continue
         ack_len = acknowledged_interrupts.get(t.turn)
         if ack_len is not None and any(
-            b.actor == "brain" and b.action == "response" for b in conversation[ack_len:]
+            b.actor == "brain" and (
+                b.action == "response"
+                or (b.action == "wait" and b.waitingFor == "user")
+            )
+            for b in conversation[ack_len:]
         ):
             processed_up_to = idx + 1
             continue

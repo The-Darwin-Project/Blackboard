@@ -7,7 +7,7 @@
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is NOT deleted on event close -- delete_slack_mapping() sets a 14-day archival-retention TTL (SLACK_MAPPING_TTL) instead, so follow-up replies in the thread can still resolve to the closed event for smart continuation routing.
-# 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None. User-initiated sources MUST seed their first turn(s) via create_event(initial_turns=...), never via a follow-up append_turn (evt-996e33ec).
+# 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None. User-initiated sources MUST seed their first turn(s) via create_event(initial_turns=...), never via a follow-up append_turn (evt-996e33ec). create_event persists doc + active-set + queue push in ONE transaction=True pipeline (all-or-nothing).
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 # 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag) and atomic observation rename-and-reindex.
 # 11. [Pattern]: Field Notes Notebook (darwin:notebook HASH). RENAMENX for atomic drain; ResponseError for missing-source guard. Quarantine via RENAME after MAX_DIGEST_RETRIES. Retry counter is Redis INCR with TTL (survives pod restart).
@@ -1180,20 +1180,22 @@ return 1
             slack_user_id=slack_user_id,
             conversation=list(initial_turns or []),
         )
-        # Seeded turns are numbered 1..N and persisted WITH the document before
-        # SADD/LPUSH, so a queue pop can never observe a blank user-initiated event
-        # (evt-996e33ec: LPUSH-before-append_turn gave Run 1 turn_snapshot=0).
+        # Seeded turns are numbered 1..N and persisted WITH the document, so a queue pop
+        # can never observe a blank user-initiated event (evt-996e33ec: LPUSH-before-
+        # append_turn gave Run 1 turn_snapshot=0).
         for i, t in enumerate(event.conversation, start=1):
             t.turn = i
-        # Store event document
-        await self.redis.set(
-            f"{self.EVENT_PREFIX}{event.id}",
-            json.dumps(event.model_dump())
-        )
-        # Add to active set
-        await self.redis.sadd(self.EVENT_ACTIVE, event.id)
-        # Push to queue for Brain
-        await self.redis.lpush(self.EVENT_QUEUE, event.id)
+        # SET + SADD + LPUSH in one MULTI/EXEC: all-or-nothing, and the queue entry only
+        # becomes visible together with the (seeded) document. A failure can no longer leave
+        # an active-set member with no queue entry, or a queued id with no document.
+        async with self.redis.pipeline(transaction=True) as pipe:
+            pipe.set(
+                f"{self.EVENT_PREFIX}{event.id}",
+                json.dumps(event.model_dump()),
+            )
+            pipe.sadd(self.EVENT_ACTIVE, event.id)
+            pipe.lpush(self.EVENT_QUEUE, event.id)
+            await pipe.execute()
         logger.info(
             f"Created event: {event.id} ({source}) for {service} "
             f"({len(event.conversation)} seeded turn(s))"

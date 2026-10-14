@@ -88,27 +88,18 @@ def test_event_document_roundtrip_with_created_by_email():
     assert restored.created_by_email == "user@redhat.com"
 
 
+def _fake_redis():
+    import fakeredis.aioredis
+
+    return fakeredis.aioredis.FakeRedis()
+
+
 @pytest.mark.asyncio
 async def test_create_event_persists_created_by_email():
     """BlackboardState.create_event() round-trips created_by_email through Redis."""
-    from unittest.mock import AsyncMock
     from src.state.blackboard import BlackboardState
 
-    mock_redis = AsyncMock()
-    stored_data = {}
-
-    async def fake_set(key, value):
-        stored_data[key] = value
-
-    async def fake_get(key):
-        return stored_data.get(key)
-
-    mock_redis.set = AsyncMock(side_effect=fake_set)
-    mock_redis.get = AsyncMock(side_effect=fake_get)
-    mock_redis.sadd = AsyncMock()
-    mock_redis.lpush = AsyncMock()
-
-    bb = BlackboardState(redis=mock_redis)
+    bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
         source="chat",
         service="general",
@@ -126,24 +117,9 @@ async def test_create_event_persists_created_by_email():
 @pytest.mark.asyncio
 async def test_create_event_without_email_defaults_none():
     """Existing callers that don't pass created_by_email get None."""
-    from unittest.mock import AsyncMock
     from src.state.blackboard import BlackboardState
 
-    mock_redis = AsyncMock()
-    stored_data = {}
-
-    async def fake_set(key, value):
-        stored_data[key] = value
-
-    async def fake_get(key):
-        return stored_data.get(key)
-
-    mock_redis.set = AsyncMock(side_effect=fake_set)
-    mock_redis.get = AsyncMock(side_effect=fake_get)
-    mock_redis.sadd = AsyncMock()
-    mock_redis.lpush = AsyncMock()
-
-    bb = BlackboardState(redis=mock_redis)
+    bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
         source="aligner",
         service="my-service",
@@ -155,53 +131,61 @@ async def test_create_event_without_email_defaults_none():
     assert retrieved is not None
     assert retrieved.created_by_email is None
 
-def _seed_redis():
-    from unittest.mock import AsyncMock
-
-    mock_redis = AsyncMock()
-    stored: dict = {}
-
-    async def fake_set(key, value):
-        stored[key] = value
-
-    async def fake_get(key):
-        return stored.get(key)
-
-    mock_redis.set = AsyncMock(side_effect=fake_set)
-    mock_redis.get = AsyncMock(side_effect=fake_get)
-    mock_redis.sadd = AsyncMock()
-    mock_redis.lpush = AsyncMock()
-    return mock_redis, stored
-
 
 @pytest.mark.asyncio
-async def test_create_event_seeds_initial_turns_before_lpush():
-    """B-T1 (evt-996e33ec): the stored doc already carries the seeded turn when LPUSH runs."""
-    from unittest.mock import AsyncMock
+async def test_create_event_seeds_initial_turns_before_queue_visible():
+    """B-T1 (evt-996e33ec): the queued id is only ever visible WITH the seeded turn."""
     from src.models import ConversationTurn
     from src.state.blackboard import BlackboardState
 
-    mock_redis, stored = _seed_redis()
-    seen_at_lpush: list = []
-
-    async def lpush_probe(queue, event_id):
-        doc = json.loads(stored[f"{BlackboardState.EVENT_PREFIX}{event_id}"])
-        seen_at_lpush.append(doc["conversation"])
-
-    mock_redis.lpush = AsyncMock(side_effect=lpush_probe)
-
-    bb = BlackboardState(redis=mock_redis)
-    await bb.create_event(
+    redis = _fake_redis()
+    bb = BlackboardState(redis=redis)
+    event_id = await bb.create_event(
         source="chat", service="general", reason="Hi Friday", evidence="Hi Friday",
         initial_turns=[ConversationTurn(turn=1, actor="user", action="message", thoughts="Hi Friday")],
     )
 
-    assert len(seen_at_lpush) == 1
-    conv = seen_at_lpush[0]
+    popped = await redis.rpop(BlackboardState.EVENT_QUEUE)
+    assert popped.decode() == event_id
+    conv = json.loads(await redis.get(f"{BlackboardState.EVENT_PREFIX}{event_id}"))["conversation"]
     assert len(conv) == 1
     assert conv[0]["turn"] == 1
     assert conv[0]["actor"] == "user"
     assert conv[0]["thoughts"] == "Hi Friday"
+    assert await redis.sismember(BlackboardState.EVENT_ACTIVE, event_id)
+
+
+@pytest.mark.asyncio
+async def test_create_event_is_one_transaction():
+    """doc SET, active SADD and queue LPUSH are queued on ONE transaction=True pipeline;
+    a failing EXEC leaves no partial state (no queue entry, no active member, no doc)."""
+    from unittest.mock import patch
+
+    from src.state.blackboard import BlackboardState
+
+    redis = _fake_redis()
+    bb = BlackboardState(redis=redis)
+    real_pipeline = redis.pipeline
+    seen_transaction_flags: list[bool] = []
+
+    def spy_pipeline(*args, **kwargs):
+        seen_transaction_flags.append(kwargs.get("transaction", True))
+        pipe = real_pipeline(*args, **kwargs)
+
+        async def boom():
+            raise RuntimeError("EXEC failed")
+
+        pipe.execute = boom
+        return pipe
+
+    with patch.object(redis, "pipeline", side_effect=spy_pipeline):
+        with pytest.raises(RuntimeError):
+            await bb.create_event(source="chat", service="general", reason="r", evidence="e")
+
+    assert seen_transaction_flags == [True]
+    assert await redis.llen(BlackboardState.EVENT_QUEUE) == 0
+    assert await redis.scard(BlackboardState.EVENT_ACTIVE) == 0
+    assert [k async for k in redis.scan_iter(f"{BlackboardState.EVENT_PREFIX}*")] == []
 
 
 @pytest.mark.asyncio
@@ -210,8 +194,7 @@ async def test_create_event_numbers_multiple_initial_turns():
     from src.models import ConversationTurn
     from src.state.blackboard import BlackboardState
 
-    mock_redis, _ = _seed_redis()
-    bb = BlackboardState(redis=mock_redis)
+    bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
         source="slack", service="general", reason="follow-up", evidence="follow-up",
         initial_turns=[
@@ -230,14 +213,27 @@ async def test_create_event_without_initial_turns_is_blank():
     """B-T3: back-compat -- automated sources still start with an empty conversation."""
     from src.state.blackboard import BlackboardState
 
-    mock_redis, _ = _seed_redis()
-    bb = BlackboardState(redis=mock_redis)
+    bb = BlackboardState(redis=_fake_redis())
     event_id = await bb.create_event(
         source="aligner", service="svc", reason="CPU spike", evidence="x",
     )
 
     event = await bb.get_event(event_id)
     assert event.conversation == []
+
+
+def test_event_repository_protocol_create_event_accepts_initial_turns():
+    """Port stays in lockstep with BlackboardState.create_event (evt-996e33ec)."""
+    import inspect
+
+    from src.state.blackboard import BlackboardState
+    from src.state.ports import EventRepository
+
+    port = inspect.signature(EventRepository.create_event).parameters
+    impl = inspect.signature(BlackboardState.create_event).parameters
+    assert "initial_turns" in port
+    assert port["initial_turns"].default is None
+    assert list(port) == list(impl)
 
 
 def test_event_document_created_by_email_validator():

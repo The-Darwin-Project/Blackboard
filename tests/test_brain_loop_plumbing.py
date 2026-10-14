@@ -1141,3 +1141,38 @@ class TestProcessedScope:
 
         conv = _conv(("user", "message"), ("brain", "triage"), ("user", "message"), ("brain", "response"))
         assert _compute_processed_up_to(conv, 2, {}) == 2
+
+
+class TestProcessedScopeWaitAnswer:
+    """A wait_for_user park (action="wait", waitingFor="user") after the ack answers the
+    interrupt: its summary IS the user-facing reply. Leaving the interrupt DELIVERED made
+    the scan 'user-message bypass' clear the park and re-process (duplicate reply)."""
+
+    @staticmethod
+    def _wait_conv(wait_waiting_for):
+        conv = _conv(("user", "message"), ("brain", "triage"), ("user", "message"), ("brain", "wait"))
+        conv[3].waitingFor = wait_waiting_for
+        return conv
+
+    def test_wait_for_user_after_ack_answers_interrupt(self):
+        from src.agents.brain import _compute_processed_up_to
+
+        assert _compute_processed_up_to(self._wait_conv("user"), 2, {3: 3}) == 4
+
+    def test_wait_without_user_waitingfor_does_not_answer(self):
+        from src.agents.brain import _compute_processed_up_to
+
+        assert _compute_processed_up_to(self._wait_conv(None), 2, {3: 3}) == 2
+
+    def test_wait_before_ack_does_not_answer(self):
+        """A park that predates the acknowledgement never saw the interrupt."""
+        from src.agents.brain import _compute_processed_up_to
+
+        conv = _conv(("user", "message"), ("brain", "wait"), ("user", "message"), ("brain", "tool_result"))
+        conv[1].waitingFor = "user"
+        assert _compute_processed_up_to(conv, 1, {3: 3}) == 2
+
+    def test_unacknowledged_user_turn_before_wait_stays_delivered(self):
+        from src.agents.brain import _compute_processed_up_to
+
+        assert _compute_processed_up_to(self._wait_conv("user"), 2, {}) == 2

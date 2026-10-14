@@ -339,6 +339,178 @@ class TestSeededUserTurnLifecycle:
         brain.blackboard.stamp_event.assert_awaited()
 
 
+class TestBlankEventGraceGuardClauses:
+    """Pins every clause/boundary of the blank-event grace guard in _process_event_inner
+    (@ai-rules #33; evt-996e33ec) so single-clause mutants die."""
+
+    _NOW = 1_700_000_000.0
+
+    @staticmethod
+    async def _run(brain, event):
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("stop here"))
+        try:
+            await brain._process_event_inner(event.id)
+            return "returned"
+        except RuntimeError as e:
+            assert "stop here" in str(e)
+            return "processed"
+
+    def _blank(self, *, source="chat", age=1.0, processing_started_at=None, queued_at="auto"):
+        event = _make_seeded_chat_event(
+            processing_started_at=processing_started_at,
+            queued_at=self._NOW - age,
+        )
+        event.conversation = []
+        event.source = source
+        if queued_at != "auto":
+            event.queued_at = queued_at
+        return event
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["aligner", "jira", "headhunter"])
+    async def test_blank_non_user_source_is_not_delayed(self, source):
+        """Automated sources are legitimately created blank: never held by the grace window."""
+        from unittest.mock import patch
+
+        brain = _make_brain()
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, self._blank(source=source, age=1.0))
+        assert outcome == "processed"
+        brain.blackboard.stamp_event.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_blank_slack_event_within_grace_defers(self):
+        from unittest.mock import patch
+
+        brain = _make_brain()
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, self._blank(source="slack", age=1.0))
+        assert outcome == "returned"
+        brain.blackboard.stamp_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_processing_started_at_bypasses_grace(self):
+        """An already-stamped blank event (orphan re-queue) must proceed, not be deferred again."""
+        from unittest.mock import patch
+
+        brain = _make_brain()
+        event = self._blank(source="chat", age=1.0, processing_started_at=self._NOW - 1.0)
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, event)
+        assert outcome == "processed"
+
+    @pytest.mark.asyncio
+    async def test_missing_queued_at_does_not_defer(self):
+        """queued_at=None (legacy docs) must not be treated as 'just queued'."""
+        from unittest.mock import patch
+
+        brain = _make_brain()
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, self._blank(source="chat", queued_at=None))
+        assert outcome == "processed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "age,expected",
+        [(0.0, "returned"), (9.99, "returned"), (10.0, "processed"), (10.01, "processed")],
+    )
+    async def test_grace_window_boundary(self, age, expected):
+        """Exactly _BLANK_USER_EVENT_GRACE_SECONDS (10s) is OUT of the window (strict <)."""
+        from unittest.mock import patch
+
+        from src.agents.brain import _BLANK_USER_EVENT_GRACE_SECONDS
+
+        assert _BLANK_USER_EVENT_GRACE_SECONDS == 10.0
+        brain = _make_brain()
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, self._blank(source="chat", age=age))
+        assert outcome == expected
+
+    @pytest.mark.asyncio
+    async def test_seeded_non_blank_chat_event_is_not_delayed(self):
+        """A chat event WITH its seeded turn is never held by the blank-event guard."""
+        from unittest.mock import patch
+
+        brain = _make_brain()
+        event = _make_seeded_chat_event(queued_at=self._NOW - 1.0)
+        with patch("src.agents.brain.time.time", return_value=self._NOW):
+            outcome = await self._run(brain, event)
+        assert outcome == "processed"
+
+
+class TestHasNonUserTurnsSeedAware:
+    """_has_non_user_turns vs the Slack follow-up brain.context seed (restart / first-error paths)."""
+
+    @staticmethod
+    def _slack_followup(*extra: ConversationTurn) -> EventDocument:
+        event = _make_seeded_chat_event(processing_started_at=time.time())
+        event.source = "slack"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="brain", action="context", thoughts="prior ctx", source="system"),
+            ConversationTurn(turn=2, actor="user", action="message", thoughts="and now?", source="slack"),
+            *extra,
+        ]
+        return event
+
+    def test_seeded_context_and_user_turns_are_not_brain_activity(self):
+        from src.agents.brain import _has_non_user_turns
+
+        assert _has_non_user_turns(self._slack_followup().conversation) is False
+
+    def test_real_brain_turn_after_seed_counts(self):
+        from src.agents.brain import _has_non_user_turns
+
+        reply = ConversationTurn(turn=3, actor="brain", action="response", thoughts="hi")
+        assert _has_non_user_turns(self._slack_followup(reply).conversation) is True
+
+    def test_brain_context_without_system_source_counts(self):
+        """Only the creation seed (source=system) is exempt; other brain.context turns are real."""
+        from src.agents.brain import _has_non_user_turns
+
+        turns = [ConversationTurn(turn=1, actor="brain", action="context", thoughts="x", source="slack")]
+        assert _has_non_user_turns(turns) is True
+
+    def test_agent_turn_counts_and_empty_is_false(self):
+        from src.agents.brain import _has_non_user_turns
+
+        assert _has_non_user_turns([]) is False
+        assert _has_non_user_turns(
+            [ConversationTurn(turn=1, actor="developer", action="result", thoughts="done")]
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_first_error_path_writes_error_turn_for_slack_followup(self):
+        """The Brain failing on a [context, user] follow-up still records the error turn."""
+        brain = _make_brain()
+        event = self._slack_followup()
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.append_turn = AsyncMock(return_value=3)
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+
+        with pytest.raises(RuntimeError, match="LLM unavailable"):
+            await brain._process_event_inner(event.id)
+
+        written = brain.blackboard.append_turn.await_args_list[-1].args[1]
+        assert written.action == "error"
+
+    @pytest.mark.asyncio
+    async def test_restart_cleanup_keeps_unprocessed_slack_followup(self):
+        """Restart cleanup must NOT close a Slack follow-up the Brain never answered."""
+        brain = _make_brain()
+        event = self._slack_followup()
+        event.status = EventStatus.ACTIVE
+        brain.blackboard.get_active_events = AsyncMock(return_value=[event.id])
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.redis.srem = AsyncMock()
+        brain._close_and_broadcast = AsyncMock()
+
+        await brain._cleanup_stale_events()
+
+        brain._close_and_broadcast.assert_not_awaited()
+        brain.blackboard.close_event.assert_not_awaited()
+
+
 # =========================================================================
 # Phase initialization
 # =========================================================================
@@ -349,33 +521,19 @@ class TestPhaseInitialization:
     @pytest.mark.asyncio
     async def test_create_event_sets_brain_phase_triage(self):
         """New events should have brain_phase='triage' from create_event."""
+        import fakeredis.aioredis
         from src.state.blackboard import BlackboardState
-        bb = MagicMock(spec=BlackboardState)
-        bb.redis = MagicMock()
-        bb.redis.set = AsyncMock()
-        bb.redis.sadd = AsyncMock()
-        bb.redis.lpush = AsyncMock()
-        bb.EVENT_PREFIX = "darwin:event:"
-        bb.EVENT_ACTIVE = "darwin:event:active"
-        bb.EVENT_QUEUE = "darwin:queue"
 
-        real_bb = BlackboardState.__new__(BlackboardState)
-        real_bb.redis = bb.redis
-        real_bb.EVENT_PREFIX = bb.EVENT_PREFIX
-        real_bb.EVENT_ACTIVE = bb.EVENT_ACTIVE
-        real_bb.EVENT_QUEUE = bb.EVENT_QUEUE
-
+        real_bb = BlackboardState(redis=fakeredis.aioredis.FakeRedis())
         evidence = EventEvidence(
             display_text="test", source_type="chat", severity="info",
         )
-        await real_bb.create_event(
+        event_id = await real_bb.create_event(
             source="chat", service="test-svc", reason="test", evidence=evidence,
         )
 
-        import json
-        stored_call = bb.redis.set.await_args
-        stored_json = json.loads(stored_call.args[1])
-        assert stored_json["brain_phase"] == "triage"
+        stored = await real_bb.get_event(event_id)
+        assert stored.brain_phase == "triage"
 
     @pytest.mark.asyncio
     async def test_set_phase_triage_when_none_writes_turn(self):
