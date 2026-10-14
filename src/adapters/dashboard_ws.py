@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ..auth import can_append_message, can_approve_event, get_user_from_websocket, resolve_approval_identity
+from ..auth import (
+    can_append_message, can_approve_event, get_user_from_websocket, prompt_display_name,
+    resolve_approval_identity,
+)
 from ..models import ConversationTurn, EventEvidence
 from ..utils.vcs_approval import resolve_live_head_sha
 
@@ -148,7 +151,7 @@ class DashboardWSAdapter:
             action="message",
             thoughts=message,
             image=image,
-            user_name=user.label if user.label != "anonymous" else None,
+            user_name=prompt_display_name(user),
         )
         event_id = await self._blackboard.create_event(
             source="chat",
@@ -157,7 +160,7 @@ class DashboardWSAdapter:
             evidence=EventEvidence(
                 display_text=message,
                 source_type="chat",
-                triggered_by=display_label,
+                triggered_by=prompt_display_name(user) or display_label,
                 domain="disorder",
                 severity="info",
             ),
@@ -216,7 +219,7 @@ class DashboardWSAdapter:
             action="message",
             thoughts=message,
             image=image,
-            user_name=user.label if user.label != "anonymous" else None,
+            user_name=prompt_display_name(user),
         )
         await self._blackboard.append_turn(event_id, turn)
         self._brain.clear_waiting(event_id)

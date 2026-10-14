@@ -102,6 +102,14 @@ def _build_identity_block(
             lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
         eff_severity = ev.brain_severity or ev.severity
         lines.append(f"Severity: {eff_severity}")
+        # evt-996e33ec: anchor the operator's identity in the deterministic header so
+        # "use the operator's name" does not depend on inference. Input is sanitized
+        # (single-line, control chars stripped, length-capped).
+        if event.source in ("chat", "slack"):
+            who = _safe_prompt_field(ev.triggered_by, max_len=80).strip()
+            email = _safe_prompt_field(event.created_by_email, max_len=120).strip()
+            if who or email:
+                lines.append(f"Requester: {who or email}" + (f" <{email}>" if who and email else ""))
     return lines
 
 

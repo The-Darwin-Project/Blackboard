@@ -275,3 +275,21 @@ async def test_ws_chat_oversized_image_seeded_without_image():
     assert sent[0]["kind"] == "invalid_payload"
     assert sent[0]["event_id"] == "evt-bigimg01"
     bb.append_turn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ws_chat_uses_full_name_for_turn_label_and_triggered_by():
+    """E2: the JWT 'name' claim labels the seeded turn and evidence; label/email stay untouched."""
+    adapter, bb = _chat_adapter()
+    ws = AsyncMock()
+    user = auth.UserContext(
+        user_id="u1", display_name="thason@redhat.com", email="thason@redhat.com",
+        full_name="Tal Hason",
+    )
+
+    await adapter._handle_chat(ws, {"message": "Hi Friday"}, user)
+
+    kwargs = bb.create_event.await_args.kwargs
+    assert kwargs["initial_turns"][0].user_name == "Tal Hason"
+    assert kwargs["evidence"].triggered_by == "Tal Hason"
+    assert kwargs["created_by_email"] == "thason@redhat.com"

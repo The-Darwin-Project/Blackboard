@@ -82,10 +82,25 @@ class UserContext:
     email: Optional[str] = None
     source: str = "dashboard"
     roles: list[str] = field(default_factory=list)
+    full_name: Optional[str] = None  # JWT "name" claim (profile scope) -- prompt display only
 
     @property
     def label(self) -> str:
         return self.display_name or self.user_id
+
+
+def prompt_display_name(user) -> Optional[str]:
+    """Human name for prompts/turn labels: full_name > label (never 'anonymous').
+
+    isinstance checks keep duck-typed test doubles (MagicMock) from leaking
+    non-string values into pydantic-validated fields. label/display_name are NOT
+    changed -- approval stamping and audit use them.
+    """
+    full = getattr(user, "full_name", None)
+    if isinstance(full, str) and full.strip():
+        return full.strip()
+    label = getattr(user, "label", None)
+    return label if isinstance(label, str) and label != "anonymous" else None
 
 
 def _validate_jwt(token: str) -> dict:
@@ -119,6 +134,7 @@ def _claims_to_user(claims: dict) -> UserContext:
         email=claims.get("email"),
         source="dashboard",
         roles=claims.get("groups", []),
+        full_name=claims.get("name"),
     )
 
 

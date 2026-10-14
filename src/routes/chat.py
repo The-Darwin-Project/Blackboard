@@ -26,7 +26,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import DEX_ENABLED, TRUSTED_PROXY_ENABLED, can_append_message, get_user_from_request
+from ..auth import (
+    DEX_ENABLED, TRUSTED_PROXY_ENABLED, can_append_message, get_user_from_request,
+    prompt_display_name,
+)
 from ..dependencies import get_blackboard, get_brain
 from ..models import ConversationTurn, EventEvidence
 from ..state.blackboard import BlackboardState
@@ -92,6 +95,7 @@ async def create_chat_event(
                     actor="user",
                     action="message",
                     thoughts=request.message,
+                    user_name=prompt_display_name(user),
                 )
                 await blackboard.append_turn(request.event_id, turn)
                 try:
@@ -122,7 +126,7 @@ async def create_chat_event(
             actor="user",
             action="message",
             thoughts=request.message,
-            user_name=user.label if user.label != "anonymous" else None,
+            user_name=prompt_display_name(user),
         )
         event_id = await blackboard.create_event(
             source="chat",
@@ -131,7 +135,7 @@ async def create_chat_event(
             evidence=EventEvidence(
                 display_text=request.message,
                 source_type="chat",
-                triggered_by=display_label,
+                triggered_by=prompt_display_name(user) or display_label,
                 domain="disorder",
                 severity="info",
             ),
