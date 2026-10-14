@@ -17,7 +17,6 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -421,3 +420,82 @@ class TestStreamTimeout:
         else:
             assert pair1 == (None, None), "Without archivist, both calls return (None, None)"
             assert pair2 == (None, None)
+
+    # --- Drain cancellation recovery (VMER-2099) ---
+
+    @pytest.mark.asyncio
+    async def test_chunk_timeout_during_drain_preserves_tool_call(self, monkeypatch):
+        """T-5: Brain chunk timeout during drain recovers tool call and executes it."""
+        from types import SimpleNamespace
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "0.2")
+
+        fc = SimpleNamespace(name="classify_event", args={"domain": "complicated"})
+        chunk1 = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(parts=[SimpleNamespace(text=None, thought=False, function_call=fc)]),
+                    grounding_metadata=None,
+                )
+            ],
+            text=None,
+            function_calls=[fc],
+            usage_metadata=None,
+        )
+
+        class HangingSDKStream:
+            def __init__(self):
+                self._yielded = 0
+                self.aclose_called = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._yielded == 0:
+                    self._yielded += 1
+                    return chunk1
+                # Hang on subsequent anext to trigger Brain chunk timeout during drain
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.aclose_called = True
+
+        sdk_stream = HangingSDKStream()
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-argon"
+        adapter._tracker = None
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        adapter.set_search_enabled = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content_stream = AsyncMock(return_value=sdk_stream)
+        adapter._client = mock_client
+
+        brain = _make_brain()
+        brain._adapter = adapter
+        brain._execute_function_call = AsyncMock(return_value=True)
+
+        event = _make_event()
+
+        with (
+            patch("src.agents.tool_gates.evaluate_gates", return_value=[{"name": "classify_event"}]),
+            _gate_ctx_patch(),
+            _sleep_patch,
+        ):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        brain._execute_function_call.assert_awaited_once()
+        call_args = brain._execute_function_call.call_args
+        assert call_args[0][0] == "evt-test"
+        assert call_args[0][1] == "classify_event"
+        assert call_args[0][2] == {"domain": "complicated"}
+        error_turns = _get_error_turns(brain)
+        assert len(error_turns) == 0
+        assert sdk_stream.aclose_called is True
+

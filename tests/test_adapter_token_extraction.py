@@ -1,5 +1,6 @@
 # tests/test_adapter_token_extraction.py
 """Direct tests for GeminiAdapter._record_usage() and ClaudeAdapter._extract_usage()."""
+import logging
 from types import SimpleNamespace
 
 from src.agents.llm.types import TokenUsage
@@ -437,7 +438,7 @@ class TestGeminiGenerateStreamDrainHardening:
     # --- Stream close on every exit (@ai-rules 15) ---
 
     @staticmethod
-    def _spy(chunks, *, hang_after=None, raise_after=None, aclose_exc=None):
+    def _spy(chunks, *, hang_after=None, raise_after=None, raise_exc=None, aclose_exc=None):
         import asyncio
 
         class SpyStream:
@@ -454,7 +455,7 @@ class TestGeminiGenerateStreamDrainHardening:
                 if hang_after is not None and self._i >= hang_after:
                     await asyncio.Event().wait()
                 if raise_after is not None and self._i >= raise_after:
-                    raise ConnectionError("read failed")
+                    raise raise_exc if raise_exc is not None else ConnectionError("read failed")
                 if self._i >= len(chunks):
                     raise StopAsyncIteration
                 self._i += 1
@@ -543,3 +544,229 @@ class TestGeminiGenerateStreamDrainHardening:
         assert chunks[-1].function_call.name == "classify_event"
         assert spy.aclose_awaited == 1
         assert "Gemini stream close failed" in caplog.text
+
+    def test_drain_cancellation_emits_pending_function_call(self, caplog):
+        """T-1: Mid-drain cancellation preserves captured tool call."""
+        import asyncio
+        import logging
+        tracker = self._tracker()
+        spy = self._spy(
+            [_chunk(parts=[_part()], function_calls=[_fc()])],
+            raise_after=1,
+            raise_exc=asyncio.CancelledError(),
+        )
+        adapter = self._adapter(lambda: spy, tracker=tracker)
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert chunks[0].function_call.name == "classify_event"
+        assert chunks[0].done is True
+        assert spy.aclose_awaited == 1
+        assert "Gemini stream drain interrupted" in caplog.text
+        assert "CancelledError" in caplog.text
+
+    def test_pre_function_call_cancellation_propagates(self):
+        """T-2: Pre-tool-call cancellation propagates immediately."""
+        import asyncio
+        import pytest
+        spy = self._spy([], raise_after=0, raise_exc=asyncio.CancelledError())
+        adapter = self._adapter(lambda: spy)
+
+        with pytest.raises(asyncio.CancelledError):
+            self._collect(adapter)
+
+        assert spy.aclose_awaited == 1
+
+    def test_close_stream_shielded_under_cancellation(self, caplog):
+        """T-3a: Stream cleanup shielded under outer task cancellation."""
+        import asyncio
+        import logging
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter.ACLOSE_TIMEOUT_S = 0.5
+
+        aclose_completed = False
+
+        class SlowStream:
+            async def aclose(self):
+                nonlocal aclose_completed
+                await asyncio.sleep(0.05)
+                aclose_completed = True
+
+        stream = SlowStream()
+
+        async def run():
+            task = asyncio.create_task(adapter._close_stream(stream))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            await task
+            await asyncio.sleep(0.06)
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            asyncio.run(run())
+
+        assert aclose_completed is True
+        assert "Gemini stream close failed" in caplog.text
+        assert "CancelledError" in caplog.text
+
+    def test_close_stream_bounded_on_hang(self, caplog):
+        """T-3b: Stream cleanup bounded by ACLOSE_TIMEOUT_S when aclose hangs."""
+        import asyncio
+        import logging
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter.ACLOSE_TIMEOUT_S = 0.05
+
+        class HangingStream:
+            def __init__(self):
+                self.cancelled = False
+
+            async def aclose(self):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+
+        stream = HangingStream()
+
+        async def run():
+            await asyncio.wait_for(adapter._close_stream(stream), timeout=1.0)
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            asyncio.run(run())
+
+        assert "Gemini stream close failed" in caplog.text
+        assert "TimeoutError" in caplog.text
+        assert stream.cancelled is True
+
+    def test_drain_timeout_env_var_override(self, monkeypatch):
+        """T-4: Drain timeout dynamically configurable via environment variable."""
+        import asyncio
+        from unittest.mock import patch
+
+        monkeypatch.setenv("LLM_STREAM_DRAIN_TIMEOUT_SEC", "3.0")
+        recorded_timeouts = []
+        real_wait_for = asyncio.wait_for
+
+        async def spy_wait_for(fut, timeout=None):
+            if timeout is not None:
+                recorded_timeouts.append(timeout)
+            return await real_wait_for(fut, timeout=timeout)
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+            yield _chunk(usage=_usage(total=100))
+
+        adapter = self._adapter(stream)
+        with patch("src.agents.llm.gemini_client.asyncio.wait_for", side_effect=spy_wait_for):
+            chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert chunks[0].function_call.name == "classify_event"
+        assert len(recorded_timeouts) >= 1
+        assert 2.5 <= recorded_timeouts[0] <= 3.0
+
+    def test_clean_stream_eof_does_not_log_drain_interruption(self, caplog):
+        """T-6: Clean stream EOF breaks cleanly without logging drain interruption warning."""
+        import logging
+        tracker = self._tracker()
+        spy = self._spy([_chunk(parts=[_part()], function_calls=[_fc()])])
+        adapter = self._adapter(lambda: spy, tracker=tracker)
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert chunks[0].function_call.name == "classify_event"
+        assert chunks[0].done is True
+        assert spy.aclose_awaited == 1
+        assert "Gemini stream drain interrupted" not in caplog.text
+        assert "Gemini stream drain timeout expired" not in caplog.text
+
+    def test_parse_drain_timeout_validation(self, caplog):
+        """CR-2: _parse_drain_timeout validates input, guards against NaN/Inf/empty/bounds, falls back safely."""
+        from src.agents.llm.gemini_client import _parse_drain_timeout
+
+        assert _parse_drain_timeout(None, default=15.0) == 15.0
+        assert _parse_drain_timeout("", default=15.0) == 15.0
+        assert _parse_drain_timeout("   ", default=15.0) == 15.0
+        assert _parse_drain_timeout("10.5", default=15.0) == 10.5
+        assert _parse_drain_timeout("300.0", default=15.0) == 300.0
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            assert _parse_drain_timeout("not-a-number", default=15.0) == 15.0
+            assert "Malformed LLM_STREAM_DRAIN_TIMEOUT_SEC" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            assert _parse_drain_timeout("nan", default=15.0) == 15.0
+            assert _parse_drain_timeout("inf", default=15.0) == 15.0
+            assert _parse_drain_timeout("-inf", default=15.0) == 15.0
+            assert _parse_drain_timeout("-1.0", default=15.0) == 15.0
+            assert _parse_drain_timeout("0.0", default=15.0) == 15.0
+            assert _parse_drain_timeout("500.0", default=15.0) == 15.0
+            assert "Invalid LLM_STREAM_DRAIN_TIMEOUT_SEC" in caplog.text
+
+    def test_drain_timeout_log_formatting_timeout_vs_cancelled(self, caplog):
+        """CR-5: TimeoutError logs 'timed out', CancelledError logs 'cancelled'."""
+        import asyncio
+        tracker = self._tracker()
+
+        # 1. Stalled drain -> TimeoutError logs 'timed out'
+        stalled_spy = self._spy([_chunk(parts=[_part()], function_calls=[_fc()])], hang_after=1)
+        adapter = self._adapter(lambda: stalled_spy, tracker=tracker)
+        adapter.DRAIN_TIMEOUT_S = 0.05
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert "Gemini stream drain interrupted (TimeoutError: timed out)" in caplog.text or "timed out" in caplog.text
+        assert "TimeoutError: cancelled" not in caplog.text
+
+        # 2. CancelledError during drain -> logs 'cancelled'
+        caplog.clear()
+        cancelled_spy = self._spy(
+            [_chunk(parts=[_part()], function_calls=[_fc()])],
+            raise_after=1,
+            raise_exc=asyncio.CancelledError(),
+        )
+        adapter2 = self._adapter(lambda: cancelled_spy, tracker=tracker)
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks2 = self._collect(adapter2)
+
+        assert len(chunks2) == 1
+        assert "Gemini stream drain interrupted (CancelledError: cancelled)" in caplog.text
+
+    def test_candidate_parsing_usage_metadata_exception_preserves_function_call(self, caplog):
+        """CR-3: Exception during usage_metadata read preserves pending_fc."""
+        tracker = self._tracker()
+
+        class FaultyChunk:
+            text = None
+            function_calls = None
+
+            @property
+            def usage_metadata(self):
+                raise RuntimeError("Corrupted usage metadata")
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+            yield FaultyChunk()
+
+        adapter = self._adapter(stream, tracker=tracker)
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            chunks = self._collect(adapter)
+
+        assert len(chunks) == 1
+        assert chunks[0].function_call.name == "classify_event"
+        assert chunks[0].done is True
+        assert "Gemini stream drain candidate parsing failed" in caplog.text
+        assert "RuntimeError" in caplog.text
+
+

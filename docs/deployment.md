@@ -87,6 +87,8 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | (none) |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
+| `LLM_STREAM_CHUNK_TIMEOUT_SEC` | Per-chunk timeout for LLM streaming responses | `120` |
+| `LLM_STREAM_DRAIN_TIMEOUT_SEC` | Stream drain timeout for trailing metadata after function call (must be << `LLM_STREAM_CHUNK_TIMEOUT_SEC`) | `15.0` |
 | `QDRANT_URL` | Qdrant vector store | `http://localhost:6333` |
 | `DEBUG` | Enable debug logging | `false` |
 
