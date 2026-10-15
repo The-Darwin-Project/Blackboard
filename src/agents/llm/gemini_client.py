@@ -266,7 +266,56 @@ class GeminiAdapter:
                         parts.append(p)
                 else:
                     parts.append(p)
-            converted.append(types.Content(role=role, parts=parts))
+            # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts.
+            if role == "user":
+                fr_parts = []
+                non_fr_parts = []
+                for p in parts:
+                    is_fr = False
+                    if isinstance(p, dict) and ("functionResponse" in p or "function_response" in p):
+                        is_fr = True
+                    elif hasattr(p, "function_response") and p.function_response:
+                        is_fr = True
+
+                    if is_fr:
+                        fr_parts.append(p)
+                    else:
+                        non_fr_parts.append(p)
+
+                if fr_parts and non_fr_parts:
+                    converted.append(types.Content(role="user", parts=fr_parts))
+                    converted.append(types.Content(role="user", parts=non_fr_parts))
+                elif parts:
+                    converted.append(types.Content(role="user", parts=parts))
+            elif role == "model" and converted and converted[-1].role == "model":
+                converted[-1].parts.extend(parts)
+            elif parts:
+                converted.append(types.Content(role=role, parts=parts))
+
+        # Protocol safety net: requests ending with a model turn are rejected by Gemini with 400.
+        if converted and converted[-1].role == "model":
+            logger.warning(
+                "Gemini wire adapter: trailing model turn detected in payload; synthesizing user completion."
+            )
+            unanswered = []
+            for p in converted[-1].parts:
+                if isinstance(p, dict) and "functionCall" in p:
+                    unanswered.append(p["functionCall"])
+                elif isinstance(p, dict) and "function_call" in p:
+                    unanswered.append(p["function_call"])
+                elif hasattr(p, "function_call") and p.function_call:
+                    unanswered.append({"name": p.function_call.name})
+            if unanswered:
+                frs = [
+                    types.Part.from_function_response(
+                        name=(fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)) or "tool",
+                        response={"result": "unknown -- synthetic completion"},
+                    )
+                    for fc in unanswered
+                ]
+                converted.append(types.Content(role="user", parts=frs))
+            converted.append(types.Content(role="user", parts=[types.Part.from_text(text="Proceed.")]))
+
         return converted
 
     # -----------------------------------------------------------------

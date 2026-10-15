@@ -256,6 +256,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 import httpx
 
 from src.agents.context_parts import (
+    _XML_FENCE_TAGS,
     build_function_response as _cp_build_function_response,
     build_single_function_response as _cp_build_single_fr,
     compress_contents as _cp_compress_contents,
@@ -532,6 +533,70 @@ _THINKING_PULSE_TAIL_CHARS = 300
 
 # Max chars of a turn's recorded result echoed by the trailing-FC safety net.
 _TRAILING_FC_RESULT_MAX = 2000
+
+
+def _close_unanswered_fc(
+    contents: list[dict],
+    event: EventDocument,
+    last_emitted_idx: int | None,
+    context_label: str = "safety net",
+) -> bool:
+    """Close any trailing unanswered functionCall on contents[-1] with a user:functionResponse turn.
+
+    Gemini wire protocol requires that every model turn containing functionCall(s)
+    be followed immediately by a user turn containing ONLY functionResponse parts.
+    Returns True if a synthetic functionResponse turn was appended, False otherwise.
+    """
+    if not contents or contents[-1]["role"] != "model":
+        return False
+    fc_parts_unanswered = [
+        p["functionCall"] for p in contents[-1]["parts"] if p.get("functionCall")
+    ]
+    if not fc_parts_unanswered:
+        return False
+    tail_turn = (
+        event.conversation[last_emitted_idx]
+        if last_emitted_idx is not None and 0 <= last_emitted_idx < len(event.conversation)
+        else None
+    )
+    thoughts = tail_turn.get("thoughts") if isinstance(tail_turn, dict) else getattr(tail_turn, "thoughts", None)
+    evidence = tail_turn.get("evidence") if isinstance(tail_turn, dict) else getattr(tail_turn, "evidence", None)
+    waiting_for = tail_turn.get("waitingFor") if isinstance(tail_turn, dict) else getattr(tail_turn, "waitingFor", None)
+
+    raw_recorded = (thoughts or evidence or "").strip()
+    for tag in _XML_FENCE_TAGS:
+        raw_recorded = raw_recorded.replace(tag, "")
+    recorded = raw_recorded[:_TRAILING_FC_RESULT_MAX]
+
+    logger.warning(
+        "%s fired for %s: %d unanswered functionCall(s) %s "
+        "(last turn=%s action=%s)",
+        context_label,
+        event.id,
+        len(fc_parts_unanswered),
+        [(fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)) or "tool" for fc in fc_parts_unanswered],
+        (tail_turn.get("turn") if isinstance(tail_turn, dict) else getattr(tail_turn, "turn", None)),
+        (tail_turn.get("action") if isinstance(tail_turn, dict) else getattr(tail_turn, "action", None)),
+    )
+    fr_parts = []
+    for fc in fc_parts_unanswered:
+        name = (fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)) or "tool"
+        if recorded and tail_turn is not None and name == waiting_for:
+            result = (
+                f"{recorded}\n[recorded result -- this call may already have run, "
+                "do not re-issue]"
+            )
+        else:
+            result = (
+                "unknown -- this call may already have run (its side effect may have "
+                "completed). Do NOT re-issue this exact call; check current event "
+                "state first."
+            )
+        fr_parts.append({
+            "functionResponse": {"name": name, "response": {"result": result}}
+        })
+    contents.append({"role": "user", "parts": fr_parts})
+    return True
 
 
 def _compute_processed_up_to(
@@ -3271,7 +3336,12 @@ class Brain:
                                 _last_emitted_idx is not None
                                 and _last_emitted_idx in _fc_emitted_for_turn
                             )
+                            # Close any unclosed FC from prior turns before appending new model:FC
                             if not preceding_emitted:
+                                self._close_unanswered_fc(
+                                    contents, event, _last_emitted_idx,
+                                    context_label="Intermediate FC safety net",
+                                )
                                 if contents and contents[-1]["role"] == "model":
                                     contents[-1]["parts"].extend(fc_parts)
                                 else:
@@ -3358,6 +3428,10 @@ class Brain:
                         )
 
                         if not preceding_emitted:
+                            self._close_unanswered_fc(
+                                contents, event, _last_emitted_idx,
+                                context_label="Intermediate FC safety net",
+                            )
                             # Case B: emit model:FC (inline merge-check)
                             if contents and contents[-1]["role"] == "model":
                                 contents[-1]["parts"].extend(fc_parts)
@@ -3393,8 +3467,26 @@ class Brain:
                     if refs and parts[0].get("text"):
                         parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
 
-            # -- Merge into contents (existing logic, unchanged) --
+            # Intermediate FC safety net: if history ends on an unanswered model:FC,
+            # ensure it is closed with user:FR before appending turns without FR.
+            curr_has_fr = any(p.get("functionResponse") for p in parts)
+            if not curr_has_fr:
+                self._close_unanswered_fc(
+                    contents, event, _last_emitted_idx,
+                    context_label="Intermediate FC safety net",
+                )
+
+            # -- Merge into contents --
+            can_merge = False
             if contents and contents[-1]["role"] == role:
+                if role == "model":
+                    can_merge = True
+                else:
+                    prev_has_fr = any(p.get("functionResponse") for p in contents[-1]["parts"])
+                    curr_has_fr = any(p.get("functionResponse") for p in parts)
+                    can_merge = (prev_has_fr == curr_has_fr)
+
+            if can_merge:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
                     header_separated = True
@@ -3426,45 +3518,13 @@ class Brain:
         # Reaching this means a turn stored FC response_parts without its paired result turn
         # (e.g. a V2-off handler persisting ungated parts) -- log it, and surface the turn's
         # recorded result instead of a placeholder that hides an already-completed call.
-        if contents and contents[-1]["role"] == "model":
-            fc_parts_unanswered = [
-                p["functionCall"] for p in contents[-1]["parts"] if p.get("functionCall")
-            ]
-            if fc_parts_unanswered:
-                tail_turn = (
-                    event.conversation[_last_emitted_idx] if _last_emitted_idx is not None else None
-                )
-                recorded = (
-                    (tail_turn.thoughts or tail_turn.evidence or "").strip() if tail_turn else ""
-                )[:_TRAILING_FC_RESULT_MAX]
-                logger.warning(
-                    "Trailing FC safety net fired for %s: %d unanswered functionCall(s) %s "
-                    "(last turn=%s action=%s)",
-                    event.id, len(fc_parts_unanswered),
-                    [fc.get("name", "tool") for fc in fc_parts_unanswered],
-                    getattr(tail_turn, "turn", None), getattr(tail_turn, "action", None),
-                )
-                fr_parts = []
-                for fc in fc_parts_unanswered:
-                    name = fc.get("name", "tool")
-                    if recorded and tail_turn is not None and name == tail_turn.waitingFor:
-                        result = (
-                            f"{recorded}\n[recorded result -- this call may already have run, "
-                            "do not re-issue]"
-                        )
-                    else:
-                        result = (
-                            "unknown -- this call may already have run (its side effect may have "
-                            "completed). Do NOT re-issue this exact call; check current event "
-                            "state first."
-                        )
-                    fr_parts.append({
-                        "functionResponse": {"name": name, "response": {"result": result}}
-                    })
-                contents.append({"role": "user", "parts": fr_parts})
+        self._close_unanswered_fc(
+            contents, event, _last_emitted_idx,
+            context_label="Trailing FC safety net",
+        )
 
         action_prompt = {"text": terminal_prompt}
-        if contents[-1]["role"] == "user":
+        if contents[-1]["role"] == "user" and not any(p.get("functionResponse") for p in contents[-1]["parts"]):
             contents[-1]["parts"].append(action_prompt)
         else:
             contents.append({"role": "user", "parts": [action_prompt]})
@@ -3475,6 +3535,8 @@ class Brain:
     def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
         """Delegate to context_parts.turn_to_parts."""
         return _cp_turn_to_parts(turn)
+
+    _close_unanswered_fc = staticmethod(_close_unanswered_fc)
 
     # =========================================================================
     # FC/FR Replay Helpers (thought_signature v2)

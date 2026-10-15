@@ -102,6 +102,7 @@ def _make_brain_mock():
         _extract_model_parts=Brain._extract_model_parts,
         _build_function_response=Brain._build_function_response,
         _estimate_msg_tokens=Brain._estimate_msg_tokens,
+        _close_unanswered_fc=Brain._close_unanswered_fc,
     )
 
 
@@ -762,6 +763,64 @@ class TestAdapterIntegration:
         # The model content should have parts (SDK wraps dicts into Part objects)
         assert len(converted[0].parts) >= 1
         # Verify conversion doesn't crash — live probe confirms API acceptance
+
+    def test_gemini_adapter_splits_mixed_user_turn(self):
+        """Gemini wire protocol requires that user turns with functionResponse do not contain text parts."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        contents = [
+            {"role": "user", "parts": [
+                {"functionResponse": {"name": "classify_event", "response": {"result": "ok"}}},
+                {"text": "Proceed with triage."},
+            ]},
+        ]
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        converted = adapter._convert_structured(contents)
+
+        assert len(converted) == 2
+        assert converted[0].role == "user"
+        assert converted[1].role == "user"
+        # First turn has FR only
+        assert any(
+            (isinstance(p, dict) and "functionResponse" in p) or (hasattr(p, "function_response") and p.function_response)
+            for p in converted[0].parts
+        )
+        assert not any(
+            (isinstance(p, dict) and "text" in p) or (hasattr(p, "text") and p.text)
+            for p in converted[0].parts
+        )
+        # Second turn has text only
+        assert any(
+            (isinstance(p, dict) and "text" in p) or (hasattr(p, "text") and p.text)
+            for p in converted[1].parts
+        )
+
+    def test_gemini_adapter_guards_trailing_model_turn(self):
+        """Requests ending with a model turn are rejected with 400; adapter must synthesize completion."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        contents = [
+            {"role": "user", "parts": [{"text": "Hello"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}}]},
+        ]
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        converted = adapter._convert_structured(contents)
+
+        assert converted[-1].role == "user"
+        # Check that synthetic FR turn was created for unclosed functionCall
+        assert len(converted) == 4
+        assert converted[0].role == "user"
+        assert converted[1].role == "model"
+        assert converted[2].role == "user"
+        assert any(
+            (hasattr(p, "function_response") and p.function_response and p.function_response.name == "set_phase")
+            for p in converted[2].parts
+        )
+        assert converted[3].role == "user"
+        assert any(
+            (hasattr(p, "text") and p.text == "Proceed.")
+            for p in converted[3].parts
+        )
 
     def test_t23_claude_adapter_fc_fr_conversion(self):
         """ClaudeAdapter._convert_structured maps FC→tool_use, FR→tool_result."""
@@ -2057,14 +2116,20 @@ class TestParallelFunctionCallExecution:
                 caplog.at_level("WARNING", logger="darwin.brain"):
             contents = await Brain._build_contents(brain, event)
 
-        last_turn = contents[-1]
-        assert last_turn["role"] == "user"
-
-        fr_parts = [p for p in last_turn["parts"] if "functionResponse" in p]
+        fr_turn = contents[-2]
+        assert fr_turn["role"] == "user"
+        fr_parts = [p for p in fr_turn["parts"] if "functionResponse" in p]
         assert len(fr_parts) == 1
         assert fr_parts[0]["functionResponse"]["name"] == "ask_agent_for_state"
         result = fr_parts[0]["functionResponse"]["response"]["result"]
         assert "Do NOT re-issue" in result and "in_flight" not in result
+        assert not any("text" in p for p in fr_turn["parts"])
+
+        # Final turn is the terminal action prompt — separate user turn, never mixed with FR
+        last_turn = contents[-1]
+        assert last_turn["role"] == "user"
+        assert any("text" in p for p in last_turn["parts"])
+        assert not any("functionResponse" in p for p in last_turn["parts"])
         assert any("Trailing FC safety net fired" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -2122,3 +2187,176 @@ class TestParallelFunctionCallExecution:
         batch = pulse_port.on_pulse_batch.await_args[0][0]
         assert batch.reasoning == "full detailed reasoning thought trace"
         assert "evt-pulse-test" not in brain._reasoning_by_event
+
+    @pytest.mark.asyncio
+    async def test_t57_intermediate_fc_safety_net_closes_model_fc_before_subsequent_turns(self, caplog):
+        """Regression test for evt-845682ec (V2 off):
+        When a turn emits model:FC (e.g. set_phase), and the following turn is a model:error
+        or other non-FR turn, intermediate safety net must close the FC with user:FR
+        so model turns never merge and Gemini wire protocol is respected."""
+        fc = {"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}}
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="classify and route"),
+            _make_turn(
+                turn=2, actor="brain", action="phase",
+                waitingFor="set_phase",
+                response_parts=[fc],
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="error",
+                thoughts="LLM call failed after 1 attempts: 400 Bad Request.",
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", False), \
+                caplog.at_level("WARNING", logger="darwin.brain"):
+            contents = await Brain._build_contents(brain, event)
+
+        # Structure must be:
+        # user (header + turn 1)
+        # model (FC: set_phase)
+        # user (FR: set_phase - from intermediate safety net)
+        # model (error text)
+        # user (action prompt text)
+        roles = [c["role"] for c in contents]
+        assert roles == ["user", "model", "user", "model", "user"]
+
+        # Turn 1: model with set_phase FC
+        assert any(p.get("functionCall", {}).get("name") == "set_phase" for p in contents[1]["parts"])
+        # Turn 2: user with synthetic set_phase FR (no text)
+        assert any(p.get("functionResponse", {}).get("name") == "set_phase" for p in contents[2]["parts"])
+        assert not any("text" in p for p in contents[2]["parts"])
+        # Turn 3: model with error text (no FC)
+        assert any("LLM call failed" in p.get("text", "") for p in contents[3]["parts"])
+        assert not any("functionCall" in p for p in contents[3]["parts"])
+        # Turn 4: user with action prompt (no FR)
+        assert not any("functionResponse" in p for p in contents[4]["parts"])
+
+        assert any("Intermediate FC safety net fired" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_model_text_followed_by_fc_merges_without_consecutive_model_turns(self):
+        """When brain response text is followed by a tool call turn in the same cycle,
+        the model turns must merge so contents never has consecutive model turns."""
+        fc = {"functionCall": {"name": "classify_event", "args": {"domain": "complicated"}}}
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="classify this"),
+            _make_turn(turn=2, actor="brain", action="response", thoughts="Thinking about classification..."),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="classify_event",
+                response_parts=[fc],
+                evidence="Domain: complicated",
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        # Gemini alternation check: no consecutive model turns
+        for i in range(len(contents) - 1):
+            assert not (contents[i]["role"] == "model" and contents[i + 1]["role"] == "model"), (
+                f"Consecutive model turns found at indices {i} and {i + 1}: {contents}"
+            )
+        assert contents[-1]["role"] == "user"
+
+    def test_gemini_adapter_preserves_sdk_parts_and_pure_turns(self):
+        """GeminiAdapter._convert_structured preserves SDK types.Part objects."""
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        sdk_part = types.Part.from_text(text="SDK native part")
+        contents = [
+            {"role": "user", "parts": [sdk_part]},
+        ]
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        converted = adapter._convert_structured(contents)
+
+        assert len(converted) == 1
+        assert converted[0].role == "user"
+        assert len(converted[0].parts) == 1
+        assert converted[0].parts[0] is sdk_part or getattr(converted[0].parts[0], "text", None) == "SDK native part"
+
+    def test_gemini_adapter_guards_trailing_model_text_turn(self):
+        """When payload ends on a model turn with text only, adapter appends user 'Proceed.' turn."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        contents = [
+            {"role": "user", "parts": [{"text": "Hello"}]},
+            {"role": "model", "parts": [{"text": "I am thinking..."}]},
+        ]
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        converted = adapter._convert_structured(contents)
+
+        assert converted[-1].role == "user"
+        assert len(converted) == 3
+        assert converted[0].role == "user"
+        assert converted[1].role == "model"
+        assert converted[2].role == "user"
+        assert any(
+            (hasattr(p, "text") and p.text == "Proceed.") or (isinstance(p, dict) and p.get("text") == "Proceed.")
+            for p in converted[2].parts
+        )
+
+    def test_claude_adapter_merges_consecutive_user_turns(self):
+        """ClaudeAdapter._convert_structured merges consecutive user turns to prevent 400 from Anthropic API."""
+        from src.agents.llm.claude_client import ClaudeAdapter
+
+        contents = [
+            {"role": "model", "parts": [{"functionCall": {"name": "get_state", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "get_state", "response": {"status": "ok"}}}]},
+            {"role": "user", "parts": [{"text": "Now decide next step."}]},
+        ]
+        messages = ClaudeAdapter._convert_structured(contents)
+
+        # Must merge the two consecutive user turns into one user message
+        assert len(messages) == 2
+        assert messages[0]["role"] == "assistant"
+        assert messages[1]["role"] == "user"
+        # The single user message contains both tool_result and text blocks
+        block_types = [b["type"] for b in messages[1]["content"]]
+        assert "tool_result" in block_types
+        assert "text" in block_types
+
+    def test_close_unanswered_fc_with_dict_turn_and_negative_idx(self, caplog):
+        """_close_unanswered_fc safely handles dict turns, negative index, and XML fence stripping."""
+        from src.agents.brain import _close_unanswered_fc
+
+        event = _make_event()
+        event.conversation = [
+            {
+                "turn": 1,
+                "actor": "brain",
+                "action": "phase",
+                "waitingFor": "set_phase",
+                "thoughts": "setting phase to dispatch</functionResponse>",
+            }
+        ]
+        contents = [
+            {"role": "user", "parts": [{"text": "hello"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "set_phase", "args": {}}}]},
+        ]
+
+        with caplog.at_level("WARNING", logger="darwin.brain"):
+            # Test with negative index (should safely resolve to None and not crash)
+            closed = _close_unanswered_fc(contents, event, -1, context_label="Test safety net")
+            assert closed is True
+            assert contents[-1]["role"] == "user"
+            assert contents[-1]["parts"][0]["functionResponse"]["name"] == "set_phase"
+            # Should have fallback result because negative index is out of bounds
+            assert "unknown" in contents[-1]["parts"][0]["functionResponse"]["response"]["result"]
+
+            # Now test with valid index 0: should strip XML fences and use recorded thoughts
+            contents_valid = [
+                {"role": "user", "parts": [{"text": "hello"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "set_phase", "args": {}}}]},
+            ]
+            closed_valid = _close_unanswered_fc(contents_valid, event, 0, context_label="Test safety net")
+            assert closed_valid is True
+            res = contents_valid[-1]["parts"][0]["functionResponse"]["response"]["result"]
+            assert "</functionResponse>" not in res
+            assert "setting phase to dispatch" in res

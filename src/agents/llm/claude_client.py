@@ -222,7 +222,10 @@ class ClaudeAdapter:
                 elif isinstance(p, str):
                     blocks.append({"type": "text", "text": p})
             if blocks:
-                messages.append({"role": role, "content": blocks})
+                if messages and messages[-1]["role"] == role:
+                    messages[-1]["content"].extend(blocks)
+                else:
+                    messages.append({"role": role, "content": blocks})
         return messages
 
     # -----------------------------------------------------------------
