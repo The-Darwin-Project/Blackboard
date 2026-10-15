@@ -1185,7 +1185,7 @@ class Brain:
         if event_id in self._waiting_for_agent:
             _, wait_turn = self._waiting_for_agent[event_id]
             has_response = any(
-                t.status.value == "delivered" and t.actor != "brain"
+                t.status.value == "delivered" and t.actor not in ("brain", "dispatcher")
                 for t in event.conversation[wait_turn:]
             )
             if has_response:
@@ -1457,7 +1457,7 @@ class Brain:
             if task_running:
                 routing_turn = self._routing_turn_for_event.get(event_id, 0)
                 has_agent_result = any(
-                    t.actor != "brain" and t.action not in ("message", "plan_step")
+                    t.actor not in ("brain", "dispatcher") and t.action not in ("message", "plan_step")
                     and t.turn > routing_turn
                     for t in event.conversation
                 )
@@ -1788,6 +1788,8 @@ class Brain:
                             thinking_level=thinking_level,
                         )
                         it = stream.__aiter__()
+                        last_thinking_pulse_time = time.time()
+                        last_thinking_pulse_len = 0
                         while True:
                             try:
                                 chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
@@ -1801,6 +1803,18 @@ class Brain:
                                         window = reflex_chunker.feed(chunk.text)
                                         if window and reflex_searcher:
                                             reflex_searcher.fire(window)
+                                    now = time.time()
+                                    if (
+                                        now - last_thinking_pulse_time >= 15.0
+                                        or (len(accumulated_thoughts) - last_thinking_pulse_len) >= 1200
+                                    ):
+                                        last_thinking_pulse_time = now
+                                        last_thinking_pulse_len = len(accumulated_thoughts)
+                                        await self._emit_executive_pulse(
+                                            event_id,
+                                            [("thinking:friday", "thinking", 1.0)],
+                                            reasoning_override=accumulated_thoughts[-300:],
+                                        )
                                 else:
                                     accumulated_text += chunk.text
                                     if len(accumulated_text) > 2000:
@@ -1937,7 +1951,7 @@ class Brain:
                         action="response",
                         thoughts=accumulated_text,
                         evidence=grounding_evidence if grounding_evidence else None,
-                        response_parts=captured_parts,
+                        response_parts=None,
                     )
                     await self._append_and_broadcast(event_id, response_turn)
                     await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
@@ -2008,6 +2022,12 @@ class Brain:
                     logger.warning(f"Memory reflex gate error for {event_id}: {e}")
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
+            if accumulated_thoughts:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [("thinking:friday", "thinking", 1.0)],
+                    reasoning_override=accumulated_thoughts[-300:],
+                )
 
             for i, fc_part in enumerate(batch_fcs):
                 fc_name = fc_part["functionCall"]["name"]
@@ -2100,7 +2120,7 @@ class Brain:
                         action="response",
                         thoughts=accumulated_text,
                         evidence=grounding_evidence if grounding_evidence else None,
-                        response_parts=captured_parts,
+                        response_parts=None,
                     )
                     await self._append_and_broadcast(event_id, response_turn)
                     await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
@@ -2194,6 +2214,12 @@ class Brain:
                     logger.warning(f"Memory reflex gate error for {event_id}: {e}")
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
+            if accumulated_thoughts:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [("thinking:friday", "thinking", 1.0)],
+                    reasoning_override=accumulated_thoughts[-300:],
+                )
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
                 response_parts=captured_parts,
@@ -2208,8 +2234,14 @@ class Brain:
                 thoughts=accumulated_thoughts,
             )
             await self._append_and_broadcast(event_id, thoughts_turn)
+            await self._emit_executive_pulse(
+                event_id,
+                [("thinking:friday", "thinking", 1.0)],
+                reasoning_override=accumulated_thoughts[-300:],
+            )
 
         if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
+            self._reasoning_by_event[event_id] = accumulated_thoughts or None
             is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -3186,7 +3218,12 @@ class Brain:
             if (
                 _THOUGHT_SIG_V2
                 and turn.actor == "brain"
-                and (turn.action == "tool_result" or turn.batch_size or turn.batch_index)
+                and (
+                    turn.action in ("tool_result", "route", "phase", "respond_jarvis", "notify")
+                    or turn.batch_size
+                    or turn.batch_index
+                    or (turn.action not in ("response", "thoughts", "intermediate") and turn.waitingFor)
+                )
                 and turn.response_parts
                 and any(p.get("functionCall") for p in turn.response_parts)
             ):
@@ -3360,11 +3397,11 @@ class Brain:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
                     header_separated = True
-                if turn.actor != "brain":
+                if turn.actor not in ("brain", "dispatcher"):
                     last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
                 contents[-1]["parts"].extend(parts)
             else:
-                if turn.actor != "brain":
+                if turn.actor not in ("brain", "dispatcher"):
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
 
@@ -3382,6 +3419,24 @@ class Brain:
         if last_non_brain_pos:
             ci, pi = last_non_brain_pos
             contents[ci]["parts"].insert(pi, {"text": "\n--- RESPOND TO THIS ---\n"})
+
+        # Trailing FC safety net: if history ends on a model turn with unanswered functionCall,
+        # Gemini protocol requires an immediate user:functionResponse before any plain text.
+        if contents and contents[-1]["role"] == "model":
+            fc_parts_unanswered = [
+                p["functionCall"] for p in contents[-1]["parts"] if p.get("functionCall")
+            ]
+            if fc_parts_unanswered:
+                fr_parts = [
+                    {
+                        "functionResponse": {
+                            "name": fc.get("name", "tool"),
+                            "response": {"result": "in_flight -- tool execution in progress"},
+                        }
+                    }
+                    for fc in fc_parts_unanswered
+                ]
+                contents.append({"role": "user", "parts": fr_parts})
 
         action_prompt = {"text": terminal_prompt}
         if contents[-1]["role"] == "user":
@@ -3434,13 +3489,18 @@ class Brain:
     # =========================================================================
 
     async def _emit_executive_pulse(
-        self, event_id: str, pulses_data: list[tuple[str, str]] | list[tuple[str, str, float]],
+        self,
+        event_id: str,
+        pulses_data: list[tuple[str, str]] | list[tuple[str, str, float]],
+        reasoning_override: str | None = None,
     ) -> None:
-        """Emit executive hemisphere pulses (tool/phase/agent). Non-fatal.
+        """Emit executive hemisphere pulses (tool/phase/agent/thinking). Non-fatal.
 
         pulses_data items can be (neuron_id, neuron_type) -- defaults score to 1.0,
         or (neuron_id, neuron_type, score) for explicit outcome scoring:
           1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
+        If reasoning_override is provided, it is used without popping
+        self._reasoning_by_event[event_id].
         """
         if not self.pulse_port:
             return
@@ -3455,7 +3515,10 @@ class Brain:
                     score = 1.0
                 pulses.append(Pulse(nid, ntype, score, injected=score >= 0.5))
             ev = await self.blackboard.get_event(event_id)
-            reasoning = self._reasoning_by_event.pop(event_id, None)
+            if reasoning_override is not None:
+                reasoning = reasoning_override
+            else:
+                reasoning = self._reasoning_by_event.pop(event_id, None)
             batch = PulseBatch(
                 event_id=event_id,
                 pulses=pulses,
@@ -5682,7 +5745,7 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                    has_new_input = any(t.actor != "brain" for t in unseen)
+                    has_new_input = any(t.actor not in ("brain", "dispatcher") for t in unseen)
                     if has_new_input:
                         has_huddle = any(t.action == "huddle" for t in unseen)
                         if has_huddle:
@@ -5788,11 +5851,11 @@ class Brain:
                 # scan iteration still needs participant-input gating.
                 _, wait_turn = self._waiting_for_agent[eid]
                 # Edge-triggered: fresh sent turns from this scan cycle
-                has_participant_input = any(t.actor != "brain" for t in unseen)
+                has_participant_input = any(t.actor not in ("brain", "dispatcher") for t in unseen)
                 # Level-triggered: delivered non-brain turns AFTER wait was set
                 if not has_participant_input:
                     has_participant_input = any(
-                        t.status.value == "delivered" and t.actor != "brain"
+                        t.status.value == "delivered" and t.actor not in ("brain", "dispatcher")
                         for t in event.conversation[wait_turn:]
                     )
                 if not has_participant_input:

@@ -149,6 +149,11 @@ from friction — not so you can describe which one you matched.
   means the delegation strategy is wrong, not the agent. 3+ dispatches without
   progress between them. Sequential Dev→QE is expected, not churn.
   Disconnect→retry is healthy.
+- **Thinking Dwell**: active internal reasoning without action means FRIDAY is
+  deliberating without committing. 3+ thinking pulses or >90s of continuous
+  thinking without a tool call or phase transition. Intervene via send_event_message
+  to steer FRIDAY toward a decisive action or hypothesis testing ("FRIDAY, you've
+  been deliberating on X for several minutes. What is the immediate next probe?").
 - **Premature Closure**: closing without verification breaks the feedback loop —
   the system declares success without evidence. Event closed without verifying the
   fix, or closed while the underlying condition is still active. Exception: never
@@ -715,7 +720,7 @@ List each event you tracked: event_id, phase progression, elapsed time,
 and whether it resolved or is still active.
 
 ### Friction Patterns Detected
-For each friction pattern you detected (spiral, plateau, agent churn):
+For each friction pattern you detected (spiral, plateau, agent churn, thinking dwell):
 - Event ID
 - Pattern type and evidence (e.g., "tool:set_phase fired 7 times in 4 minutes")
 - Whether the friction resolved on its own or required intervention

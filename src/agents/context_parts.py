@@ -276,7 +276,11 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
                     break
         return parts
 
-    if turn.actor == "brain" and turn.response_parts:
+    if (
+        turn.actor == "brain"
+        and turn.response_parts
+        and any(p.get("functionCall") for p in turn.response_parts)
+    ):
         # Apply the same sibling-sig defense as extract_model_parts() so a
         # functionCall part missing thought_signature (e.g. one half of a
         # dual-stored FC that lost its sig in an earlier normalization
@@ -284,6 +288,20 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
         # is also what a later FC-dedup pass may leave standing as the
         # final record for this turn.
         return _apply_sibling_signature(list(turn.response_parts))
+
+    if turn.actor == "brain" and turn.action == "response":
+        text = turn.thoughts or ""
+        if not text and turn.response_parts:
+            text = "".join(p.get("text", "") for p in turn.response_parts if "text" in p)
+        if turn.evidence:
+            text = f"{text}\n{turn.evidence}" if text else turn.evidence
+        parts: list[dict] = [{"text": text}]
+        if turn.response_parts:
+            for rp in turn.response_parts:
+                if rp.get("thought_signature"):
+                    parts[0]["thought_signature"] = rp["thought_signature"]
+                    break
+        return parts
 
     text = ""
     if turn.actor == "brain":

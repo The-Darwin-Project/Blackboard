@@ -1058,12 +1058,16 @@ class LiveAPIAdapter:
         tool_trail: list[str] = []
         phases: list[str] = []
         defer_timestamps: list[float] = []
+        thinking_pulses = 0
         non_defer_between_defers = 0
         for b in batches:
             for p in b.get("pulses", []):
                 nid = p.get("neuron_id", "")
+                ntype = p.get("neuron_type")
                 neuron_counts[nid] = neuron_counts.get(nid, 0) + 1
-                if p.get("neuron_type") == "tool":
+                if ntype == "thinking":
+                    thinking_pulses += 1
+                elif ntype == "tool":
                     tool_trail.append(nid.removeprefix("tool:"))
                     if nid == "tool:defer_event":
                         ts = b.get("timestamp")
@@ -1071,7 +1075,7 @@ class LiveAPIAdapter:
                             defer_timestamps.append(ts)
                     elif defer_timestamps:
                         non_defer_between_defers += 1
-                if p.get("neuron_type") == "phase":
+                elif ntype == "phase":
                     phases.append(nid.removeprefix("phase:"))
         top_neurons = sorted(neuron_counts.items(), key=lambda x: -x[1])[:5]
 
@@ -1080,6 +1084,7 @@ class LiveAPIAdapter:
             f"Pulse history for {event_id} (last {last_n_minutes} minutes):",
             f"Total pulse batches: {len(batches)}",
             f"Total neuron activations: {total_neurons}",
+            f"Thinking pulses: {thinking_pulses}",
             f"Unique neurons: {len(neuron_counts)}",
             f"Phases during window: {' -> '.join(phases) if phases else 'no phase changes'}",
         ]
