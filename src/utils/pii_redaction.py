@@ -4,7 +4,9 @@
 #    src/agents/ and src/adapters/ without creating a cross-layer dependency in either direction.
 # 2. [Constraint]: NOT exhaustive. Covers emails, IPv4 addresses, JWTs, and named-prefix secrets
 #    (Bearer tokens, AWS/GitHub/Slack/Google API-key formats, generic key=value/key: value pairs
-#    for api_key/secret/password/token fields, matched via negative lookbehind so
+#    for api_key/secret/password/token fields with optional whitespace around the ':'/'=',
+#    URL basic-auth credentials, and PEM private key blocks (an unclosed BEGIN header
+#    redacts to end of string), matched via negative lookbehind so
 #    SCREAMING_SNAKE_CASE names like DB_PASSWORD= are caught, not just space/start-prefixed
 #    ones) -- categories with distinctive patterns and low false-positive rates. Value charset
 #    intentionally excludes whitespace (unbounded on the right with no terminator otherwise) but
@@ -47,9 +49,21 @@ _BEARER_TOKEN_RE = re.compile(r"\bBearer\s+[A-Za-z0-9\-._~+/!@#$%^&*]{8,}=*", re
 # but common password punctuation included) per codereview finding on charset coverage.
 _KEYED_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9])(api[_-]?key|access[_-]?key|secret|password|passwd|token|authorization)"
-    r"([:=])\s*(['\"]?)[A-Za-z0-9\-._~+/!@#$%^&*]{8,}=*\3",
+    r"\s*([:=])\s*(['\"]?)[A-Za-z0-9\-._~+/!@#$%^&*]{8,}=*\3",
     re.IGNORECASE,
 )
+# URL basic-auth credentials (scheme://user:password@host). The whole userinfo is dropped
+# (the user part can itself be a token, e.g. https://ghp_xxx:x-oauth-basic@github.com).
+# The password run is greedy up to the last '@' before a '/' or whitespace so passwords
+# containing '@' do not leak a suffix.
+_URL_CREDENTIALS_RE = re.compile(r"://[^/\s:@]+:[^/\s]+@")
+# PEM private key blocks. Closed blocks first; then an unclosed BEGIN header (text sliced
+# before the END marker, e.g. a tail-truncated thought) redacts through end of string, since
+# the base64 body that follows is the secret.
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
+_PEM_UNCLOSED_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*")
 
 
 def redact_pii(text: str) -> str:
@@ -59,6 +73,11 @@ def redact_pii(text: str) -> str:
     """
     if not text:
         return text
+    # PEM and URL credentials run before the email pattern, which would otherwise consume
+    # the "password@host" part of a credentialed URL and obscure the match.
+    text = _PEM_PRIVATE_KEY_RE.sub("[REDACTED_PRIVATE_KEY]", text)
+    text = _PEM_UNCLOSED_RE.sub("[REDACTED_PRIVATE_KEY]", text)
+    text = _URL_CREDENTIALS_RE.sub("://[REDACTED]@", text)
     text = _EMAIL_RE.sub("[redacted-email]", text)
     text = _JWT_RE.sub("[redacted-jwt]", text)
     text = _AWS_ACCESS_KEY_RE.sub("[redacted-aws-key]", text)

@@ -961,3 +961,48 @@ class TestV2OffNotifyReplayAndTrailingFCNet:
             for m in contents for p in m["parts"] if "functionResponse" in p
         )
         assert "Do NOT re-issue" in result and "Slack DM sent" not in result
+
+
+class TestTrailingFCRecordedResultBounds:
+    """Recorded-result text on the trailing-FC net: evidence fallback and length cap."""
+
+    @staticmethod
+    def _conversation_with(**turn_kwargs) -> list:
+        conversation = [
+            _bc_turn(turn=1, actor="user", action="message", thoughts="tell Tal"),
+            _bc_turn(
+                turn=2, actor="brain", action="notify", waitingFor="notify_user_slack",
+                response_parts=[_NOTIFY_FC], **turn_kwargs,
+            ),
+        ]
+        return conversation
+
+    async def _fr_result(self, conversation) -> str:
+        event = _bc_event(conversation=conversation)
+        with _patch("src.agents.brain._THOUGHT_SIG_V2", False):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+        return next(
+            p["functionResponse"]["response"]["result"]
+            for m in contents for p in m["parts"] if "functionResponse" in p
+        )
+
+    @pytest.mark.asyncio
+    async def test_evidence_used_when_thoughts_empty(self):
+        result = await self._fr_result(self._conversation_with(thoughts=None, evidence="route: sysadmin"))
+        assert result.startswith("route: sysadmin\n")
+        assert "do not re-issue" in result
+
+    @pytest.mark.asyncio
+    async def test_thoughts_preferred_over_evidence(self):
+        result = await self._fr_result(
+            self._conversation_with(thoughts="from thoughts", evidence="from evidence")
+        )
+        assert "from thoughts" in result and "from evidence" not in result
+
+    @pytest.mark.asyncio
+    async def test_recorded_result_truncated_to_cap(self):
+        cap = brain_mod._TRAILING_FC_RESULT_MAX
+        assert cap == 2000
+        result = await self._fr_result(self._conversation_with(thoughts="x" * (cap + 500)))
+        recorded = result.split("\n[recorded result", 1)[0]
+        assert recorded == "x" * cap

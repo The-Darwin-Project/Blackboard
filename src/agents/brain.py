@@ -3434,7 +3434,9 @@ class Brain:
                 tail_turn = (
                     event.conversation[_last_emitted_idx] if _last_emitted_idx is not None else None
                 )
-                recorded = ((tail_turn.thoughts or "").strip() if tail_turn else "")[:_TRAILING_FC_RESULT_MAX]
+                recorded = (
+                    (tail_turn.thoughts or tail_turn.evidence or "").strip() if tail_turn else ""
+                )[:_TRAILING_FC_RESULT_MAX]
                 logger.warning(
                     "Trailing FC safety net fired for %s: %d unanswered functionCall(s) %s "
                     "(last turn=%s action=%s)",
