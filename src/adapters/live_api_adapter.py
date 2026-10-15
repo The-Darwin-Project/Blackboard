@@ -480,17 +480,11 @@ class LiveAPIAdapter:
         # JARVIS generate a reply (-> send_event_message -> new FRIDAY turn -> more pulses).
         # Forward at most one per event per _THINKING_FORWARD_MIN_INTERVAL_S so thinking
         # dwell stays observable without driving a duplicate-reply loop.
-        if batch.pulses and all(p.neuron_type == "thinking" for p in batch.pulses):
+        is_thinking_only = bool(batch.pulses) and all(p.neuron_type == "thinking" for p in batch.pulses)
+        if is_thinking_only:
             last_fwd = self._last_thinking_forward.get(batch.event_id, 0.0)
             if time.time() - last_fwd < _THINKING_FORWARD_MIN_INTERVAL_S:
                 return
-            now = time.time()
-            if len(self._last_thinking_forward) > 256:
-                self._last_thinking_forward = {
-                    k: t for k, t in self._last_thinking_forward.items()
-                    if now - t < _THINKING_FORWARD_MIN_INTERVAL_S
-                }
-            self._last_thinking_forward[batch.event_id] = now
 
         if self._generating_report:
             return
@@ -511,6 +505,14 @@ class LiveAPIAdapter:
             )
             await self._session.send(input=text, end_of_turn=True)
             logger.debug("Cortex send_pulse: send() returned successfully")
+            if is_thinking_only:
+                now = time.time()
+                if len(self._last_thinking_forward) > 256:
+                    self._last_thinking_forward = {
+                        k: t for k, t in self._last_thinking_forward.items()
+                        if now - t < _THINKING_FORWARD_MIN_INTERVAL_S
+                    }
+                self._last_thinking_forward[batch.event_id] = now
         except Exception as e:
             logger.debug("Cortex send_pulse failed (non-fatal): %s", e, exc_info=True)
             self._session = None

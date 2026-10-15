@@ -130,6 +130,13 @@ class TestObserverThinkingThrottle:
         await a.send_pulse(_thinking_batch(reasoning=f"password={SECRET}"))
         assert SECRET not in a._session.send.await_args.kwargs["input"]
 
+    @pytest.mark.asyncio
+    async def test_throttle_timestamp_not_recorded_if_send_fails(self):
+        a = _observer_adapter()
+        a._session.send = AsyncMock(side_effect=RuntimeError("connection dropped"))
+        await a.send_pulse(_thinking_batch("evt-fail"))
+        assert "evt-fail" not in a._last_thinking_forward
+
 
 # ---------------------------------------------------------------------------
 # _tool_get_pulse_history: thinking tally

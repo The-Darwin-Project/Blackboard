@@ -199,6 +199,31 @@ class TestRedactUrlCredentials:
         text = "connect to http://host:8080/a and mail later"
         assert redact_pii(text) == text
 
+    def test_password_containing_slash_fully_redacted(self):
+        result = redact_pii("https://user:pa/ss@host.example.com/path")
+        assert "pa/ss" not in result
+        assert result == "https://[REDACTED]@host.example.com/path"
+
+    def test_username_containing_at_sign_fully_redacted(self):
+        result = redact_pii("https://alice@corp.com:S3cretPw@git.example.com/repo")
+        assert "S3cretPw" not in result
+        assert "alice@corp.com" not in result
+        assert result == "https://[REDACTED]@git.example.com/repo"
+
+    def test_url_path_containing_at_sign_not_falsely_redacted(self):
+        for url in (
+            "https://example.com/foo/bar@baz",
+            "https://example.com/foo@bar",
+            "https://localhost:8080/@scope/pkg",
+            "https://example.com:8080/foo@baz",
+        ):
+            assert redact_pii(url) == url
+
+    def test_token_only_url_credentials_redacted(self):
+        result = redact_pii("https://glpat-abcdef12345678@gitlab.com/api/v4")
+        assert "glpat-abcdef12345678" not in result
+        assert result == "https://[REDACTED]@gitlab.com/api/v4"
+
 
 class TestRedactPemPrivateKeys:
     BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\nabcdEFGHijklMNOPqrstUVWX0123456789+/=="

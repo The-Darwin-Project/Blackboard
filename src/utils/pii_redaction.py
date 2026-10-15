@@ -54,9 +54,12 @@ _KEYED_SECRET_RE = re.compile(
 )
 # URL basic-auth credentials (scheme://user:password@host). The whole userinfo is dropped
 # (the user part can itself be a token, e.g. https://ghp_xxx:x-oauth-basic@github.com).
-# The password run is greedy up to the last '@' before a '/' or whitespace so passwords
-# containing '@' do not leak a suffix.
-_URL_CREDENTIALS_RE = re.compile(r"://[^/\s:@]+:[^/\s]+@")
+# Anchors on the last '@' before the host authority boundary, supporting usernames
+# containing '@' (e.g. email identities) and passwords containing unencoded '/' or '@',
+# while avoiding URL paths containing '@' (e.g. npm scopes or branch names).
+_URL_CREDENTIALS_RE = re.compile(
+    r"://(?:[^/\s?#]+|[^/:\s?#]+:(?![0-9]+(?:/|$))[^\s?#]+)@(?=[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:[^a-zA-Z0-9_.:-]|$))"
+)
 # PEM private key blocks. Closed blocks first; then an unclosed BEGIN header (text sliced
 # before the END marker, e.g. a tail-truncated thought) redacts through end of string, since
 # the base64 body that follows is the secret.
