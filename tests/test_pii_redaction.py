@@ -144,3 +144,117 @@ class TestRedactCombined:
         that don't contain '@' (e.g. LiveAPIAdapter's "No handoff notes found.")."""
         sentinel = "No handoff notes found."
         assert redact_pii(sentinel) == sentinel
+
+
+class TestKeyedSecretWhitespaceSeparator:
+    """Whitespace before/after ':' or '=' must not bypass the keyed-secret pattern."""
+
+    def test_spaces_around_equals(self):
+        result = redact_pii("password = secretvalue123")
+        assert "secretvalue123" not in result
+        assert "password=[redacted-secret]" in result
+
+    def test_spaces_around_colon(self):
+        result = redact_pii("api_key : secretvalue123")
+        assert "secretvalue123" not in result
+        assert "api_key:[redacted-secret]" in result
+
+    def test_space_only_before_separator(self):
+        assert "secretvalue123" not in redact_pii("token =secretvalue123")
+
+    def test_tab_before_separator(self):
+        assert "secretvalue123" not in redact_pii("secret\t= secretvalue123")
+
+    def test_quoted_value_with_spaces_around_equals(self):
+        assert "sk_live_abcdefghijklmnop" not in redact_pii('api_key = "sk_live_abcdefghijklmnop"')
+
+    def test_no_separator_unchanged(self):
+        text = "the password is rotated weekly"
+        assert redact_pii(text) == text
+
+
+class TestRedactUrlCredentials:
+    def test_basic_auth_password_redacted_host_preserved(self):
+        result = redact_pii("clone https://deploy:hunter2pass@git.example.com/org/repo.git")
+        assert "hunter2pass" not in result
+        assert "deploy" not in result
+        assert result == "clone https://[REDACTED]@git.example.com/org/repo.git"
+
+    def test_scheme_variants(self):
+        for scheme in ("postgres", "redis", "amqp"):
+            result = redact_pii(f"{scheme}://user:p4ssw0rd@db.internal:5432/x")
+            assert "p4ssw0rd" not in result
+            assert f"{scheme}://[REDACTED]@db.internal:5432/x" in result
+
+    def test_password_containing_at_sign_fully_redacted(self):
+        result = redact_pii("https://user:p@ss@host.example.com/path")
+        assert "p@ss" not in result and "ss@host" not in result
+        assert "https://[REDACTED]@host.example.com/path" in result
+
+    def test_url_without_credentials_unchanged(self):
+        text = "see https://example.com:8443/path?x=1 for details"
+        assert redact_pii(text) == text
+
+    def test_port_is_not_mistaken_for_credentials(self):
+        text = "connect to http://host:8080/a and mail later"
+        assert redact_pii(text) == text
+
+    def test_password_containing_slash_fully_redacted(self):
+        result = redact_pii("https://user:pa/ss@host.example.com/path")
+        assert "pa/ss" not in result
+        assert result == "https://[REDACTED]@host.example.com/path"
+
+    def test_username_containing_at_sign_fully_redacted(self):
+        result = redact_pii("https://alice@corp.com:S3cretPw@git.example.com/repo")
+        assert "S3cretPw" not in result
+        assert "alice@corp.com" not in result
+        assert result == "https://[REDACTED]@git.example.com/repo"
+
+    def test_url_path_containing_at_sign_not_falsely_redacted(self):
+        for url in (
+            "https://example.com/foo/bar@baz",
+            "https://example.com/foo@bar",
+            "https://localhost:8080/@scope/pkg",
+            "https://example.com:8080/foo@baz",
+        ):
+            assert redact_pii(url) == url
+
+    def test_token_only_url_credentials_redacted(self):
+        result = redact_pii("https://glpat-abcdef12345678@gitlab.com/api/v4")
+        assert "glpat-abcdef12345678" not in result
+        assert result == "https://[REDACTED]@gitlab.com/api/v4"
+
+
+class TestRedactPemPrivateKeys:
+    BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\nabcdEFGHijklMNOPqrstUVWX0123456789+/=="
+
+    def test_full_block_redacted(self):
+        text = f"key:\n-----BEGIN PRIVATE KEY-----\n{self.BODY}\n-----END PRIVATE KEY-----\nafter"
+        result = redact_pii(text)
+        assert "MIIEvQIBADANBg" not in result and "abcdEFGH" not in result
+        assert result == "key:\n[REDACTED_PRIVATE_KEY]\nafter"
+
+    def test_typed_headers(self):
+        for kind in ("RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY"):
+            text = f"-----BEGIN {kind}-----\n{self.BODY}\n-----END {kind}-----"
+            assert redact_pii(text) == "[REDACTED_PRIVATE_KEY]"
+
+    def test_unclosed_block_redacted_to_end_of_string(self):
+        text = f"leading note\n-----BEGIN RSA PRIVATE KEY-----\n{self.BODY}"
+        result = redact_pii(text)
+        assert "MIIEvQIBADANBg" not in result and "abcdEFGH" not in result
+        assert result == "leading note\n[REDACTED_PRIVATE_KEY]"
+
+    def test_header_only_redacted(self):
+        result = redact_pii("-----BEGIN PRIVATE KEY-----")
+        assert "BEGIN" not in result
+        assert "[REDACTED_PRIVATE_KEY]" in result
+
+    def test_public_key_block_not_redacted(self):
+        text = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0C\n-----END PUBLIC KEY-----"
+        assert redact_pii(text) == text
+
+    def test_multiple_blocks(self):
+        block = f"-----BEGIN PRIVATE KEY-----\n{self.BODY}\n-----END PRIVATE KEY-----"
+        result = redact_pii(f"{block}\nmid\n{block}")
+        assert result == "[REDACTED_PRIVATE_KEY]\nmid\n[REDACTED_PRIVATE_KEY]"

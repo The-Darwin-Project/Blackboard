@@ -226,6 +226,8 @@ export function classifyCortexMessage(msg: CortexThinkingMessage): MessageClass 
 
 const SPIRAL_THRESHOLD = 5;
 const PLATEAU_SECONDS = 1800;
+// Thinking pulses stream ~every 15s; 6 consecutive with no tool/phase pulse ~= 90s of dwell.
+const THINKING_DWELL_PULSES = 6;
 
 export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): FrictionIndicator[] {
   return useMemo(() => {
@@ -278,6 +280,20 @@ export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): F
       if (shared.length > 0) {
         indicators.push({ pattern: 'agent_churn', label: 'Agent Churn', color: 'amber' });
       }
+    }
+
+    // Thinking Dwell: consecutive thinking pulses with no tool/phase pulse since
+    const chronological = [...eventBatches].sort((a, b) => a.timestamp - b.timestamp);
+    let thinkingStreak = 0;
+    for (const b of chronological) {
+      if (b.pulses.some(p => p.neuron_type === 'tool' || p.neuron_type === 'phase')) {
+        thinkingStreak = 0;
+      } else if (b.pulses.some(p => p.neuron_type === 'thinking')) {
+        thinkingStreak += 1;
+      }
+    }
+    if (thinkingStreak >= THINKING_DWELL_PULSES) {
+      indicators.push({ pattern: 'thinking_dwell', label: 'Thinking Dwell', color: 'amber' });
     }
 
     return indicators;

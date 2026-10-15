@@ -67,6 +67,14 @@ export function getExecutiveNeurons(): Neuron[] {
     });
   }
 
+  // Real-time thinking neuron for FRIDAY cognitive streaming
+  neurons.push({
+    id: 'thinking:friday',
+    type: 'thinking',
+    heat: 0,
+    payload: { label: 'FRIDAY Thinking' },
+  });
+
   return neurons;
 }
 
@@ -123,6 +131,8 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'domain:disorder': 'Default state — not yet classified into a domain',
   // KG Service entities (pattern: service:{entity_id})
   'service': 'Knowledge Graph service entity with relationship history',
+  // Thinking neuron
+  'thinking:friday': 'Real-time internal reasoning stream (FRIDAY thinking)',
 };
 
 /**

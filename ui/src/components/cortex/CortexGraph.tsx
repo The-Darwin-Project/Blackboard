@@ -48,7 +48,7 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 
 function getNeuronSize(heat: number, type: string): number {
   const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
-    : type === 'tool' ? 4 : type === 'event' ? 5 : type === 'skill' ? 3 : type === 'service' ? 5 : 3;
+    : type === 'tool' ? 4 : type === 'event' ? 5 : type === 'skill' ? 3 : type === 'service' ? 5 : type === 'thinking' ? 5 : 3;
   const maxGrowth = type === 'skill' ? 2 : 4;
   // Logarithmic scaling: heat=1→+0.7, heat=10→+2.3, heat=50→+3.9, heat=100→+4 (capped)
   const growth = heat > 0 ? Math.min(Math.log(heat + 1) * 1.0, maxGrowth) : 0;
@@ -115,8 +115,9 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     const phaseNodes = allNeurons.filter(n => n.type === 'phase');
     const agentNodes = allNeurons.filter(n => n.type === 'agent');
     const domainNodes = allNeurons.filter(n => n.type === 'domain');
+    const thinkingNodes = allNeurons.filter(n => n.type === 'thinking');
     const skillNodes = allNeurons.filter(n => n.type === 'skill');
-    const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length + domainNodes.length;
+    const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length + domainNodes.length + thinkingNodes.length;
     let execIdx = 0;
     let skillIdx = 0;
 
@@ -158,7 +159,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         label = (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id.slice(0, 15);
       }
 
-      const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain';
+      const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain' || n.type === 'thinking';
       const isFixed = isExecutive || n.type === 'skill' || isKnowledge;
       // Skill color resolved inline (tag_type in payload, not available in getNeuronColor signature)
       let nodeColor = n.type === 'skill'
@@ -377,6 +378,10 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           size = 2;
           // Skill pulses arrive in a separate batch (no tool in same batch) — route from event node
           source = evtId;
+        } else if (pulse.neuron_type === 'thinking') {
+          size = 3;
+          source = evtId;
+          color = '#f59e0b';
         }
 
         // Sequential chain: stagger edge creation by 120ms per pulse for cascade effect

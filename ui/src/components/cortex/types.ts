@@ -9,7 +9,7 @@ import type { EventSource } from '../../api/types';
 
 export interface Pulse {
   neuron_id: string;
-  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill' | 'service';
+  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill' | 'service' | 'thinking' | 'system';
   score: number;
   injected: boolean;
 }
@@ -29,7 +29,7 @@ export interface PulseBatch {
 
 export interface Neuron {
   id: string;
-  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill' | 'service';
+  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill' | 'service' | 'thinking' | 'system';
   heat: number;
   payload: Record<string, unknown>;
 }
@@ -85,7 +85,7 @@ export interface WhisperMessage {
   timestamp: number;
 }
 
-export type FrictionPattern = 'spiral' | 'plateau' | 'agent_churn';
+export type FrictionPattern = 'spiral' | 'plateau' | 'agent_churn' | 'thinking_dwell';
 
 export interface FrictionIndicator {
   pattern: FrictionPattern;

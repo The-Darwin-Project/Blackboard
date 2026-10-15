@@ -155,6 +155,21 @@ class TestTurnToPartsLabeling:
 
         assert parts == rp
 
+    def test_t4b_brain_response_with_empty_response_parts_preserves_thoughts(self):
+        """Regression test for evt-4a38699c: when response_parts is [{'text': ''}] but
+        thoughts contains actual text, turn_to_parts must NOT wipe it out."""
+        rp = [{"text": "", "thought_signature": "sig_abc"}]
+        turn = _make_turn(
+            actor="brain", action="response",
+            thoughts="Actual response text from FRIDAY",
+            response_parts=rp,
+        )
+        parts = Brain._turn_to_parts(turn)
+
+        assert len(parts) == 1
+        assert parts[0]["text"] == "Actual response text from FRIDAY"
+        assert parts[0]["thought_signature"] == "sig_abc"
+
     def test_t5_brain_phase_gets_friday_prefix(self):
         turn = _make_turn(actor="brain", action="phase", thoughts="Phase: VERIFY")
         parts = Brain._turn_to_parts(turn)
@@ -202,6 +217,84 @@ class TestBuildContentsStructure:
         contents = await Brain._build_contents(brain, event)
 
         assert "--- RESPOND TO THIS ---" in _all_text(contents)
+
+    @staticmethod
+    def _marker_locations(contents: list[dict]) -> list[tuple[int, int]]:
+        return [
+            (ci, pi)
+            for ci, msg in enumerate(contents)
+            for pi, part in enumerate(msg.get("parts", []))
+            if "--- RESPOND TO THIS ---" in part.get("text", "")
+        ]
+
+    @staticmethod
+    def _content_index_with(contents: list[dict], needle: str) -> int:
+        return next(
+            ci for ci, msg in enumerate(contents)
+            if any(needle in part.get("text", "") for part in msg.get("parts", []))
+        )
+
+    _T6B_CONVERSATION = [
+        ("brain", "response", "Noted"),
+        ("user", "message", "check status"),
+        ("brain", "response", "On it"),
+        ("dispatcher", "spawn_worker", "worker pod scheduled"),
+    ]
+
+    def _t6b_event(self):
+        return _make_event(conversation=[
+            _make_turn(turn=i + 1, actor=a, action=act, thoughts=t)
+            for i, (a, act, t) in enumerate(self._T6B_CONVERSATION)
+        ])
+
+    @pytest.mark.asyncio
+    async def test_t6b_dispatcher_turns_ignored_by_last_non_brain_pos(self):
+        """Dispatcher turns (actor='dispatcher') are system control signals and must NOT anchor
+        the '--- RESPOND TO THIS ---' marker or displace the actual user turn: the marker sits
+        immediately before the real user part and never inside the dispatcher's content."""
+        contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
+
+        locs = self._marker_locations(contents)
+        assert len(locs) == 1
+        ci, pi = locs[0]
+        # Immediately before the real user turn's part ...
+        assert "check status" in contents[ci]["parts"][pi + 1]["text"]
+        # ... and not in the dispatcher's content.
+        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
+        assert ci != dispatcher_ci
+        assert not any(
+            "RESPOND TO THIS" in part.get("text", "") for part in contents[dispatcher_ci]["parts"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_t6b_guard_fails_against_pre_pr_ordering(self):
+        """Regression guard for t6b: with the pre-PR actor check (only 'brain' excluded) the
+        marker lands in the dispatcher's content -- proving t6b's assertions are discriminating."""
+        with patch("src.agents.brain._NON_PARTICIPANT_ACTORS", frozenset({"brain"})):
+            contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
+
+        locs = self._marker_locations(contents)
+        assert len(locs) == 1
+        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
+        assert locs[0][0] == dispatcher_ci
+        assert "check status" not in "".join(
+            part.get("text", "")
+            for part in contents[dispatcher_ci]["parts"][locs[0][1] + 1:]
+        )
+
+    @pytest.mark.asyncio
+    async def test_t6c_dispatcher_only_conversation_has_no_delta_marker(self):
+        """If the only non-brain turn is a dispatcher turn, no delta marker should be generated."""
+        conversation = [
+            _make_turn(turn=1, actor="brain", action="response", thoughts="Starting"),
+            _make_turn(turn=2, actor="dispatcher", action="circuit_breaker", thoughts="circuit breaker tripped"),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        contents = await Brain._build_contents(brain, event)
+
+        assert "RESPOND TO THIS" not in _all_text(contents)
 
     @pytest.mark.asyncio
     async def test_t7_no_delta_marker_empty_conversation(self):
@@ -1906,3 +1999,126 @@ class TestParallelFunctionCallExecution:
         padded = fr_parts_all[1]["functionResponse"]
         assert padded["name"] == "lookup_journal"
         assert padded["response"]["result"] == "execution interrupted"
+
+    @pytest.mark.asyncio
+    async def test_t53_single_tool_select_agent_replayed_as_paired_fc_fr(self):
+        """Single-tool dispatch (action='route', waitingFor='select_agent') with response_parts
+        carrying functionCall and thought_signature must replay as paired model:functionCall and user:functionResponse."""
+        fc = {"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="build feature"),
+            _make_turn(
+                turn=2, actor="brain", action="route",
+                waitingFor="select_agent",
+                evidence="Dispatched developer",
+                response_parts=[fc, sig],
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fc_parts = [
+            p for msg in contents if msg["role"] == "model"
+            for p in msg.get("parts", []) if "functionCall" in p
+        ]
+        fr_parts = [
+            p for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+
+        assert len(fc_parts) == 1
+        assert fc_parts[0]["functionCall"]["name"] == "select_agent"
+        assert len(fr_parts) == 1
+        assert fr_parts[0]["functionResponse"]["name"] == "select_agent"
+        assert "developer" in fr_parts[0]["functionResponse"]["response"]["result"]
+
+    @pytest.mark.asyncio
+    async def test_t54_trailing_unanswered_function_call_gets_synthetic_response(self, caplog):
+        """If conversation ends on a model turn with an unanswered functionCall,
+        _build_contents must append a synthetic user:functionResponse before the action prompt
+        to prevent Gemini API protocol violations."""
+        fc = {"functionCall": {"name": "ask_agent_for_state", "args": {"agent": "developer"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="status?"),
+            _make_turn(
+                turn=2, actor="brain", action="response",
+                response_parts=[fc, sig],
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                caplog.at_level("WARNING", logger="darwin.brain"):
+            contents = await Brain._build_contents(brain, event)
+
+        last_turn = contents[-1]
+        assert last_turn["role"] == "user"
+
+        fr_parts = [p for p in last_turn["parts"] if "functionResponse" in p]
+        assert len(fr_parts) == 1
+        assert fr_parts[0]["functionResponse"]["name"] == "ask_agent_for_state"
+        result = fr_parts[0]["functionResponse"]["response"]["result"]
+        assert "Do NOT re-issue" in result and "in_flight" not in result
+        assert any("Trailing FC safety net fired" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_t55_emit_executive_pulse_thinking_reasoning_override_preserves_cache(self):
+        """_emit_executive_pulse with reasoning_override must emit the override string
+        without popping the cached reasoning from _reasoning_by_event."""
+        pulse_port = AsyncMock()
+        blackboard = AsyncMock()
+        blackboard.get_event.return_value = _make_event(event_id="evt-pulse-test")
+
+        brain = SimpleNamespace(
+            pulse_port=pulse_port,
+            blackboard=blackboard,
+            _reasoning_by_event={"evt-pulse-test": "full detailed reasoning thought trace"},
+            _defer_wake_events=set(),
+        )
+
+        await Brain._emit_executive_pulse(
+            brain,
+            "evt-pulse-test",
+            [("thinking:friday", "thinking", 1.0)],
+            reasoning_override="streaming thinking snippet",
+        )
+
+        pulse_port.on_pulse_batch.assert_awaited_once()
+        batch = pulse_port.on_pulse_batch.await_args[0][0]
+        assert batch.reasoning == "streaming thinking snippet"
+        assert len(batch.pulses) == 1
+        assert batch.pulses[0].neuron_id == "thinking:friday"
+        assert batch.pulses[0].neuron_type == "thinking"
+
+        assert brain._reasoning_by_event["evt-pulse-test"] == "full detailed reasoning thought trace"
+
+    @pytest.mark.asyncio
+    async def test_t56_emit_executive_pulse_without_override_pops_cached_reasoning(self):
+        """_emit_executive_pulse without reasoning_override pops _reasoning_by_event."""
+        pulse_port = AsyncMock()
+        blackboard = AsyncMock()
+        blackboard.get_event.return_value = _make_event(event_id="evt-pulse-test")
+
+        brain = SimpleNamespace(
+            pulse_port=pulse_port,
+            blackboard=blackboard,
+            _reasoning_by_event={"evt-pulse-test": "full detailed reasoning thought trace"},
+            _defer_wake_events=set(),
+        )
+
+        await Brain._emit_executive_pulse(
+            brain,
+            "evt-pulse-test",
+            [("tool:classify_event", "tool", 1.0)],
+        )
+
+        pulse_port.on_pulse_batch.assert_awaited_once()
+        batch = pulse_port.on_pulse_batch.await_args[0][0]
+        assert batch.reasoning == "full detailed reasoning thought trace"
+        assert "evt-pulse-test" not in brain._reasoning_by_event

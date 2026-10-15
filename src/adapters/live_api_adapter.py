@@ -129,6 +129,9 @@ def _build_skill_refs(tag_ids: list[str]) -> str:
 
 _PULSE_REFS = _build_skill_refs(["observer-mode", "observer-constraints"])
 _PEER_REFS = _build_skill_refs(["peer-mode", "peer-circuit-breaker"])
+
+# Min seconds between thinking-only pulses forwarded to the Live API session, per event.
+_THINKING_FORWARD_MIN_INTERVAL_S = 30.0
 _REVIEW_REFS = _build_skill_refs(["proactive-review", "proactive-review-constraints"])
 _REPORT_REFS = _build_skill_refs(["shift-report"])
 _RESUME_REFS = _build_skill_refs(["shared-context", "darwin-ecosystem"])
@@ -191,6 +194,7 @@ class LiveAPIAdapter:
         self._neuron_labels: dict[str, str] = {}
         self._last_pulse_event_id: str | None = None
         self._last_pulse_time: float = 0
+        self._last_thinking_forward: dict[str, float] = {}
         self._text_buffer: list[str] = []
         self._receive_task: asyncio.Task | None = None
         self._idle_watchdog_task: asyncio.Task | None = None
@@ -472,6 +476,16 @@ class LiveAPIAdapter:
         if any(p.neuron_id in suppress_neurons for p in batch.pulses):
             return
 
+        # Thinking-only pulses stream every ~15s from FRIDAY; each end_of_turn send makes
+        # JARVIS generate a reply (-> send_event_message -> new FRIDAY turn -> more pulses).
+        # Forward at most one per event per _THINKING_FORWARD_MIN_INTERVAL_S so thinking
+        # dwell stays observable without driving a duplicate-reply loop.
+        is_thinking_only = bool(batch.pulses) and all(p.neuron_type == "thinking" for p in batch.pulses)
+        if is_thinking_only:
+            last_fwd = self._last_thinking_forward.get(batch.event_id, 0.0)
+            if time.time() - last_fwd < _THINKING_FORWARD_MIN_INTERVAL_S:
+                return
+
         if self._generating_report:
             return
         was_idle = not self._session
@@ -491,6 +505,14 @@ class LiveAPIAdapter:
             )
             await self._session.send(input=text, end_of_turn=True)
             logger.debug("Cortex send_pulse: send() returned successfully")
+            if is_thinking_only:
+                now = time.time()
+                if len(self._last_thinking_forward) > 256:
+                    self._last_thinking_forward = {
+                        k: t for k, t in self._last_thinking_forward.items()
+                        if now - t < _THINKING_FORWARD_MIN_INTERVAL_S
+                    }
+                self._last_thinking_forward[batch.event_id] = now
         except Exception as e:
             logger.debug("Cortex send_pulse failed (non-fatal): %s", e, exc_info=True)
             self._session = None
@@ -1058,12 +1080,16 @@ class LiveAPIAdapter:
         tool_trail: list[str] = []
         phases: list[str] = []
         defer_timestamps: list[float] = []
+        thinking_pulses = 0
         non_defer_between_defers = 0
         for b in batches:
             for p in b.get("pulses", []):
                 nid = p.get("neuron_id", "")
+                ntype = p.get("neuron_type")
                 neuron_counts[nid] = neuron_counts.get(nid, 0) + 1
-                if p.get("neuron_type") == "tool":
+                if ntype == "thinking":
+                    thinking_pulses += 1
+                elif ntype == "tool":
                     tool_trail.append(nid.removeprefix("tool:"))
                     if nid == "tool:defer_event":
                         ts = b.get("timestamp")
@@ -1071,7 +1097,7 @@ class LiveAPIAdapter:
                             defer_timestamps.append(ts)
                     elif defer_timestamps:
                         non_defer_between_defers += 1
-                if p.get("neuron_type") == "phase":
+                elif ntype == "phase":
                     phases.append(nid.removeprefix("phase:"))
         top_neurons = sorted(neuron_counts.items(), key=lambda x: -x[1])[:5]
 
@@ -1080,6 +1106,7 @@ class LiveAPIAdapter:
             f"Pulse history for {event_id} (last {last_n_minutes} minutes):",
             f"Total pulse batches: {len(batches)}",
             f"Total neuron activations: {total_neurons}",
+            f"Thinking pulses: {thinking_pulses}",
             f"Unique neurons: {len(neuron_counts)}",
             f"Phases during window: {' -> '.join(phases) if phases else 'no phase changes'}",
         ]

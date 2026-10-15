@@ -5,6 +5,8 @@
 # 3. [Pattern]: Observer pattern for fan-out to System 2 (Layer 2). Observers added via add_observer().
 # 4. [Gotcha]: All operations are non-fatal -- log and continue on Redis errors.
 # 5. [Pattern]: Broadcast via callable (DashboardWSAdapter pattern). None = no broadcast.
+# 6. [Constraint]: batch.reasoning is redact_pii()'d at on_pulse_batch entry, BEFORE the Redis log
+#    write, WS broadcast and observer fan-out. Never persist/broadcast raw reasoning text.
 """
 PulseTracker: tracks neuron activation heat and streams pulse events.
 
@@ -15,10 +17,12 @@ broadcasts real-time pulse events via WebSocket.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from typing import Any, Callable, Coroutine, Protocol
 
+from ..utils.pii_redaction import redact_pii
 from .pulse import PulseBatch
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,8 @@ class PulseTracker:
 
     async def on_pulse_batch(self, batch: PulseBatch) -> None:
         """PulsePort implementation. Heat + log + broadcast + fan-out."""
+        if batch.reasoning:
+            batch = dataclasses.replace(batch, reasoning=redact_pii(batch.reasoning))
         try:
             pipe = self._redis.pipeline()
             for pulse in batch.pulses:
