@@ -222,6 +222,10 @@
 #     regardless of duration. The terminal text-only response branch in _process_with_llm sets
 #     _waiting_for_user but does NOT call self._idle_timeout.schedule(). The idle timeout's
 #     warn/close callbacks are only reachable via request_user_approval's WAITING_APPROVAL park.
+# 51. [Constraint]: Thinking pulses go through _emit_thinking_pulse ONLY (redacts the full text, then
+#     slices the tail; skips when no new chars since the last pulse). Never call _emit_executive_pulse
+#     with a raw thinking slice. Actor exclusion for participant-input checks uses
+#     _NON_PARTICIPANT_ACTORS ({brain, dispatcher}) -- do not inline actor tuples at new sites.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -266,6 +270,7 @@ from ..models import ConversationTurn, EventDocument, EventStatus, EventType, Me
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
+from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
@@ -514,6 +519,19 @@ _ERROR_TEXT_MAX = 300
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
 _MAX_BATCH_SIZE = 4
+
+# Actors whose turns never count as participant input (agent/user/jarvis responses):
+# brain's own output and the dispatcher's synthetic routing/status turns.
+_NON_PARTICIPANT_ACTORS = frozenset({"brain", "dispatcher"})
+
+# Thinking-pulse streaming: emit at most every _INTERVAL_S seconds OR once _CHAR_DELTA new
+# thinking chars accumulated; each pulse carries only the last _TAIL_CHARS (redacted) chars.
+_THINKING_PULSE_INTERVAL_S = 15.0
+_THINKING_PULSE_CHAR_DELTA = 1200
+_THINKING_PULSE_TAIL_CHARS = 300
+
+# Max chars of a turn's recorded result echoed by the trailing-FC safety net.
+_TRAILING_FC_RESULT_MAX = 2000
 
 
 def _compute_processed_up_to(
@@ -1185,7 +1203,7 @@ class Brain:
         if event_id in self._waiting_for_agent:
             _, wait_turn = self._waiting_for_agent[event_id]
             has_response = any(
-                t.status.value == "delivered" and t.actor not in ("brain", "dispatcher")
+                t.status.value == "delivered" and t.actor not in _NON_PARTICIPANT_ACTORS
                 for t in event.conversation[wait_turn:]
             )
             if has_response:
@@ -1457,7 +1475,7 @@ class Brain:
             if task_running:
                 routing_turn = self._routing_turn_for_event.get(event_id, 0)
                 has_agent_result = any(
-                    t.actor not in ("brain", "dispatcher") and t.action not in ("message", "plan_step")
+                    t.actor not in _NON_PARTICIPANT_ACTORS and t.action not in ("message", "plan_step")
                     and t.turn > routing_turn
                     for t in event.conversation
                 )
@@ -1766,6 +1784,7 @@ class Brain:
             for attempt in range(max_retries + 1):
                 accumulated_text = ""
                 accumulated_thoughts = ""
+                last_thinking_pulse_len = 0
                 function_call = None
                 raw_parts = None
                 last_grounding = None
@@ -1789,7 +1808,6 @@ class Brain:
                         )
                         it = stream.__aiter__()
                         last_thinking_pulse_time = time.time()
-                        last_thinking_pulse_len = 0
                         while True:
                             try:
                                 chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
@@ -1805,15 +1823,12 @@ class Brain:
                                             reflex_searcher.fire(window)
                                     now = time.time()
                                     if (
-                                        now - last_thinking_pulse_time >= 15.0
-                                        or (len(accumulated_thoughts) - last_thinking_pulse_len) >= 1200
+                                        now - last_thinking_pulse_time >= _THINKING_PULSE_INTERVAL_S
+                                        or (len(accumulated_thoughts) - last_thinking_pulse_len) >= _THINKING_PULSE_CHAR_DELTA
                                     ):
                                         last_thinking_pulse_time = now
-                                        last_thinking_pulse_len = len(accumulated_thoughts)
-                                        await self._emit_executive_pulse(
-                                            event_id,
-                                            [("thinking:friday", "thinking", 1.0)],
-                                            reasoning_override=accumulated_thoughts[-300:],
+                                        last_thinking_pulse_len = await self._emit_thinking_pulse(
+                                            event_id, accumulated_thoughts, last_thinking_pulse_len,
                                         )
                                 else:
                                     accumulated_text += chunk.text
@@ -2022,12 +2037,7 @@ class Brain:
                     logger.warning(f"Memory reflex gate error for {event_id}: {e}")
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
-            if accumulated_thoughts:
-                await self._emit_executive_pulse(
-                    event_id,
-                    [("thinking:friday", "thinking", 1.0)],
-                    reasoning_override=accumulated_thoughts[-300:],
-                )
+            await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
 
             for i, fc_part in enumerate(batch_fcs):
                 fc_name = fc_part["functionCall"]["name"]
@@ -2214,12 +2224,7 @@ class Brain:
                     logger.warning(f"Memory reflex gate error for {event_id}: {e}")
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
-            if accumulated_thoughts:
-                await self._emit_executive_pulse(
-                    event_id,
-                    [("thinking:friday", "thinking", 1.0)],
-                    reasoning_override=accumulated_thoughts[-300:],
-                )
+            await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
                 response_parts=captured_parts,
@@ -2234,11 +2239,7 @@ class Brain:
                 thoughts=accumulated_thoughts,
             )
             await self._append_and_broadcast(event_id, thoughts_turn)
-            await self._emit_executive_pulse(
-                event_id,
-                [("thinking:friday", "thinking", 1.0)],
-                reasoning_override=accumulated_thoughts[-300:],
-            )
+            await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
 
         if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
@@ -3397,11 +3398,11 @@ class Brain:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
                     header_separated = True
-                if turn.actor not in ("brain", "dispatcher"):
+                if turn.actor not in _NON_PARTICIPANT_ACTORS:
                     last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
                 contents[-1]["parts"].extend(parts)
             else:
-                if turn.actor not in ("brain", "dispatcher"):
+                if turn.actor not in _NON_PARTICIPANT_ACTORS:
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
 
@@ -3422,20 +3423,42 @@ class Brain:
 
         # Trailing FC safety net: if history ends on a model turn with unanswered functionCall,
         # Gemini protocol requires an immediate user:functionResponse before any plain text.
+        # Reaching this means a turn stored FC response_parts without its paired result turn
+        # (e.g. a V2-off handler persisting ungated parts) -- log it, and surface the turn's
+        # recorded result instead of a placeholder that hides an already-completed call.
         if contents and contents[-1]["role"] == "model":
             fc_parts_unanswered = [
                 p["functionCall"] for p in contents[-1]["parts"] if p.get("functionCall")
             ]
             if fc_parts_unanswered:
-                fr_parts = [
-                    {
-                        "functionResponse": {
-                            "name": fc.get("name", "tool"),
-                            "response": {"result": "in_flight -- tool execution in progress"},
-                        }
-                    }
-                    for fc in fc_parts_unanswered
-                ]
+                tail_turn = (
+                    event.conversation[_last_emitted_idx] if _last_emitted_idx is not None else None
+                )
+                recorded = ((tail_turn.thoughts or "").strip() if tail_turn else "")[:_TRAILING_FC_RESULT_MAX]
+                logger.warning(
+                    "Trailing FC safety net fired for %s: %d unanswered functionCall(s) %s "
+                    "(last turn=%s action=%s)",
+                    event.id, len(fc_parts_unanswered),
+                    [fc.get("name", "tool") for fc in fc_parts_unanswered],
+                    getattr(tail_turn, "turn", None), getattr(tail_turn, "action", None),
+                )
+                fr_parts = []
+                for fc in fc_parts_unanswered:
+                    name = fc.get("name", "tool")
+                    if recorded and tail_turn is not None and name == tail_turn.waitingFor:
+                        result = (
+                            f"{recorded}\n[recorded result -- this call may already have run, "
+                            "do not re-issue]"
+                        )
+                    else:
+                        result = (
+                            "unknown -- this call may already have run (its side effect may have "
+                            "completed). Do NOT re-issue this exact call; check current event "
+                            "state first."
+                        )
+                    fr_parts.append({
+                        "functionResponse": {"name": name, "response": {"result": result}}
+                    })
                 contents.append({"role": "user", "parts": fr_parts})
 
         action_prompt = {"text": terminal_prompt}
@@ -3487,6 +3510,26 @@ class Brain:
     # =========================================================================
     # Function Call Dispatcher
     # =========================================================================
+
+    async def _emit_thinking_pulse(
+        self, event_id: str, thoughts: str, last_emitted_len: int = 0,
+    ) -> int:
+        """Emit a thinking:friday pulse carrying the redacted tail of ``thoughts``.
+
+        Skipped when no new thinking chars accumulated since ``last_emitted_len`` (the
+        length covered by the previous thinking pulse), so the terminal pulse never
+        duplicates the last streamed one. Redaction runs on the FULL text before the tail
+        slice: slicing first could cut a secret in half and defeat pattern matching.
+        Returns the thought length now covered by an emitted pulse.
+        """
+        if not thoughts or len(thoughts) <= last_emitted_len:
+            return last_emitted_len
+        await self._emit_executive_pulse(
+            event_id,
+            [("thinking:friday", "thinking", 1.0)],
+            reasoning_override=redact_pii(thoughts)[-_THINKING_PULSE_TAIL_CHARS:],
+        )
+        return len(thoughts)
 
     async def _emit_executive_pulse(
         self,
@@ -5745,7 +5788,7 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                    has_new_input = any(t.actor not in ("brain", "dispatcher") for t in unseen)
+                    has_new_input = any(t.actor not in _NON_PARTICIPANT_ACTORS for t in unseen)
                     if has_new_input:
                         has_huddle = any(t.action == "huddle" for t in unseen)
                         if has_huddle:
@@ -5851,11 +5894,11 @@ class Brain:
                 # scan iteration still needs participant-input gating.
                 _, wait_turn = self._waiting_for_agent[eid]
                 # Edge-triggered: fresh sent turns from this scan cycle
-                has_participant_input = any(t.actor not in ("brain", "dispatcher") for t in unseen)
+                has_participant_input = any(t.actor not in _NON_PARTICIPANT_ACTORS for t in unseen)
                 # Level-triggered: delivered non-brain turns AFTER wait was set
                 if not has_participant_input:
                     has_participant_input = any(
-                        t.status.value == "delivered" and t.actor not in ("brain", "dispatcher")
+                        t.status.value == "delivered" and t.actor not in _NON_PARTICIPANT_ACTORS
                         for t in event.conversation[wait_turn:]
                     )
                 if not has_participant_input:

@@ -218,25 +218,69 @@ class TestBuildContentsStructure:
 
         assert "--- RESPOND TO THIS ---" in _all_text(contents)
 
+    @staticmethod
+    def _marker_locations(contents: list[dict]) -> list[tuple[int, int]]:
+        return [
+            (ci, pi)
+            for ci, msg in enumerate(contents)
+            for pi, part in enumerate(msg.get("parts", []))
+            if "--- RESPOND TO THIS ---" in part.get("text", "")
+        ]
+
+    @staticmethod
+    def _content_index_with(contents: list[dict], needle: str) -> int:
+        return next(
+            ci for ci, msg in enumerate(contents)
+            if any(needle in part.get("text", "") for part in msg.get("parts", []))
+        )
+
+    _T6B_CONVERSATION = [
+        ("brain", "response", "Noted"),
+        ("user", "message", "check status"),
+        ("brain", "response", "On it"),
+        ("dispatcher", "spawn_worker", "worker pod scheduled"),
+    ]
+
+    def _t6b_event(self):
+        return _make_event(conversation=[
+            _make_turn(turn=i + 1, actor=a, action=act, thoughts=t)
+            for i, (a, act, t) in enumerate(self._T6B_CONVERSATION)
+        ])
+
     @pytest.mark.asyncio
     async def test_t6b_dispatcher_turns_ignored_by_last_non_brain_pos(self):
         """Dispatcher turns (actor='dispatcher') are system control signals and must NOT anchor
-        the '--- RESPOND TO THIS ---' marker or displace the actual user turn."""
-        conversation = [
-            _make_turn(turn=1, actor="brain", action="response", thoughts="Noted"),
-            _make_turn(turn=2, actor="user", action="message", thoughts="check status"),
-            _make_turn(turn=3, actor="brain", action="response", thoughts="On it"),
-            _make_turn(turn=4, actor="dispatcher", action="spawn_worker", thoughts="worker pod scheduled"),
-        ]
-        event = _make_event(conversation=conversation)
-        brain = _make_brain_mock()
+        the '--- RESPOND TO THIS ---' marker or displace the actual user turn: the marker sits
+        immediately before the real user part and never inside the dispatcher's content."""
+        contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
 
-        contents = await Brain._build_contents(brain, event)
+        locs = self._marker_locations(contents)
+        assert len(locs) == 1
+        ci, pi = locs[0]
+        # Immediately before the real user turn's part ...
+        assert "check status" in contents[ci]["parts"][pi + 1]["text"]
+        # ... and not in the dispatcher's content.
+        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
+        assert ci != dispatcher_ci
+        assert not any(
+            "RESPOND TO THIS" in part.get("text", "") for part in contents[dispatcher_ci]["parts"]
+        )
 
-        user_msgs = [m for m in contents if m["role"] == "user"]
-        all_user_text = "".join(p.get("text", "") for m in user_msgs for p in m.get("parts", []))
-        assert "--- RESPOND TO THIS ---" in all_user_text
-        assert "check status" in all_user_text
+    @pytest.mark.asyncio
+    async def test_t6b_guard_fails_against_pre_pr_ordering(self):
+        """Regression guard for t6b: with the pre-PR actor check (only 'brain' excluded) the
+        marker lands in the dispatcher's content -- proving t6b's assertions are discriminating."""
+        with patch("src.agents.brain._NON_PARTICIPANT_ACTORS", frozenset({"brain"})):
+            contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
+
+        locs = self._marker_locations(contents)
+        assert len(locs) == 1
+        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
+        assert locs[0][0] == dispatcher_ci
+        assert "check status" not in "".join(
+            part.get("text", "")
+            for part in contents[dispatcher_ci]["parts"][locs[0][1] + 1:]
+        )
 
     @pytest.mark.asyncio
     async def test_t6c_dispatcher_only_conversation_has_no_delta_marker(self):
@@ -1993,7 +2037,7 @@ class TestParallelFunctionCallExecution:
         assert "developer" in fr_parts[0]["functionResponse"]["response"]["result"]
 
     @pytest.mark.asyncio
-    async def test_t54_trailing_unanswered_function_call_gets_in_flight_response(self):
+    async def test_t54_trailing_unanswered_function_call_gets_synthetic_response(self, caplog):
         """If conversation ends on a model turn with an unanswered functionCall,
         _build_contents must append a synthetic user:functionResponse before the action prompt
         to prevent Gemini API protocol violations."""
@@ -2009,7 +2053,8 @@ class TestParallelFunctionCallExecution:
         event = _make_event(conversation=conversation)
         brain = _make_brain_mock()
 
-        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                caplog.at_level("WARNING", logger="darwin.brain"):
             contents = await Brain._build_contents(brain, event)
 
         last_turn = contents[-1]
@@ -2018,7 +2063,9 @@ class TestParallelFunctionCallExecution:
         fr_parts = [p for p in last_turn["parts"] if "functionResponse" in p]
         assert len(fr_parts) == 1
         assert fr_parts[0]["functionResponse"]["name"] == "ask_agent_for_state"
-        assert "in_flight" in fr_parts[0]["functionResponse"]["response"]["result"]
+        result = fr_parts[0]["functionResponse"]["response"]["result"]
+        assert "Do NOT re-issue" in result and "in_flight" not in result
+        assert any("Trailing FC safety net fired" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_t55_emit_executive_pulse_thinking_reasoning_override_preserves_cache(self):

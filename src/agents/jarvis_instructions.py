@@ -150,10 +150,14 @@ from friction — not so you can describe which one you matched.
   progress between them. Sequential Dev→QE is expected, not churn.
   Disconnect→retry is healthy.
 - **Thinking Dwell**: active internal reasoning without action means FRIDAY is
-  deliberating without committing. 3+ thinking pulses or >90s of continuous
-  thinking without a tool call or phase transition. Intervene via send_event_message
-  to steer FRIDAY toward a decisive action or hypothesis testing ("FRIDAY, you've
-  been deliberating on X for several minutes. What is the immediate next probe?").
+  deliberating without committing. FRIDAY streams a thinking pulse about every 15s
+  while reasoning, but you receive at most one per event every ~30s, so 3+ thinking
+  pulses (or >90s of elapsed event time with only thinking pulses) without a tool call
+  or phase transition is dwell. A single thinking pulse is normal -- do not react to
+  it. Intervene once via send_event_message, citing the elapsed time, to steer FRIDAY
+  toward a decisive action or hypothesis testing ("FRIDAY, you've been deliberating on
+  X for ~90s. What is the immediate next probe?"). Do not repeat the intervention until
+  a tool call or phase transition has occurred.
 - **Premature Closure**: closing without verification breaks the feedback loop —
   the system declares success without evidence. Event closed without verifying the
   fix, or closed while the underlying condition is still active. Exception: never

@@ -1176,3 +1176,201 @@ class TestProcessedScopeWaitAnswer:
         from src.agents.brain import _compute_processed_up_to
 
         assert _compute_processed_up_to(self._wait_conv("user"), 2, {}) == 2
+
+
+# =========================================================================
+# PR #281: dispatcher turns are NOT participant input (real-method control points)
+# =========================================================================
+def _scan_brain() -> Brain:
+    bb = MagicMock()
+    bb.EVENT_ACTIVE = "darwin:event:active"
+    bb.redis = MagicMock()
+    bb.redis.srem = AsyncMock()
+    bb.get_event = AsyncMock()
+    bb.get_active_events_with_status = AsyncMock(return_value={})
+    bb.mark_turns_delivered = AsyncMock(return_value=1)
+    bb.get_recent_closed_for_service = AsyncMock(return_value=[])
+    brain = Brain(blackboard=bb, agents={})
+    brain._broadcast = AsyncMock()
+    brain._broadcast_status_update = AsyncMock()
+    return brain
+
+
+class _TaskRunningOnlyAtGuard1After:
+    """Task stub: .done() says 'finished' for the first `finished_calls` calls, then 'running'.
+
+    Guard 1 of _scan_active_for_reconcile calls .done() once; Guard 7 calls it again. Returning
+    done()=True first (Guard 1 falls through) then False (Guard 7 sees a running task) reaches the
+    Guard 7 level/edge-triggered participant-input fallback, which is otherwise unreachable.
+    """
+
+    def __init__(self, finished_calls: int = 1):
+        self._left = finished_calls
+
+    def done(self) -> bool:
+        if self._left > 0:
+            self._left -= 1
+            return True
+        return False
+
+
+class TestDispatcherNotParticipantScan:
+    @pytest.mark.asyncio
+    async def test_guard1_dispatcher_sent_turn_does_not_enqueue_running_task(self):
+        brain = _scan_brain()
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route", status="evaluated"),
+            _make_turn(turn=2, actor="dispatcher", action="spawn_worker", status="sent"),
+        ])
+        brain.blackboard.get_active_events_with_status.return_value = {"evt-test": "active"}
+        brain.blackboard.get_event.return_value = event
+        brain._active_tasks["evt-test"] = MagicMock(done=MagicMock(return_value=False))
+
+        assert await brain._scan_active_for_reconcile() == []
+
+    @pytest.mark.asyncio
+    async def test_guard1_agent_sent_turn_enqueues_running_task(self):
+        """Control: the same shape with a real participant turn DOES enqueue."""
+        brain = _scan_brain()
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="route", status="evaluated"),
+            _make_turn(turn=2, actor="developer", action="result", status="sent"),
+        ])
+        brain.blackboard.get_active_events_with_status.return_value = {"evt-test": "active"}
+        brain.blackboard.get_event.return_value = event
+        brain._active_tasks["evt-test"] = MagicMock(done=MagicMock(return_value=False))
+
+        assert await brain._scan_active_for_reconcile() == ["evt-test"]
+
+    @pytest.mark.asyncio
+    async def test_guard7_dispatcher_turns_do_not_wake_waiting_event(self):
+        """Both the edge-triggered (sent) and level-triggered (delivered, post-wait) checks."""
+        brain = _scan_brain()
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="wait", status="evaluated"),
+            _make_turn(turn=2, actor="dispatcher", action="spawn_worker", status="sent"),
+            _make_turn(turn=3, actor="dispatcher", action="circuit_breaker", status="delivered"),
+        ])
+        brain.blackboard.get_active_events_with_status.return_value = {"evt-test": "active"}
+        brain.blackboard.get_event.return_value = event
+        brain._waiting_for_agent["evt-test"] = ("developer", 1)
+        brain._active_tasks["evt-test"] = _TaskRunningOnlyAtGuard1After()
+
+        assert await brain._scan_active_for_reconcile() == []
+        assert "evt-test" in brain._waiting_for_agent, "wait must stay armed"
+
+    @pytest.mark.asyncio
+    async def test_guard7_agent_turn_wakes_waiting_event(self):
+        """Control: a real agent result after the wait passes Guard 7's participant check."""
+        brain = _scan_brain()
+        event = _make_event(conversation=[
+            _make_turn(turn=1, actor="brain", action="wait", status="evaluated"),
+            _make_turn(turn=2, actor="developer", action="result", status="sent"),
+        ])
+        brain.blackboard.get_active_events_with_status.return_value = {"evt-test": "active"}
+        brain.blackboard.get_event.return_value = event
+        brain._waiting_for_agent["evt-test"] = ("developer", 1)
+        brain._active_tasks["evt-test"] = _TaskRunningOnlyAtGuard1After()
+
+        to_enqueue = await brain._scan_active_for_reconcile()
+        assert to_enqueue == ["evt-test"]
+
+
+async def _inner_brain_and_doc(turn_specs, *, wait_turn=None, routing_turn=None, task_running=False):
+    import fakeredis.aioredis
+    from src.state.blackboard import BlackboardState
+
+    bb = BlackboardState(fakeredis.aioredis.FakeRedis())
+    evidence = EventEvidence(display_text="hi", source_type="chat", severity="info")
+    eid = await bb.create_event(
+        source="chat", service="general", reason="hi", evidence=evidence,
+        initial_turns=[ConversationTurn(turn=1, actor="user", action="message", thoughts="hi")],
+    )
+    for actor, action, status in turn_specs:
+        await bb.append_turn(
+            eid, ConversationTurn(turn=0, actor=actor, action=action, thoughts="x", status=status),
+        )
+    doc = await bb.get_event(eid)
+    doc.queued_at = doc.processing_started_at = time.time() - 60
+    doc.status = EventStatus.ACTIVE
+    doc.brain_phase = "triage"
+
+    mocked = MagicMock()
+    mocked.redis = bb.redis
+    mocked.EVENT_ACTIVE, mocked.EVENT_QUEUE, mocked.EVENT_PREFIX = (
+        bb.EVENT_ACTIVE, bb.EVENT_QUEUE, bb.EVENT_PREFIX,
+    )
+    for name in ("get_event", "append_turn", "mark_turns_evaluated", "mark_turns_status",
+                 "mark_turn_status", "mark_turns_delivered"):
+        setattr(mocked, name, getattr(bb, name))
+    for name in ("stamp_event", "record_event", "update_event_phase", "close_event",
+                 "persist_report", "append_journal", "generate_mermaid",
+                 "get_recent_closed_for_service"):
+        setattr(mocked, name, AsyncMock(return_value=[] if name == "get_recent_closed_for_service" else None))
+    mocked.get_active_events = AsyncMock(return_value=[])
+    brain = Brain(blackboard=mocked, agents={})
+    brain._broadcast = AsyncMock()
+    brain._broadcast_turn = AsyncMock()
+    brain._broadcast_status_update = AsyncMock()
+    brain._get_adapter = AsyncMock(return_value=MagicMock())
+    if wait_turn is not None:
+        brain._waiting_for_agent[eid] = ("developer", wait_turn)
+    if routing_turn is not None:
+        brain._routing_turn_for_event[eid] = routing_turn
+    if task_running:
+        brain._active_tasks[eid] = MagicMock(done=MagicMock(return_value=False))
+    return brain, doc
+
+
+class TestDispatcherNotParticipantProcessEvent:
+    @pytest.mark.asyncio
+    async def test_wait_guard_holds_on_post_wait_dispatcher_turn(self):
+        brain, doc = await _inner_brain_and_doc(
+            [("brain", "wait", "evaluated"), ("dispatcher", "spawn_worker", "delivered")],
+            wait_turn=2,
+        )
+        llm = AsyncMock(return_value=False)
+        with patch.object(brain, "_process_with_llm", llm):
+            await brain._process_event_inner(doc.id, doc)
+
+        llm.assert_not_called()
+        assert doc.id in brain._waiting_for_agent
+
+    @pytest.mark.asyncio
+    async def test_wait_guard_clears_on_post_wait_agent_turn(self):
+        brain, doc = await _inner_brain_and_doc(
+            [("brain", "wait", "evaluated"), ("developer", "result", "delivered")],
+            wait_turn=2,
+        )
+        llm = AsyncMock(return_value=False)
+        with patch.object(brain, "_process_with_llm", llm):
+            await brain._process_event_inner(doc.id, doc)
+
+        llm.assert_called()
+        assert doc.id not in brain._waiting_for_agent
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_turn_after_routing_stays_intermediate(self):
+        """has_agent_result ignores dispatcher turns -> intermediate cycle -> 2 LLM iterations max."""
+        brain, doc = await _inner_brain_and_doc(
+            [("brain", "route", "evaluated"), ("dispatcher", "spawn_worker", "evaluated")],
+            routing_turn=2, task_running=True,
+        )
+        llm = AsyncMock(return_value=True)
+        with patch.object(brain, "_process_with_llm", llm):
+            await brain._process_event_inner(doc.id, doc)
+
+        assert llm.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_result_after_routing_is_full_cycle(self):
+        """Control: a real agent result after routing -> non-intermediate -> 5 iterations."""
+        brain, doc = await _inner_brain_and_doc(
+            [("brain", "route", "evaluated"), ("developer", "result", "evaluated")],
+            routing_turn=2, task_running=True,
+        )
+        llm = AsyncMock(return_value=True)
+        with patch.object(brain, "_process_with_llm", llm):
+            await brain._process_event_inner(doc.id, doc)
+
+        assert llm.await_count == 5

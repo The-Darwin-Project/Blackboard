@@ -701,3 +701,263 @@ class TestReflexExempt:
         assert should_continue is True
         brain._execute_function_call.assert_not_awaited()
         assert "evt-cc105cc5" in brain._reflex_fired_for
+
+
+# ---------------------------------------------------------------------------
+# PR #281 (evt-4a38699c): thinking pulses, response_parts on flush turns, V2-off notify replay
+# ---------------------------------------------------------------------------
+import logging  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+
+from src.agents import brain as brain_mod  # noqa: E402
+
+_THINKING = [("thinking:friday", "thinking", 1.0)]
+
+
+class _ClockedStream(MockStream):
+    """MockStream whose chunks are (clock_advance_s, chunk) pairs driving a fake time.time()."""
+
+    def __init__(self, items, clock):
+        super().__init__([c for _, c in items])
+        self._deltas = [d for d, _ in items]
+        self._clock = clock
+
+    async def __anext__(self):
+        i = self._yielded
+        chunk = await super().__anext__()
+        self._clock[0] += self._deltas[i]
+        return chunk
+
+
+def _thinking_pulses(brain: Brain) -> list[str]:
+    """reasoning_override of every thinking:friday pulse emitted, in order."""
+    return [
+        c.kwargs["reasoning_override"]
+        for c in brain._emit_executive_pulse.await_args_list
+        if c.args[1] == _THINKING
+    ]
+
+
+async def _run_clocked(items, fc_name="classify_event"):
+    clock = [1000.0]
+    stream_items = [(d, _Chunk(text=t, is_thought=True)) for d, t in items]
+    stream_items.append((0.0, _Chunk(function_call=FunctionCall(name=fc_name, args={}))))
+    brain = _make_brain(stream_factory=lambda **kw: _ClockedStream(stream_items, clock))
+    with _patch("src.agents.brain.time.time", new=lambda: clock[0]), \
+            _gate_patch([fc_name]), _gate_ctx_patch():
+        await brain._process_with_llm("evt-cc105cc5", _make_event(), response_emitted=False)
+    return brain
+
+
+class TestThinkingPulseStreaming:
+    def test_constants_pin_the_throttle(self):
+        assert brain_mod._THINKING_PULSE_INTERVAL_S == 15.0
+        assert brain_mod._THINKING_PULSE_CHAR_DELTA == 1200
+        assert brain_mod._THINKING_PULSE_TAIL_CHARS == 300
+
+    @pytest.mark.asyncio
+    async def test_no_streamed_pulse_below_interval_and_char_thresholds(self):
+        """14s elapsed / <1200 chars: only the terminal pulse fires, once."""
+        brain = await _run_clocked([(7.0, "first "), (7.0, "second")])
+        assert _thinking_pulses(brain) == ["first second"]
+
+    @pytest.mark.asyncio
+    async def test_streamed_pulse_after_15s_then_terminal_deduped(self):
+        """Pulse at >=15s; the terminal pulse adds nothing new so it must NOT duplicate it."""
+        brain = await _run_clocked([(1.0, "a" * 10), (15.0, "b" * 10)])
+        assert _thinking_pulses(brain) == ["a" * 10 + "b" * 10]
+
+    @pytest.mark.asyncio
+    async def test_streamed_pulse_after_1200_new_chars_sends_last_300(self):
+        text = "x" * 1000 + "y" * 300
+        brain = await _run_clocked([(0.0, text)])
+        pulses = _thinking_pulses(brain)
+        assert pulses == ["y" * 300]  # one pulse (terminal deduped), tail slice [-300:]
+
+    @pytest.mark.asyncio
+    async def test_terminal_pulse_fires_when_new_chars_follow_streamed_pulse(self):
+        brain = await _run_clocked([(0.0, "x" * 1300), (1.0, " new-tail")])
+        pulses = _thinking_pulses(brain)
+        assert len(pulses) == 2
+        assert pulses[1].endswith("new-tail") and len(pulses[1]) == 300
+
+    @pytest.mark.asyncio
+    async def test_no_thinking_pulse_without_thoughts(self):
+        brain = await _run_clocked([])
+        assert _thinking_pulses(brain) == []
+
+    @pytest.mark.asyncio
+    async def test_secret_straddling_tail_boundary_is_redacted(self):
+        """Redaction runs before the [-300:] slice: slicing first would cut 'password=' in half
+        and leave the value unredacted."""
+        text = "x" * 100 + " password=hunter2hunter2hunter2 " + "y" * 270
+        brain = await _run_clocked([(0.0, text)])
+        (reasoning,) = _thinking_pulses(brain)
+        assert "hunter2" not in reasoning
+        assert len(reasoning) <= 300
+
+    @pytest.mark.asyncio
+    async def test_emit_thinking_pulse_helper_return_value_and_skip(self):
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        assert await brain._emit_thinking_pulse("e", "", 0) == 0
+        assert await brain._emit_thinking_pulse("e", "abc", 3) == 3  # nothing new
+        brain._emit_executive_pulse.assert_not_awaited()
+        assert await brain._emit_thinking_pulse("e", "abcd", 3) == 4
+        brain._emit_executive_pulse.assert_awaited_once()
+
+
+class TestFlushTurnsDropResponseParts:
+    @pytest.mark.asyncio
+    async def test_terminal_flush_response_turn_has_no_response_parts(self):
+        """Pre-FC text flushed as brain.response must not carry the FC response_parts -- they
+        would replay as an unanswered functionCall right before the real tool_result turn."""
+        fc_parts = [{"functionCall": {"name": "wait_for_user", "args": {}}}]
+        chunks = [
+            _Chunk(text="I'll pause here for your reply."),
+            _Chunk(
+                function_call=FunctionCall(name="wait_for_user", args={}),
+                raw_parts=fc_parts,
+            ),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        brain._normalize_response_parts = MagicMock(side_effect=lambda rp: rp)
+
+        with _gate_patch(["wait_for_user"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", _make_event(), response_emitted=False)
+
+        (response_turn,) = _turns_by_action(brain, "response")
+        assert response_turn.response_parts is None
+        # ... while the tool still receives the parts for its own tool_result turn.
+        assert brain._execute_function_call.await_args.kwargs["response_parts"] == fc_parts
+
+
+# -- V2-off notify turns: handler gating + replay safety net --------------------------------------
+
+from tests.test_build_contents_structure import (  # noqa: E402
+    _make_brain_mock,
+    _make_event as _bc_event,
+    _make_turn as _bc_turn,
+)
+
+_NOTIFY_FC = {"functionCall": {"name": "notify_user_slack", "args": {"user_email": "a@b.c"}}}
+
+
+def _handler_ctx(captured: list):
+    ctx = MagicMock()
+    ctx.get_slack_channel = MagicMock(return_value=None)
+    ctx.get_blackboard = MagicMock(return_value=MagicMock())
+    ctx.next_turn_number = AsyncMock(return_value=7)
+    ctx.emit_pulse = AsyncMock()
+
+    async def _append(event_id, turn):
+        captured.append(turn)
+
+    ctx.append_and_broadcast = _append
+    return ctx
+
+
+class TestNotifyTurnsGatedOnThoughtSigV2:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("v2, expected", [(False, None), (True, [_NOTIFY_FC])])
+    async def test_notify_user_slack_response_parts_gated(self, v2, expected):
+        from src.agents import handlers_integration as hi
+
+        turns: list = []
+        with _patch.object(hi, "_THOUGHT_SIG_V2", v2):
+            await hi.handle_notify_user_slack(
+                _handler_ctx(turns), "evt-1", {"user_email": "a@b.c", "message": "m"}, [_NOTIFY_FC],
+            )
+        (turn,) = turns
+        assert turn.action == "notify"
+        assert turn.response_parts == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("v2, expected", [(False, None), (True, [_NOTIFY_FC])])
+    async def test_notify_user_slack_unresolved_user_turn_gated(self, v2, expected):
+        from src.agents import handlers_integration as hi
+
+        turns: list = []
+        ctx = _handler_ctx(turns)
+        ctx.get_slack_channel = MagicMock(return_value=MagicMock())
+        ctx.get_blackboard.return_value.get_event = AsyncMock(return_value=None)
+        with _patch.object(hi, "_THOUGHT_SIG_V2", v2), \
+                _patch.object(hi, "_resolve_slack_user", AsyncMock(return_value=None)):
+            await hi.handle_notify_user_slack(
+                ctx, "evt-1", {"user_email": "a@b.c", "message": "m"}, [_NOTIFY_FC],
+            )
+        (turn,) = turns
+        assert "Could not resolve Slack user" in turn.thoughts
+        assert turn.response_parts == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("v2, expected", [(False, None), (True, [_NOTIFY_FC])])
+    async def test_report_incident_notify_turn_gated(self, v2, expected):
+        from src.agents import handlers_dispatch as hd
+
+        turns: list = []
+        ctx = _handler_ctx(turns)
+        ctx.get_blackboard.return_value.get_event = AsyncMock(return_value=None)
+        with _patch.object(hd, "_THOUGHT_SIG_V2", v2):
+            await hd.handle_report_incident(ctx, "evt-1", {}, [_NOTIFY_FC])
+        (turn,) = turns
+        assert turn.action == "notify"
+        assert turn.response_parts == expected
+
+
+class TestV2OffNotifyReplayAndTrailingFCNet:
+    def _conversation(self, response_parts):
+        return [
+            _bc_turn(turn=1, actor="user", action="message", thoughts="tell Tal"),
+            _bc_turn(
+                turn=2, actor="brain", action="notify", waitingFor="notify_user_slack",
+                thoughts="Slack DM sent to a@b.c. They can reply in the thread.",
+                response_parts=response_parts,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gated_notify_turn_replays_as_plain_text_without_safety_net(self, caplog):
+        """V2 off + handler gating (response_parts=None): no functionCall in history, net silent."""
+        event = _bc_event(conversation=self._conversation(None))
+        with _patch("src.agents.brain._THOUGHT_SIG_V2", False), \
+                caplog.at_level(logging.WARNING, logger="darwin.brain"):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+
+        assert not any(p.get("functionCall") or p.get("functionResponse")
+                       for m in contents for p in m["parts"])
+        assert not any("Trailing FC safety net" in r.getMessage() for r in caplog.records)
+        assert "Slack DM sent" in "".join(p.get("text", "") for m in contents for p in m["parts"])
+
+    @pytest.mark.asyncio
+    async def test_ungated_legacy_notify_turn_net_fires_with_recorded_result(self, caplog):
+        """V2 off but a turn already persisted FC parts (pre-gating data): the net must warn and
+        echo the turn's recorded result with explicit non-reissue wording, not 'in_flight'."""
+        event = _bc_event(conversation=self._conversation([_NOTIFY_FC]))
+        with _patch("src.agents.brain._THOUGHT_SIG_V2", False), \
+                caplog.at_level(logging.WARNING, logger="darwin.brain"):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+
+        fr = [p["functionResponse"] for m in contents if m["role"] == "user"
+              for p in m["parts"] if "functionResponse" in p]
+        assert len(fr) == 1 and fr[0]["name"] == "notify_user_slack"
+        result = fr[0]["response"]["result"]
+        assert "Slack DM sent to a@b.c" in result
+        assert "do not re-issue" in result
+        assert "in_flight" not in result
+        assert any("Trailing FC safety net fired" in r.getMessage() for r in caplog.records)
+        # FR is immediately followed by the action prompt in the same user content
+        assert contents[-1]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_net_without_matching_recorded_result_uses_unknown_wording(self):
+        """Unanswered FC whose name != the tail turn's waitingFor gets generic non-reissue text."""
+        other = {"functionCall": {"name": "select_agent", "args": {}}}
+        event = _bc_event(conversation=self._conversation([other]))
+        with _patch("src.agents.brain._THOUGHT_SIG_V2", False):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+
+        result = next(
+            p["functionResponse"]["response"]["result"]
+            for m in contents for p in m["parts"] if "functionResponse" in p
+        )
+        assert "Do NOT re-issue" in result and "Slack DM sent" not in result

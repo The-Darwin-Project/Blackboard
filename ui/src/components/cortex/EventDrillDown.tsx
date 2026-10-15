@@ -3,7 +3,7 @@
 // 1. [Pattern]: Right panel shown when an event is selected from active events bar.
 // 2. [Pattern]: Same CortexGraph but dimmed -- only neurons fired during THIS event are bright.
 // 3. [Constraint]: Uses getEventPulses for historical data + live pulse stream filtered by event_id.
-// 4. [Pattern]: Friction indicators derived client-side from pulse data (spiral/plateau/agent_churn).
+// 4. [Pattern]: Friction indicators derived client-side from pulse data (spiral/plateau/agent_churn/thinking_dwell).
 // 5. [Pattern]: Cortex Observations section merges shadow + live whisper entries with [shadow]/[live] badges.
 import { useMemo, type FC } from 'react';
 import { useQuery } from '@tanstack/react-query';

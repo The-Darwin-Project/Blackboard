@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("darwin.brain")
 
+# Mirrors brain.py's _THOUGHT_SIG_V2 (duplicated, not imported -- this module's
+# @ai-rules forbid importing Brain). With V2 off, notify turns must not persist
+# response_parts: FC-bearing parts would replay as an unanswered model functionCall.
+_THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
+
 
 # ---------------------------------------------------------------------------
 # Helpers (extracted from Brain static/private methods)
@@ -110,7 +115,7 @@ async def handle_notify_user_slack(
                     turn=(await ctx.next_turn_number(event_id)),
                     actor="brain", action="notify",
                     thoughts=result_text, waitingFor="notify_user_slack",
-                    response_parts=response_parts,
+                    response_parts=response_parts if _THOUGHT_SIG_V2 else None,
                 )
                 await ctx.append_and_broadcast(event_id, turn)
                 await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.0)])
@@ -205,7 +210,7 @@ async def handle_notify_user_slack(
         action="notify",
         thoughts=result_text,
         waitingFor="notify_user_slack",
-        response_parts=response_parts,
+        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
     )
     await ctx.append_and_broadcast(event_id, turn)
     return True
@@ -803,7 +808,7 @@ async def handle_notify_gitlab_result(
         action="notify",
         thoughts=result_text,
         waitingFor="notify_gitlab_result",
-        response_parts=response_parts,
+        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
     )
     await ctx.append_and_broadcast(event_id, turn)
     return True
