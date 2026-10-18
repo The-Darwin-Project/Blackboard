@@ -30,6 +30,7 @@ logger = logging.getLogger("darwin.formatter")
 
 # Slack section text limit (Block Kit)
 _MAX_TEXT = 2900
+MAX_SECTION_TEXT = _MAX_TEXT
 
 AGENT_COLORS: dict[str, str] = {
     "architect": "#3b82f6",
@@ -109,39 +110,101 @@ def _md_table_to_text(match: re.Match) -> str:
 
 
 _MAX_TABLE_ROWS = 100
-_MAX_TABLE_COLS = 20
+_MAX_TABLE_COLS = 10
 
 
-def _md_table_to_block_kit(table_text: str) -> dict | None:
+def _md_table_to_block_kit(table_text: str | list[list[str]]) -> dict | None:
     """Convert markdown pipe table to a Block Kit table block dict.
 
-    Enforces Slack limits: 100 rows, 20 columns. Truncates with a footer on overflow.
+    Enforces Slack limits: 100 rows, 10 columns. Truncates with a footer on overflow.
+    Pads ragged rows with "-" and replaces empty cells with "-".
     """
-    rows = _parse_md_table(table_text)
+    if isinstance(table_text, str):
+        rows = _parse_md_table(table_text)
+    else:
+        rows = table_text
     if len(rows) < 2:
         return None
     overflow = len(rows) > _MAX_TABLE_ROWS
-    col_count = min(max((len(r) for r in rows), default=1), _MAX_TABLE_COLS)
-    truncated = [row[:col_count] for row in rows[:_MAX_TABLE_ROWS]]
+    col_count = max(1, min(max((len(r) for r in rows), default=1), _MAX_TABLE_COLS))
+    processed_rows: list[list[str]] = []
+    for row in rows[:_MAX_TABLE_ROWS]:
+        sanitized = [(cell or "").strip() or "-" for cell in row[:col_count]]
+        if len(sanitized) < col_count:
+            sanitized.extend(["-"] * (col_count - len(sanitized)))
+        processed_rows.append(sanitized)
+
     if overflow:
-        footer = [f"... ({len(rows) - _MAX_TABLE_ROWS} more rows)"] + [""] * (col_count - 1)
-        truncated.append(footer)
+        footer = [f"... ({len(rows) - _MAX_TABLE_ROWS} more rows)"]
+        if col_count > 1:
+            footer.extend(["-"] * (col_count - 1))
+        processed_rows.append(footer[:col_count])
+
     return {
         "type": "table",
-        "rows": [[{"type": "raw_text", "text": cell} for cell in row] for row in truncated],
+        "rows": [[{"type": "raw_text", "text": cell} for cell in row] for row in processed_rows],
     }
+
+
+def table_block_to_code_block(table_block: dict, max_rows: int = 25) -> str:
+    """Convert a Block Kit table block dict to a monospaced ASCII code block string.
+
+    Capped at max_rows (default 25) to prevent exceeding Slack's 3000-char section limit.
+    """
+    raw_rows = table_block.get("rows", [])
+    if not raw_rows:
+        return ""
+
+    rows: list[list[str]] = []
+    for r in raw_rows:
+        row_cells = []
+        for cell in r:
+            if isinstance(cell, dict):
+                row_cells.append(str(cell.get("text") or ""))
+            else:
+                row_cells.append(str(cell if cell is not None else ""))
+        rows.append(row_cells)
+
+    total_rows = len(rows)
+    overflow = total_rows > max_rows
+    display_rows = rows[:max_rows]
+
+    col_count = max((len(r) for r in display_rows), default=0)
+    if col_count == 0:
+        return ""
+
+    widths = [0] * col_count
+    for row in display_rows:
+        for i, cell in enumerate(row):
+            if i < col_count:
+                widths[i] = max(widths[i], len(cell))
+
+    out: list[str] = []
+    for idx, row in enumerate(display_rows):
+        padded = [row[i].ljust(widths[i]) if i < len(row) else " " * widths[i] for i in range(col_count)]
+        out.append("  ".join(padded))
+        if idx == 0 and len(display_rows) > 1:
+            out.append("  ".join("-" * w for w in widths))
+
+    if overflow:
+        out.append(f"... [{total_rows - max_rows} more rows truncated]")
+
+    return "```\n" + "\n".join(out) + "\n```"
 
 
 _TABLE_RE = re.compile(r"(?:^\|.+\|$\n?)+", re.MULTILINE)
 
 
-def extract_tables(text: str) -> tuple[str, list[dict]]:
+def extract_tables(text: str, max_tables: int = 1) -> tuple[str, list[dict]]:
     """Extract markdown tables from text, returning cleaned text + Block Kit table blocks.
-    Tables are stripped from the text so they don't double-render as code blocks in _md_to_mrkdwn.
+    Only the first max_tables tables are extracted into Block Kit blocks; subsequent tables
+    are left in the markdown text so they render as code blocks in _md_to_mrkdwn.
     """
     tables: list[dict] = []
 
     def _replace(match: re.Match) -> str:
+        if len(tables) >= max_tables:
+            return match.group(0)
         block = _md_table_to_block_kit(match.group(0))
         if block:
             tables.append(block)
@@ -175,6 +238,9 @@ def _truncate(text: str, limit: int = _MAX_TEXT) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 20] + "\n...(truncated)"
+
+
+truncate_text = _truncate
 
 
 def _section(text: str) -> dict[str, Any]:

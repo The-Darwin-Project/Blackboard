@@ -719,3 +719,121 @@ class TestMultiInstallationRouting:
         resolved = await platform._resolve_client("", "org-a", "repo1")
         assert resolved is client
         manager.get_client_for_repo.assert_called_once_with("org-a", "repo1")
+
+
+# ---------------------------------------------------------------------------
+# Test: Compound key tombstoning for 404/422 responses
+# ---------------------------------------------------------------------------
+
+
+class TestCompoundKeyTombstoning:
+    """Verify compound key tombstoning, TTL expiration, and cache pruning."""
+
+    @pytest.mark.asyncio
+    async def test_pulls_404_tombstones_pulls_only(self):
+        """When _list_from_repos gets 404 on pulls, it tombstones repo:pulls but NOT repo:issues."""
+        platform = _make_platform("org/repo")
+        client = AsyncMock()
+
+        # Mock 404 on pulls
+        resp_404 = MagicMock(status_code=404)
+        req = MagicMock()
+        client.get = AsyncMock(side_effect=httpx.HTTPStatusError("Not Found", request=req, response=resp_404))
+
+        # First call hits API, gets 404, tombstones pulls
+        result = await platform._list_from_repos(client, ["org/repo"], "456")
+        assert result == []
+        assert client.get.call_count == 1
+        assert platform._is_tombstoned("org/repo", "pulls") is True
+        # Tombstoning pulls does NOT block issues on the same repo!
+        assert platform._is_tombstoned("org/repo", "issues") is False
+
+        # Second call skips the network request because pulls is tombstoned
+        result2 = await platform._list_from_repos(client, ["org/repo"], "456")
+        assert result2 == []
+        assert client.get.call_count == 1  # No additional call
+
+    @pytest.mark.asyncio
+    async def test_issues_404_tombstones_issues_only(self):
+        """When _poll_issues gets 404 on issues, it tombstones repo:issues but NOT repo:pulls."""
+        platform = _make_platform("org/repo")
+        platform.get_active_keys = AsyncMock(return_value=set())
+        client = AsyncMock()
+
+        resp_404 = MagicMock(status_code=404)
+        req = MagicMock()
+        client.get = AsyncMock(side_effect=httpx.HTTPStatusError("Not Found", request=req, response=resp_404))
+
+        result = await platform._poll_issues(client, ["org/repo"], "456")
+        assert result == []
+        assert client.get.call_count == 1
+        assert platform._is_tombstoned("org/repo", "issues") is True
+        assert platform._is_tombstoned("org/repo", "pulls") is False
+
+        # Subsequent call skips network request
+        result2 = await platform._poll_issues(client, ["org/repo"], "456")
+        assert result2 == []
+        assert client.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tombstone_ttl_expiration(self):
+        """After 600s TTL expires, the tombstone is evicted and the endpoint is queried again."""
+        platform = _make_platform("org/repo")
+        client = AsyncMock()
+
+        start_time = 1000.0
+        with patch("time.monotonic", return_value=start_time):
+            platform._tombstone("org/repo", "pulls", ttl_seconds=600.0)
+            assert platform._is_tombstoned("org/repo", "pulls") is True
+
+        # Before expiration: at start_time + 500s -> still tombstoned
+        with patch("time.monotonic", return_value=start_time + 500.0):
+            assert platform._is_tombstoned("org/repo", "pulls") is True
+
+        # After expiration: at start_time + 601s -> expired and evicted
+        with patch("time.monotonic", return_value=start_time + 601.0):
+            assert platform._is_tombstoned("org/repo", "pulls") is False
+            assert "org/repo:pulls" not in platform._repo_tombstones
+
+            # Now querying _list_from_repos actually attempts client.get
+            resp = MagicMock()
+            resp.json.return_value = []
+            client.get = AsyncMock(return_value=resp)
+            await platform._list_from_repos(client, ["org/repo"], "456")
+            assert client.get.call_count == 1
+
+    def test_tombstone_cache_pruning(self):
+        """When tombstone cache exceeds 1,000 entries, expired entries are pruned."""
+        platform = _make_platform()
+        current_time = 5000.0
+
+        with patch("time.monotonic", return_value=current_time):
+            # Pre-populate with 1001 expired entries
+            for i in range(1001):
+                platform._repo_tombstones[f"repo_{i}:pulls"] = current_time - 10.0
+
+            # Add one fresh entry; _tombstone should trigger prune
+            platform._tombstone("new_repo", "pulls", ttl_seconds=600.0)
+
+            # All expired entries should be pruned, only the active one remains
+            assert len(platform._repo_tombstones) == 1
+            assert "new_repo:pulls" in platform._repo_tombstones
+
+    def test_tombstone_hard_cap_active_storm(self):
+        """When cache exceeds 1,000 unexpired entries, enforces a hard capacity ceiling (800 entries)."""
+        platform = _make_platform()
+        current_time = 5000.0
+
+        with patch("time.monotonic", return_value=current_time):
+            # Pre-populate with 1005 UNEXPIRED entries
+            for i in range(1005):
+                platform._repo_tombstones[f"repo_{i}:pulls"] = current_time + float(i + 1)
+
+            # Trigger tombstone; unexpired prune leaves >1000, triggering hard cap trim to 800 + 1 = 801
+            platform._tombstone("new_repo", "pulls", ttl_seconds=600.0)
+
+            assert len(platform._repo_tombstones) <= 801
+            assert "new_repo:pulls" in platform._repo_tombstones
+            # The oldest repo_0 to repo_204 should have been trimmed away
+            assert "repo_0:pulls" not in platform._repo_tombstones
+

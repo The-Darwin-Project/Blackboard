@@ -144,6 +144,31 @@ class GitHubPlatform:
         }
         # label → (content, expiry_epoch): 5-min TTL, 404 does NOT reset TTL
         self._issue_skill_cache: dict[str, tuple[str, float]] = {}
+        self._repo_tombstones: dict[str, float] = {}
+
+    def _is_tombstoned(self, repo_full: str, endpoint: str) -> bool:
+        """Check if an endpoint for a repo is tombstoned (404/422 cooldown). Lazy eviction."""
+        key = f"{repo_full}:{endpoint}"
+        now = time.monotonic()
+        if key in self._repo_tombstones:
+            if now < self._repo_tombstones[key]:
+                return True
+            del self._repo_tombstones[key]
+        return False
+
+    def _tombstone(self, repo_full: str, endpoint: str, ttl_seconds: float = 600.0) -> None:
+        """Tombstone an endpoint for a repo for ttl_seconds (default 10 minutes).
+
+        Prunes expired entries if cache size exceeds 1,000 entries.
+        """
+        now = time.monotonic()
+        if len(self._repo_tombstones) > 1000:
+            self._repo_tombstones = {k: exp for k, exp in self._repo_tombstones.items() if exp > now}
+            if len(self._repo_tombstones) > 1000:
+                # Enforce hard capacity ceiling by keeping newest 800 entries
+                sorted_entries = sorted(self._repo_tombstones.items(), key=lambda item: item[1])
+                self._repo_tombstones = dict(sorted_entries[-800:])
+        self._repo_tombstones[f"{repo_full}:{endpoint}"] = now + ttl_seconds
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -350,6 +375,8 @@ class GitHubPlatform:
         """
         prs: list[dict] = []
         for repo_full in repos:
+            if self._is_tombstoned(repo_full, "pulls"):
+                continue
             try:
                 resp = await client.get(
                     f"/repos/{repo_full}/pulls",
@@ -359,6 +386,7 @@ class GitHubPlatform:
                     prs.append(self._normalize_pr_data(repo_full, pr_data, installation_id))
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
+                    self._tombstone(repo_full, "pulls")
                     logger.warning(f"GitHub repo list {e.response.status_code} for {repo_full}")
                     continue
                 raise
@@ -404,6 +432,8 @@ class GitHubPlatform:
         issues: list[dict] = []
         active_keys = await self.get_active_keys()
         for repo_full in repos:
+            if self._is_tombstoned(repo_full, "issues"):
+                continue
             try:
                 resp = await client.get(
                     f"/repos/{repo_full}/issues",
@@ -430,6 +460,7 @@ class GitHubPlatform:
                     issues.append(normalized)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
+                    self._tombstone(repo_full, "issues")
                     logger.warning(f"GitHub issues list {e.response.status_code} for {repo_full}")
                     continue
                 raise

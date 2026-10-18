@@ -1389,3 +1389,127 @@ class TestCrossThreadRedirectAck:
         assert redirect_call is not None
         assert redirect_call["channel"] == "D_DM"
         assert "C_INFRA" in redirect_call["text"]
+
+
+# ---------------------------------------------------------------------------
+# Test: Table Rejection Fallback Retry
+# ---------------------------------------------------------------------------
+
+
+class TestTableRejectionFallback:
+    """Verify SlackApiError on table_blocks triggers monospaced code block retry."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error_code", ["invalid_blocks", "invalid_attachments"])
+    async def test_table_rejection_fallback_retries_with_code_block(self, error_code):
+        from slack_sdk.errors import SlackApiError
+
+        sc, _ = _make_channel()
+
+        first_call_error = SlackApiError(
+            message="The request to the Slack API failed.",
+            response={"ok": False, "error": error_code},
+        )
+        sc._app.client.chat_postMessage.side_effect = [
+            first_call_error,
+            {"ok": True, "ts": "1700000001.000002"},
+        ]
+
+        table_blocks = [
+            {
+                "type": "table",
+                "rows": [
+                    [{"type": "raw_text", "text": "ColA"}, {"type": "raw_text", "text": "ColB"}],
+                    [{"type": "raw_text", "text": "Val1"}, {"type": "raw_text", "text": "Val2"}],
+                ],
+            }
+        ]
+
+        await sc._post_to_thread(
+            channel="C_TEST",
+            thread_ts="1700000001.000001",
+            text="Report with table",
+            table_blocks=table_blocks,
+        )
+
+        assert sc._app.client.chat_postMessage.call_count == 2
+
+        # First call included table_blocks in attachments
+        first_call_kwargs = sc._app.client.chat_postMessage.call_args_list[0].kwargs
+        assert first_call_kwargs["channel"] == "C_TEST"
+        assert first_call_kwargs["attachments"] == [{"blocks": table_blocks}]
+
+        # Second call removed table_blocks from attachments and appended section code block
+        second_call_kwargs = sc._app.client.chat_postMessage.call_args_list[1].kwargs
+        assert second_call_kwargs["channel"] == "C_TEST"
+        assert second_call_kwargs["thread_ts"] == "1700000001.000001"
+        assert second_call_kwargs["text"] == "Report with table"
+
+        # Attachments should no longer have table_blocks
+        retry_attachments = second_call_kwargs.get("attachments", [])
+        for att in retry_attachments:
+            assert att.get("blocks") is not table_blocks
+
+        # Fallback section block must contain ASCII code block with table data
+        retry_blocks = second_call_kwargs.get("blocks", [])
+        assert len(retry_blocks) >= 1
+        fallback_block = retry_blocks[-1]
+        assert fallback_block.get("type") == "section"
+        block_text = fallback_block.get("text", {}).get("text", "")
+        assert block_text.startswith("```")
+        assert "ColA" in block_text
+        assert "ColB" in block_text
+        assert "Val1" in block_text
+        assert "Val2" in block_text
+
+    @pytest.mark.asyncio
+    async def test_post_to_thread_table_blocks_fallback_with_colored_attachment(self):
+        """When attachment_color is set, fallback code block is appended to the colored attachment."""
+        from slack_sdk.errors import SlackApiError
+
+        sc, _ = _make_channel()
+        error_response = {
+            "ok": False,
+            "error": "invalid_blocks",
+        }
+        sc._app.client.chat_postMessage.side_effect = [
+            SlackApiError(message="invalid_blocks", response=error_response),
+            {"ok": True, "ts": "1700000002.000001"},
+        ]
+
+        main_block = {"type": "section", "text": {"type": "mrkdwn", "text": "Agent message"}}
+        table_blocks = [
+            {
+                "type": "table",
+                "rows": [
+                    [{"type": "raw_text", "text": "Col1"}],
+                    [{"type": "raw_text", "text": "Val1"}],
+                ],
+            }
+        ]
+
+        await sc._post_to_thread(
+            channel="C_TEST",
+            thread_ts="1700000001.000001",
+            text="Fallback colored test",
+            blocks=[main_block],
+            attachment_color="#3b82f6",
+            table_blocks=table_blocks,
+        )
+
+        assert sc._app.client.chat_postMessage.call_count == 2
+        retry_kwargs = sc._app.client.chat_postMessage.call_args_list[1].kwargs
+
+        # Top-level blocks should NOT contain the fallback block (which would render above the colored attachment)
+        assert "blocks" not in retry_kwargs
+
+        # Attachment blocks should contain main block followed by the fallback table code block
+        attachments = retry_kwargs.get("attachments", [])
+        assert len(attachments) == 1
+        assert attachments[0]["color"] == "#3b82f6"
+        att_blocks = attachments[0]["blocks"]
+        assert len(att_blocks) == 2
+        assert att_blocks[0] == main_block
+        assert att_blocks[1]["type"] == "section"
+        assert "Col1" in att_blocks[1]["text"]["text"]
+

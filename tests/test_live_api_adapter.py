@@ -1197,3 +1197,83 @@ async def test_is_event_closed_or_missing():
     # Returns True when blackboard has no get_event
     assert await _is_event_closed_or_missing(object(), "evt-no-method") is True
     assert await _is_event_closed_or_missing(None, "evt-none-bb") is True
+
+
+# ---------------------------------------------------------------------------
+# Test: Receive loop clean closure vs unexpected error handling
+# ---------------------------------------------------------------------------
+
+
+class TestReceiveLoopClosure:
+    """Verify code 1000/GoAway clean closure logs INFO without traceback and triggers single reconnect."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc,go_away_flag",
+        [
+            (Exception("1000: GoAway deadline exceeded"), False),
+            (Exception("ConnectionClosedOK: 1000"), False),
+            (Exception("Normal disconnect"), True),
+        ],
+    )
+    async def test_clean_closure_logs_info_without_traceback_and_reconnects(self, exc, go_away_flag):
+        adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+        adapter._running = True
+        adapter._go_away_received = go_away_flag
+        adapter._try_reconnect = AsyncMock()
+
+        async def stop_running():
+            adapter._running = False
+        adapter._try_reconnect.side_effect = stop_running
+
+        class CleanSession:
+            def receive(self):
+                async def _gen():
+                    raise exc
+                    yield
+                return _gen()
+
+        adapter._session = CleanSession()
+
+        with patch("src.adapters.live_api_adapter.logger") as mock_logger:
+            await adapter._receive_loop()
+
+            info_calls = [call for call in mock_logger.info.call_args_list if "connection closed cleanly" in str(call)]
+            assert len(info_calls) >= 1
+
+            warn_calls = [call for call in mock_logger.warning.call_args_list if "receive loop error" in str(call)]
+            assert len(warn_calls) == 0
+
+            assert adapter._go_away_received is False
+            adapter._try_reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_clean_exception_logs_warning_with_traceback(self):
+        adapter = LiveAPIAdapter.__new__(LiveAPIAdapter)
+        adapter._running = True
+        adapter._go_away_received = False
+        adapter._try_reconnect = AsyncMock()
+
+        async def stop_running():
+            adapter._running = False
+        adapter._try_reconnect.side_effect = stop_running
+
+        class ErrorSession:
+            def receive(self):
+                async def _gen():
+                    raise RuntimeError("500 Internal Server Error")
+                    yield
+                return _gen()
+
+        adapter._session = ErrorSession()
+
+        with patch("src.adapters.live_api_adapter.logger") as mock_logger:
+            await adapter._receive_loop()
+
+            warn_calls = [call for call in mock_logger.warning.call_args_list if "receive loop error" in str(call)]
+            assert len(warn_calls) >= 1
+            call_kwargs = warn_calls[0].kwargs
+            assert call_kwargs.get("exc_info") is True
+
+            adapter._try_reconnect.assert_called_once()
+

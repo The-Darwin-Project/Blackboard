@@ -43,10 +43,12 @@ from typing import TYPE_CHECKING, Any
 
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_sdk.errors import SlackApiError
 
 from .formatter import (
     format_turn, format_event_summary, get_turn_attachment_color,
-    get_agent_notification_text, extract_tables,
+    get_agent_notification_text, extract_tables, table_block_to_code_block,
+    truncate_text, MAX_SECTION_TEXT,
 )
 from ..models import ConversationTurn, EventEvidence
 
@@ -1218,6 +1220,37 @@ class SlackChannel:
             if attachments:
                 kwargs["attachments"] = attachments
             await self._app.client.chat_postMessage(**kwargs)
+        except SlackApiError as e:
+            if table_blocks and any(err in str(e) for err in ("invalid_blocks", "invalid_attachments", "uneven_table_rows_not_allowed")):
+                logger.warning("Slack rejected table blocks (%s); falling back to monospaced code block", e)
+                retry_attachments = [a for a in attachments if a.get("blocks") is not table_blocks]
+                fallback_section_blocks = []
+                for tb in table_blocks:
+                    code_block = table_block_to_code_block(tb)
+                    fallback_text = truncate_text(code_block, MAX_SECTION_TEXT)
+                    fallback_section_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}})
+                retry_kwargs: dict[str, Any] = {
+                    "channel": channel, "thread_ts": thread_ts, "text": text,
+                }
+                if retry_attachments:
+                    # In Slack, top-level blocks render above attachments.
+                    # When attachment_color is used, append fallback sections to the attachment
+                    # so the table appears below the message body.
+                    if "blocks" in retry_attachments[0]:
+                        retry_attachments[0]["blocks"] = list(retry_attachments[0]["blocks"]) + fallback_section_blocks
+                    else:
+                        retry_attachments.append({"blocks": fallback_section_blocks})
+                    retry_kwargs["attachments"] = retry_attachments
+                else:
+                    fallback_blocks = list(kwargs.get("blocks", [])) + fallback_section_blocks
+                    if fallback_blocks:
+                        retry_kwargs["blocks"] = fallback_blocks
+                try:
+                    await self._app.client.chat_postMessage(**retry_kwargs)
+                except Exception as retry_err:
+                    logger.warning("Slack fallback post failed: %s", retry_err)
+            else:
+                logger.warning("Slack post failed: %s", e)
         except Exception as e:
             logger.warning(f"Slack post failed: {e}")
 
