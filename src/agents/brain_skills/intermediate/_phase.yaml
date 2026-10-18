@@ -1,8 +1,7 @@
 thinking_level: "medium"
-temperature: 0.7
+temperature: 1.0
 priority: 90
-max_output_tokens: 2048
+max_output_tokens: 8192
 description: "Evaluate intermediate turns during active dispatch. Tools:
-  reply_to_agent, message_agent, wait_for_agent. Token limit: 256 (agent-only),
-  1024 (user or huddle present). Thinking escalates to high when last turn is
-  user."
+  reply_to_agent, message_agent, wait_for_agent. Normalized token limit: 8192.
+  Thinking escalates to high when last turn is user."

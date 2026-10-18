@@ -605,6 +605,7 @@ class LiveAPIAdapter:
         """Background task: receive model output and handle tool calls."""
         logger.info("Cortex _receive_loop started (task=%s)", asyncio.current_task().get_name())
         msg_count = 0
+        reconnect_needed = False
         while self._running and self._session:
             try:
                 logger.debug("Cortex _receive_loop: entering async for on session.receive()")
@@ -638,14 +639,37 @@ class LiveAPIAdapter:
                 logger.info("Cortex _receive_loop cancelled (received %d msgs total)", msg_count)
                 break
             except Exception as e:
-                logger.warning("Cortex receive loop error (after %d msgs): %s", msg_count, e, exc_info=True)
+                is_clean = (
+                    self._go_away_received
+                    or getattr(e, "code", None) in (1000, 1001)
+                    or getattr(getattr(e, "rcvd", None), "code", None) in (1000, 1001)
+                    or any(
+                        s in str(e)
+                        for s in (
+                            "1000",
+                            "1001",
+                            "GoAway deadline exceeded",
+                            "ConnectionClosedOK",
+                        )
+                    )
+                )
+                if is_clean:
+                    logger.info("Cortex Live API connection closed cleanly: %s", e)
+                else:
+                    logger.warning(
+                        "Cortex receive loop error (after %d msgs): %s",
+                        msg_count,
+                        e,
+                        exc_info=True,
+                    )
                 if self._running:
-                    await self._try_reconnect()
+                    reconnect_needed = True
                     break
         logger.info("Cortex _receive_loop exited (running=%s, session=%s, msgs=%d)",
                      self._running, self._session is not None, msg_count)
-        if self._go_away_received and self._running:
-            self._go_away_received = False
+        self._go_away_received = False
+        if reconnect_needed and self._running:
+            logger.info("Scheduling Live API reconnection")
             await self._try_reconnect()
 
     async def _receive_watchdog(self, get_last_msg_time) -> None:

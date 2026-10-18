@@ -310,14 +310,14 @@ def test_blocker_handles_dict_turns_for_response_and_phase():
     ) is True
 
 
-# T-2: JARVIS idle-ack text (thoughts="watching." or "ok") does not block event closure (returns False).
+# T-2: JARVIS idle-ack text does not block event closure (returns False).
 def test_jarvis_idle_ack_text_does_not_block():
-    turn1 = SimpleNamespace(actor="jarvis", action="message", status=MessageStatus.SENT, thoughts="watching.")
-    ctx1 = _ctx(conversation=[turn1])
-    assert _pred_unevaluated_close(ctx1) is False
-    turn2 = SimpleNamespace(actor="jarvis", action="message", status=MessageStatus.SENT, thoughts="ok")
-    ctx2 = _ctx(conversation=[turn2])
-    assert _pred_unevaluated_close(ctx2) is False
+    acks = ["watching", "watching.", "silently observing", "acknowledged", "confirmed", "understood", "no observations", "noted", "ok", "ok."]
+    for ack in acks:
+        turn = SimpleNamespace(actor="jarvis", action="message", status=MessageStatus.SENT, thoughts=ack)
+        ctx = _ctx(conversation=[turn])
+        assert _pred_unevaluated_close(ctx) is False, f"Ack {ack} should not block close"
+        assert has_unevaluated_close_blocker([turn]) is False, f"Ack {ack} should not be a close blocker"
 
 # T-3: Unhandled user message (actor="user", status="sent") blocks closure (returns True).
 def test_unhandled_user_message_blocks_closure():

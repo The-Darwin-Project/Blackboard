@@ -425,11 +425,21 @@ class TestJarvisResponse:
     def test_keeps_respond_when_jarvis_message_pending(self):
         turns = [
             _turn("brain", "respond_jarvis"),
-            _turn("jarvis", "message"),
+            _turn("jarvis", "message", thoughts="What is the next step?"),
         ]
         ctx = _ctx(event_source="aligner", conversation=turns)
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "respond_to_jarvis" in _names(result)
+
+    def test_strips_respond_when_last_jarvis_turn_is_acknowledgment(self):
+        for ack in ("watching", "silently observing", "acknowledged", "confirmed", "understood", "no observations", "ok"):
+            turns = [
+                _turn("brain", "respond_jarvis"),
+                _turn("jarvis", "message", thoughts=ack),
+            ]
+            ctx = _ctx(event_source="aligner", conversation=turns)
+            result = evaluate_gates(ALL_SCHEMAS, ctx)
+            assert "respond_to_jarvis" not in _names(result), f"respond_to_jarvis should be stripped for ack: {ack}"
 
 
 class TestJarvisWait:

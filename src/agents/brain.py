@@ -421,7 +421,7 @@ VOLUME_PATHS = {
 # System states (intermediate, waiting) preempt Brain phase via early-return in _match_phases.
 BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
     "triage":    [],
-    "dispatch":  ["dispatch", "coordination"],
+    "dispatch":  ["dispatch"],
     "verify":    ["post-agent", "defer-wake"],
     "escalate":  ["post-agent", "escalate"],
     "close":     ["close"],
@@ -2305,6 +2305,7 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, thoughts_turn)
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
+            self._last_processed[event_id] = time.time()
 
         if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
@@ -2411,12 +2412,13 @@ class Brain:
         Most specific phase wins (lowest priority number).
         Falls back to legacy heuristic if loader unavailable.
         """
+        fallback_temp = getattr(self, "temperature", 1.0)
         if not self._skill_loader:
-            return "high", 0.5, self.max_output_tokens
+            return "high", fallback_temp, self.max_output_tokens
 
         best_priority = float("inf")
         best_thinking = "high"
-        best_temp = 0.5
+        best_temp = fallback_temp
         best_tokens = self.max_output_tokens
 
         for phase_name in active_phases:
@@ -2426,9 +2428,19 @@ class Brain:
                 if priority < best_priority:
                     best_priority = priority
                     best_thinking = meta["thinking_level"]
-                    best_temp = meta.get("temperature", 0.5)
+                    best_temp = meta.get("temperature", fallback_temp)
                     best_tokens = meta.get("max_output_tokens", self.max_output_tokens)
 
+        try:
+            best_temp = float(best_temp) if best_temp is not None else fallback_temp
+        except (ValueError, TypeError):
+            best_temp = fallback_temp
+
+        try:
+            best_tokens = int(best_tokens) if best_tokens is not None else self.max_output_tokens
+        except (ValueError, TypeError):
+            best_tokens = self.max_output_tokens
+        best_tokens = max(best_tokens, 8192)
         logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp}, tokens={best_tokens} (priority={best_priority})")
         return best_thinking, best_temp, best_tokens
 
@@ -6070,6 +6082,20 @@ class Brain:
             elif not has_unread and not is_locked:
                 time_since = time.time() - self._last_processed.get(eid, 0)
                 if not is_waiting and time_since > 60:
+                    trailing_thoughts = 0
+                    for t in reversed(event.conversation):
+                        act = t.action if hasattr(t, "action") else (t.get("action") if isinstance(t, dict) else None)
+                        actor = t.actor if hasattr(t, "actor") else (t.get("actor") if isinstance(t, dict) else None)
+                        if actor == "brain" and act == "thoughts":
+                            trailing_thoughts += 1
+                        else:
+                            break
+                    if trailing_thoughts >= 2:
+                        logger.warning(
+                            "Idle safety net suppressed for %s: %d consecutive brain.thoughts turns (thinking loop guard)",
+                            eid, trailing_thoughts,
+                        )
+                        continue
                     logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since:.0f}s)")
                     to_enqueue.append(eid)
 

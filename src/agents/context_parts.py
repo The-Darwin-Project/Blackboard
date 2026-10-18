@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from src.utils.jarvis_ack import is_jarvis_acknowledgment
 from src.utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text
 
 if TYPE_CHECKING:
@@ -322,10 +323,19 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
             prefix = f"[USER{action_suffix}]"
         text = f"{prefix}: {raw}" if raw else prefix
     elif turn.actor == "jarvis" and turn.action == "message":
-        text = (
-            f"[AGENT jarvis]: {turn.thoughts or turn.result or ''}\n\n"
-            f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
-        )
+        raw = turn.thoughts or turn.result or ""
+        if is_jarvis_acknowledgment(raw):
+            text = f"[AGENT jarvis]: {raw}" if raw else "[AGENT jarvis]"
+        elif "?" in raw or any(
+            raw.lower().lstrip().startswith(prefix)
+            for prefix in ("could you", "can you", "what", "why", "how", "where", "when", "who", "please")
+        ):
+            text = (
+                f"[AGENT jarvis]: {raw}\n\n"
+                f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
+            )
+        else:
+            text = f"[AGENT jarvis]: {raw}" if raw else "[AGENT jarvis]"
     else:
         raw = turn.evidence or turn.result or turn.thoughts or ""
         text = f"[AGENT {turn.actor}]: {raw}" if raw else f"[AGENT {turn.actor}]"

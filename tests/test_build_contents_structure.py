@@ -193,6 +193,21 @@ class TestTurnToPartsLabeling:
         assert len(parts) >= 1
         assert parts[0]["text"].startswith("[AGENT jarvis]: ")
 
+    def test_t12b_jarvis_message_ack_does_not_inject_directive(self):
+        for ack in ("watching", "watching.", "silently observing", "acknowledged", "confirmed", "understood", "no observations", "ok"):
+            turn = _make_turn(actor="jarvis", action="message", thoughts=ack)
+            parts = Brain._turn_to_parts(turn)
+            assert len(parts) == 1
+            assert parts[0]["text"] == f"[AGENT jarvis]: {ack}"
+            assert "JARVIS asked you a question" not in parts[0]["text"]
+
+    def test_t12c_jarvis_message_question_injects_directive(self):
+        for q in ("Could you verify the deployment status?", "What is the error?", "Can you check the logs?"):
+            turn = _make_turn(actor="jarvis", action="message", thoughts=q)
+            parts = Brain._turn_to_parts(turn)
+            assert len(parts) == 1
+            assert "JARVIS asked you a question. Send your answer back to JARVIS before doing anything else." in parts[0]["text"]
+
 
 # ---------------------------------------------------------------------------
 # T6–T10: _build_contents structural markers (async)
@@ -2360,3 +2375,81 @@ class TestParallelFunctionCallExecution:
             res = contents_valid[-1]["parts"][0]["functionResponse"]["response"]["result"]
             assert "</functionResponse>" not in res
             assert "setting phase to dispatch" in res
+
+
+# ---------------------------------------------------------------------------
+# Test: LLM Parameter Resolution & Phase Coordination Decoupling
+# ---------------------------------------------------------------------------
+
+
+class TestResolveLlmParams:
+    """Verify _resolve_llm_params and phase decoupling for dispatch and coordination."""
+
+    def test_dispatch_phase_llm_params_without_huddle(self):
+        """For dispatch phase without pending huddle: thinking=high, temp=1.0, max_output_tokens>=8192."""
+        from unittest.mock import AsyncMock
+        from src.agents.brain import Brain
+
+        bb = AsyncMock()
+        brain = Brain(blackboard=bb)
+
+        event = _make_event(brain_phase="dispatch")
+        ctx = {
+            "has_related": False,
+            "has_graph_edges": False,
+            "has_recent_closed": False,
+            "has_slack_participant": False,
+            "is_intermediate": False,
+            "is_waiting": False,
+            "has_pending_huddle": False,
+            "has_agent_result": False,
+            "event_domain": None,
+        }
+
+        active_phases = brain._match_phases(event, ctx)
+        assert "dispatch" in active_phases
+        assert "coordination" not in active_phases
+
+        thinking, temp, tokens = brain._resolve_llm_params(active_phases)
+        assert thinking == "high"
+        assert temp == 1.0
+        assert tokens >= 8192
+
+    def test_dispatch_phase_with_pending_huddle_loads_coordination_priority_25(self):
+        """When has_pending_huddle=True: coordination is dynamically loaded with priority 25."""
+        from unittest.mock import AsyncMock
+        from src.agents.brain import Brain
+
+        bb = AsyncMock()
+        brain = Brain(blackboard=bb)
+
+        event = _make_event(brain_phase="dispatch")
+        ctx = {
+            "has_related": False,
+            "has_graph_edges": False,
+            "has_recent_closed": False,
+            "has_slack_participant": False,
+            "is_intermediate": False,
+            "is_waiting": False,
+            "has_pending_huddle": True,
+            "has_agent_result": False,
+            "event_domain": None,
+        }
+
+        active_phases = brain._match_phases(event, ctx)
+        assert "dispatch" in active_phases
+        assert "coordination" in active_phases
+
+        coord_meta = brain._skill_loader.get_phase_meta("coordination")
+        assert coord_meta is not None
+        assert coord_meta.get("priority") == 25
+
+        dispatch_meta = brain._skill_loader.get_phase_meta("dispatch")
+        assert dispatch_meta is not None
+        assert dispatch_meta.get("priority") == 30
+
+        thinking, temp, tokens = brain._resolve_llm_params(active_phases)
+        assert thinking == coord_meta.get("thinking_level")
+        assert temp == coord_meta.get("temperature", 1.0)
+        assert tokens >= 8192
+

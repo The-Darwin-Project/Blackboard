@@ -86,27 +86,33 @@ class TestMatchPhases:
         assert "source" in active
         assert "dispatch" not in active
 
-    def test_dispatch_loads_dispatch_and_coordination(self):
+    def test_dispatch_decoupled_from_coordination(self):
         ctx = self._make_ctx()
         event = self._make_event_stub(brain_phase="dispatch")
         active = Brain._match_phases(None, event, ctx)
         assert "dispatch" in active
-        assert "coordination" in active
+        assert "coordination" not in active
         assert "post-agent" not in active
+
+        # With pending huddle, coordination is dynamically loaded
+        ctx_huddle = self._make_ctx(has_pending_huddle=True)
+        active_huddle = Brain._match_phases(None, event, ctx_huddle)
+        assert "dispatch" in active_huddle
+        assert "coordination" in active_huddle
 
     def test_legacy_investigate_alias_resolves_to_dispatch(self):
         ctx = self._make_ctx()
         event = self._make_event_stub(brain_phase="investigate")
         active = Brain._match_phases(None, event, ctx)
         assert "dispatch" in active
-        assert "coordination" in active
+        assert "coordination" not in active
 
     def test_legacy_execute_alias_resolves_to_dispatch(self):
         ctx = self._make_ctx()
         event = self._make_event_stub(brain_phase="execute")
         active = Brain._match_phases(None, event, ctx)
         assert "dispatch" in active
-        assert "coordination" in active
+        assert "coordination" not in active
 
     def test_verify_loads_post_agent_and_defer_wake(self):
         ctx = self._make_ctx()

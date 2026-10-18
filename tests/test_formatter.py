@@ -290,3 +290,159 @@ def test_report_md_brain_response_friday_label():
     turn = _make_turn(actor="brain", action="response", thoughts="Here is the answer")
     md = build_event_report_md(_make_event_doc(turn))
     assert "**FRIDAY:** Here is the answer" in md
+
+
+# ── Block Kit Table Formatting & Fallback Code Block ───────────────────
+
+class TestSlackTableFormatting:
+    """Tests for Block Kit table normalization, rectangular padding, and ASCII code block fallback."""
+
+    def test_ragged_row_padding(self):
+        """A table where rows have varying number of cells gets padded with '-' so all rows have col_count cells."""
+        from src.channels.formatter import extract_tables
+
+        md = (
+            "| Col1 | Col2 | Col3 | Col4 |\n"
+            "|---|---|---|---|\n"
+            "| A | B |\n"
+            "| C | D | E | F |\n"
+        )
+        cleaned, tables = extract_tables(md)
+        assert len(tables) == 1
+        table = tables[0]
+        assert table.get("type") == "table"
+        rows = table.get("rows", [])
+        assert len(rows) == 3  # header + 2 data rows
+        for row in rows:
+            assert len(row) == 4
+        # Check row 1 (A, B) was padded with "-"
+        row1_texts = [cell["text"] for cell in rows[1]]
+        assert row1_texts == ["A", "B", "-", "-"]
+
+    def test_empty_cell_sanitization(self):
+        """Empty string '', whitespace '  ', or None in cells are normalized to '-'."""
+        from src.channels.formatter import extract_tables
+
+        md = (
+            "| H1 | H2 | H3 |\n"
+            "|---|---|---|\n"
+            "| A | | C |\n"
+            "|   | E | |\n"
+        )
+        cleaned, tables = extract_tables(md)
+        assert len(tables) == 1
+        rows = tables[0].get("rows", [])
+        assert len(rows) == 3
+        # Check row 1
+        row1_texts = [cell["text"] for cell in rows[1]]
+        assert row1_texts == ["A", "-", "C"]
+        # Check row 2
+        row2_texts = [cell["text"] for cell in rows[2]]
+        assert row2_texts == ["-", "E", "-"]
+        for row in rows:
+            for cell in row:
+                assert cell["text"] != ""
+                assert cell["text"].strip() != ""
+
+    def test_column_cap_at_10_columns(self):
+        """A table with 15 columns is capped at 10 columns (_MAX_TABLE_COLS)."""
+        from src.channels.formatter import _MAX_TABLE_COLS, extract_tables
+
+        assert _MAX_TABLE_COLS == 10
+        headers = " | ".join(f"Col{i}" for i in range(1, 16))
+        seps = " | ".join("---" for _ in range(15))
+        values = " | ".join(f"Val{i}" for i in range(1, 16))
+        md = f"| {headers} |\n| {seps} |\n| {values} |\n"
+        cleaned, tables = extract_tables(md)
+        assert len(tables) == 1
+        rows = tables[0].get("rows", [])
+        for row in rows:
+            assert len(row) == 10
+        row0_texts = [c["text"] for c in rows[0]]
+        assert row0_texts == [f"Col{i}" for i in range(1, 11)]
+
+    def test_secondary_table_preservation(self):
+        """extract_tables(text, max_tables=1) extracts only 1 table block and leaves remaining tables in markdown text."""
+        from src.channels.formatter import extract_tables
+
+        table1 = (
+            "| H1 | H2 |\n"
+            "|---|---|\n"
+            "| A | B |\n"
+        )
+        table2 = (
+            "| H3 | H4 |\n"
+            "|---|---|\n"
+            "| C | D |\n"
+        )
+        text = f"First table:\n{table1}\nSecond table:\n{table2}\nDone."
+        cleaned, tables = extract_tables(text, max_tables=1)
+        assert len(tables) == 1
+        # First table was extracted
+        assert "| H1 | H2 |" not in cleaned
+        # Second table is preserved in cleaned text
+        assert "| H3 | H4 |" in cleaned
+        assert "| C | D |" in cleaned
+
+    def test_table_block_to_code_block_ascii_format(self):
+        """Converts a table block dict into an ASCII aligned table in ``` code block."""
+        from src.channels.formatter import table_block_to_code_block
+
+        table_block = {
+            "type": "table",
+            "rows": [
+                [{"type": "raw_text", "text": "Service"}, {"type": "raw_text", "text": "Status"}],
+                [{"type": "raw_text", "text": "auth"}, {"type": "raw_text", "text": "healthy"}],
+                [{"type": "raw_text", "text": "payment"}, {"type": "raw_text", "text": "degraded"}],
+            ],
+        }
+        code_block = table_block_to_code_block(table_block)
+        assert code_block.startswith("```")
+        assert code_block.endswith("```")
+        assert "Service" in code_block
+        assert "Status" in code_block
+        assert "auth" in code_block
+        assert "healthy" in code_block
+        assert "payment" in code_block
+        assert "degraded" in code_block
+
+    def test_table_block_to_code_block_row_truncation(self):
+        """If rows exceed 25, truncates and appends '... [N more rows truncated]'."""
+        from src.channels.formatter import table_block_to_code_block
+
+        rows = [[{"type": "raw_text", "text": f"Row{i}"}] for i in range(30)]
+        table_block = {
+            "type": "table",
+            "rows": rows,
+        }
+        code_block = table_block_to_code_block(table_block)
+        assert code_block.startswith("```")
+        assert code_block.endswith("```")
+        assert "... [5 more rows truncated]" in code_block
+
+    def test_formatter_exports_and_cell_sanitization(self):
+        """Verifies public exports and safe cell sanitization (None text, raw types)."""
+        from src.channels.formatter import (
+            truncate_text, MAX_SECTION_TEXT, table_block_to_code_block, _md_table_to_block_kit
+        )
+
+        assert MAX_SECTION_TEXT == 2900
+        assert truncate_text("short") == "short"
+
+        # Safe handling of None in dict text and non-dict cells
+        table_block = {
+            "type": "table",
+            "rows": [
+                [{"type": "raw_text", "text": None}, "plain_cell"],
+                [None, 123],
+            ],
+        }
+        cb = table_block_to_code_block(table_block)
+        assert "plain_cell" in cb
+        assert "123" in cb
+        assert "None" not in cb  # Empty/None text converted to empty or space, never literal "None"
+
+        # Col count clamp
+        block = _md_table_to_block_kit([["h1"], ["c1"]])
+        assert block is not None
+        assert len(block["rows"][0]) == 1

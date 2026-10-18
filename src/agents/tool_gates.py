@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Callable, Literal
 if TYPE_CHECKING:
     from ..models import EventDocument
 
+from src.utils.jarvis_ack import is_jarvis_acknowledgment
+
 
 @dataclass(frozen=True)
 class GateContext:
@@ -183,6 +185,9 @@ def _pred_jarvis_response(ctx: GateContext) -> bool:
     else:
         for t in reversed(ctx.conversation):
             if t.actor == "jarvis" and t.action in ("message", "insight"):
+                raw = str(getattr(t, "thoughts", None) or getattr(t, "result", None) or "")
+                if is_jarvis_acknowledgment(raw):
+                    break
                 has_unanswered = True
                 break
             if t.actor == "brain" and t.action == "respond_jarvis":
@@ -253,8 +258,8 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
         if actor == "jarvis":
             thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
             result = t.get("result") if isinstance(t, dict) else getattr(t, "result", None)
-            text_val = str(thoughts or result or "").lower().strip()
-            if text_val in ("watching", "watching.", "ok", "ok."):
+            raw = str(thoughts or result or "")
+            if is_jarvis_acknowledgment(raw):
                 continue
 
         if actor in ("jarvis", "user") and action == "message" and (not status_val or status_val in ("sent", "delivered")):
