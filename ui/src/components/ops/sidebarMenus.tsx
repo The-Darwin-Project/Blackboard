@@ -6,7 +6,14 @@
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 // 5. [Pattern]: alignerPendingMenuItems — Copy only (Create Event deferred to v2, needs full WS+Brain chain).
 // 6. [Pattern]: jenkinsQueueMenuItems — Open in Jenkins (safeOpen, XSS prevention) + Copy Job Name.
-// 7. [Pattern]: Pure helpers (isGitHubTodo, isGitHubIssue) for platform detection and label/key formatting.
+// 7. [Pattern]: Exported Headhunter helpers shared with EventSidebar + HeadhunterQueuePanel:
+//    isGitHubTodo / isGitHubIssue (platform + PR-vs-Issue detection), formatHeadhunterLabel (label, optional
+//    { truncate: false }), getHeadhunterItemKey (React key; idx only used when no todo_id and no item number).
+// 8. [Constraint]: GitHub detection parses URLs (hostname === github.com). Never substring-match target_url.
+//    Precedence: explicit platform > github.com host > mr_iid (GitLab) > pr_number/issue_number (GitHub).
+// 9. [Pattern]: hhMenuItems + eventMenuItems open links via safeOpen (http/https only) and support GitLab MR,
+//    GitHub PR and GitHub Issue. eventMenuItems labels follow the evidence field the URL came from
+//    (gitlab_context > github_context.pr_url > github_issue_context.html_url > target_url host/path).
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
@@ -17,12 +24,44 @@ import type { AgentRegistryEntry, KargoStageStatus, JiraMission, JenkinsPendingI
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
 
+const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
+
+/** Parse an absolute http(s) URL; null for relative, malformed or non-http(s) input. */
+function parseHttpUrl(url: string | null | undefined): URL | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** For github.com URLs returns the third path segment kind ('issues' | 'pull' | ...); null otherwise. */
+function githubPathKind(url: string | null | undefined): string | null {
+  const parsed = parseHttpUrl(url);
+  if (!parsed || !GITHUB_HOSTS.has(parsed.hostname.toLowerCase())) return null;
+  // /{owner}/{repo}/{issues|pull}/{n}
+  return parsed.pathname.split('/').filter(Boolean)[2] ?? '';
+}
+
+function isGitHubUrl(url: string | null | undefined): boolean {
+  return githubPathKind(url) !== null;
+}
+
 export function isGitHubTodo(todo: HeadhunterTodo): boolean {
-  return todo.platform === 'github' || Boolean(!todo.platform && (todo.pr_number != null || todo.issue_number != null || todo.target_url?.includes('github.com')));
+  if (todo.platform === 'github') return true;
+  if (todo.platform === 'gitlab') return false;
+  if (isGitHubUrl(todo.target_url)) return true;
+  // Platform unset: an MR iid is GitLab-only, so it wins over PR/issue numbers.
+  if (todo.mr_iid != null) return false;
+  return todo.pr_number != null || todo.issue_number != null;
 }
 
 export function isGitHubIssue(todo: HeadhunterTodo): boolean {
-  return isGitHubTodo(todo) && Boolean(todo.issue_number != null || todo.target_url?.includes('/issues/'));
+  if (!isGitHubTodo(todo)) return false;
+  if (todo.pr_number != null) return false;
+  return todo.issue_number != null || githubPathKind(todo.target_url) === 'issues';
 }
 
 export function agentMenuItems(
@@ -51,11 +90,27 @@ export function eventMenuItems(
   const gc = ev?.gitlab_context as Record<string, unknown> | undefined;
   const ghc = ev?.github_context as Record<string, unknown> | undefined;
   const ghic = ev?.github_issue_context as Record<string, unknown> | undefined;
-  const mrUrl = evt.source === 'headhunter'
-    ? (gc?.target_url as string || ghc?.pr_url as string || ghic?.html_url as string || ev?.target_url as string || null)
-    : null;
-  const isGhIssue = mrUrl?.includes('/issues/');
-  const mrLabel = isGhIssue ? 'Open Issue in GitHub' : (ghc || mrUrl?.includes('github.com')) ? 'Open PR in GitHub' : 'Open MR in GitLab';
+  const nonEmpty = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  // Label follows the evidence field the URL came from, so an empty github_context ({}) or a GitLab URL
+  // can never be mislabelled as GitHub. Only the generic target_url falls back to host/path inspection.
+  type MrKind = 'gitlab' | 'pr' | 'issue';
+  let mrUrl: string | null = null;
+  let mrKind: MrKind = 'gitlab';
+  if (evt.source === 'headhunter') {
+    const candidates: Array<[string | null, MrKind | null]> = [
+      [nonEmpty(gc?.target_url), 'gitlab'],
+      [nonEmpty(ghc?.pr_url), 'pr'],
+      [nonEmpty(ghic?.html_url), 'issue'],
+      [nonEmpty(ev?.target_url), null],
+    ];
+    const hit = candidates.find(([url]) => url);
+    if (hit) {
+      mrUrl = hit[0];
+      const pathKind = githubPathKind(mrUrl);
+      mrKind = hit[1] ?? (pathKind === null ? 'gitlab' : pathKind === 'issues' ? 'issue' : 'pr');
+    }
+  }
+  const mrLabel = mrKind === 'issue' ? 'Open Issue in GitHub' : mrKind === 'pr' ? 'Open PR in GitHub' : 'Open MR in GitLab';
 
   return [
     { id: 'chat', label: 'Open Chat', icon: <MessageSquare size={18} />, color: '#3b82f6', onClick: () => selectEvent(evt.id) },
@@ -95,20 +150,25 @@ export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
   ];
 }
 
-export function formatHeadhunterLabel(todo: HeadhunterTodo): string {
+export function formatHeadhunterLabel(todo: HeadhunterTodo, opts: { truncate?: boolean } = {}): string {
+  const { truncate = true } = opts;
   const isGitHub = isGitHubTodo(todo);
   const num = isGitHub ? (todo.pr_number ?? todo.issue_number) : todo.mr_iid;
   const title = isGitHub ? (todo.pr_title ?? todo.issue_title ?? '') : (todo.mr_title ?? '');
   const pfx = isGitHub ? '#' : '!';
-  const safeTitle = Array.from(title).slice(0, 30).join('');
+  // Code-point safe truncation (Array.from) so emoji surrogate pairs are never split.
+  const safeTitle = truncate ? Array.from(title).slice(0, 30).join('') : title;
   if (num != null) return `${pfx}${num}${safeTitle ? ' ' + safeTitle : ''}`;
   return safeTitle || 'Queued Item';
 }
 
 export function getHeadhunterItemKey(todo: HeadhunterTodo, idx: number): string | number {
   if (todo.todo_id != null) return todo.todo_id;
-  const num = todo.pr_number ?? todo.issue_number ?? '';
-  return `gh-${num}-${todo.project_path}-${idx}`;
+  const pfx = isGitHubTodo(todo) ? 'gh' : 'gl';
+  const num = todo.pr_number ?? todo.issue_number ?? todo.mr_iid;
+  // Stable identity when we have one; list index only as a last resort (it shifts as the queue drains).
+  if (num != null) return `${pfx}-${num}-${todo.project_path ?? ''}`;
+  return `${pfx}-${todo.project_path ?? ''}-${idx}`;
 }
 
 export function alignerPendingMenuItems(item: { target: string; key: string }): ContextMenuItem[] {
