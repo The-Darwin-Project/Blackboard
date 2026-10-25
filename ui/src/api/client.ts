@@ -357,6 +357,8 @@ export interface HeadhunterTodo {
   platform?: 'gitlab' | 'github';
   pr_number?: number;
   pr_title?: string;
+  issue_number?: number;
+  issue_title?: string;
   queue_position?: number;
 }
 

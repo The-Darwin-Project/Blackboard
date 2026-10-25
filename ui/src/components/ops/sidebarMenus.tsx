@@ -6,6 +6,7 @@
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 // 5. [Pattern]: alignerPendingMenuItems — Copy only (Create Event deferred to v2, needs full WS+Brain chain).
 // 6. [Pattern]: jenkinsQueueMenuItems — Open in Jenkins (safeOpen, XSS prevention) + Copy Job Name.
+// 7. [Pattern]: Pure helpers (isGitHubTodo, isGitHubIssue) for platform detection and label/key formatting.
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
@@ -15,6 +16,14 @@ import { safeOpen } from '../../utils/safeOpen';
 import type { AgentRegistryEntry, KargoStageStatus, JiraMission, JenkinsPendingItem } from '../../api/types';
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
+
+export function isGitHubTodo(todo: HeadhunterTodo): boolean {
+  return todo.platform === 'github' || Boolean(!todo.platform && (todo.pr_number != null || todo.issue_number != null || todo.target_url?.includes('github.com')));
+}
+
+export function isGitHubIssue(todo: HeadhunterTodo): boolean {
+  return isGitHubTodo(todo) && Boolean(todo.issue_number != null || todo.target_url?.includes('/issues/'));
+}
 
 export function agentMenuItems(
   name: string, reg: AgentRegistryEntry | undefined, setHotspot: (id: string | null) => void,
@@ -45,7 +54,8 @@ export function eventMenuItems(
   const mrUrl = evt.source === 'headhunter'
     ? (gc?.target_url as string || ghc?.pr_url as string || ghic?.html_url as string || ev?.target_url as string || null)
     : null;
-  const mrLabel = ghic?.html_url ? 'Open Issue in GitHub' : ghc?.pr_url ? 'Open PR in GitHub' : 'Open MR in GitLab';
+  const isGhIssue = mrUrl?.includes('/issues/');
+  const mrLabel = isGhIssue ? 'Open Issue in GitHub' : (ghc || mrUrl?.includes('github.com')) ? 'Open PR in GitHub' : 'Open MR in GitLab';
 
   return [
     { id: 'chat', label: 'Open Chat', icon: <MessageSquare size={18} />, color: '#3b82f6', onClick: () => selectEvent(evt.id) },
@@ -69,11 +79,36 @@ export function eventMenuItems(
 }
 
 export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
+  const isGitHub = isGitHubTodo(todo);
+  const isIssue = isGitHubIssue(todo);
+  const openLabel = isIssue ? 'Open Issue in GitHub' : isGitHub ? 'Open PR in GitHub' : 'Open MR in GitLab';
+  const copyLabel = isGitHub ? (isIssue ? 'Copy Issue URL' : 'Copy PR URL') : 'Copy MR URL';
+
   return [
-    { id: 'open', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
+    { id: 'open', label: openLabel, icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
-    { id: 'copy', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(todo.target_url) },
+    { id: 'copy', label: copyLabel, icon: <Copy size={18} />, color: '#64748b', onClick: () => {
+      if (todo.target_url && navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(todo.target_url).catch(() => {});
+      }
+    }},
   ];
+}
+
+export function formatHeadhunterLabel(todo: HeadhunterTodo): string {
+  const isGitHub = isGitHubTodo(todo);
+  const num = isGitHub ? (todo.pr_number ?? todo.issue_number) : todo.mr_iid;
+  const title = isGitHub ? (todo.pr_title ?? todo.issue_title ?? '') : (todo.mr_title ?? '');
+  const pfx = isGitHub ? '#' : '!';
+  const safeTitle = Array.from(title).slice(0, 30).join('');
+  if (num != null) return `${pfx}${num}${safeTitle ? ' ' + safeTitle : ''}`;
+  return safeTitle || 'Queued Item';
+}
+
+export function getHeadhunterItemKey(todo: HeadhunterTodo, idx: number): string | number {
+  if (todo.todo_id != null) return todo.todo_id;
+  const num = todo.pr_number ?? todo.issue_number ?? '';
+  return `gh-${num}-${todo.project_path}-${idx}`;
 }
 
 export function alignerPendingMenuItems(item: { target: string; key: string }): ContextMenuItem[] {

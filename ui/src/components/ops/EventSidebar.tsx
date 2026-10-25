@@ -19,7 +19,11 @@ import { useSchedules } from '../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon, { JenkinsIcon } from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
-import { agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems, jenkinsQueueMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
+import {
+  agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems,
+  jenkinsQueueMenuItems, kargoStageMenuItems, jiraMissionMenuItems,
+  formatHeadhunterLabel, getHeadhunterItemKey, isGitHubTodo,
+} from './sidebarMenus';
 import { safeOpen } from '../../utils/safeOpen';
 import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
@@ -352,19 +356,23 @@ export default function EventSidebar() {
               forceCollapsed={!!selectedEventId}>
               {hhError && <EmptyLabel>Failed to load queue</EmptyLabel>}
               {!hhError && demoHH.length === 0 && <EmptyLabel>No pending todos</EmptyLabel>}
-              {demoHH.map(todo => (
-                <TreeNode key={todo.todo_id}
-                  icon={<SourceIcon source="headhunter" size={18} />}
-                  label={`!${todo.mr_iid} ${todo.mr_title?.slice(0, 30) || ''}`}
-                  sublabel={todo.action.replace(/_/g, ' ')}
-                  sublabelColor={todo.pipeline_status === 'failed' ? '#ef4444' : '#64748b'}
-                  onClick={() => safeOpen(todo.target_url)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setCtxMenu({ x: e.clientX, y: e.clientY, items: hhMenuItems(todo) });
-                  }}
-                />
-              ))}
+              {demoHH.map((todo, idx) => {
+                const isGitHub = isGitHubTodo(todo);
+                return (
+                  <TreeNode
+                    key={getHeadhunterItemKey(todo, idx)}
+                    icon={<SourceIcon source={isGitHub ? 'github' : 'headhunter'} size={18} />}
+                    label={formatHeadhunterLabel(todo)}
+                    sublabel={todo.action?.replace(/_/g, ' ') || ''}
+                    sublabelColor={todo.pipeline_status === 'failed' ? '#ef4444' : '#64748b'}
+                    onClick={() => safeOpen(todo.target_url)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, items: hhMenuItems(todo) });
+                    }}
+                  />
+                );
+              })}
             </TreeGroup>
 
             {/* Schedules Group */}

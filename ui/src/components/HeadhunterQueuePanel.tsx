@@ -3,7 +3,7 @@
 // 1. [Pattern]: Polls GET /queue/headhunter/pending every 30s. Pure display component.
 // 2. [Pattern]: Shows pending items (GitLab todos + GitHub queued PRs) sorted oldest-first (FIFO).
 // 3. [Constraint]: Read-only -- no actions, just observability.
-// 4. [Pattern]: Platform discriminator: platform ?? "gitlab". Prefix: "!" for gitlab, "#" for github.
+// 4. [Pattern]: Platform discriminator: isGitHubTodo helper. Prefix: "!" for gitlab, "#" for github. External links routed via safeOpen.
 // 5. [Gotcha]: All HeadhunterTodo fields are optional except action/project_path/author/created_at.
 /**
  * Headhunter Queue panel — shows pending GitLab todos waiting to be processed.
@@ -13,6 +13,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 import { getHeadhunterPending } from '../api/client';
 import type { HeadhunterTodo } from '../api/client';
+import { isGitHubTodo, getHeadhunterItemKey } from './ops/sidebarMenus';
+import { safeOpen } from '../utils/safeOpen';
 
 const ACTION_BADGE: Record<string, { bg: string; text: string }> = {
   build_failed:       { bg: '#7f1d1d', text: '#fca5a5' },
@@ -84,27 +86,27 @@ export default function HeadhunterQueuePanel() {
     );
   }
 
-  const gitlabItems = todos.filter(t => (t.platform ?? 'gitlab') === 'gitlab');
-  const githubItems = todos.filter(t => t.platform === 'github');
+  const gitlabItems = todos.filter(t => !isGitHubTodo(t));
+  const githubItems = todos.filter(t => isGitHubTodo(t));
 
   function renderItem(todo: HeadhunterTodo, i: number) {
-    const platform = todo.platform ?? 'gitlab';
-    const isGitHub = platform === 'github';
+    const isGitHub = isGitHubTodo(todo);
     const badge = ACTION_BADGE[todo.action] || { bg: '#1e293b', text: '#94a3b8' };
     const pipeDot = PIPELINE_DOT[todo.pipeline_status ?? 'unknown'] || PIPELINE_DOT.unknown;
     const projectName = todo.project_path.split('/').pop() || todo.project_path;
-    // Platform-aware prefix: "!" for GitLab MRs, "#" for GitHub PRs
+    // Platform-aware prefix: "!" for GitLab MRs, "#" for GitHub items
     const pfx = isGitHub ? '#' : '!';
-    const itemNum = isGitHub ? (todo.pr_number ?? '') : (todo.mr_iid ?? '');
-    const itemTitle = isGitHub ? (todo.pr_title ?? '') : (todo.mr_title ?? '');
-    const isFirst = i === 0;
+    const itemNum = isGitHub ? (todo.pr_number ?? todo.issue_number ?? '') : (todo.mr_iid ?? '');
+    const itemTitle = isGitHub ? (todo.pr_title ?? todo.issue_title ?? '') : (todo.mr_title ?? '');
+    const isFirst = todo === todos[0];
 
     return (
       <a
-        key={todo.todo_id ?? `gh-${todo.pr_number}-${todo.project_path}`}
+        key={getHeadhunterItemKey(todo, i)}
         href={todo.target_url}
         target="_blank"
         rel="noopener noreferrer"
+        onClick={(e) => { e.preventDefault(); safeOpen(todo.target_url); }}
         style={{
           display: 'block',
           padding: '10px 12px',
@@ -123,7 +125,7 @@ export default function HeadhunterQueuePanel() {
             background: badge.bg, color: badge.text,
             padding: '2px 8px', borderRadius: 8, fontSize: 10, fontWeight: 600,
           }}>
-            {todo.action.replace(/_/g, ' ')}
+            {todo.action?.replace(/_/g, ' ') || ''}
           </span>
           {!isGitHub && (
             <span style={{
@@ -154,7 +156,7 @@ export default function HeadhunterQueuePanel() {
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           marginBottom: 4,
         }}>
-          {pfx}{itemNum} {itemTitle}
+          {pfx}{itemNum}{itemTitle ? ' ' + itemTitle : ''}
         </div>
         {/* Row 3: project + author */}
         <div style={{
