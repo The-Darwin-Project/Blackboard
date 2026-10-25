@@ -114,3 +114,34 @@ describe('Layout connection degraded banner', () => {
     consoleSpy.mockRestore();
   });
 });
+
+describe('Layout header branding', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders the Darwin logo image alongside the brand text', () => {
+    vi.mocked(useAuth).mockReturnValue({
+      isAuthenticated: true,
+      isLoading: false,
+      user: { profile: { email: 'test@example.com' } },
+    } as unknown as ReturnType<typeof useAuth>);
+    vi.mocked(useWSConnection).mockReturnValue({
+      connectionDegraded: false,
+      reconnect: vi.fn(),
+    } as unknown as ReturnType<typeof useWSConnection>);
+
+    render(
+      <QueryClientProvider client={new QueryClient()}><MemoryRouter>
+        <Layout>
+          <div>content</div>
+        </Layout>
+      </MemoryRouter></QueryClientProvider>
+    );
+
+    const logo = screen.getByAltText('Darwin');
+    expect(logo.tagName).toBe('IMG');
+    expect(logo.getAttribute('src')).toBe('/darwin.svg');
+    expect(screen.getAllByText('Darwin').length).toBeGreaterThan(0);
+  });
+});
