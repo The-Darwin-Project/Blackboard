@@ -52,4 +52,10 @@ puppeteer_test.js
 
 # Logs
 *.log
-probe-data/***.plan.md
+probe-data/**
+*.plan.md
+
+# Graphify knowledge graph ephemeral cache, manifest timestamps, and internal state
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/.*

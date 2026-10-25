@@ -1,0 +1,31 @@
+---
+description: Codebase knowledge graph navigation, god-node discovery, and dependency query guidelines
+alwaysApply: true
+---
+
+# Codebase Knowledge Graph Navigation
+
+The repository maintains an automated knowledge graph generated via Graphify under `graphify-out/`.
+
+## 1. Core Principle: Graph First, Grep Second
+
+Before launching broad file searches or reading dozens of modules to trace call paths:
+1. **Consult `graphify-out/GRAPH_REPORT.md`**: Review architectural clusters, top god nodes (highest-degree incoming/outgoing call and dependency junctions), and cross-subsystem bridges.
+2. **Consult `graphify-out/graph.json`**: For targeted dependency tracing, check module relationships, imported functions, and AST linkages.
+3. **Interactive Visualizer**: Use `graphify-out/graph.html` when visual cluster inspection or community structure exploration is needed.
+
+## 2. Ephemeral vs Durable Artifacts
+
+- **Durable Artifacts (Committed)**:
+  - `graphify-out/graph.json`: Machine-readable GraphRAG AST graph.
+  - `graphify-out/graph.html`: Self-contained interactive Sigma.js visualizer.
+  - `graphify-out/GRAPH_REPORT.md`: God nodes, module linkages, and cluster analysis.
+- **Ephemeral State (Never Commit)**:
+  - `graphify-out/cache/`: Internal parser cache.
+  - `graphify-out/manifest.json`: Local file modification timestamps.
+  - `graphify-out/.*`: Tool internal runtime flags and dotfiles.
+
+## 3. Knowledge Graph Maintenance
+
+The graph is kept fresh automatically by `.github/workflows/graphify.yaml` on every push to `main` and weekly schedule.
+When adding new non-code trees (e.g. documentation dumps, test suites, or scratch data) that should not inflate the graph, update `.graphifyignore` to keep indexed files bounded under 500.

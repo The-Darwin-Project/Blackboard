@@ -1,0 +1,118 @@
+# .github/workflows/graphify.yaml
+# @ai-rules:
+# 1. [Trigger & Concurrency]: Runs on push to main (ignoring graphify-out/**, helm/**, .github/**), weekly cron, or manual dispatch. Serialized via graphify-sync concurrency group.
+# 2. [Security & Scoping]: Uses split-token authentication with repository scoping fallback to GITHUB_TOKEN; pinned dependency version.
+# 3. [GitOps Resilience]: Headless AST extraction with zero LLM API requirements; push via HEAD:main with retry backoff and clean staged diff check.
+name: Codebase Knowledge Graph Maintenance
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'graphify-out/**'
+      - 'helm/**'
+      - '.github/**'
+  schedule:
+    - cron: '0 2 * * 0' # Weekly Sunday at 02:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: graphify-sync
+  cancel-in-progress: false
+
+jobs:
+  generate-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DARWIN_APP_ID }}
+          private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install graphify
+        run: |
+          pip install --upgrade "graphifyy==0.9.93"
+
+      - name: Run two-stage graph extraction
+        run: |
+          graphify extract . --code-only --force
+          GRAPHIFY_BACKEND=none graphify cluster-only . --no-label
+
+      - name: Commit and push graph updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md
+
+          if git diff --staged --quiet; then
+            echo "Knowledge graph is up to date. No changes to commit."
+            exit 0
+          fi
+
+          mkdir -p "${{ runner.temp }}/graphify-artifacts"
+          cp graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md "${{ runner.temp }}/graphify-artifacts/"
+
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Commit attempt $i/$MAX_RETRIES"
+
+            if [ "$i" -gt 1 ]; then
+              git fetch origin main
+              git reset --hard origin/main
+              cp "${{ runner.temp }}"/graphify-artifacts/* graphify-out/
+              git add graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md
+            fi
+
+            if git diff --staged --quiet; then
+              echo "Nothing to commit after rebasing against main."
+              exit 0
+            fi
+
+            git commit -m "chore(graphify): update knowledge graph [skip ci]"
+
+            if git push origin HEAD:main; then
+              echo "Successfully pushed knowledge graph update."
+              exit 0
+            fi
+
+            echo "Push failed, retrying in $(( i * 2 )) seconds..."
+            sleep $(( i * 2 ))
+          done
+
+          echo "Failed to push knowledge graph after $MAX_RETRIES attempts."
+          exit 1
+
+      - name: Upload graph artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-artifacts
+          path: |
+            graphify-out/graph.json
+            graphify-out/graph.html
+            graphify-out/GRAPH_REPORT.md
+          retention-days: 30

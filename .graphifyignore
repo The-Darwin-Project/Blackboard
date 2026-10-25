@@ -1,0 +1,45 @@
+# .graphifyignore
+# Test suites and test fixtures
+tests/**
+gemini-sidecar/tests/**
+ui/src/__tests__/**
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.spec.ts
+**/*.spec.tsx
+puppeteer_test.js
+test.js
+test.html
+test-react-keys.js
+
+# Build artifacts & dependencies
+ui/dist/**
+ui/public/**
+ui/src/assets/**
+node_modules/**
+.venv/**
+venv/**
+__pycache__/**
+*.egg-info/**
+
+# Infrastructure charts & manifests
+helm/**
+
+# Ephemeral probe data & scratch scripts
+probe-data/**
+scripts/**
+skill-author/**
+.claude/**
+.cursor/prompts/**
+*.plan.md
+
+# Historical review logs and incident reports
+docs/reviews/**
+docs/investigations/**
+docs/plans/**
+docs/lessons-learned/**
+docs/*-Review_*.md
+docs/*Review*.md
+docs/events/**
+docs/evt-*.md
