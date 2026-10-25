@@ -12,6 +12,7 @@ Phase 3.5:  After deduplication, asserts no duplicate content + gated/ metadata 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -334,7 +335,7 @@ class TestWorkerHandoffBalanceProbe:
         assert "approval gates" in flat[i:i + 160]
 
 
-def test_agent_dispatch_defer_rules_alignment(loader):
+def test_agent_dispatch_defer_rules_alignment(loader, monkeypatch):
     """VMER-2187: Verify intermediate deferral rules harmonization across skills.
 
     Tests T-1 through T-6 from Test Specification & Code Review findings:
@@ -353,26 +354,37 @@ def test_agent_dispatch_defer_rules_alignment(loader):
     # T-1 & T-2: Section-scoped checks in always/01
     sec_01 = _section(skill_01, "## Agent Progress vs Completed Work")
     assert "close, defer, or transition phases" not in sec_01
-    assert "do not defer" not in sec_01.lower()
-    assert "defer the event (`defer_event`)" in sec_01
+    assert not re.search(r"(do not|never|don't)[^.]*\bdefer", sec_01.lower())
+    assert "defer the event (`defer_event`" in sec_01
+    assert "when `defer_event` is available" in sec_01
 
     # T-3: Section-scoped checks in always/09
     sec_09_cap = _section(skill_09, "## Capabilities Per Phase")
-    assert "external async result" in sec_09_cap
-    assert "call wait_for_agent ONCE to park" in sec_09_cap
-    assert "valid only for capacity gating" not in sec_09_cap
-    assert "in-flight agent is actively progressing" in sec_09_cap
-    assert "Do not transition to VERIFY while an agent dispatch is still running" in sec_09_cap
+    flat_09 = " ".join(sec_09_cap.split())
+    assert "external async result" in flat_09
+    assert "call wait_for_agent ONCE to park" in flat_09
+    assert "valid only for capacity gating" not in flat_09
+    assert "in-flight agent is still running" in flat_09
+    assert "stay in the current phase to park or defer" in flat_09
+    assert "transition to VERIFY once the agent's final result arrives" in flat_09
+    assert "Do not transition to VERIFY while an agent dispatch" not in flat_09
+    assert "Once the agent has returned its final result" in flat_09
 
     # T-4: Intermediate phase configuration and awareness
     phase_yaml = yaml.safe_load((SKILLS_DIR / "intermediate" / "_phase.yaml").read_text())
-    assert "defer_event" in phase_yaml["description"]
+    from src.agents.tool_gates import INTERMEDIATE_TOOLS
+    assert "defer_event" in INTERMEDIATE_TOOLS
+    for tool in ("reply_to_agent", "message_agent", "wait_for_agent", "defer_event"):
+        assert tool in phase_yaml["description"]
 
     skill_intermediate_awareness = _skill(loader, "intermediate/awareness.md")
+    assert "scheduling a calibrated deferral" in " ".join(skill_intermediate_awareness.split())
     assert "defer_event" in skill_intermediate_awareness
 
-    # T-6: Timekeeper context loader compatibility
-    from src.routes.timekeeper import _load_brain_context
-    ctx = _load_brain_context()
-    assert len(ctx) > 0
+    # T-6: Timekeeper context loader compatibility (reset the module-level cache
+    # so the check reads the skill files on disk, independent of test order)
+    from src.routes import timekeeper
+    monkeypatch.setattr(timekeeper, "_brain_context_cache", None)
+    ctx = timekeeper._load_brain_context()
     assert "Agent Progress vs Completed Work" in ctx
+    assert "when `defer_event` is available" in ctx

@@ -8,8 +8,9 @@ Dispatching a second agent while one is already working on the same event create
 
 An agent is currently working on this event. Your tool set is restricted to
 communication capabilities: replying to agents, sending messages, recording
-wait states, and responding to JARVIS. Dispatch and mutation capabilities
-are not available until the agent completes.
+wait states, scheduling a calibrated deferral, and responding to JARVIS.
+Dispatch and mutation capabilities are not available until the agent
+completes.
 
 Turn handling during active dispatch (huddles, user messages, JARVIS messages):
 see always/12-actor-responses.md § Actor Response Model.
@@ -20,4 +21,7 @@ status — not evidence of event-level problems. When the Dispatcher reports
 "paused," the event is already deferred with a calibrated wait. No
 investigation or retry action is needed from you.
 
-When an agent is actively progressing on a long-running task, call defer_event with a calibrated interval rather than repeatedly waiting.
+When an agent is actively progressing on a long-running task, wait once to
+park, then defer with a calibrated interval (30-3600s) when `defer_event` is
+available, rather than repeatedly waiting. The defer parks your turn without
+cancelling the running agent; its final result is delivered on completion.

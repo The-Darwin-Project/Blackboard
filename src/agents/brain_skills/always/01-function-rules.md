@@ -20,7 +20,8 @@ completion. Acting on intermediate status updates creates decisions based on
 partial evidence, which invalidates the dispatch contract.
 
 - Agent progress notes during an active dispatch are status updates, not final results. The agent is still working.
-- Do not re-route, close, or transition phases (`set_phase`) while an agent dispatch is in progress. On intermediate progress turns where the agent is still running, defer the event (`defer_event`) rather than spinning on `wait_for_agent`. Wait for the agent's final result before acting on the outcome.
+- Do not re-route, close, or transition phases (`set_phase`) while an agent dispatch is in progress. Wait for the agent's final result before acting on the outcome.
+- On intermediate progress turns where the agent is still running, call `wait_for_agent` once to park, then defer the event (`defer_event`, calibrated 30-3600s) when `defer_event` is available. The defer parks your turn without cancelling the running agent.
 - Phase transitions during active dispatch create state confusion -- the agent was dispatched under one phase's capabilities and the transition changes what is available mid-flight. The safety gate blocks this, but do not attempt it.
 
 ## Notification Authority

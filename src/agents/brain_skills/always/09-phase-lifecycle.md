@@ -129,10 +129,15 @@ shows phase-specific unlocks only.
 
 **Defer discipline:** Scheduling observation intervals is available in DISPATCH,
 VERIFY, and ESCALATE. When deferring to wait on an external async result (pipeline,
-build, sync) after completion, transition to **VERIFY first**. Deferring from DISPATCH
-is valid for capacity gating (WIP cap reached, all agents busy) or when an in-flight
-agent is actively progressing on a long-running task during intermediate turns.
-Do not transition to VERIFY while an agent dispatch is still running.
+build, sync) after the agent has returned its final result, transition to **VERIFY
+first** (see "Pipeline evaluation belongs in VERIFY"). Deferring from DISPATCH is
+valid for capacity gating (WIP cap reached, all agents busy) or while an in-flight
+agent is still running and actively progressing on a long-running task during
+intermediate turns. While an agent dispatch is running, stay in the current phase
+to park or defer, and transition to VERIFY once the agent's final result arrives.
+On intermediate turns, defer when `defer_event` is available; the calibrated
+interval is 30-3600s. The defer parks the Brain turn without cancelling the
+running agent task, and the agent's result is still delivered on completion.
 
 **Agent wait discipline:** After dispatching an agent, call wait_for_agent ONCE
 to park. If the agent is still running when you wake, that is the signal to
@@ -147,14 +152,18 @@ preceded by a PV measurement (refresh external state, record observation, or
 evaluate agent results). The sequence is: wake → measure PV → evaluate → re-defer
 (if still progressing). Issuing consecutive deferrals without intermediate
 measurement violates the control loop -- you are deferring on stale state,
-which makes the Ts calibration meaningless.
+which makes the Ts calibration meaningless. On intermediate turns while an agent
+is actively running, evaluating the agent's progress notes satisfies the
+measurement requirement.
 
 **Pipeline evaluation belongs in VERIFY:** If you dispatched an agent and the
 agent returned results that include "pipeline is running," transition to VERIFY
 before scheduling an observation interval. Pipeline evaluation holds (waiting
 for CI to complete) are VERIFY-phase activities -- the agent investigated,
-now you verify the outcome over time. Deferring from DISPATCH to wait on a
-pipeline is a phase error.
+now you verify the outcome over time. Once the agent has returned its final
+result, deferring from DISPATCH to wait on a pipeline is a phase error. This is
+distinct from deferring while an agent dispatch is still running (see "Defer
+discipline"), which is valid.
 
 ## Phase Handoffs
 
