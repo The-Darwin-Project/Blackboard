@@ -19,3 +19,5 @@ conversation turns (`[Dispatch: ...]`). Dispatcher messages are system-level
 status — not evidence of event-level problems. When the Dispatcher reports
 "paused," the event is already deferred with a calibrated wait. No
 investigation or retry action is needed from you.
+
+When an agent is actively progressing on a long-running task, call defer_event with a calibrated interval rather than repeatedly waiting.

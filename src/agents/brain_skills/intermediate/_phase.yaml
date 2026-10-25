@@ -3,5 +3,5 @@ temperature: 1.0
 priority: 90
 max_output_tokens: 8192
 description: "Evaluate intermediate turns during active dispatch. Tools:
-  reply_to_agent, message_agent, wait_for_agent. Normalized token limit: 8192.
+  reply_to_agent, message_agent, wait_for_agent, defer_event. Normalized token limit: 8192.
   Thinking escalates to high when last turn is user."
