@@ -15,7 +15,6 @@
  */
 import { useEffect, useMemo } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Activity } from 'lucide-react';
 import { OpsControlProvider, useOpsControl } from '../contexts/OpsStateContext';
 import { useWSConnection } from '../contexts/WebSocketContext';
 import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
@@ -111,11 +110,9 @@ function LayoutInner() {
     <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
       {/* Header -- clean: logo + tabs only */}
       <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-4 py-1.5 flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
-            <Activity className="w-4.5 h-4.5 text-white" />
-          </div>
-          <span className="text-sm font-semibold text-text-primary hidden lg:block">Darwin</span>
+        <div className="flex items-center gap-2.5">
+          <img src="/darwin.svg" alt="Darwin" className="w-7 h-7 rounded-lg shadow-sm" />
+          <span className="text-sm font-semibold text-text-primary hidden lg:block tracking-tight">Darwin</span>
         </div>
 
         <nav className="flex items-center gap-0.5">
