@@ -571,6 +571,35 @@ class TestT5WorkflowSyntaxAndTokenStrategy:
             "Workflow @ai-rules must document that graphifyy (double-y) is the official package"
         )
 
+    def test_t5_github_pages_deployment_configuration(self, workflow_yaml: dict) -> None:
+        """Verify GitHub Pages artifact upload and deployment job configuration."""
+        # 1. upload-pages-artifact in generate-graph
+        upload_pages = [
+            s for s in _job_steps(workflow_yaml)
+            if str(s.get("uses", "")).startswith("actions/upload-pages-artifact@")
+        ]
+        assert len(upload_pages) == 1, "generate-graph job must include actions/upload-pages-artifact"
+        assert "steps.extract.outcome == 'success'" in upload_pages[0].get("if", "")
+
+        # 2. deploy-pages job
+        assert "deploy-pages" in workflow_yaml["jobs"], "Workflow must define deploy-pages job"
+        deploy_job = workflow_yaml["jobs"]["deploy-pages"]
+        assert deploy_job.get("needs") == "generate-graph"
+        assert deploy_job.get("if") == "github.ref == 'refs/heads/main'"
+
+        perms = deploy_job.get("permissions", {})
+        assert perms.get("pages") == "write"
+        assert perms.get("id-token") == "write"
+
+        env = deploy_job.get("environment", {})
+        assert env.get("name") == "github-pages"
+
+        deploy_step = [
+            s for s in deploy_job.get("steps", [])
+            if str(s.get("uses", "")).startswith("actions/deploy-pages@")
+        ]
+        assert len(deploy_step) == 1, "deploy-pages job must invoke actions/deploy-pages"
+
 
 # ============================================================================
 # T-6: Anti-recursion git protection (.github/workflows/graphify.yaml)
