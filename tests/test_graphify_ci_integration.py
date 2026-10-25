@@ -142,6 +142,7 @@ class TestT1GitignoreExclusions:
             ("graphify-out/cache/ast_cache.json", True),
             ("graphify-out/manifest.json", True),
             ("graphify-out/.cloud-cta-shown", True),
+            ("graphify-out/2026-10-25/", True),
             ("graphify-out/graph.json", False),
             ("graphify-out/graph.html", False),
             ("graphify-out/GRAPH_REPORT.md", False),
@@ -383,11 +384,11 @@ class TestT4ExtractionArtifactsAndContracts:
         assert "graphify extract . --code-only --force" in commands, (
             "Extract step must execute extract with --code-only --force to avoid remote LLM costs"
         )
-        assert "GRAPHIFY_BACKEND=none graphify cluster-only . --no-label" in commands, (
-            "Extract step must execute cluster-only with GRAPHIFY_BACKEND=none and --no-label"
+        assert "GRAPHIFY_BACKEND=none graphify cluster-only ." in commands, (
+            "Extract step must execute cluster-only with GRAPHIFY_BACKEND=none"
         )
         assert commands.index("graphify extract . --code-only --force") < commands.index(
-            "GRAPHIFY_BACKEND=none graphify cluster-only . --no-label"
+            "GRAPHIFY_BACKEND=none graphify cluster-only ."
         ), "extract must run before cluster-only"
 
     def test_t4_generated_artifacts_validity(self) -> None:

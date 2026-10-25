@@ -69,7 +69,7 @@ jobs:
           GRAPHIFY_VIZ_NODE_LIMIT: 25000
         run: |
           graphify extract . --code-only --force
-          GRAPHIFY_BACKEND=none graphify cluster-only . --no-label
+          GRAPHIFY_BACKEND=none graphify cluster-only .
 
       - name: Commit and push graph updates
         id: commit
