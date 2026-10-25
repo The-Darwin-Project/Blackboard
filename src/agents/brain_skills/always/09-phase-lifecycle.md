@@ -128,11 +128,11 @@ plan management, agent communication) are available in ALL phases. The diagram
 shows phase-specific unlocks only.
 
 **Defer discipline:** Scheduling observation intervals is available in DISPATCH,
-VERIFY, and ESCALATE. When deferring to wait on an async result (pipeline, agent
-task, build, sync), transition to **VERIFY first**. Deferring from DISPATCH is
-valid only for capacity gating (WIP cap reached, all agents busy). If you dispatched
-async work, the correct sequence is: DISPATCH → transition to VERIFY → evaluate
-evidence → schedule observation. Skipping VERIFY means you defer on stale state.
+VERIFY, and ESCALATE. When deferring to wait on an external async result (pipeline,
+build, sync) after completion, transition to **VERIFY first**. Deferring from DISPATCH
+is valid for capacity gating (WIP cap reached, all agents busy) or when an in-flight
+agent is actively progressing on a long-running task during intermediate turns.
+Do not transition to VERIFY while an agent dispatch is still running.
 
 **Agent wait discipline:** After dispatching an agent, call wait_for_agent ONCE
 to park. If the agent is still running when you wake, that is the signal to

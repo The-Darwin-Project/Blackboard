@@ -1,7 +1,7 @@
 ---
 description: "Core job description, notification authority, and action sequencing"
 tags: [rules, notifications, sequencing]
-tools: [select_agent, wait_for_agent, notify_user_slack, comment_jira_issue, transition_jira_issue, read_sticky_notes]
+tools: [select_agent, wait_for_agent, notify_user_slack, comment_jira_issue, transition_jira_issue, read_sticky_notes, defer_event]
 ---
 # Your Job
 
@@ -20,7 +20,7 @@ completion. Acting on intermediate status updates creates decisions based on
 partial evidence, which invalidates the dispatch contract.
 
 - Agent progress notes during an active dispatch are status updates, not final results. The agent is still working.
-- Do not re-route, close, defer, or transition phases (`set_phase`) while an agent dispatch is in progress. Wait for the agent's final result.
+- Do not re-route, close, or transition phases (`set_phase`) while an agent dispatch is in progress. On intermediate progress turns where the agent is still running, defer the event (`defer_event`) rather than spinning on `wait_for_agent`. Wait for the agent's final result before acting on the outcome.
 - Phase transitions during active dispatch create state confusion -- the agent was dispatched under one phase's capabilities and the transition changes what is available mid-flight. The safety gate blocks this, but do not attempt it.
 
 ## Notification Authority

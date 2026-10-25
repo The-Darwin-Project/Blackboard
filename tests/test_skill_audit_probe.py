@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 SKILLS_DIR = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
 
@@ -331,3 +332,47 @@ class TestWorkerHandoffBalanceProbe:
         flat = " ".join(body.split())
         i = flat.index("sensor inputs for you to evaluate against")
         assert "approval gates" in flat[i:i + 160]
+
+
+def test_agent_dispatch_defer_rules_alignment(loader):
+    """VMER-2187: Verify intermediate deferral rules harmonization across skills.
+
+    Tests T-1 through T-6 from Test Specification & Code Review findings:
+    - Tool-to-skill indexing: always/01 in loader.get_tool_skills("defer_event")
+    - T-1: Blanket deferral ban removed from always/01-function-rules.md
+    - T-2: Intermediate deferral permitted on active wake in always/01-function-rules.md
+    - T-3: External async distinction and single wait discipline in always/09-phase-lifecycle.md
+    - T-4: defer_event present in intermediate/_phase.yaml and intermediate/awareness.md
+    - T-6: Timekeeper context loader compatibility
+    """
+    assert "always/01-function-rules.md" in loader.get_tool_skills("defer_event")
+
+    skill_01 = _skill(loader, "always/01-function-rules.md")
+    skill_09 = _skill(loader, "always/09-phase-lifecycle.md")
+
+    # T-1 & T-2: Section-scoped checks in always/01
+    sec_01 = _section(skill_01, "## Agent Progress vs Completed Work")
+    assert "close, defer, or transition phases" not in sec_01
+    assert "do not defer" not in sec_01.lower()
+    assert "defer the event (`defer_event`)" in sec_01
+
+    # T-3: Section-scoped checks in always/09
+    sec_09_cap = _section(skill_09, "## Capabilities Per Phase")
+    assert "external async result" in sec_09_cap
+    assert "call wait_for_agent ONCE to park" in sec_09_cap
+    assert "valid only for capacity gating" not in sec_09_cap
+    assert "in-flight agent is actively progressing" in sec_09_cap
+    assert "Do not transition to VERIFY while an agent dispatch is still running" in sec_09_cap
+
+    # T-4: Intermediate phase configuration and awareness
+    phase_yaml = yaml.safe_load((SKILLS_DIR / "intermediate" / "_phase.yaml").read_text())
+    assert "defer_event" in phase_yaml["description"]
+
+    skill_intermediate_awareness = _skill(loader, "intermediate/awareness.md")
+    assert "defer_event" in skill_intermediate_awareness
+
+    # T-6: Timekeeper context loader compatibility
+    from src.routes.timekeeper import _load_brain_context
+    ctx = _load_brain_context()
+    assert len(ctx) > 0
+    assert "Agent Progress vs Completed Work" in ctx
