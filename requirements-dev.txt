@@ -3,9 +3,15 @@
 # 1. [Constraint]: NEVER add test deps to requirements.txt -- they ship in the production Docker image.
 # 2. [Pattern]: Inherits prod deps via -r requirements.txt. Only test-specific packages here.
 # 3. [Constraint]: httpx is already in requirements.txt (prod dep). Do not duplicate here.
+# 4. [Provenance]: graphifyy (double-y) is the official PyPI name for Graphify-Labs/graphify; pin must match .github/workflows/graphify.yaml.
 
 -r requirements.txt
 
 pytest>=8.0.0
 pytest-asyncio>=0.25.0
 fakeredis>=2.26.0
+
+# Knowledge-graph CI tests (tests/test_graphify_ci_integration.py) need the graphify runtime.
+# NOTE: "graphifyy" (double-y) is the official PyPI package for Graphify-Labs/graphify (CLI: graphify) -- not a typo.
+# Keep the pin in sync with .github/workflows/graphify.yaml.
+graphifyy==0.9.93
