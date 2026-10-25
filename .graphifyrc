@@ -1,0 +1,3 @@
+# .graphifyrc
+# Graphify configuration: map Cursor rules (.mdc) to markdown
+language.mdc = .md

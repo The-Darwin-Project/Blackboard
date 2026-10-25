@@ -1,0 +1,219 @@
+# .github/workflows/graphify.yaml
+# @ai-rules:
+# 1. [Trigger & Concurrency]: Runs on push to main (ignoring graphify-out/**, helm/**, .github/**), weekly cron, or manual dispatch. Serialized via graphify-sync concurrency group. Job is gated on github.ref == refs/heads/main so workflow_dispatch from other refs never gets write credentials.
+# 2. [Security & Scoping]: Split-token authentication (GitHub App token with GITHUB_TOKEN fallback) scoped to this repo. checkout uses persist-credentials: false; the token is injected via GH_TOKEN only for the commit/push step (never during pip install or graphify extract). Use $RUNNER_TEMP in run: scripts, not ${{ runner.temp }}.
+# 3. [Dependency Provenance]: "graphifyy" (double-y) pinned to 0.9.93 is the OFFICIAL PyPI package for Graphify-Labs/graphify (CLI: graphify). It is NOT a typosquat of "graphify"; do not flag or rename it.
+# 4. [GitOps Resilience]: Headless AST extraction with zero LLM API requirements. The commit step skips when only volatile fields differ from HEAD (graph.json built_at_commit, GRAPH_REPORT.md header date and "Built from commit" line), pushes via HEAD:main with up to 5 attempts (re-sync to origin/main and restore artifacts from $RUNNER_TEMP between attempts), and does not sleep after the final failed attempt. tests/test_graphify_ci_integration.py executes this step's script against a temp bare remote; keep the step id "commit" stable.
+# 5. [Artifacts]: upload-artifact runs only when the extract step (id: extract) succeeded. Pages artifact is prepared under $RUNNER_TEMP/pages and deployed to GitHub Pages via actions/deploy-pages.
+name: Codebase Knowledge Graph Maintenance
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'graphify-out/**'
+      - 'helm/**'
+      - '.github/**'
+  schedule:
+    - cron: '0 2 * * 0' # Weekly Sunday at 02:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: graphify-sync
+  cancel-in-progress: false
+
+jobs:
+  generate-graph:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DARWIN_APP_ID }}
+          private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # "graphifyy" (double-y) is the official PyPI name of Graphify-Labs/graphify (CLI: graphify); not a typosquat.
+      - name: Install graphify
+        run: |
+          pip install --upgrade "graphifyy==0.9.93"
+
+      - name: Run two-stage graph extraction
+        id: extract
+        run: |
+          graphify extract . --code-only --force
+          GRAPHIFY_BACKEND=none graphify cluster-only . --no-label
+
+      - name: Commit and push graph updates
+        id: commit
+        shell: bash
+        env:
+          # Credentials are only exposed to this step (checkout uses persist-credentials: false).
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          ARTIFACTS=(graphify-out/graph.json graphify-out/graph.html graphify-out/GRAPH_REPORT.md)
+
+          # Authenticate only the fetch/push calls below (never persisted to .git/config).
+          git_remote() {
+            if [ -n "${GH_TOKEN:-}" ]; then
+              local basic
+              basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+              echo "::add-mask::$basic"
+              git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" "$@"
+            else
+              git "$@"
+            fi
+          }
+
+          # Returns 0 when the artifacts only differ from HEAD in volatile fields:
+          # graph.json built_at_commit, the GRAPH_REPORT.md header date and its "Built from commit" line.
+          semantically_unchanged() {
+            python3 - "${ARTIFACTS[@]}" <<'PY'
+          import json, re, subprocess, sys
+
+          def normalize(path, raw):
+              text = raw.decode("utf-8")
+              if path.endswith("graph.json"):
+                  data = json.loads(text)
+                  data.pop("built_at_commit", None)
+                  return json.dumps(data, sort_keys=True)
+              if path.endswith("GRAPH_REPORT.md"):
+                  text = re.sub(r"^(# Graph Report - .*?)\s*\(\d{4}-\d{2}-\d{2}\)\s*$", r"\1", text, count=1, flags=re.M)
+                  text = re.sub(r"^- Built from commit: .*$", "", text, flags=re.M)
+              return text
+
+          for path in sys.argv[1:]:
+              head = subprocess.run(["git", "show", f"HEAD:{path}"], capture_output=True)
+              if head.returncode != 0:
+                  sys.exit(1)
+              with open(path, "rb") as fh:
+                  current = fh.read()
+              if normalize(path, head.stdout) != normalize(path, current):
+                  sys.exit(1)
+          PY
+          }
+
+          if semantically_unchanged; then
+            echo "Knowledge graph is semantically unchanged (only volatile fields differ). Nothing to commit."
+            exit 0
+          fi
+
+          git add "${ARTIFACTS[@]}"
+
+          if git diff --staged --quiet; then
+            echo "Knowledge graph is up to date. No changes to commit."
+            exit 0
+          fi
+
+          mkdir -p "$RUNNER_TEMP/graphify-artifacts"
+          cp "${ARTIFACTS[@]}" "$RUNNER_TEMP/graphify-artifacts/"
+
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Commit attempt $i/$MAX_RETRIES"
+
+            if [ "$i" -gt 1 ]; then
+              git_remote fetch origin main
+              git reset --hard origin/main
+              cp "$RUNNER_TEMP"/graphify-artifacts/* graphify-out/
+
+              if semantically_unchanged; then
+                echo "Graph on main already matches. Nothing to commit after rebasing against main."
+                exit 0
+              fi
+
+              git add "${ARTIFACTS[@]}"
+            fi
+
+            if git diff --staged --quiet; then
+              echo "Nothing to commit after rebasing against main."
+              exit 0
+            fi
+
+            git commit -m "chore(graphify): update knowledge graph [skip ci]"
+
+            if git_remote push origin HEAD:main; then
+              echo "Successfully pushed knowledge graph update."
+              exit 0
+            fi
+
+            if [ "$i" -lt "$MAX_RETRIES" ]; then
+              echo "Push failed, retrying in $(( i * 2 )) seconds..."
+              sleep $(( i * 2 ))
+            else
+              echo "Push failed on final attempt."
+            fi
+          done
+
+          echo "Failed to push knowledge graph after $MAX_RETRIES attempts."
+          exit 1
+
+      - name: Upload graph artifacts
+        if: always() && steps.extract.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-artifacts
+          path: |
+            graphify-out/graph.json
+            graphify-out/graph.html
+            graphify-out/GRAPH_REPORT.md
+          retention-days: 30
+
+      - name: Prepare Pages directory
+        if: steps.extract.outcome == 'success'
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages"
+          cp -r graphify-out/* "$RUNNER_TEMP/pages/"
+          cp graphify-out/graph.html "$RUNNER_TEMP/pages/index.html"
+
+      - name: Upload Pages artifact
+        if: steps.extract.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: generate-graph
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
