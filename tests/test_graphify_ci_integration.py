@@ -600,6 +600,17 @@ class TestT5WorkflowSyntaxAndTokenStrategy:
         ]
         assert len(deploy_step) == 1, "deploy-pages job must invoke actions/deploy-pages"
 
+    def test_t5_extract_step_configures_viz_node_limit(self, workflow_yaml: dict) -> None:
+        """Verify the extract step configures GRAPHIFY_VIZ_NODE_LIMIT to prevent community-meta collapse."""
+        extract = _step_by_id(workflow_yaml, "extract")
+        step_env = extract.get("env", {})
+        assert "GRAPHIFY_VIZ_NODE_LIMIT" in step_env, (
+            "Extract step must set GRAPHIFY_VIZ_NODE_LIMIT env var"
+        )
+        assert int(step_env["GRAPHIFY_VIZ_NODE_LIMIT"]) >= 10000, (
+            f"GRAPHIFY_VIZ_NODE_LIMIT must be >= 10,000, got: {step_env['GRAPHIFY_VIZ_NODE_LIMIT']}"
+        )
+
 
 # ============================================================================
 # T-6: Anti-recursion git protection (.github/workflows/graphify.yaml)
