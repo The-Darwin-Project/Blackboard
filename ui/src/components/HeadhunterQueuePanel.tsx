@@ -1,10 +1,17 @@
 // BlackBoard/ui/src/components/HeadhunterQueuePanel.tsx
 // @ai-rules:
 // 1. [Pattern]: Polls GET /queue/headhunter/pending every 30s. Pure display component.
-// 2. [Pattern]: Shows pending items (GitLab todos + GitHub queued PRs) sorted oldest-first (FIFO).
+// 2. [Pattern]: Shows pending items (GitLab todos + GitHub queued/active PRs and Issues) sorted oldest-first (FIFO).
 // 3. [Constraint]: Read-only -- no actions, just observability.
-// 4. [Pattern]: Platform discriminator: platform ?? "gitlab". Prefix: "!" for gitlab, "#" for github.
-// 5. [Gotcha]: All HeadhunterTodo fields are optional except action/project_path/author/created_at.
+// 4. [Pattern]: Shares the 4 sidebarMenus helpers (isGitHubTodo, isGitHubIssue, formatHeadhunterLabel, getHeadhunterItemKey);
+//    this file calls isGitHubTodo/formatHeadhunterLabel/getHeadhunterItemKey, PR vs Issue handled inside the label helper.
+//    Label is built ONLY by formatHeadhunterLabel(todo, { truncate: false }) -- never re-implement pfx/num/title here.
+//    Prefix: "!" for GitLab MRs, "#" for GitHub PRs/Issues; missing number falls back to title or "Queued Item".
+// 5. [Constraint]: Cards route clicks through preventDefault + safeOpen (http/https only); the <a href> is only a
+//    hint for hover/middle-click and is limited to http(s) (else "#").
+// 6. [Pattern]: The single "NEXT" badge goes to the first genuinely queued row (queue_position != null or action
+//    "queued"); in-progress rows (action active/new/deferred, queue_position null) are never badged.
+// 7. [Gotcha]: All HeadhunterTodo fields are optional except action/project_path/author/created_at.
 /**
  * Headhunter Queue panel — shows pending GitLab todos waiting to be processed.
  * Displays in the right panel alongside Resources and Agents tabs.
@@ -13,6 +20,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 import { getHeadhunterPending } from '../api/client';
 import type { HeadhunterTodo } from '../api/client';
+import { isGitHubTodo, formatHeadhunterLabel, getHeadhunterItemKey } from './ops/sidebarMenus';
+import { safeOpen } from '../utils/safeOpen';
 
 const ACTION_BADGE: Record<string, { bg: string; text: string }> = {
   build_failed:       { bg: '#7f1d1d', text: '#fca5a5' },
@@ -30,6 +39,28 @@ const PIPELINE_DOT: Record<string, string> = {
   pending: '#94a3b8',
   unknown: '#475569',
 };
+
+// Backend marks items Darwin already has an event for with the event status (see _github_active_item).
+const IN_PROGRESS_ACTIONS = new Set(['active', 'new', 'deferred']);
+
+function isQueuedTodo(todo: HeadhunterTodo): boolean {
+  return todo.queue_position != null || todo.action === 'queued';
+}
+
+function isInProgressTodo(todo: HeadhunterTodo): boolean {
+  return todo.queue_position == null && IN_PROGRESS_ACTIONS.has(todo.action);
+}
+
+/** Only http(s) URLs may reach href; anything else (javascript:, data:, empty) degrades to "#". */
+function safeHref(url: string | undefined | null): string {
+  if (!url) return '#';
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? url : '#';
+  } catch {
+    return '#';
+  }
+}
 
 function formatAge(isoDate: string): string {
   if (!isoDate) return '';
@@ -51,8 +82,8 @@ export default function HeadhunterQueuePanel() {
       const data = await getHeadhunterPending();
       setTodos(data);
       setError(null);
-    } catch (e: any) {
-      setError(e.message || 'Failed to fetch');
+    } catch (e) {
+      setError((e instanceof Error && e.message) || 'Failed to fetch');
     } finally {
       setLoading(false);
     }
@@ -84,27 +115,25 @@ export default function HeadhunterQueuePanel() {
     );
   }
 
-  const gitlabItems = todos.filter(t => (t.platform ?? 'gitlab') === 'gitlab');
-  const githubItems = todos.filter(t => t.platform === 'github');
+  const gitlabItems = todos.filter(t => !isGitHubTodo(t));
+  const githubItems = todos.filter(t => isGitHubTodo(t));
+  // Single NEXT target: first queued row; else first not-in-progress row (GitLab todos carry no queue state).
+  const nextTodo = todos.find(isQueuedTodo) ?? todos.find(t => !isInProgressTodo(t));
 
   function renderItem(todo: HeadhunterTodo, i: number) {
-    const platform = todo.platform ?? 'gitlab';
-    const isGitHub = platform === 'github';
+    const isGitHub = isGitHubTodo(todo);
     const badge = ACTION_BADGE[todo.action] || { bg: '#1e293b', text: '#94a3b8' };
     const pipeDot = PIPELINE_DOT[todo.pipeline_status ?? 'unknown'] || PIPELINE_DOT.unknown;
     const projectName = todo.project_path.split('/').pop() || todo.project_path;
-    // Platform-aware prefix: "!" for GitLab MRs, "#" for GitHub PRs
-    const pfx = isGitHub ? '#' : '!';
-    const itemNum = isGitHub ? (todo.pr_number ?? '') : (todo.mr_iid ?? '');
-    const itemTitle = isGitHub ? (todo.pr_title ?? '') : (todo.mr_title ?? '');
-    const isFirst = i === 0;
+    const isFirst = todo === nextTodo;
 
     return (
       <a
-        key={todo.todo_id ?? `gh-${todo.pr_number}-${todo.project_path}`}
-        href={todo.target_url}
+        key={getHeadhunterItemKey(todo, i)}
+        href={safeHref(todo.target_url)}
         target="_blank"
         rel="noopener noreferrer"
+        onClick={(e) => { e.preventDefault(); safeOpen(todo.target_url); }}
         style={{
           display: 'block',
           padding: '10px 12px',
@@ -123,7 +152,7 @@ export default function HeadhunterQueuePanel() {
             background: badge.bg, color: badge.text,
             padding: '2px 8px', borderRadius: 8, fontSize: 10, fontWeight: 600,
           }}>
-            {todo.action.replace(/_/g, ' ')}
+            {todo.action?.replace(/_/g, ' ') || ''}
           </span>
           {!isGitHub && (
             <span style={{
@@ -154,7 +183,7 @@ export default function HeadhunterQueuePanel() {
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           marginBottom: 4,
         }}>
-          {pfx}{itemNum} {itemTitle}
+          {formatHeadhunterLabel(todo, { truncate: false })}
         </div>
         {/* Row 3: project + author */}
         <div style={{

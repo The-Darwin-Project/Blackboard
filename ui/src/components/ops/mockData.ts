@@ -4,6 +4,8 @@
 // 2. [Pattern]: Mock events match the EventDocument shape from api/types.ts.
 // 3. [Gotcha]: These are NOT real events. They exist only to visualize the sidebar tree + accordion.
 
+import type { HeadhunterTodo } from '../../api/client';
+
 export const MOCK_EVENTS = [
   {
     id: 'evt-demo0001',
@@ -149,7 +151,7 @@ export const MOCK_EVENT_DOC = {
   token_usage: undefined as Record<string, number> | undefined,
 };
 
-export const MOCK_HH_TODOS = [
+export const MOCK_HH_TODOS: HeadhunterTodo[] = [
   {
     todo_id: 9901,
     mr_iid: 297,
@@ -173,5 +175,27 @@ export const MOCK_HH_TODOS = [
     target_url: 'https://gitlab.example.com/mr/301',
     author: 'konflux-release',
     created_at: new Date(Date.now() - 15 * 60000).toISOString(),
+  },
+  {
+    platform: 'github',
+    pr_number: 142,
+    pr_title: 'fix(cortex): pulse node materialize',
+    project_path: 'The-Darwin-Project/BlackBoard',
+    action: 'review_requested',
+    priority: 1,
+    target_url: 'https://github.com/The-Darwin-Project/BlackBoard/pull/142',
+    author: 'darwin-bot',
+    created_at: new Date(Date.now() - 10 * 60000).toISOString(),
+  },
+  {
+    platform: 'github',
+    issue_number: 233,
+    issue_title: 'Headhunter pending widget drops active GitHub work',
+    project_path: 'The-Darwin-Project/BlackBoard',
+    action: 'queued',
+    priority: 0,
+    target_url: 'https://github.com/The-Darwin-Project/BlackBoard/issues/233',
+    author: 'darwin-agent',
+    created_at: new Date(Date.now() - 30 * 60000).toISOString(),
   },
 ];
