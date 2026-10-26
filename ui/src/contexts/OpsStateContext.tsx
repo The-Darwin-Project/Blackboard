@@ -3,7 +3,7 @@
 // 1. [Pattern]: OpsControl context — user-interaction frequency state only.
 // 2. [Pattern]: selectedEventId with full sessionStorage lifecycle (hydrate/set/clear).
 // 3. [Pattern]: Agent registry 10s poll with cleanup. ephemeralAgents derived via useMemo.
-// 4. [Pattern]: WS: event_created (auto-select), event_closed (deselect + optimistic), event_status_changed, subscription_changed, kargo_*.
+// 4. [Pattern]: WS: event_created (auto-select), event_closed (deselect + optimistic), event_status_changed, subscription_changed, domain_updated, severity_updated, kargo_*.
 // 5. [Pattern]: useWSReconnect invalidates all queries + kargo + headhunter + aligner.
 // 7. [Pattern]: invalidateAligner on event_created + event_closed + reconnect (diverges from HH which skips event_created).
 // 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
@@ -13,12 +13,18 @@
 //    transitions that touch EVENT_WAITING_APPROVAL now have a WS broadcast + invalidation path,
 //    not just close. Backend broadcast sites: close_event (queue.py/brain.py close paths),
 //    request_user_approval (handlers_state.py, park), resume_if_parked (brain.py, resume) (#240).
+// 9. [Constraint]: domain_updated / severity_updated patch ONLY evidence.brain_domain / brain_severity.
+//    Base evidence.domain / severity are source-assessed and never overwritten (05-event-evidence-contract).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
-import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
+import type { AgentRegistryEntry, EventEvidence, KargoStageStatus } from '../api/types';
+
+const EVIDENCE_SEVERITIES: readonly string[] = ['info', 'warning', 'critical'];
+const isEvidenceSeverity = (v: unknown): v is EventEvidence['brain_severity'] =>
+  typeof v === 'string' && EVIDENCE_SEVERITIES.includes(v);
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
 
@@ -197,24 +203,14 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();
     } else if (msg.type === 'domain_updated') {
-      if (msg.event_id && msg.domain) {
-        optimisticPatchEvent(msg.event_id as string, {
-          evidence: {
-            domain: msg.domain as any,
-            brain_domain: msg.domain as string,
-          } as any,
-        });
+      if (typeof msg.event_id === 'string' && typeof msg.domain === 'string' && msg.domain) {
+        optimisticPatchEvent(msg.event_id, { evidence: { brain_domain: msg.domain } });
       }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'severity_updated') {
-      if (msg.event_id && msg.severity) {
-        optimisticPatchEvent(msg.event_id as string, {
-          evidence: {
-            severity: msg.severity as any,
-            brain_severity: msg.severity as any,
-          } as any,
-        });
+      if (typeof msg.event_id === 'string' && isEvidenceSeverity(msg.severity)) {
+        optimisticPatchEvent(msg.event_id, { evidence: { brain_severity: msg.severity } });
       }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
