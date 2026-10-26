@@ -134,3 +134,24 @@ Usage: {{ include "darwin.validateSidecars" . }}
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Per-sidecar storage env: DEFAULT_WORK_DIR must match the container's actual volume mount (the storage recycler measures
+and sweeps that mount), plus the optional sidecars.storageRecycler tunables. Unset tunables are omitted so the
+sidecar's validated defaults apply.
+Usage: {{ include "darwin.storageEnv" (dict "root" $ "mount" "/data/gitops-developer") | nindent 12 }}
+*/}}
+{{- define "darwin.storageEnv" -}}
+- name: DEFAULT_WORK_DIR
+  value: {{ .mount | quote }}
+{{- $sr := (.root.Values.sidecars.storageRecycler | default dict) }}
+{{- range $env, $key := dict "STORAGE_HIGH_WATERMARK" "highWatermark" "STORAGE_CRITICAL_WATERMARK" "criticalWatermark" "STORAGE_STALE_MS" "staleMs" "STORAGE_SWEEP_INTERVAL_MS" "sweepIntervalMs" }}
+{{- $val := get $sr $key }}
+{{- if not (kindIs "invalid" $val) }}
+{{- if ne (toString $val) "" }}
+- name: {{ $env }}
+  value: {{ $val | toString | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
