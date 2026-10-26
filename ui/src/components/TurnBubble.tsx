@@ -15,6 +15,7 @@ import MarkdownPreview from '@uiw/react-markdown-preview';
 import { getCodeString } from 'rehype-rewrite';
 import MermaidBlock from './MermaidBlock';
 import MarkdownViewer from './MarkdownViewer';
+import ExtendedThinkingAccordion from './workspace/ExtendedThinkingAccordion';
 
 export function StatusBadge({ status }: { status: string }) {
   const s = STATUS_COLORS[status] || STATUS_COLORS.closed;
@@ -207,18 +208,10 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
 
   if (turn.action === 'thoughts' && turn.actor === 'brain') {
     return (
-      <div style={{ borderLeft: '3px solid #475569', paddingLeft: 12, marginBottom: 8, opacity: 0.7 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setThoughtsExpanded(!thoughtsExpanded)}>
-          <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
-          <span style={{ fontSize: 12, color: '#64748b', fontStyle: 'italic' }}>thinking...</span>
-          <span style={{ fontSize: 10, color: '#475569', transform: thoughtsExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▶</span>
-        </div>
-        {thoughtsExpanded && turn.thoughts && (
-          <div style={{ marginTop: 6, padding: '8px 12px', background: '#1e293b', borderRadius: 6, border: '1px solid #334155' }}>
-            <MarkdownPreview source={turn.thoughts} style={{ fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
-          </div>
-        )}
-      </div>
+      <ExtendedThinkingAccordion
+        thoughts={turn.thoughts}
+        timestamp={turn.timestamp}
+      />
     );
   }
 
@@ -323,7 +316,17 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
       </div>
       {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       {turn.image && (
-        <img src={turn.image} alt="User attachment" style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }} onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')} />
+        <img
+          src={turn.image}
+          alt="User attachment"
+          style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }}
+          onClick={(e) => {
+            const src = (e.target as HTMLImageElement).src;
+            if (src && (src.startsWith('data:image/') || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://'))) {
+              window.open(src, '_blank', 'noopener,noreferrer');
+            }
+          }}
+        />
       )}
       {turn.result && (
         turn.actor === 'developer' && turn.result.includes('## Developer Result') && turn.result.includes('## QE Assessment') ? (

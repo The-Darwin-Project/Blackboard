@@ -5,11 +5,13 @@ import { useWSConnection } from '../contexts/WebSocketContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { OpsControlProvider } from '../contexts/OpsStateContext';
+import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 
 vi.mock('../contexts/WebSocketContext', async (importOriginal) => {
   const actual = await importOriginal();
   return {
-    ...actual as any,
+    ...(actual as object),
   useWSConnection: vi.fn(),
   useWSReconnect: vi.fn(),
   useWSMessage: vi.fn(),
@@ -40,7 +42,7 @@ describe('Layout connection degraded banner', () => {
       isAuthenticated: true,
       isLoading: false,
       user: { profile: { email: 'test@example.com' } },
-    } as any);
+    } as never);
   });
 
   it('renders Retry Now button when connectionDegraded is true', () => {
@@ -48,13 +50,17 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: true,
       reconnect: mockReconnect,
-    } as any);
+    } as never);
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -69,13 +75,17 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: false,
       reconnect: vi.fn(),
-    } as any);
+    } as never);
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -86,16 +96,20 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: false,
       reconnect: vi.fn(),
-    } as any);
+    } as never);
 
     // Suppress console.error from React error boundary during test
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const { rerender } = render(
+    render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -133,9 +147,13 @@ describe('Layout header branding', () => {
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 

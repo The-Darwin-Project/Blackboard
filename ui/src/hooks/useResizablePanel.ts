@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback, useRef, type RefObject } from 'react'
 
 export interface UseResizablePanelOptions {
   direction: 'horizontal' | 'vertical';
+  anchor?: 'left' | 'right';
   min: number;
   max: number;
   defaultSize: number;
@@ -22,7 +23,7 @@ export interface UseResizablePanelReturn<T extends HTMLElement> {
 }
 
 export function useResizablePanel<T extends HTMLElement = HTMLDivElement>(options: UseResizablePanelOptions): UseResizablePanelReturn<T> {
-  const { direction, min, max, defaultSize, storageKey, enabled = true } = options;
+  const { direction, anchor = 'left', min, max, defaultSize, storageKey, enabled = true } = options;
 
   const [size, setSize] = useState(() => {
     if (!storageKey) return defaultSize;
@@ -50,7 +51,7 @@ export function useResizablePanel<T extends HTMLElement = HTMLDivElement>(option
       if (!panelRef.current) return;
       const rect = panelRef.current.getBoundingClientRect();
       const raw = direction === 'horizontal'
-        ? e.clientX - rect.left
+        ? (anchor === 'right' ? rect.right - e.clientX : e.clientX - rect.left)
         : rect.bottom - e.clientY;
       setSize(Math.min(max, Math.max(min, raw)));
     };
@@ -65,7 +66,7 @@ export function useResizablePanel<T extends HTMLElement = HTMLDivElement>(option
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-  }, [isResizing, direction, min, max]);
+  }, [isResizing, direction, anchor, min, max]);
 
   return { size, isResizing, startResize, panelRef };
 }
