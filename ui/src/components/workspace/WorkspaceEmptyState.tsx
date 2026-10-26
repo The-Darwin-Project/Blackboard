@@ -1,27 +1,22 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceEmptyState.tsx
+// @ai-rules:
+// 1. [Constraint]: When onSelectEvent is provided it owns selection AND navigation; do not also call navigate().
+// 2. [Pattern]: Without onSelectEvent, fall back to opsControl.selectEvent + navigate to /workspace/:id.
 /**
  * Cold-boot empty state for Agent Workspace when no session is selected.
  * Offers starter chips and dispatches new sessions via POST /chat/ (createChatEvent).
  */
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Bot } from 'lucide-react';
 import { createChatEvent } from '../../api/client';
 import { useOpsControlSafe } from '../../contexts/OpsStateContext';
 import { useQueueInvalidation } from '../../hooks/useQueue';
 import WorkspaceStarterChips from './WorkspaceStarterChips';
 import WorkspacePromptForm from './WorkspacePromptForm';
+import { useSafeNavigate } from './useSafeNavigate';
 
 interface WorkspaceEmptyStateProps {
   onSelectEvent?: (eventId: string) => void;
-}
-
-function useSafeNavigate() {
-  try {
-    return useNavigate();
-  } catch {
-    return null;
-  }
 }
 
 export default function WorkspaceEmptyState({ onSelectEvent }: WorkspaceEmptyStateProps) {
@@ -49,12 +44,11 @@ export default function WorkspaceEmptyState({ onSelectEvent }: WorkspaceEmptySta
       if (res?.event_id) {
         invalidateActive();
         if (onSelectEvent) {
+          // Parent handler selects the event and navigates; a second navigate() would duplicate history
           onSelectEvent(res.event_id);
-        } else if (opsControl) {
-          opsControl.selectEvent(res.event_id);
-        }
-        if (navigate) {
-          navigate(`/workspace/${encodeURIComponent(res.event_id)}`);
+        } else {
+          opsControl?.selectEvent(res.event_id);
+          navigate?.(`/workspace/${encodeURIComponent(res.event_id)}`);
         }
       }
     } catch (err: unknown) {

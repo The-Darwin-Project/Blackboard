@@ -7,7 +7,7 @@ import * as queueHook from '../../../hooks/useQueue';
 
 // Mock child tabs
 vi.mock('../../PlanProgress', () => ({
-  default: ({ conversation }: { conversation: any[] }) => (
+  default: ({ conversation }: { conversation: unknown[] }) => (
     <div data-testid="plan-progress">Plan with {conversation?.length || 0} turns</div>
   ),
 }));
@@ -48,7 +48,7 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       },
       isLoading: false,
       isError: false,
-    } as any);
+    } as never);
 
     vi.spyOn(OpsStateContext, 'useOpsControl').mockReturnValue({
       registeredAgents: [],
@@ -67,7 +67,7 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       toggleAutoHotspot: vi.fn(),
       connected: true,
       send: vi.fn(),
-    } as any);
+    } as never);
   });
 
   const renderComponent = (props: {

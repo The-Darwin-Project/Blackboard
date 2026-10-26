@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/useWorkspaceShortcuts.ts
+// @ai-rules:
+// 1. [Constraint]: Cmd/Ctrl+B and Cmd/Ctrl+J toggle panels everywhere; Escape deselects only when focus is not in a text field.
+// 2. [Gotcha]: Callbacks are effect dependencies; pass stable (useCallback) handlers to avoid re-binding the window listener each render.
 /**
  * Keyboard shortcuts hook for Agent Workspace (Cmd+B, Cmd+J, Escape).
  */

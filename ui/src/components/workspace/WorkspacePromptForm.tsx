@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/WorkspacePromptForm.tsx
+// @ai-rules:
+// 1. [Pattern]: Controlled component; the parent owns prompt text and submission state.
+// 2. [Constraint]: Enter submits, Shift+Enter inserts a newline; submit is blocked while isSubmitting.
 /**
  * Prompt input form with submit button for cold-boot Workspace perspective.
  */

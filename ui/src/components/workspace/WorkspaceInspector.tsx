@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceInspector.tsx
+// @ai-rules:
+// 1. [Constraint]: Derive conversation/diffs inside useMemo keyed on eventDoc?.conversation; never create a fresh [] before the memo.
+// 2. [Pattern]: Hooks run before the isOpen early return.
 /**
  * Collapsible & resizable right sidebar for Agent Workspace.
  * Hosts Plan execution, Diff viewer, Swarm topology, and Live Logs tabs.
@@ -30,7 +33,8 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   });
 
   const { data: eventDoc } = useEventDocument(selectedEventId);
-  const conversation = (eventDoc?.conversation as ConversationTurn[]) || [];
+  const rawConversation = eventDoc?.conversation as ConversationTurn[] | undefined;
+  const conversation = useMemo<ConversationTurn[]>(() => rawConversation ?? [], [rawConversation]);
   const diffs = useMemo(() => extractDiffsFromConversation(conversation), [conversation]);
 
   if (!isOpen) return null;

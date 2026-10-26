@@ -2,7 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import WorkspaceCenterStage from '../WorkspaceCenterStage';
 import * as client from '../../../api/client';
+import * as OpsStateContext from '../../../contexts/OpsStateContext';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-router-dom')>()),
+  useNavigate: () => navigateMock,
+}));
 
 // Mock dependencies
 vi.mock('../../../api/client', () => ({
@@ -85,7 +92,7 @@ describe('WorkspaceCenterStage (T-5, T-6)', () => {
     vi.mocked(client.createChatEvent).mockResolvedValueOnce({
       event_id: 'evt-new-456',
       status: 'created',
-    } as any);
+    } as never);
 
     renderComponent({ selectedEventId: null, onSelectEvent });
 
@@ -102,6 +109,42 @@ describe('WorkspaceCenterStage (T-5, T-6)', () => {
         expect.anything()
       );
       expect(onSelectEvent).toHaveBeenCalledWith('evt-new-456');
+    });
+  });
+
+  describe('Close Session', () => {
+    it('calls onDeselectEvent and never onSelectEvent(\'\') (which navigated to /workspace/)', () => {
+      const onSelectEvent = vi.fn();
+      const onDeselectEvent = vi.fn();
+      render(
+        <QueryClientProvider client={queryClient}>
+          <WorkspaceCenterStage selectedEventId="evt-123" onSelectEvent={onSelectEvent} onDeselectEvent={onDeselectEvent} />
+        </QueryClientProvider>
+      );
+
+      fireEvent.click(screen.getByTitle('Close Session'));
+
+      expect(onDeselectEvent).toHaveBeenCalledTimes(1);
+      expect(onSelectEvent).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+    });
+
+    it('without onDeselectEvent: deselects via opsControl and replaces history with /workspace (not /workspace/)', () => {
+      const deselectEvent = vi.fn();
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({ deselectEvent, connected: false } as never);
+      const onSelectEvent = vi.fn();
+      render(
+        <QueryClientProvider client={queryClient}>
+          <WorkspaceCenterStage selectedEventId="evt-123" onSelectEvent={onSelectEvent} />
+        </QueryClientProvider>
+      );
+
+      fireEvent.click(screen.getByTitle('Close Session'));
+
+      expect(deselectEvent).toHaveBeenCalledTimes(1);
+      expect(onSelectEvent).not.toHaveBeenCalled();
+      expect(navigateMock).toHaveBeenCalledTimes(1);
+      expect(navigateMock).toHaveBeenCalledWith('/workspace', { replace: true });
     });
   });
 });

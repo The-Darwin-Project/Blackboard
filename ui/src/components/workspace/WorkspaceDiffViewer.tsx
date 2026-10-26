@@ -1,19 +1,29 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceDiffViewer.tsx
+// @ai-rules:
+// 1. [Constraint]: Parsing is memoized on the diffs prop; callers must pass a referentially stable array.
+// 2. [Pattern]: Unparseable diffs fall back to a raw <pre> block rather than being dropped.
 /**
  * Unified diff viewer component using Tailwind color tokens.
  * Displays file headers, hunk offsets, and highlighted additions and deletions.
  */
+import { useMemo } from 'react';
 import { FileCode2 } from 'lucide-react';
-import { parseUnifiedDiff } from './diffParser';
+import { parseUnifiedDiff, type DiffFile } from './diffParser';
 
 interface WorkspaceDiffViewerProps {
   diffs: string[];
 }
 
 export default function WorkspaceDiffViewer({ diffs }: WorkspaceDiffViewerProps) {
-  const nonEmptyDiffs = (diffs || []).filter(d => Boolean(d && d.trim()));
+  const parsedFiles = useMemo<DiffFile[]>(() => {
+    const nonEmpty = (diffs || []).filter(d => Boolean(d && d.trim()));
+    return nonEmpty.flatMap(raw => {
+      const files = parseUnifiedDiff(raw);
+      return files.length > 0 ? files : [{ oldPath: 'diff', newPath: 'patch', hunks: [], raw }];
+    });
+  }, [diffs]);
 
-  if (nonEmptyDiffs.length === 0) {
+  if (parsedFiles.length === 0) {
     return (
       <div className="p-8 text-center text-text-muted text-xs">
         <FileCode2 size={24} className="mx-auto mb-2 opacity-40" />
@@ -21,11 +31,6 @@ export default function WorkspaceDiffViewer({ diffs }: WorkspaceDiffViewerProps)
       </div>
     );
   }
-
-  const parsedFiles = nonEmptyDiffs.flatMap(raw => {
-    const files = parseUnifiedDiff(raw);
-    return files.length > 0 ? files : [{ oldPath: 'diff', newPath: 'patch', hunks: [], raw }];
-  });
 
   return (
     <div className="p-3 space-y-4 font-mono text-xs overflow-x-auto">

@@ -10,7 +10,7 @@
  * Sets up TanStack Query, Auth, WebSocket providers and routing.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 import { OpsControlProvider } from './contexts/OpsStateContext';
@@ -30,6 +30,10 @@ import ShiftsPage from './components/ShiftsPage';
 import JarvisMemoryPage from './components/JarvisMemoryPage';
 import CortexPage from './components/cortex/CortexPage';
 import { lazy, Suspense, Component, type ReactNode } from 'react';
+import FlowHistoryPage from './components/FlowHistoryPage';
+import TokenUtilizationPage from './components/TokenUtilizationPage';
+import ErrorBoundary from './components/ErrorBoundary';
+
 const CortexDevPage = lazy(() => import('./components/cortex/CortexDevPage'));
 const WorkspaceLayout = lazy(() => import('./components/workspace/WorkspaceLayout'));
 
@@ -40,9 +44,6 @@ function WorkspaceLoading() {
     </div>
   );
 }
-import FlowHistoryPage from './components/FlowHistoryPage';
-import TokenUtilizationPage from './components/TokenUtilizationPage';
-import ErrorBoundary from './components/ErrorBoundary';
 
 class WipErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean}> {
   state = { hasError: false };
@@ -63,6 +64,26 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// Keyed by pathname so navigating to another session (or back) resets a tripped boundary
+function WorkspaceRoute() {
+  const { pathname } = useLocation();
+  return (
+    <ErrorBoundary
+      key={pathname}
+      fallback={
+        <div className="h-screen bg-bg-primary flex flex-col items-center justify-center gap-3 text-sm">
+          <span className="text-rose-400">Agent Workspace encountered an error. Try refreshing or returning to the Ops Center.</span>
+          <Link to="/" className="text-accent hover:underline">Back to Ops Center</Link>
+        </div>
+      }
+    >
+      <Suspense fallback={<WorkspaceLoading />}>
+        <WorkspaceLayout />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
 
 function AuthGate() {
   const { isAuthenticated, isLoading, authConfig } = useAuth();
@@ -87,22 +108,7 @@ function AuthGate() {
       <OpsControlProvider>
         <ActiveStreamsProvider>
           <Routes>
-            <Route
-              path="/workspace/:eventId?"
-              element={
-                <ErrorBoundary
-                  fallback={
-                    <div className="h-screen bg-bg-primary flex items-center justify-center text-rose-400 text-sm">
-                      Agent Workspace encountered an error. Try refreshing or navigating back to Ops Center.
-                    </div>
-                  }
-                >
-                  <Suspense fallback={<WorkspaceLoading />}>
-                    <WorkspaceLayout />
-                  </Suspense>
-                </ErrorBoundary>
-              }
-            />
+            <Route path="/workspace/:eventId?" element={<WorkspaceRoute />} />
             <Route path="/" element={<Layout />}>
               <Route index element={<Dashboard />} />
               <Route path="topology" element={<TopologyView />} />

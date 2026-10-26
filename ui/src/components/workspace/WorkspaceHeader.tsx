@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceHeader.tsx
+// @ai-rules:
+// 1. [Constraint]: Hooks only; selection comes from the selectedEventId prop with opsControl as fallback, and the header never mutates selection.
+// 2. [Pattern]: The Ops Center link is a router <Link> to '/', leaving the isolated workspace perspective.
 /**
  * Header for the Agent Workspace perspective.
  * Features PWA brand icon, active session title, swarm count, panel toggles, and Ops Center link.

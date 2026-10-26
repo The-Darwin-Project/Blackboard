@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import WorkspaceDiffViewer from '../WorkspaceDiffViewer';
 
 describe('WorkspaceDiffViewer (T-7, T-13)', () => {

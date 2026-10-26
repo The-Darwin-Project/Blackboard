@@ -1,9 +1,14 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceSessionsHub.tsx
+// @ai-rules:
+// 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in activeEvents and has since disappeared.
+//    A newly created / deep-linked ID is absent from a stale cache; evicting it would bounce the user to /workspace.
+// 2. [Pattern]: Eviction calls onNewTask (WorkspaceLayout.handleDeselectEvent uses replace:true so Back is not trapped).
+// 3. [Gotcha]: Skip eviction while a refetch is in flight; the cached list may still be stale.
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
  * Lists active events with Cynefin domain badges and provides '+ New Task' trigger.
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Plus } from 'lucide-react';
 import { useActiveEvents } from '../../hooks/useQueue';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
@@ -24,19 +29,27 @@ export default function WorkspaceSessionsHub({
   onSelectEvent: propOnSelectEvent,
   onNewTask,
 }: WorkspaceSessionsHubProps) {
-  const { data: events = [], isLoading } = useActiveEvents();
+  const { data: events = [], isLoading, isFetching } = useActiveEvents();
   const opsControl = useOpsControl();
 
   const selectedEventId = propSelectedEventId !== undefined ? propSelectedEventId : opsControl.selectedEventId;
 
-  // Eviction listener: if an active event terminates and is no longer present, clear selection
+  // IDs seen in the active list. Pruned on eviction so a re-opened closed event is not evicted again.
+  const seenActiveIdsRef = useRef<Set<string>>(new Set());
+
+  // Eviction listener: clear selection only when a previously active event has left the active list
   useEffect(() => {
-    if (!isLoading && events.length > 0 && selectedEventId) {
-      if (!events.some(e => e.id === selectedEventId)) {
-        onNewTask();
-      }
+    if (isLoading) return;
+    const seen = seenActiveIdsRef.current;
+    const currentIds = new Set(events.map(e => e.id));
+    if (selectedEventId && seen.has(selectedEventId) && !currentIds.has(selectedEventId)) {
+      if (isFetching) return;
+      seen.delete(selectedEventId);
+      onNewTask();
+      return;
     }
-  }, [events, isLoading, selectedEventId, onNewTask]);
+    currentIds.forEach(id => seen.add(id));
+  }, [events, isLoading, isFetching, selectedEventId, onNewTask]);
 
   const handleSelect = (id: string) => {
     if (propOnSelectEvent) {

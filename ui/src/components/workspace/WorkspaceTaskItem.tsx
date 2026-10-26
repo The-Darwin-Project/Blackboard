@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceTaskItem.tsx
+// @ai-rules:
+// 1. [Pattern]: Presentational; selection is reported through onSelect(id) and the parent owns navigation.
+// 2. [Gotcha]: Unknown Cynefin domains fall back to the 'casual' badge style.
 /**
  * Single task session button item with Cynefin pill.
  */

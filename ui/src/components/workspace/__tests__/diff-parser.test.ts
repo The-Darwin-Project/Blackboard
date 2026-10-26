@@ -63,6 +63,87 @@ index e69de29..4994342 100644
     expect(files[0].hunks[1].lines.some(l => l.type === 'delete')).toBe(true);
   });
 
+  it('preserves deleted "-- comment" (---) and added "++" (+++) lines inside a hunk', () => {
+    const diff = `diff --git a/query.sql b/query.sql
+--- a/query.sql
++++ b/query.sql
+@@ -1,4 +1,4 @@
+ SELECT 1;
+--- old comment
++++ new counter
+ SELECT 2;
+`;
+    const files = parseUnifiedDiff(diff);
+    expect(files.length).toBe(1);
+    expect(files[0].oldPath).toBe('a/query.sql');
+    expect(files[0].newPath).toBe('b/query.sql');
+    expect(files[0].hunks.length).toBe(1);
+    const lines = files[0].hunks[0].lines;
+    expect(lines).toContainEqual({ type: 'delete', content: '-- old comment' });
+    expect(lines).toContainEqual({ type: 'add', content: '++ new counter' });
+    expect(lines.map(l => l.type)).toEqual(['normal', 'delete', 'add', 'normal']);
+  });
+
+  it('does not split a block on an in-hunk deleted line that looks like "--- a/..."', () => {
+    const diff = `diff --git a/x.md b/x.md
+--- a/x.md
++++ b/x.md
+@@ -1,2 +1,1 @@
+--- a/looks/like/header
+ keep
+`;
+    const files = parseUnifiedDiff(diff);
+    expect(files.length).toBe(1);
+    expect(files[0].newPath).toBe('b/x.md');
+    expect(files[0].hunks[0].lines[0]).toEqual({ type: 'delete', content: '-- a/looks/like/header' });
+  });
+
+  it('still separates multiple files in a plain unified diff without "diff --git"', () => {
+    const diff = `--- a/one.txt
++++ b/one.txt
+@@ -1 +1 @@
+-a
++b
+--- a/two.txt
++++ b/two.txt
+@@ -1 +1 @@
+-c
++d
+`;
+    const files = parseUnifiedDiff(diff);
+    expect(files.map(f => f.newPath)).toEqual(['b/one.txt', 'b/two.txt']);
+    expect(files[0].hunks[0].lines.map(l => l.content)).toEqual(['a', 'b']);
+    expect(files[1].hunks[0].lines.map(l => l.content)).toEqual(['c', 'd']);
+  });
+
+  it('keeps binary, rename-only and mode-only blocks that have no hunks', () => {
+    const diff = `diff --git a/logo.png b/logo.png
+index 1111111..2222222 100644
+Binary files a/logo.png and b/logo.png differ
+diff --git a/old.ts b/new.ts
+similarity index 100%
+rename from old.ts
+rename to new.ts
+diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+diff --git a/real.ts b/real.ts
+--- a/real.ts
++++ b/real.ts
+@@ -1 +1 @@
+-x
++y
+`;
+    const files = parseUnifiedDiff(diff);
+    expect(files.length).toBe(4);
+    expect(files[0]).toMatchObject({ oldPath: 'a/logo.png', newPath: 'b/logo.png', hunks: [] });
+    expect(files[0].raw).toContain('Binary files');
+    expect(files[1]).toMatchObject({ oldPath: 'old.ts', newPath: 'new.ts', hunks: [] });
+    expect(files[2]).toMatchObject({ oldPath: 'a/run.sh', newPath: 'b/run.sh', hunks: [] });
+    expect(files[2].raw).toContain('new mode 100755');
+    expect(files[3].hunks[0].lines.length).toBe(2);
+  });
+
   it('T-13: parseUnifiedDiff gracefully handles malformed/empty diffs without throwing', () => {
     expect(() => parseUnifiedDiff('')).not.toThrow();
     expect(parseUnifiedDiff('')).toEqual([]);

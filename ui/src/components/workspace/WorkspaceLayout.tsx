@@ -1,4 +1,8 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceLayout.tsx
+// @ai-rules:
+// 1. [Pattern]: Route param :eventId is the source of truth; handleSelectEvent/handleDeselectEvent are the only navigation points.
+// 2. [Constraint]: handleDeselectEvent navigates with { replace: true } so eviction/close never leaves a Back-button loop.
+// 3. [Gotcha]: Never call onSelectEvent('') to deselect; it navigates to the malformed '/workspace/'.
 /**
  * 3-Column IDE Workspace perspective with responsive auto-collapse and keyboard shortcuts.
  * Route parameter :eventId? is the primary source of truth for session selection.
@@ -37,7 +41,7 @@ export default function WorkspaceLayout() {
 
   const handleDeselectEvent = useCallback(() => {
     deselectEvent();
-    navigate('/workspace');
+    navigate('/workspace', { replace: true });
   }, [deselectEvent, navigate]);
 
   // Responsive listener: auto-collapse when viewport < 1024px
@@ -80,6 +84,7 @@ export default function WorkspaceLayout() {
         <WorkspaceCenterStage
           selectedEventId={selectedEventId}
           onSelectEvent={handleSelectEvent}
+          onDeselectEvent={handleDeselectEvent}
         />
 
         <WorkspaceInspector

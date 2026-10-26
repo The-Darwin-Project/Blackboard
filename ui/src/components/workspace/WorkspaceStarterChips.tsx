@@ -1,21 +1,11 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceStarterChips.tsx
+// @ai-rules:
+// 1. [Pattern]: Chips only populate the prompt via onSelectPrompt; they never submit a session on their own.
+// 2. [Constraint]: Honor the disabled prop while a session is being created.
 /**
  * Starter prompt action chips for cold-boot Workspace perspective.
  */
-import { GitPullRequest, Wrench, AlertTriangle, Sparkles, type LucideIcon } from 'lucide-react';
-
-export interface StarterChip {
-  label: string;
-  icon: LucideIcon;
-  prompt: string;
-}
-
-export const STARTER_CHIPS: StarterChip[] = [
-  { label: 'Review PR', icon: GitPullRequest, prompt: 'Review PR' },
-  { label: 'Debug Pipeline', icon: Wrench, prompt: 'Debug Pipeline' },
-  { label: 'Incident Scan', icon: AlertTriangle, prompt: 'Inspect service latency and logs' },
-  { label: 'Swarm Strategy', icon: Sparkles, prompt: 'Plan swarm architecture improvements' },
-];
+import { STARTER_CHIPS } from './starterChips';
 
 interface WorkspaceStarterChipsProps {
   onSelectPrompt: (prompt: string) => void;

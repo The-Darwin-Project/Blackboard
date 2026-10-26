@@ -50,7 +50,7 @@ describe('WorkspaceSwarmPanel (T-8)', () => {
       toggleAutoHotspot: vi.fn(),
       connected: true,
       send: vi.fn(),
-    } as any);
+    } as never);
 
     render(<WorkspaceSwarmPanel />);
 
@@ -89,7 +89,7 @@ describe('WorkspaceSwarmPanel (T-8)', () => {
       toggleAutoHotspot: vi.fn(),
       connected: true,
       send: vi.fn(),
-    } as any);
+    } as never);
 
     render(<WorkspaceSwarmPanel />);
 

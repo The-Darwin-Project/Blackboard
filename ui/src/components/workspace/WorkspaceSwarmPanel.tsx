@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceSwarmPanel.tsx
+// @ai-rules:
+// 1. [Constraint]: Read agents from useOpsControl (WebSocket-fed); do not add REST polling here.
+// 2. [Pattern]: Prefer opsControl.agents, falling back to registeredAgents.
 /**
  * Agent Swarm topology panel for Workspace Inspector.
  * Consumes useOpsControl without triggering duplicate REST polls.

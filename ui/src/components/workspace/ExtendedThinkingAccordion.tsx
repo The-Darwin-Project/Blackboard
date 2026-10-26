@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/components/workspace/ExtendedThinkingAccordion.tsx
+// @ai-rules:
+// 1. [Pattern]: Renders nothing when there are no thoughts and no stream; collapsed by default.
+// 2. [Constraint]: Thought text is rendered via MarkdownPreview only; never inject it as raw HTML.
 /**
  * Collapsible extended thinking/reasoning accordion for agent turns.
  * Displays step counts, streaming indicator, and formatted Markdown reasoning.

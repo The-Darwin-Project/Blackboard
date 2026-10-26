@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/testSetup.ts
+// @ai-rules:
+// 1. [Pattern]: Vitest global setup; unmounts RTL trees after each test and registers a minimal toBeInTheDocument matcher.
+// 2. [Constraint]: Do not pull in jest-dom; extend matchers here only when a test needs one.
 import { expect, afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 

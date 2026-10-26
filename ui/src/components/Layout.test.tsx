@@ -11,7 +11,7 @@ import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 vi.mock('../contexts/WebSocketContext', async (importOriginal) => {
   const actual = await importOriginal();
   return {
-    ...actual as any,
+    ...(actual as object),
   useWSConnection: vi.fn(),
   useWSReconnect: vi.fn(),
   useWSMessage: vi.fn(),
@@ -42,7 +42,7 @@ describe('Layout connection degraded banner', () => {
       isAuthenticated: true,
       isLoading: false,
       user: { profile: { email: 'test@example.com' } },
-    } as any);
+    } as never);
   });
 
   it('renders Retry Now button when connectionDegraded is true', () => {
@@ -50,7 +50,7 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: true,
       reconnect: mockReconnect,
-    } as any);
+    } as never);
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
@@ -75,7 +75,7 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: false,
       reconnect: vi.fn(),
-    } as any);
+    } as never);
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
@@ -96,12 +96,12 @@ describe('Layout connection degraded banner', () => {
     vi.mocked(useWSConnection).mockReturnValue({
       connectionDegraded: false,
       reconnect: vi.fn(),
-    } as any);
+    } as never);
 
     // Suppress console.error from React error boundary during test
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    const { rerender } = render(
+    render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
         <OpsControlProvider>
           <ActiveStreamsProvider>

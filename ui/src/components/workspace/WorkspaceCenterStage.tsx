@@ -1,4 +1,8 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceCenterStage.tsx
+// @ai-rules:
+// 1. [Constraint]: Close Session must go through onDeselectEvent (or opsControl.deselectEvent + navigate('/workspace', { replace: true })).
+//    Never call onSelectEvent('') -- it navigates to the malformed '/workspace/'.
+// 2. [Pattern]: ConversationFeed/ErrorBoundary are keyed by selectedEventId so a session switch resets feed state.
 /**
  * Center stage for Agent Workspace.
  * Switches between cold-boot WorkspaceEmptyState and interactive ConversationFeed + ChatInput.
@@ -10,17 +14,21 @@ import ChatInput from '../ChatInput';
 import ErrorBoundary from '../ErrorBoundary';
 import WorkspaceEmptyState from './WorkspaceEmptyState';
 import { X } from 'lucide-react';
+import { useSafeNavigate } from './useSafeNavigate';
 
 interface WorkspaceCenterStageProps {
   selectedEventId: string | null;
   onSelectEvent?: (id: string) => void;
+  onDeselectEvent?: () => void;
 }
 
 export default function WorkspaceCenterStage({
   selectedEventId,
   onSelectEvent,
+  onDeselectEvent,
 }: WorkspaceCenterStageProps) {
   const opsControl = useOpsControlSafe();
+  const navigate = useSafeNavigate();
   const { invalidateActive } = useQueueInvalidation();
 
   const hasEvent = Boolean(selectedEventId && selectedEventId.trim());
@@ -29,11 +37,13 @@ export default function WorkspaceCenterStage({
     return <WorkspaceEmptyState onSelectEvent={onSelectEvent} />;
   }
 
-  const handleDeselect = () => {
-    if (onSelectEvent) {
-      onSelectEvent('');
+  const handleCloseSession = () => {
+    if (onDeselectEvent) {
+      onDeselectEvent();
+      return;
     }
     opsControl?.deselectEvent();
+    navigate?.('/workspace', { replace: true });
   };
 
   return (
@@ -45,7 +55,7 @@ export default function WorkspaceCenterStage({
           <span className="text-xs font-mono font-medium text-text-primary">{selectedEventId}</span>
         </div>
         <button
-          onClick={handleDeselect}
+          onClick={handleCloseSession}
           className="p-1 rounded text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors"
           title="Close Session"
         >

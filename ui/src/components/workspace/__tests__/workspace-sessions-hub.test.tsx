@@ -33,7 +33,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue({
       data: mockEvents,
       isLoading: false,
-    } as any);
+    } as never);
 
     vi.spyOn(OpsStateContext, 'useOpsControl').mockReturnValue({
       selectedEventId: 'evt-1',
@@ -52,7 +52,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       toggleAutoHotspot: vi.fn(),
       connected: true,
       send: vi.fn(),
-    } as any);
+    } as never);
   });
 
   it('renders active sessions with service name and Cynefin status/domain badges', () => {
@@ -86,9 +86,95 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue({
       data: [],
       isLoading: false,
-    } as any);
+    } as never);
 
     render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
     expect(screen.getByText(/no active tasks|no sessions/i)).toBeInTheDocument();
+  });
+
+  describe('stale-cache eviction guard', () => {
+    const asQuery = (data: unknown[], extra: Record<string, unknown> = {}) =>
+      ({ data, isLoading: false, isFetching: false, ...extra }) as never;
+
+    it('does NOT evict a newly selected / deep-linked session that is absent from a stale active list', () => {
+      const onNewTask = vi.fn();
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+
+      render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-brand-new" onNewTask={onNewTask} />);
+
+      expect(onNewTask).not.toHaveBeenCalled();
+    });
+
+    it('keeps a new session selected when the refreshed list then includes it, and evicts it only after it closes', () => {
+      const onNewTask = vi.fn();
+      const spy = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(
+        <WorkspaceSessionsHub isOpen={true} selectedEventId="evt-brand-new" onNewTask={onNewTask} />,
+      );
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      // Refetch lands: new session is now observed
+      const withNew = [...mockEvents, { ...mockEvents[0], id: 'evt-brand-new' }];
+      spy.mockReturnValue(asQuery(withNew));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-brand-new" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      // Session closes: it disappears after having been seen
+      spy.mockReturnValue(asQuery(mockEvents));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-brand-new" onNewTask={onNewTask} />);
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
+
+    it('evicts the selection when a previously seen active event closes', () => {
+      const onNewTask = vi.fn();
+      const spy = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      spy.mockReturnValue(asQuery([mockEvents[1]]));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
+
+    it('evicts when the last active event closes (list becomes empty)', () => {
+      const onNewTask = vi.fn();
+      const spy = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      spy.mockReturnValue(asQuery([]));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
+
+    it('defers eviction while a refetch is in flight', () => {
+      const onNewTask = vi.fn();
+      const spy = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      spy.mockReturnValue(asQuery([mockEvents[1]], { isFetching: true }));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      spy.mockReturnValue(asQuery([mockEvents[1]], { isFetching: false }));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-evict a closed event that the user deep-links to again after eviction', () => {
+      const onNewTask = vi.fn();
+      const spy = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      spy.mockReturnValue(asQuery([mockEvents[1]]));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+
+      // Fresh list array, same stale selection: guard was pruned on eviction
+      spy.mockReturnValue(asQuery([{ ...mockEvents[1] }]));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
   });
 });
