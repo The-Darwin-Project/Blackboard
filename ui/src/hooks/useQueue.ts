@@ -11,7 +11,7 @@
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getActiveEvents, getWaitingApprovalEvents, getEventDocument, getHeadhunterPending, getAlignerPending, getJenkinsPending } from '../api/client';
-import type { ActiveEvent, EventDocument, MessageStatus } from '../api/types';
+import type { ActiveEvent, EventDocument, EventEvidence, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
   return useQuery({
@@ -93,13 +93,29 @@ export function useQueueInvalidation() {
     invalidateJenkins: () => queryClient.invalidateQueries({ queryKey: ['jenkinsPending'] }),
     optimisticRemoveEvent: (eventId: string) => {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
-        old ? old.filter((e) => e.id !== eventId) : [],
+        old ? old.filter((e) => e.id !== eventId) : old,
       );
     },
-    optimisticPatchEvent: (eventId: string, patch: Partial<ActiveEvent>) => {
-      queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
-        old ? old.map((e) => (e.id === eventId ? { ...e, ...patch } : e)) : [],
-      );
+    // Shallow-merges `patch` onto the matching event; `evidence` is merged one level deep so a
+    // partial evidence patch (e.g. only brain_domain) preserves the sibling evidence fields.
+    // An unloaded cache (undefined) stays undefined so an early WS message never masquerades as loaded data.
+    optimisticPatchEvent: (
+      eventId: string,
+      patch: Omit<Partial<ActiveEvent>, 'evidence'> & { evidence?: Partial<EventEvidence> },
+    ) => {
+      queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) => {
+        if (!old) return old;
+        return old.map((e) => {
+          if (e.id !== eventId) return e;
+          return {
+            ...e,
+            ...patch,
+            evidence: patch.evidence && e.evidence
+              ? { ...e.evidence, ...patch.evidence }
+              : (patch.evidence as EventEvidence | undefined) ?? e.evidence,
+          };
+        });
+      });
     },
     optimisticUpdateTurnStatus: (eventId: string, status: MessageStatus, turns: number[] | 'all') => {
       queryClient.setQueryData(['eventDocument', eventId], (old: EventDocument | undefined) => {

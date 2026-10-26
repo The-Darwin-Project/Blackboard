@@ -71,11 +71,11 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     expect(mockSelectEvent).toHaveBeenCalledWith('evt-2');
   });
 
-  it('provides a + New Task trigger button', () => {
+  it('provides a New Task trigger button', () => {
     const onNewTask = vi.fn();
     render(<WorkspaceSessionsHub isOpen={true} onNewTask={onNewTask} />);
 
-    const newTaskBtn = screen.getByRole('button', { name: /\+ New Task|New Session|\+ Task/i });
+    const newTaskBtn = screen.getByRole('button', { name: /^New Task$/ });
     expect(newTaskBtn).toBeInTheDocument();
 
     fireEvent.click(newTaskBtn);

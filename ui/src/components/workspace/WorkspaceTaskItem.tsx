@@ -23,8 +23,9 @@ const CYNEFIN_COLORS: Record<string, string> = {
 };
 
 export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: WorkspaceTaskItemProps) {
-  const domain = evt.evidence?.domain || 'casual';
-  const domainClass = CYNEFIN_COLORS[domain] || CYNEFIN_COLORS.casual;
+  const domain = evt.evidence?.brain_domain || evt.evidence?.domain || 'casual';
+  const domainClass = Object.hasOwn(CYNEFIN_COLORS, domain) ? CYNEFIN_COLORS[domain] : CYNEFIN_COLORS.casual;
+  const summary = evt.evidence?.display_text?.trim() || evt.reason?.trim() || 'Interactive session';
 
   return (
     <button
@@ -43,7 +44,7 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
           {domain}
         </span>
       </div>
-      <div className="text-[11px] text-text-muted line-clamp-1">{evt.reason || 'Interactive session'}</div>
+      <div className="text-[11px] text-text-muted line-clamp-1">{summary}</div>
     </button>
   );
 }

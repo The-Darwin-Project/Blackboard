@@ -6,7 +6,7 @@
 // 3. [Gotcha]: Skip eviction while a refetch is in flight; the cached list may still be stale.
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
- * Lists active events with Cynefin domain badges and provides '+ New Task' trigger.
+ * Lists active events with Cynefin domain badges and provides a 'New Task' trigger.
  */
 import { useEffect, useRef } from 'react';
 import { Plus } from 'lucide-react';
@@ -72,12 +72,12 @@ export default function WorkspaceSessionsHub({
         <span className="text-xs font-semibold text-text-primary tracking-wider uppercase">Active Tasks</span>
         <button
           onClick={onNewTask}
-          aria-label="+ New Task"
-          className="flex items-center gap-1 px-2 py-1 rounded bg-accent/15 border border-accent/30 hover:bg-accent/25 text-accent text-xs font-medium transition-colors"
-          title="Create New Task (+)"
+          aria-label="New Task"
+          className="flex items-center gap-1.5 px-2 py-1 rounded bg-accent/15 border border-accent/30 hover:bg-accent/25 text-accent text-xs font-medium transition-colors"
+          title="Create New Task"
         >
           <Plus size={13} />
-          <span>+ New Task</span>
+          <span>New Task</span>
         </button>
       </div>
 
