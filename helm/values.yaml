@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "40eb927" # Updated by CI to commit SHA
+  tag: "fbeaf42" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -126,10 +126,10 @@ sidecars:
   # sidecar's validated defaults apply. Invalid values (non-numeric, or not 0 < high < critical <= 1) fall back to defaults.
   # DEFAULT_WORK_DIR is wired per sidecar from its volume mount (/data/gitops-<role>) in templates/deployment.yaml.
   storageRecycler:
-    highWatermark: ""      # STORAGE_HIGH_WATERMARK, default 0.70 -- start recycling above this used ratio
-    criticalWatermark: ""  # STORAGE_CRITICAL_WATERMARK, default 0.85 -- emergency LRU prune above this used ratio
-    staleMs: ""            # STORAGE_STALE_MS, default 86400000 (24h) -- idle age before an event workspace is evicted
-    sweepIntervalMs: ""    # STORAGE_SWEEP_INTERVAL_MS, default 1800000 (30m) -- periodic sweep cadence
+    highWatermark: "" # STORAGE_HIGH_WATERMARK, default 0.70 -- start recycling above this used ratio
+    criticalWatermark: "" # STORAGE_CRITICAL_WATERMARK, default 0.85 -- emergency LRU prune above this used ratio
+    staleMs: "" # STORAGE_STALE_MS, default 86400000 (24h) -- idle age before an event workspace is evicted
+    sweepIntervalMs: "" # STORAGE_SWEEP_INTERVAL_MS, default 1800000 (30m) -- periodic sweep cadence
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
