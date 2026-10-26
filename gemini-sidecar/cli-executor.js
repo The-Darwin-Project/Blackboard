@@ -34,6 +34,7 @@ const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
 const { setupGoogleAuthForAgy } = require('./credentials');
+const { checkAndRecycleStorage } = require('./storage-recycler');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveEffectiveRole(role) {
@@ -362,6 +363,13 @@ async function executeCLI(prompt, options = {}) {
         }
     }
 
+    const storageRoot = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
+    try {
+        await checkAndRecycleStorage(storageRoot, options.cwd);
+    } catch (err) {
+        console.warn(`[${new Date().toISOString()}] Storage check failed before executeCLI: ${err.message}`);
+    }
+
     // buildCLICommand can throw (fail-closed on a missing/invalid --settings file --
     // see ROLE_SETTINGS_FILE above). No try/catch needed HERE: a synchronous throw
     // inside a `new Promise((resolve, reject) => {...})` executor is caught by the
@@ -488,6 +496,13 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         } catch (err) {
             console.error(`[${new Date().toISOString()}] setupGoogleAuthForAgy failed before executeCLIStreaming: ${err.message}`);
         }
+    }
+
+    const storageRoot = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
+    try {
+        await checkAndRecycleStorage(storageRoot, options.cwd);
+    } catch (err) {
+        console.warn(`[${new Date().toISOString()}] Storage check failed before executeCLIStreaming: ${err.message}`);
     }
 
     // Same guarantee as executeCLI above: a buildCLICommand throw auto-rejects this

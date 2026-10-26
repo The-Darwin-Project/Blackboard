@@ -63,6 +63,13 @@ const BRAIN_HTTP_URL = process.env.BRAIN_HTTP_URL || '';
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hlm]/g;
 function stripAnsi(text) { return text.replace(ANSI_RE, ''); }
 
+// Storage Recycler configuration (VMER-2100, incident evt-44cf0bba)
+const STORAGE_RECYCLE_INTERVAL_MS = parseInt(process.env.STORAGE_RECYCLE_INTERVAL_MS) || 1800000; // 30 min
+const STORAGE_HIGH_WATERMARK_RATIO = parseFloat(process.env.STORAGE_HIGH_WATERMARK_RATIO) || 0.70; // 70% threshold
+const STORAGE_CRITICAL_WATERMARK_RATIO = parseFloat(process.env.STORAGE_CRITICAL_WATERMARK_RATIO) || 0.85; // 85% emergency threshold
+const STORAGE_STALE_EVENT_TTL_MS = parseInt(process.env.STORAGE_STALE_EVENT_TTL_MS) || 86400000; // 24 hours
+const STORAGE_RESULTS_TTL_MS = parseInt(process.env.STORAGE_RESULTS_TTL_MS) || 7200000; // 2 hours
+
 module.exports = {
   PORT,
   ROLE_TIMEOUTS,
@@ -83,4 +90,9 @@ module.exports = {
   CLI_429_BACKOFF_MULTIPLIER,
   ANSI_RE,
   stripAnsi,
+  STORAGE_RECYCLE_INTERVAL_MS,
+  STORAGE_HIGH_WATERMARK_RATIO,
+  STORAGE_CRITICAL_WATERMARK_RATIO,
+  STORAGE_STALE_EVENT_TTL_MS,
+  STORAGE_RESULTS_TTL_MS,
 };

@@ -10,12 +10,13 @@ const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-const { PORT, AGENT_CLI, EVENT_ID, EPHEMERAL, BRAIN_HTTP_URL } = require('./config');
+const { PORT, AGENT_CLI, EVENT_ID, EPHEMERAL, BRAIN_HTTP_URL, DEFAULT_WORK_DIR } = require('./config');
 const { initializeCLISettings } = require('./cli-setup');
 const { handleRequest } = require('./http-handler');
 const { setupWSServer } = require('./ws-server');
 const { startWSClient } = require('./ws-client');
 const { stageEventDocument } = require('./event-transport');
+const { startPeriodicRecycler, stopPeriodicRecycler } = require('./storage-recycler');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
   setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
@@ -43,6 +44,7 @@ async function fetchEventDocument() {
 
 const server = http.createServer(handleRequest);
 const BRAIN_WS_URL = process.env.BRAIN_WS_URL || '';
+let storageRecyclerTimer = null;
 
 (async () => {
   await fetchEventDocument();
@@ -96,9 +98,17 @@ server.listen(PORT, '0.0.0.0', () => {
       console.log(`[${new Date().toISOString()}] Periodic CLI login refresh failed: ${err.message}`);
     });
   }, CLI_LOGIN_INTERVAL_MS);
+
+  // Storage Recycler startup sweep and periodic loop (VMER-2100)
+  const workDir = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
+  storageRecyclerTimer = startPeriodicRecycler(workDir);
+  console.log(`[${new Date().toISOString()}] Storage Recycler initialized for ${workDir}`);
 });
 
 process.on('SIGTERM', () => {
   console.log(`[${new Date().toISOString()}] Received SIGTERM, shutting down...`);
+  if (storageRecyclerTimer) {
+    stopPeriodicRecycler(storageRecyclerTimer);
+  }
   server.close(() => process.exit(0));
 });
