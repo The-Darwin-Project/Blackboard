@@ -75,7 +75,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     const onNewTask = vi.fn();
     render(<WorkspaceSessionsHub isOpen={true} onNewTask={onNewTask} />);
 
-    const newTaskBtn = screen.getByRole('button', { name: /\+ New Task|New Session|\+ Task/i });
+    const newTaskBtn = screen.getByRole('button', { name: /New Task|New Session|\+ Task/i });
     expect(newTaskBtn).toBeInTheDocument();
 
     fireEvent.click(newTaskBtn);

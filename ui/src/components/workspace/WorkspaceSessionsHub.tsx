@@ -72,12 +72,12 @@ export default function WorkspaceSessionsHub({
         <span className="text-xs font-semibold text-text-primary tracking-wider uppercase">Active Tasks</span>
         <button
           onClick={onNewTask}
-          aria-label="+ New Task"
-          className="flex items-center gap-1 px-2 py-1 rounded bg-accent/15 border border-accent/30 hover:bg-accent/25 text-accent text-xs font-medium transition-colors"
+          aria-label="New Task"
+          className="flex items-center gap-1.5 px-2 py-1 rounded bg-accent/15 border border-accent/30 hover:bg-accent/25 text-accent text-xs font-medium transition-colors"
           title="Create New Task (+)"
         >
           <Plus size={13} />
-          <span>+ New Task</span>
+          <span>New Task</span>
         </button>
       </div>
 

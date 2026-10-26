@@ -196,6 +196,28 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();
+    } else if (msg.type === 'domain_updated') {
+      if (msg.event_id && msg.domain) {
+        optimisticPatchEvent(msg.event_id as string, {
+          evidence: {
+            domain: msg.domain as any,
+            brain_domain: msg.domain as string,
+          } as any,
+        });
+      }
+      invalidateActive();
+      if (msg.event_id) invalidateEvent(msg.event_id as string);
+    } else if (msg.type === 'severity_updated') {
+      if (msg.event_id && msg.severity) {
+        optimisticPatchEvent(msg.event_id as string, {
+          evidence: {
+            severity: msg.severity as any,
+            brain_severity: msg.severity as any,
+          } as any,
+        });
+      }
+      invalidateActive();
+      if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'kargo_stages_update') {
       setKargoStages((msg.stages as KargoStageStatus[]) ?? []);
     } else if (msg.type === 'kargo_event_result') {

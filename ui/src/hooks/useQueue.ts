@@ -98,7 +98,16 @@ export function useQueueInvalidation() {
     },
     optimisticPatchEvent: (eventId: string, patch: Partial<ActiveEvent>) => {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
-        old ? old.map((e) => (e.id === eventId ? { ...e, ...patch } : e)) : [],
+        old ? old.map((e) => {
+          if (e.id !== eventId) return e;
+          return {
+            ...e,
+            ...patch,
+            evidence: patch.evidence
+              ? { ...e.evidence, ...patch.evidence }
+              : e.evidence,
+          };
+        }) : [],
       );
     },
     optimisticUpdateTurnStatus: (eventId: string, status: MessageStatus, turns: number[] | 'all') => {
