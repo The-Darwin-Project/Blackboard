@@ -137,7 +137,7 @@ sidecars:
   persistence:
     enabled: true
     storageClassName: "" # Override via ArgoCD app parameters
-    size: 5Gi
+    size: 20Gi
     accessModes:
       - ReadWriteMany
 # =============================================================================
