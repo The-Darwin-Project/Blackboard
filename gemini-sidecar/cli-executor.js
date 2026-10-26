@@ -22,19 +22,23 @@
 //     model-line-only, and match stderr only (stdout is model text and can mention these phrases).
 // 12. [Gotcha]: agy uses ~/.gemini/config/hooks.json for PreToolUse (validate-mutations.sh) and Stop (require-results.sh) as defense-in-depth.
 //     Claude uses --settings permissions.deny files (ROLE_SETTINGS_FILE) for engine-level read-only enforcement.
+// 13. [Pattern]: withTaskStorage() is the ONLY pre-task storage hook; both spawn paths call it. It pins options.cwd for the whole
+//     task (so a concurrent or in-flight storage sweep never reclaims the live workspace), runs the 70%-watermark fast-path
+//     check bounded by STORAGE_PRETASK_TIMEOUT_MS (default 5s; a slow CephFS call can never stall a task), and unpins in a finally.
+//     The storage root comes from config.resolveStorageRoot() -- never re-inline a DEFAULT_WORK_DIR fallback chain here.
 
 const cp = require('child_process');
 const spawn = (...args) => cp.spawn(...args);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS, STORAGE_PRETASK_TIMEOUT_MS, resolveStorageRoot } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
 const { setupGoogleAuthForAgy } = require('./credentials');
-const { checkAndRecycleStorage } = require('./storage-recycler');
+const { checkAndRecycleStorage, pinTaskCwd, unpinTaskCwd } = require('./storage-recycler');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 function resolveEffectiveRole(role) {
@@ -353,6 +357,31 @@ function watchResultsDir(workDir) {
     };
 }
 
+// Pre-task storage hook shared by executeCLI and executeCLIStreaming (see ai-rule 13).
+// Pins cwd for the task lifetime, runs a time-bounded recycle check, runs fn, always unpins.
+async function withTaskStorage(cwd, label, fn) {
+    pinTaskCwd(cwd);
+    try {
+        let timer;
+        const timeout = new Promise((resolve) => {
+            timer = setTimeout(() => {
+                console.warn(`[${new Date().toISOString()}] Storage check exceeded ${STORAGE_PRETASK_TIMEOUT_MS}ms before ${label}; continuing without waiting`);
+                resolve();
+            }, STORAGE_PRETASK_TIMEOUT_MS);
+        });
+        try {
+            await Promise.race([checkAndRecycleStorage(resolveStorageRoot(cwd), cwd), timeout]);
+        } catch (err) {
+            console.warn(`[${new Date().toISOString()}] Storage check failed before ${label}: ${err.message}`);
+        } finally {
+            clearTimeout(timer);
+        }
+        return await fn();
+    } finally {
+        unpinTaskCwd(cwd);
+    }
+}
+
 async function executeCLI(prompt, options = {}) {
     const agentCli = options.agentCli || AGENT_CLI;
     if (agentCli === 'agy') {
@@ -361,13 +390,6 @@ async function executeCLI(prompt, options = {}) {
         } catch (err) {
             console.error(`[${new Date().toISOString()}] setupGoogleAuthForAgy failed before executeCLI: ${err.message}`);
         }
-    }
-
-    const storageRoot = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
-    try {
-        await checkAndRecycleStorage(storageRoot, options.cwd);
-    } catch (err) {
-        console.warn(`[${new Date().toISOString()}] Storage check failed before executeCLI: ${err.message}`);
     }
 
     // buildCLICommand can throw (fail-closed on a missing/invalid --settings file --
@@ -379,7 +401,7 @@ async function executeCLI(prompt, options = {}) {
     // own try/catch, so a throw here degrades to a clean error response, never an
     // unhandled rejection. (Raised repeatedly in AI review across multiple rounds --
     // documenting the reasoning here rather than adding a redundant try/catch.)
-    return new Promise((resolve, reject) => {
+    return withTaskStorage(options.cwd, 'executeCLI', () => new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
             model: options.model,
@@ -485,7 +507,7 @@ async function executeCLI(prompt, options = {}) {
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
-    });
+    }));
 }
 
 async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
@@ -498,19 +520,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         }
     }
 
-    const storageRoot = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
-    try {
-        await checkAndRecycleStorage(storageRoot, options.cwd);
-    } catch (err) {
-        console.warn(`[${new Date().toISOString()}] Storage check failed before executeCLIStreaming: ${err.message}`);
-    }
-
     // Same guarantee as executeCLI above: a buildCLICommand throw auto-rejects this
     // Promise via the executor-throw-to-reject spec behavior. Every real caller
     // (ws-server.js task/followup handlers, ws-client.js reconnect path) already
     // awaits this inside its own try/catch, converting a throw into a clean WS error
     // message -- never an unhandled rejection.
-    return new Promise((resolve, reject) => {
+    return withTaskStorage(options.cwd, 'executeCLIStreaming', () => new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
             sessionId: options.sessionId,
@@ -659,7 +674,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
-    });
+    }));
 }
 
 function is429Error(stderr) {
@@ -742,4 +757,5 @@ module.exports = {
     isInvalidModelError,
     getRetryOptions,
     resolveModel,
+    withTaskStorage,
 };

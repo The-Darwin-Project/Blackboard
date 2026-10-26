@@ -896,6 +896,7 @@ spec:
               value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: AGENT_ROLE
               value: "architect"
+            {{- include "darwin.storageEnv" (dict "root" $ "mount" "/data/gitops-architect") | nindent 12 }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.architect.permissionMode | default "" }}"
             - name: GIT_USER_NAME
@@ -1072,6 +1073,7 @@ spec:
               value: "{{ .Values.sidecars.sysadmin.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "sysadmin"
+            {{- include "darwin.storageEnv" (dict "root" $ "mount" "/data/gitops-sysadmin") | nindent 12 }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.sysadmin.permissionMode | default "" }}"
             - name: AGENT_MODEL
@@ -1260,6 +1262,7 @@ spec:
               value: "{{ .Values.sidecars.developer.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "developer"
+            {{- include "darwin.storageEnv" (dict "root" $ "mount" "/data/gitops-developer") | nindent 12 }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.developer.permissionMode | default "" }}"
             - name: AGENT_MODEL
@@ -1420,6 +1423,7 @@ spec:
               value: "{{ .Values.sidecars.qe.cliType | default "claude" }}"
             - name: AGENT_ROLE
               value: "qe"
+            {{- include "darwin.storageEnv" (dict "root" $ "mount" "/data/gitops-qe") | nindent 12 }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.qe.permissionMode | default "" }}"
             - name: AGENT_MODEL

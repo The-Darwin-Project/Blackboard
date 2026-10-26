@@ -5,18 +5,21 @@
 // 3. [Constraint]: HTTP server always runs (K8s health probes need /health regardless of WS mode).
 // 4. [Pattern]: CLI settings init runs once at module load. Periodic CLI login refresh via setInterval.
 // 5. [Pattern]: Ephemeral agents fetch event document from Brain HTTP API before WS connect.
+// 6. [Pattern]: Storage recycler root comes ONLY from config.resolveStorageRoot() (no inline DEFAULT_WORK_DIR fallback chain).
+//    The periodic sweep starts after listen; SIGTERM stops the timer, then drains any in-flight sweep (bounded by
+//    SHUTDOWN_DRAIN_MS) via stopStorageRecycler() BEFORE server.close/exit so an fs.rm is never cut off mid-directory.
 
 const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-const { PORT, AGENT_CLI, EVENT_ID, EPHEMERAL, BRAIN_HTTP_URL, DEFAULT_WORK_DIR } = require('./config');
+const { PORT, AGENT_CLI, EVENT_ID, EPHEMERAL, BRAIN_HTTP_URL, resolveStorageRoot } = require('./config');
 const { initializeCLISettings } = require('./cli-setup');
 const { handleRequest } = require('./http-handler');
 const { setupWSServer } = require('./ws-server');
 const { startWSClient } = require('./ws-client');
 const { stageEventDocument } = require('./event-transport');
-const { startPeriodicRecycler, stopPeriodicRecycler } = require('./storage-recycler');
+const { startPeriodicRecycler, stopPeriodicRecycler, stopStorageRecycler } = require('./storage-recycler');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
   setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
@@ -100,15 +103,29 @@ server.listen(PORT, '0.0.0.0', () => {
   }, CLI_LOGIN_INTERVAL_MS);
 
   // Storage Recycler startup sweep and periodic loop (VMER-2100)
-  const workDir = process.env.DEFAULT_WORK_DIR || DEFAULT_WORK_DIR || '/data/gitops';
+  const workDir = resolveStorageRoot();
   storageRecyclerTimer = startPeriodicRecycler(workDir);
   console.log(`[${new Date().toISOString()}] Storage Recycler initialized for ${workDir}`);
 });
 
-process.on('SIGTERM', () => {
+// Keep well under the K8s default 30s terminationGracePeriodSeconds.
+const SHUTDOWN_DRAIN_MS = 10000;
+
+process.on('SIGTERM', async () => {
   console.log(`[${new Date().toISOString()}] Received SIGTERM, shutting down...`);
   if (storageRecyclerTimer) {
     stopPeriodicRecycler(storageRecyclerTimer);
+  }
+  let drainTimer;
+  try {
+    await Promise.race([
+      stopStorageRecycler(),
+      new Promise((resolve) => { drainTimer = setTimeout(resolve, SHUTDOWN_DRAIN_MS); }),
+    ]);
+  } catch (err) {
+    console.warn(`[${new Date().toISOString()}] Storage recycler drain failed: ${err.message}`);
+  } finally {
+    clearTimeout(drainTimer);
   }
   server.close(() => process.exit(0));
 });
