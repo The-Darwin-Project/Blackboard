@@ -15,13 +15,13 @@
  */
 import { useEffect, useMemo } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { OpsControlProvider, useOpsControl } from '../contexts/OpsStateContext';
+import { useOpsControl } from '../contexts/OpsStateContext';
 import { useWSConnection } from '../contexts/WebSocketContext';
-import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
 import EventChatPanel from './ops/EventChatPanel';
 import ActivityPanel from './ops/ActivityPanel';
+import Header from './Header';
 import ErrorBoundary from './ErrorBoundary';
 
 const BASE_TABS = [
@@ -39,7 +39,7 @@ const BASE_TABS = [
   { id: '/guide', label: 'Guide' },
 ];
 
-function LayoutInner() {
+export default function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { selectEvent, selectedEventId, deselectEvent } = useOpsControl();
@@ -109,25 +109,7 @@ function LayoutInner() {
   return (
     <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
       {/* Header -- clean: logo + tabs only */}
-      <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-4 py-1.5 flex items-center gap-4">
-        <div className="flex items-center gap-2.5">
-          <img src="/darwin.svg" alt="Darwin" className="w-7 h-7 rounded-lg shadow-sm" />
-          <span className="text-sm font-semibold text-text-primary hidden lg:block tracking-tight">Darwin</span>
-        </div>
-
-        <nav className="flex items-center gap-0.5">
-          {TABS.map((tab) => (
-            <button key={tab.id} onClick={() => navigate(tab.id)}
-              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                activeTab === tab.id
-                  ? 'bg-accent/20 text-accent'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-bg-tertiary'
-              }`}>
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </header>
+      <Header tabs={TABS} activeTab={activeTab} onSelectTab={navigate} />
 
       {/* Degraded connection banner (non-blocking) */}
       {connectionDegraded && (
@@ -165,15 +147,5 @@ function LayoutInner() {
       {/* Bottom bar: Activity feed + Status strip + Controls */}
       <ActivityPanel />
     </div>
-  );
-}
-
-export default function Layout() {
-  return (
-    <OpsControlProvider>
-      <ActiveStreamsProvider>
-        <LayoutInner />
-      </ActiveStreamsProvider>
-    </OpsControlProvider>
   );
 }

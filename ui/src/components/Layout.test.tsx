@@ -5,6 +5,8 @@ import { useWSConnection } from '../contexts/WebSocketContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { OpsControlProvider } from '../contexts/OpsStateContext';
+import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 
 vi.mock('../contexts/WebSocketContext', async (importOriginal) => {
   const actual = await importOriginal();
@@ -52,9 +54,13 @@ describe('Layout connection degraded banner', () => {
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -73,9 +79,13 @@ describe('Layout connection degraded banner', () => {
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -93,9 +103,13 @@ describe('Layout connection degraded banner', () => {
 
     const { rerender } = render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 
@@ -133,9 +147,13 @@ describe('Layout header branding', () => {
 
     render(
       <QueryClientProvider client={new QueryClient()}><MemoryRouter>
-        <Layout>
-          <div>content</div>
-        </Layout>
+        <OpsControlProvider>
+          <ActiveStreamsProvider>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </ActiveStreamsProvider>
+        </OpsControlProvider>
       </MemoryRouter></QueryClientProvider>
     );
 

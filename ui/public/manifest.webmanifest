@@ -1,4 +1,5 @@
 {
+  "id": "/workspace",
   "name": "Darwin Agent Workspace",
   "short_name": "Darwin",
   "description": "Darwin Autonomous AI Engineering Workspace",
@@ -41,6 +42,15 @@
       "src": "/apple-touch-icon.png",
       "sizes": "180x180",
       "type": "image/png"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Darwin Agent Workspace",
+      "short_name": "Workspace",
+      "description": "Interactive AI IDE Pair Programming Workspace",
+      "url": "/workspace",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

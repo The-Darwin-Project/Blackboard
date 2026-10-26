@@ -39,6 +39,7 @@ export interface OpsControl {
   deselectEvent: () => void;
   ephemeralAgents: AgentRegistryEntry[];
   registeredAgents: AgentRegistryEntry[];
+  agents?: AgentRegistryEntry[];
   kargoStages: KargoStageStatus[];
   kargoEventResult: KargoEventResult | null;
   contentTiles: ContentTile[];
@@ -58,6 +59,10 @@ export function useOpsControl(): OpsControl {
   const ctx = useContext(OpsControlContext);
   if (!ctx) throw new Error('useOpsControl must be used within OpsControlProvider');
   return ctx;
+}
+
+export function useOpsControlSafe(): OpsControl | null {
+  return useContext(OpsControlContext);
 }
 
 export function OpsControlProvider({ children }: { children: ReactNode }) {
@@ -204,6 +209,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
     deselectEvent,
     ephemeralAgents,
     registeredAgents,
+    agents: registeredAgents,
     kargoStages,
     kargoEventResult,
     contentTiles,
