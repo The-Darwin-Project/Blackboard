@@ -180,11 +180,8 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 
-# Copy server code (modular -- entrypoint + 14 modules + 4 MCP servers)
-COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
-     credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
-     event-transport.js team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js \
-     jenkins-mcp.js catalog-skills.js claude-guard.js roles.js ./
+# Copy server code (modular -- entrypoint + modules + MCP servers + storage recycler)
+COPY *.js ./
 
 # Verify jenkins-mcp.js's exported TOOLS array still matches the tool-name
 # contract that server.js/ws-*.js role gating depends on (jenkins_trigger_build,
@@ -226,6 +223,22 @@ COPY hooks/validate-mutations.sh /app/hooks/validate-mutations.sh
 COPY hooks/merge-guard.js /app/hooks/merge-guard.js
 RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh \
     /app/hooks/require-results.sh /app/hooks/validate-mutations.sh
+
+# Verify all relative requires in copied .js files resolve at build time.
+# Prevents MODULE_NOT_FOUND runtime crashloops if a module dependency is omitted.
+RUN node -e " \
+      const fs = require('fs'); \
+      const files = fs.readdirSync('.').filter(f => f.endsWith('.js')); \
+      for (const f of files) { \
+        const content = fs.readFileSync(f, 'utf8'); \
+        const matches = [...content.matchAll(/require\\(['\"](\\.\\/[^'\"]+)['\"]\\)/g)]; \
+        for (const [_, req] of matches) { \
+          try { require.resolve(req); } \
+          catch (e) { console.error('FATAL in ' + f + ': ' + e.message); process.exit(1); } \
+        } \
+      } \
+      console.log('All local module requires verified successfully (' + files.length + ' files)'); \
+    "
 
 # Create CLI config directories (rules come from ConfigMap mount)
 RUN mkdir -p /home/default/.gemini/config /home/default/.gemini/antigravity && \

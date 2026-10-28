@@ -109,12 +109,12 @@ function isProtectedPath(candidatePath, protectedCwds, workDir) {
   const resolved = path.resolve(candidatePath);
 
   // Explicitly protect filesystem and jail root directories
-  if (resolved === '/' || resolved === '/data' || resolved === '/tmp') {
+  if (resolved === '/' || resolved === '/data' || resolved === '/tmp' || resolved === '/private/tmp') {
     return true;
   }
 
-  // Path jail: strictly allow recycling only inside /data/ or /tmp/
-  if (!isInside(resolved, '/data') && !isInside(resolved, '/tmp')) {
+  // Path jail: strictly allow recycling only inside /data/ or /tmp/ (or macOS /private/tmp)
+  if (!isInside(resolved, '/data') && !isInside(resolved, '/tmp') && !isInside(resolved, '/private/tmp')) {
     return true;
   }
 
