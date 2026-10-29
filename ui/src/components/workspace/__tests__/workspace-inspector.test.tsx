@@ -4,6 +4,14 @@ import WorkspaceInspector from '../WorkspaceInspector';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as OpsStateContext from '../../../contexts/OpsStateContext';
 import * as queueHook from '../../../hooks/useQueue';
+import { DOMAIN_COLORS } from '../../../constants/colors';
+
+// jsdom normalises inline colours to rgb(); convert the hex constants the same way for comparison.
+const rgb = (hex: string) => {
+  const probe = document.createElement('span');
+  probe.style.color = hex;
+  return probe.style.color;
+};
 
 // Mock child tabs
 vi.mock('../../PlanProgress', () => ({
@@ -281,10 +289,70 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(screen.queryByText('creator@example.com')).not.toBeInTheDocument();
     });
 
-    it.each(['constructor', '__proto__', 'weird', 'CHAOTIC'])('renders domain badge for %s without throwing', (domain) => {
+    it.each(['constructor', '__proto__', 'weird'])('renders unknown/prototype domain %s with the casual fallback color', (domain) => {
       mockDoc({ event: { evidence: { brain_domain: domain } } });
       renderComponent({ selectedEventId: 'evt-ov' });
-      expect(screen.getByText(domain.toLowerCase())).toBeInTheDocument();
+      const badge = screen.getByText(domain);
+      expect(badge.style.color).toBe(rgb(DOMAIN_COLORS.casual.text));
+    });
+
+    it('lowercases the domain and applies its palette (case-insensitive)', () => {
+      mockDoc({ event: { evidence: { brain_domain: 'CHAOTIC' } } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      const badge = screen.getByText('chaotic');
+      expect(badge.style.color).toBe(rgb(DOMAIN_COLORS.chaotic.text));
+      expect(badge.style.color).not.toBe(rgb(DOMAIN_COLORS.casual.text));
+    });
+
+    it('prefers brain_domain over evidence.domain', () => {
+      mockDoc({ event: { evidence: { brain_domain: 'complex', domain: 'disorder' } } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('complex').style.color).toBe(rgb(DOMAIN_COLORS.complex.text));
+      expect(screen.queryByText('disorder')).not.toBeInTheDocument();
+    });
+
+    it.each(['disorder', 'complicated'] as const)(
+      'falls back to evidence.domain (%s) when brain_domain is absent',
+      (domain) => {
+        for (const brain of [null, undefined, '']) {
+          mockDoc({ event: { evidence: { brain_domain: brain, domain } } });
+          const { unmount } = renderComponent({ selectedEventId: 'evt-ov' });
+          const badge = screen.getByText(domain);
+          expect(badge.style.color).toBe(rgb(DOMAIN_COLORS[domain].text));
+          unmount();
+        }
+      },
+    );
+
+    it.each([
+      ['both null', { brain_domain: null, domain: null }],
+      ['both undefined', {}],
+    ])("defaults to 'disorder' when brain_domain and evidence.domain are %s", (_label, evidence) => {
+      mockDoc({ event: { evidence } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('disorder').style.color).toBe(rgb(DOMAIN_COLORS.disorder.text));
+    });
+
+    it("defaults to 'disorder' when the event has no evidence at all", () => {
+      mockDoc({});
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('disorder').style.color).toBe(rgb(DOMAIN_COLORS.disorder.text));
+    });
+
+    it('includes tool_use_tokens in the token breakdown bar and legend', () => {
+      mockDoc({
+        token_usage: {
+          total_tokens: 1000, input_tokens: 600, output_tokens: 0, thinking_tokens: 0,
+          cached_tokens: 0, tool_use_tokens: 400, calls: 2,
+        },
+      });
+      const { container } = renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('Tools')).toBeInTheDocument();
+      expect(screen.getByText('400')).toBeInTheDocument();
+      const segment = Array.from(container.querySelectorAll<HTMLElement>('div[style]'))
+        .find(el => el.style.width === '40%');
+      expect(segment).toBeDefined();
+      expect(segment!.style.background).toBe(rgb('#38bdf8'));
     });
   });
 });

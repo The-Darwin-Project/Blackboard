@@ -162,6 +162,27 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     expect(screen.getByText(/No active tasks/i)).toBeInTheDocument();
   });
 
+  it('shows the loading banner and suppresses empty-state text while either query is loading', () => {
+    const q = (isLoading: boolean) => ({ data: [], isLoading, isFetching: isLoading }) as never;
+    vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(q(true));
+    vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(q(false));
+    render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+    expect(screen.getByText(/Loading tasks/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No active tasks/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No deferred tasks/i)).not.toBeInTheDocument();
+  });
+
+  it('suppresses the closed empty-state while only the closed query is loading', () => {
+    const q = (isLoading: boolean) => ({ data: [], isLoading, isFetching: isLoading }) as never;
+    vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(q(false));
+    vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(q(true));
+    render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /Closed & Failed/i }));
+    expect(screen.getByText(/Loading tasks/i)).toBeInTheDocument();
+    expect(screen.getByText(/No active tasks/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No closed tasks/i)).not.toBeInTheDocument();
+  });
+
   it('filters by "My Tasks" vs "Global" scope correctly', () => {
     render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
 
@@ -388,7 +409,11 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       ]));
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
-      fireEvent.change(screen.getByLabelText(/filter by project/i), { target: { value: 'Padded' } });
+      const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      const padded = Array.from(select.options).filter(o => o.value !== 'all');
+      expect(padded.map(o => o.value)).toEqual(['Padded']);
+      expect(padded.map(o => o.textContent)).toEqual(['Padded']);
+      fireEvent.change(select, { target: { value: 'Padded' } });
       expect(screen.getByText(/ws-service/i)).toBeInTheDocument();
     });
 

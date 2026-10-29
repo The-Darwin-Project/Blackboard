@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceTaskItem from '../WorkspaceTaskItem';
 import type { ActiveEvent, EventEvidence } from '../../../api/types';
-import { DOMAIN_COLORS } from '../../../constants/colors';
+import { DOMAIN_COLORS, STATUS_COLORS } from '../../../constants/colors';
 
 // jsdom normalises inline colours to rgb(); convert the hex constants the same way for comparison.
 const rgb = (hex: string) => {
@@ -94,6 +94,23 @@ describe('WorkspaceTaskItem operational visibility parity', () => {
   it('renders status dot and service name', () => {
     renderItem(makeEvent({ service: 'order-service' }));
     expect(screen.getByText('order-service')).toBeInTheDocument();
+  });
+
+  it.each(['constructor', '__proto__', 'unknown_status'])(
+    'renders the status dot with the fallback (active) color for prototype/unknown status %s',
+    (status) => {
+      const { container } = renderItem(makeEvent({ status: status as ActiveEvent['status'] }));
+      const dot = container.querySelector<HTMLElement>('span.rounded-full.w-2');
+      expect(dot).not.toBeNull();
+      expect(dot!.style.background).toBe(rgb(STATUS_COLORS.active.border));
+    },
+  );
+
+  it('renders the status dot with the matching palette for a known status', () => {
+    const { container } = renderItem(makeEvent({ status: 'resolved' as ActiveEvent['status'] }));
+    const dot = container.querySelector<HTMLElement>('span.rounded-full.w-2');
+    expect(dot!.style.background).toBe(rgb(STATUS_COLORS.resolved.border));
+    expect(dot!.style.background).not.toBe(rgb(STATUS_COLORS.active.border));
   });
 
   it('renders the defer countdown bar when status is deferred', () => {

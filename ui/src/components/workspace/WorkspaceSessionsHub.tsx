@@ -217,7 +217,7 @@ export default function WorkspaceSessionsHub({
 
       {/* Accordion Lists */}
       <div className="flex-1 overflow-y-auto p-2 space-y-3">
-        {isLoadingActive && isLoadingClosed && (
+        {(isLoadingActive || isLoadingClosed) && (
           <div className="p-4 text-center text-xs text-text-muted animate-pulse">Loading tasks...</div>
         )}
 
@@ -241,7 +241,7 @@ export default function WorkspaceSessionsHub({
           {activeOpen && (
             <div className="pl-1 space-y-1">
               {activeTasks.length === 0 ? (
-                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No active tasks</div>
+                isLoadingActive ? null : <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No active tasks</div>
               ) : (
                 activeTasks.map((evt) => (
                   <WorkspaceTaskItem
@@ -276,7 +276,7 @@ export default function WorkspaceSessionsHub({
           {deferredOpen && (
             <div className="pl-1 space-y-1">
               {deferredTasks.length === 0 ? (
-                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No deferred tasks</div>
+                isLoadingActive ? null : <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No deferred tasks</div>
               ) : (
                 deferredTasks.map((evt) => (
                   <WorkspaceTaskItem
@@ -311,7 +311,7 @@ export default function WorkspaceSessionsHub({
           {closedOpen && (
             <div className="pl-1 space-y-1">
               {closedTasks.length === 0 ? (
-                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No closed tasks</div>
+                isLoadingClosed ? null : <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No closed tasks</div>
               ) : (
                 closedTasks.map((evt) => (
                   <WorkspaceTaskItem

@@ -35,6 +35,7 @@ const TOKEN_SEGMENTS: { key: keyof TokenUsageDict; label: string; color: string 
   { key: 'output_tokens', label: 'Out', color: '#f472b6' },
   { key: 'thinking_tokens', label: 'Think', color: '#a78bfa' },
   { key: 'cached_tokens', label: 'Cache', color: '#fbbf24' },
+  { key: 'tool_use_tokens', label: 'Tools', color: '#38bdf8' },
 ];
 
 function SessionTokenUsageMini({ usage, isLive }: { usage: TokenUsageDict; isLive: boolean }) {
@@ -97,7 +98,7 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   const { hasPlan, steps: planSteps } = usePlanState(conversation);
 
   const eventEvidence = eventDoc?.event?.evidence as EventEvidence | undefined;
-  const brainDomain = (eventEvidence?.brain_domain || 'casual').toLowerCase();
+  const brainDomain = (eventEvidence?.brain_domain || eventEvidence?.domain || 'disorder').toLowerCase();
   const domainColor = Object.hasOwn(DOMAIN_COLORS, brainDomain)
     ? DOMAIN_COLORS[brainDomain as keyof typeof DOMAIN_COLORS]
     : DOMAIN_COLORS.casual;
