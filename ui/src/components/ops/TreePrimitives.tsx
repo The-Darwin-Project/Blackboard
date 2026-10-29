@@ -12,7 +12,7 @@ import { ACTOR_COLORS, STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colo
 import SourceIcon from '../SourceIcon';
 import DeferCountdownBar from '../DeferCountdownBar';
 
-function relativeAge(isoDate: string | undefined): string {
+export function relativeAge(isoDate: string | undefined): string {
   if (!isoDate) return '';
   const ms = Date.now() - new Date(isoDate).getTime();
   if (isNaN(ms) || ms < 0) return '';

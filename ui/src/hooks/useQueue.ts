@@ -10,7 +10,7 @@
  * - Polling safety net (10s) to catch missed WS messages
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getWaitingApprovalEvents, getEventDocument, getHeadhunterPending, getAlignerPending, getJenkinsPending } from '../api/client';
+import { getActiveEvents, getWaitingApprovalEvents, getClosedEvents, getEventDocument, getHeadhunterPending, getAlignerPending, getJenkinsPending } from '../api/client';
 import type { ActiveEvent, EventDocument, EventEvidence, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
@@ -19,6 +19,15 @@ export function useActiveEvents() {
     queryFn: getActiveEvents,
     // 10s polling safety net: catches ghost events when WS event_closed was
     // sent to a dead connection (e.g., page refresh during active processing).
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useClosedEvents(limit = 50) {
+  return useQuery({
+    queryKey: ['closedEvents', limit],
+    queryFn: () => getClosedEvents(limit),
     refetchInterval: 10_000,
     refetchOnWindowFocus: true,
   });
