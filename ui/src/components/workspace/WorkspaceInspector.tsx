@@ -96,7 +96,7 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   const { hasPlan, steps: planSteps } = usePlanState(conversation);
 
   const eventEvidence = eventDoc?.event?.evidence as EventEvidence | undefined;
-  const brainDomain = (eventEvidence?.brain_domain || 'casual').toLowerCase();
+  const brainDomain = (eventEvidence?.brain_domain || 'casual').toLowerCase() as keyof typeof DOMAIN_COLORS;
   const domainColor = DOMAIN_COLORS[brainDomain] || DOMAIN_COLORS.casual;
   const statusColor = STATUS_COLORS[eventDoc?.status || 'active'] || { bg: '#1e293b', text: '#94a3b8' };
   const userTrigger = eventEvidence?.triggered_by || eventDoc?.created_by_email;

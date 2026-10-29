@@ -315,6 +315,7 @@ export interface EventDocument {
   sticky_notes?: Array<{ timestamp: string; content: string; read: boolean }>;
   unread_notes?: number;
   token_usage?: TokenUsageDict;
+  created_by_email?: string | null;
 }
 
 // =============================================================================
