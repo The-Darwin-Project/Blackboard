@@ -1,174 +1,181 @@
-# Graph Report - Blackboard  (2026-10-28)
+# Graph Report - Blackboard  (2026-10-29)
 
 ## Corpus Check
 - cluster-only mode — file stats not available
 
 ## Summary
-- 4866 nodes · 10807 edges · 210 communities (91 shown, 119 thin omitted)
-- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 920 edges (avg confidence: 0.88)
+- 4871 nodes · 10855 edges · 204 communities (99 shown, 105 thin omitted)
+- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 920 edges (avg confidence: 0.88)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `061c740d`
+- Built from commit: `ea6e8be0`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - BlackboardState
-- brain.py
-- models.py
-- ConversationTurn
-- EventChatPanel.tsx
 - client.ts
-- nightwatcher_tools.py
-- useCortexData.ts
+- logging
+- auth.py
+- api/types.ts
+- EventChatPanel.tsx
 - tool_gates.py
-- OpsStateContext.tsx
-- App.tsx
+- os
+- BaseModel
 - merge-guard.js
 - Brain
-- react
-- EventHistory.tsx
-- jenkins-mcp.js
 - EventSidebar.tsx
-- EventDocument
 - ._run_agent_task
-- Aligner
-- _BrainToolContext
+- jenkins-mcp.js
+- Archivist
+- GitHubPlatform
+- HeadhunterJira
+- lucide-react
+- topology.py
+- App.tsx
+- hooks/index.ts
+- react
 - GitLabPlatform
-- JarvisMemoryPage.tsx
-- queue.py
-- EventRepository
+- EventDocument
+- AgentRegistry
+- ConversationTurn
+- _BrainToolContext
 - credentials.js
-- JenkinsObserver
+- observations_mgmt.py
+- brain.py
+- main.py
+- handlers_integration.py
 - storage-recycler.js
 - JenkinsAdapter
-- .get_event
+- nightwatcher_tools.py
 - cli-executor.js
+- jenkins_observer.py
+- agents/__init__.py
 - KnowledgeGraphStore
-- hooks/index.ts
-- GitHubPlatform
-- AgentClient
-- observations_reporter.py
-- ArchitectureGraph.tsx
-- lifespan
+- EventRepository
 - ._process_with_llm
-- .get_service
-- main.py
-- TimeKeeperPage.tsx
-- Headhunter
-- ui/package.json
-- ws-client.js
-- auth.py
+- slack.py
+- Aligner
+- ToolContext
 - ._gate_check
+- ActiveStreamsContext.tsx
+- JenkinsObserver
+- Headhunter
+- TimeKeeperPage.tsx
 - SlackChannel
-- handlers_dispatch.py
-- server.js
+- queue.py
 - CortexGraph.tsx
-- LiveAPIAdapter
-- ChatInput.tsx
+- models.py
+- VectorStore
+- ws-client.js
+- ui/package.json
+- lifespan
 - StateWatcher
+- EventDrillDown.tsx
+- live_api_adapter.py
+- dependencies.py
+- server.js
+- useCortexData.ts
+- ArchitectureGraph.tsx
 - adf_to_markdown
-- KubernetesSpawnHealthAdapter
+- EphemeralProvisioner
 - GeminiAdapter
+- get_archivist
+- cognitive_graph.py
 - ArgoCDObserver
-- ReconcileScheduler
+- NeuronInfoPanel.tsx
+- llm/__init__.py
 - BrainSkillLoader
-- ._get_manager
 - KargoObserver
-- TopologyRepository
+- GitHubAppAuth
 - dependencies
 - reconcile.py
 - http-handler.js
-- cognitive_graph.py
+- KubernetesSpawnHealthAdapter
+- IdleTimeoutManager
 - compilerOptions
-- llm/__init__.py
 - claude-guard.js
-- slack.py
-- TokenUtilizationPage.tsx
-- AgentRegistry
-- ._build_system_prompt
-- _sanitize_analysis_text
-- format_event_summary
-- GitHubAppAuth
 - cli-setup.js
 - VcsPlatformPort
-- PulseBatch
-- jira.py
-- ._process_event_inner
+- ephemeral_provisioner.py
 - ReflexSearcher
-- EphemeralProvisioner
-- UserContext
-- FairQueue
+- ._poll_issues
+- prompt.py
 - devDependencies
 - compilerOptions
-- dispatch_to_agent
+- TokenUtilizationPage.tsx
 - DashboardWSAdapter
-- ClaudeAdapter
+- LiveAPIAdapter
 - get_report
 - gemini-sidecar/package.json
 - ._build_contents
+- ._build_system_prompt
+- .get_event
 - ObservationRepository
+- ShiftsPage.tsx
 - catalog-skills.js
 - OIDCKeyAdapter
-- Archivist
-- VectorStore
+- archivist.py
+- ClaudeAdapter
+- FlowSnapshot
+- list_active_events
+- RedisClient
 - SlackAccessGate
 - generate_map.py
-- approve_event
 - src/ports.py
 - ._discover
+- NightwatcherObserver
+- .list_observations
 - EscalationRepository
-- ._execute_function_call
-- .start_event_loop
-- QuotaTracker
-- ScheduleRepository
+- ServiceNode.tsx
+- get_brain
+- .get_blackboard
 - close_event_by_user
-- vcs_approval.py
-- RedisClient
+- QuotaTracker
 - MultiInstallationManager
-- scheduling/__init__.py
-- .scroll
+- ScheduleCreateRequest
+- FilterRule
 - ._extract_context_flags
-- HeadhunterJira
 - TokenMeter
-- IncidentAdapterPort
-- ._send_turn_to_thread
-- IdleTimeoutManager
+- ReconcileScheduler
+- JarvisMemoryPage.tsx
+- EventEvidence
+- ._cleanup_stale_events
 - ._github_poll_and_process
+- CortexLiveFeed.tsx
+- .start_event_loop
+- handle_report_incident
 - is_defer_event_available
-- cortex-constants.ts
-- NeuronInfoPanel.tsx
-- spawn_health.py
+- CiContextCard.tsx
+- cortex/types.ts
+- SecurityError
 - vite.config.ts
-- entity_extractor.py
-- SpawnHealthPort
+- _is_event_closed_or_missing
 - has_unevaluated_close_blocker
-- knowledge_graph_api.py
-- parseReport.ts
+- IncidentAdapterPort
+- nightwatcher_prompt.py
+- FairQueue
 - get_quota_tracker
-- agent_websocket_handler
 - SmartsheetMaintainerCache
-- .has_reeval_signal
-- create_chat_event
 - Trigger
 - AsyncGitHubClient
 - GitLabTokenAuth
-- _is_event_closed_or_missing
-- TimeKeeperObserver
+- ConversationMessage
+- update_knowledge
 - CortexRepository
 - BrainIntrospectionPort
-- update_notebook_note
 - scripts
 - validate-mutations.sh
 - ._process_message
-- enforce_casual_domain
+- Pulse
 - list_failed_stages
 - dex_proxy
-- _has_non_user_turns
+- submit_feedback
+- QueueTrigger
 - list_incidents
+- headhunter_pending_todos
 - require-results.sh
-- math
 - TokenUsageDict
 - findDuplicateJsonKeys.ts
 - tsconfig.json
@@ -179,6 +186,7 @@
 - huddleSendMessage.sh
 - update-agy.sh
 - sendResults.sh
+- _parse_drain_timeout
 - _patch_enum_fields
 - build_gate_context
 - diagnose_rejection
@@ -189,6 +197,7 @@
 - _pred_obs_plateau
 - _pred_silent_park
 - _tools_wait_loop
+- _normalize_gitlab_host
 
 ## God Nodes (most connected - your core abstractions)
 1. `BlackboardState` - 279 edges
@@ -196,7 +205,7 @@
 3. `ConversationTurn` - 122 edges
 4. `ToolContext` - 102 edges
 5. `GateContext` - 94 edges
-6. `react` - 79 edges
+6. `react` - 80 edges
 7. `EventDocument` - 78 edges
 8. `fetchApi()` - 65 edges
 9. `lifespan()` - 64 edges
@@ -217,153 +226,177 @@
 ## Import Cycles
 - None detected.
 
-## Communities (210 total, 119 thin omitted)
+## Communities (204 total, 105 thin omitted)
 
 ### Community 0 - "BlackboardState"
 Cohesion: 0.01
-Nodes (22): get_report_client(), render_pdf(), get_all_journal(), get_service_journal(), delete_notebook_note(), get_notebook(), bulk_delete_observations(), BulkDeleteRequest (+14 more)
+Nodes (4): get_all_journal(), get_service_journal(), get_notebook(), BlackboardState
 
-### Community 1 - "brain.py"
+### Community 1 - "client.ts"
+Cohesion: 0.04
+Nodes (97): @tanstack/react-query, ApiError, applyLessons(), bulkDeleteObservations(), correctMemory(), createKnowledge(), createLesson(), deleteKnowledge() (+89 more)
+
+### Community 2 - "logging"
+Cohesion: 0.04
+Nodes (5): _heartbeat(), _load_name_mapping(), get_current_shift(), get_shift_detail(), list_shifts()
+
+### Community 3 - "auth.py"
 Cohesion: 0.03
-Nodes (31): _annotation_replace(), _strip_pipeline_annotations(), _sanitize_lesson_text(), _compute_processed_up_to(), _get_jira_reporter(), handle_ask_release_ai(), _is_darwin_reentrant_caller(), jenkins_retrigger_cooldown_key() (+23 more)
+Nodes (26): can_append_message(), _claims_to_user(), get_user_from_request(), get_user_from_websocket(), _normalize_email(), prompt_display_name(), require_auth(), require_obs_admin() (+18 more)
 
-### Community 2 - "models.py"
-Cohesion: 0.02
-Nodes (44): can_append_message(), get_blackboard(), AppNode, ArchitectureEvent, ChatRequest, ChatResponse, EventEvidence, EventInput (+36 more)
-
-### Community 3 - "ConversationTurn"
-Cohesion: 0.06
-Nodes (49): emit_tool_result(), _safe_int(), handle_inspect_event(), handle_post_sticky_note(), handle_read_sticky_notes(), handle_recall_pruned_turns(), handle_message_agent(), handle_reply_to_agent() (+41 more)
-
-### Community 4 - "EventChatPanel.tsx"
-Cohesion: 0.05
-Nodes (72): @uiw/react-markdown-preview, approveEvent(), closeEvent(), enforceCasualDomain(), getEventReport(), rejectEvent(), submitFeedback(), CiContext (+64 more)
-
-### Community 5 - "client.ts"
+### Community 4 - "api/types.ts"
 Cohesion: 0.04
-Nodes (82): bulkDeleteObservations(), deleteObservation(), exportObservations(), ExtractedCorrection, ExtractedLesson, ExtractionResult, generateObservationsReport(), getAgents() (+74 more)
+Nodes (73): @tanstack/react-table, getReport(), getReports(), ReportSearchParams, searchReports(), Agent, AlignerPendingItem, AppNode (+65 more)
 
-### Community 6 - "nightwatcher_tools.py"
-Cohesion: 0.04
-Nodes (30): _check_security(), safe_execution(), wrapper(), SecurityError, TaskBridge, PulseContext, ShiftIncident, ShiftInvestigation (+22 more)
-
-### Community 7 - "useCortexData.ts"
+### Community 5 - "EventChatPanel.tsx"
 Cohesion: 0.06
-Nodes (73): three, getCognitiveGraph(), getCortexActivity(), getEventPulses(), getKGServiceDetail(), getKGServices(), getKGStats(), getKnowledgeById() (+65 more)
+Nodes (57): closeEvent(), enforceCasualDomain(), ConversationTurn, TokenUsageDict, CiContextCard(), ConversationFeed(), ConversationFeedProps, eventToMarkdown() (+49 more)
 
-### Community 8 - "tool_gates.py"
+### Community 6 - "tool_gates.py"
 Cohesion: 0.05
 Nodes (78): GateContext, _msg_budget_exhausted(), _msg_defer_wake_iter0(), _msg_domain_casual(), _msg_domain_chaotic(), _msg_domain_clear(), _msg_domain_complex(), _msg_hard_strip_defer() (+70 more)
 
-### Community 9 - "OpsStateContext.tsx"
+### Community 7 - "os"
 Cohesion: 0.05
-Nodes (59): getActiveEvents(), getAlignerPending(), getEventDocument(), getEvents(), getJenkinsPending(), getKargoStages(), getWaitingApprovalEvents(), ActiveEvent (+51 more)
+Nodes (21): _get_static_maintainer_emails(), _get_allowed_mention_authors(), _get_static_maintainer_emails(), _safe_int(), create_adapter(), record_token_usage(), _md_table_to_text(), _md_to_mrkdwn() (+13 more)
 
-### Community 10 - "App.tsx"
-Cohesion: 0.05
-Nodes (53): oidc-client-ts, react-dom, react-router-dom, getConfig(), getIncidents(), getWSAuthFailureCallback(), Incident, setOnUnauthorized() (+45 more)
+### Community 8 - "BaseModel"
+Cohesion: 0.04
+Nodes (12): ArchitectureEvent, EventInput, GraphEdge, GraphResponse, ScheduledEvent, Service, Snapshot, TopologySnapshot (+4 more)
 
-### Community 11 - "merge-guard.js"
+### Community 9 - "merge-guard.js"
 Cohesion: 0.05
 Nodes (69): analyzeString(), analyzeTokens(), API_VALUED, apiTokens(), apiWriteNeedsGuard(), assignName(), bareBranchProtected(), base() (+61 more)
 
-### Community 13 - "react"
-Cohesion: 0.07
-Nodes (58): lucide-react, react, applyLessons(), correctMemory(), createKnowledge(), createLesson(), deleteKnowledge(), deleteLesson() (+50 more)
+### Community 11 - "EventSidebar.tsx"
+Cohesion: 0.08
+Nodes (54): getAlignerPending(), getHeadhunterPending(), getJenkinsPending(), getJiraMissions(), getWaitingApprovalEvents(), HeadhunterTodo, postJiraAction(), EventDocument (+46 more)
 
-### Community 14 - "EventHistory.tsx"
+### Community 12 - "._run_agent_task"
 Cohesion: 0.06
-Nodes (42): @tanstack/react-query, getReport(), getReports(), ReportSearchParams, searchReports(), ReportMeta, ReportSearchResponse, SubjectType (+34 more)
+Nodes (7): on_huddle(), on_progress(), on_huddle(), on_progress(), _compute_processed_up_to(), _sanitize_error_text(), get_registry_and_bridge()
 
-### Community 15 - "jenkins-mcp.js"
+### Community 13 - "jenkins-mcp.js"
 Cohesion: 0.05
 Nodes (46): handleToolCall(), http, httpGet(), httpPost(), readline, rl, syncHighwater(), TOOLS (+38 more)
 
-### Community 16 - "EventSidebar.tsx"
-Cohesion: 0.10
-Nodes (47): getHeadhunterPending(), getJiraMissions(), HeadhunterTodo, postJiraAction(), ACTION_BADGE, formatAge(), HeadhunterQueuePanel(), renderItem() (+39 more)
-
-### Community 17 - "EventDocument"
+### Community 16 - "HeadhunterJira"
 Cohesion: 0.05
-Nodes (10): _build_closed_block(), build_event_header(), _build_identity_block(), _build_journal_block(), _build_mermaid_block(), _build_related_block(), _build_subject_block(), _build_timing_block() (+2 more)
+Nodes (3): HeadhunterJira, _walk_adf_mentions(), _walk()
 
-### Community 18 - "._run_agent_task"
+### Community 17 - "lucide-react"
 Cohesion: 0.07
-Nodes (6): on_huddle(), on_progress(), on_huddle(), on_progress(), _sanitize_override_reason(), get_registry_and_bridge()
+Nodes (44): lucide-react, createChatEvent(), getAgents(), getKargoStages(), AgentRegistryEntry, KargoStageStatus, AgentRegistryPanel(), formatConnectedSince() (+36 more)
 
-### Community 22 - "JarvisMemoryPage.tsx"
+### Community 18 - "topology.py"
+Cohesion: 0.04
+Nodes (11): AppNode, GraphNode, TicketNode, get_event_document(), get_graph_data(), get_mermaid_diagram(), get_service_details(), get_topology() (+3 more)
+
+### Community 19 - "App.tsx"
+Cohesion: 0.07
+Nodes (44): oidc-client-ts, react-router-dom, getConfig(), getWSAuthFailureCallback(), setOnUnauthorized(), setTokenGetter(), setWSAuthFailureCallback(), AppConfig (+36 more)
+
+### Community 20 - "hooks/index.ts"
+Cohesion: 0.07
+Nodes (44): getActiveEvents(), getClosedEvents(), getEventDocument(), getEvents(), getService(), getTopology(), ArchitectureEvent, ArgoCDOperation (+36 more)
+
+### Community 21 - "react"
 Cohesion: 0.08
-Nodes (42): dismissProposals(), EnhancementProposal, getFlowMetrics(), getHandoffReports(), getProposals(), HandoffReport, FlowMetrics, AgentStreamCard() (+34 more)
+Nodes (38): react, react-dom, @uiw/react-markdown-preview, approveEvent(), rejectEvent(), submitFeedback(), ChatInputProps, Draft (+30 more)
 
-### Community 23 - "queue.py"
-Cohesion: 0.07
-Nodes (23): get_archivist(), apply_lessons(), correct_memory(), CorrectMemoryRequest, create_knowledge(), create_lesson(), delete_knowledge(), delete_lesson() (+15 more)
+### Community 24 - "AgentRegistry"
+Cohesion: 0.06
+Nodes (12): AgentConnection, AgentRegistry, agent_websocket_handler(), _build_prompt(), consume_wake_task(), _consume(), _dispatch_timeout_s(), dispatch_to_agent() (+4 more)
 
-### Community 25 - "credentials.js"
+### Community 25 - "ConversationTurn"
+Cohesion: 0.10
+Nodes (25): emit_tool_result(), _safe_int(), handle_inspect_event(), handle_post_sticky_note(), handle_read_sticky_notes(), handle_recall_pruned_turns(), handle_ask_release_ai(), handle_greenwave() (+17 more)
+
+### Community 27 - "credentials.js"
 Cohesion: 0.12
 Nodes (45): resolveCommand(), writeAgyMcpServer(), writeClaudeMcpServer(), buildArgoCDMcpConfig(), createAppJWT(), discoverAndGenerateTokens(), _discoverAndGenerateTokensInner(), discoverInstallations() (+37 more)
 
-### Community 26 - "JenkinsObserver"
+### Community 28 - "observations_mgmt.py"
 Cohesion: 0.06
-Nodes (3): _env_flag(), JenkinsObserver, _redact_build_parameters()
+Nodes (17): _analyze_series(), _assemble_report(), generate_report(), _render_chart_svg(), _render_chart_with_timeout(), render_pdf(), _sample_points(), _summarize() (+9 more)
 
-### Community 27 - "storage-recycler.js"
+### Community 29 - "brain.py"
+Cohesion: 0.08
+Nodes (15): _apply_sibling_signature(), build_function_response(), build_single_function_response(), compress_contents(), estimate_msg_tokens(), estimate_tokens(), extract_model_parts(), normalize_response_parts() (+7 more)
+
+### Community 30 - "main.py"
+Cohesion: 0.06
+Nodes (17): set_agents(), set_kargo_observer(), agent_ws_endpoint(), api_info(), get_config(), get_event_flow(), get_flow_history(), get_flow_metrics() (+9 more)
+
+### Community 31 - "handlers_integration.py"
+Cohesion: 0.08
+Nodes (20): _alert_wrapper_retrigger(), _do_retrigger(), _get_jira_reporter(), handle_comment_jira_issue(), handle_fetch_jira_issue(), handle_notify_user_slack(), handle_refresh_github_context(), handle_refresh_gitlab_context() (+12 more)
+
+### Community 32 - "storage-recycler.js"
 Cohesion: 0.08
 Nodes (34): withTaskStorage(), resolveStorageRoot(), ROLE_TIMEOUTS, STORAGE_ACTIVITY_HEARTBEAT_MS, STORAGE_MAX_TIER3_DELETIONS, STORAGE_PRETASK_TIMEOUT_MS, STORAGE_RESULTS_TTL_MS, STORAGE_STALE_MS (+26 more)
 
-### Community 28 - "JenkinsAdapter"
+### Community 33 - "JenkinsAdapter"
 Cohesion: 0.06
 Nodes (6): BuildDetails, JenkinsAdapter, JenkinsPlatformPort, JobResult, JobRunState, ViewScanResult
 
-### Community 29 - ".get_event"
-Cohesion: 0.06
-Nodes (17): FeedbackRequest, submit_feedback(), aligner_pending_items(), _defer_timeline_fields(), get_event_approval(), get_event_document(), get_event_turns(), get_memory() (+9 more)
+### Community 34 - "nightwatcher_tools.py"
+Cohesion: 0.10
+Nodes (20): ShiftIncident, ShiftInvestigation, build_report_iteration_prompt(), build_summary_prompt(), extract_full_links(), build_extend_tool(), build_report_tool(), build_summary_tool() (+12 more)
 
-### Community 30 - "cli-executor.js"
+### Community 35 - "cli-executor.js"
 Cohesion: 0.09
 Nodes (34): { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS, STORAGE_PRETASK_TIMEOUT_MS, resolveStorageRoot }, buildCLICommand(), { checkAndRecycleStorage, pinTaskCwd, unpinTaskCwd }, CLAUDE_JSON_PATH, cp, executeCLI(), executeCLIStreaming(), FALLBACK_MODEL (+26 more)
 
-### Community 31 - "KnowledgeGraphStore"
-Cohesion: 0.09
-Nodes (9): _format_graph_context(), get_graph_context(), _parse_props(), _sanitize(), translate_to_lookups(), _acquire(), KnowledgeGraphStore, _sanitize() (+1 more)
+### Community 36 - "jenkins_observer.py"
+Cohesion: 0.07
+Nodes (14): _annotation_replace(), _strip_pipeline_annotations(), _clamp_confidence(), _env_flag(), _parse_job_metadata(), _prepare_console_tail(), _redact_build_parameters(), _redact_match() (+6 more)
 
-### Community 32 - "hooks/index.ts"
-Cohesion: 0.08
-Nodes (32): ApiError, getClosedEvents(), getService(), getTopology(), ArchitectureEvent, ArgoCDOperation, Service, TopologyResponse (+24 more)
-
-### Community 34 - "AgentClient"
+### Community 37 - "agents/__init__.py"
 Cohesion: 0.07
 Nodes (4): Architect, AgentClient, Developer, SysAdmin
 
-### Community 35 - "observations_reporter.py"
-Cohesion: 0.07
-Nodes (11): _analyze_series(), _assemble_report(), generate_report(), _render_chart_svg(), _render_chart_with_timeout(), _sample_points(), _summarize(), get_event_observations() (+3 more)
-
-### Community 36 - "ArchitectureGraph.tsx"
+### Community 38 - "KnowledgeGraphStore"
 Cohesion: 0.09
-Nodes (29): @dagrejs/dagre, @xyflow/react, HealthStatus, NodeType, AppNodeData, applyDagreLayout(), applyGridLayout(), applyLayout() (+21 more)
+Nodes (9): _format_graph_context(), get_graph_context(), _parse_props(), _sanitize(), translate_to_lookups(), _acquire(), KnowledgeGraphStore, _sanitize() (+1 more)
 
-### Community 37 - "lifespan"
-Cohesion: 0.06
-Nodes (9): set_incident_options(), set_agents(), set_archivist(), set_argocd_observer(), set_blackboard(), set_brain(), set_kargo_observer(), lifespan() (+1 more)
+### Community 41 - "slack.py"
+Cohesion: 0.08
+Nodes (15): build_access_denied_home_view(), build_home_tab_view(), _context_line(), create_feedback_block(), extract_tables(), _replace(), format_plan_block(), format_task_card() (+7 more)
 
-### Community 39 - ".get_service"
-Cohesion: 0.07
-Nodes (4): get_mermaid_diagram(), get_service_details(), get_topology(), list_services()
+### Community 43 - "ToolContext"
+Cohesion: 0.10
+Nodes (8): handle_message_agent(), handle_reply_to_agent(), handle_select_agent(), handle_defer_event(), handle_hold_watch(), handle_wait_for_agent(), handle_wait_for_jarvis(), ToolContext
 
-### Community 40 - "main.py"
-Cohesion: 0.07
-Nodes (15): set_kg_store(), set_pulse_tracker(), set_registry_and_bridge(), agent_ws_endpoint(), api_info(), get_config(), get_event_flow(), get_flow_history() (+7 more)
+### Community 44 - "._gate_check"
+Cohesion: 0.10
+Nodes (11): can_approve_event(), get_user_from_slack(), format_event_summary(), handle_app_home_opened(), handle_app_mention(), handle_approve(), handle_create_event_modal(), handle_darwin_command() (+3 more)
 
-### Community 41 - "TimeKeeperPage.tsx"
+### Community 45 - "ActiveStreamsContext.tsx"
+Cohesion: 0.11
+Nodes (30): getFlowMetrics(), FlowMetrics, AgentStreamCard(), AgentStreamCardProps, FloatingWindow(), MessageCards(), Dashboard(), GridTile() (+22 more)
+
+### Community 48 - "TimeKeeperPage.tsx"
 Cohesion: 0.12
 Nodes (24): createSchedule(), deleteSchedule(), getSchedules(), refineInstructions(), ScheduleCreatePayload, ScheduleItem, toggleSchedule(), updateSchedule() (+16 more)
 
-### Community 43 - "ui/package.json"
-Cohesion: 0.08
-Nodes (29): autoprefixer, cronstrue, eslint, @eslint/js, eslint-plugin-react-hooks, eslint-plugin-react-refresh, globals, graphology-layout-forceatlas2 (+21 more)
+### Community 50 - "queue.py"
+Cohesion: 0.10
+Nodes (18): can_override_domain(), JenkinsPendingItem, PendingAnomaly, apply_lessons(), correct_memory(), CorrectMemoryRequest, create_knowledge(), create_lesson() (+10 more)
 
-### Community 44 - "ws-client.js"
+### Community 51 - "CortexGraph.tsx"
+Cohesion: 0.12
+Nodes (30): graphology, ActiveEvent, KGServiceEntity, eventColor(), getExecutiveNeurons(), getStructuralEdges(), DEFAULT_TYPE_BUDGET, evictLru() (+22 more)
+
+### Community 52 - "models.py"
+Cohesion: 0.08
+Nodes (13): ChatRequest, ChatResponse, EventMetrics, EventStatus, EventType, HealthStatus, MessageStatus, Metrics (+5 more)
+
+### Community 53 - "VectorStore"
+Cohesion: 0.08
+Nodes (3): _decode_cursor(), _encode_cursor(), VectorStore
+
+### Community 54 - "ws-client.js"
 Cohesion: 0.10
 Nodes (24): is429Error(), {
   DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE,
@@ -376,55 +409,79 @@ Nodes (24): is429Error(), {
   hasJenkinsCredentials, setupJenkinsMCP, hasGoogleServiceAccount, setupGoogleAuthForAgy,
 } (+16 more)
 
-### Community 45 - "auth.py"
+### Community 55 - "ui/package.json"
+Cohesion: 0.08
+Nodes (28): autoprefixer, cronstrue, eslint, @eslint/js, eslint-plugin-react-hooks, eslint-plugin-react-refresh, globals, graphology-layout-forceatlas2 (+20 more)
+
+### Community 56 - "lifespan"
+Cohesion: 0.07
+Nodes (7): set_incident_options(), set_archivist(), set_argocd_observer(), set_blackboard(), set_brain(), set_registry_and_bridge(), lifespan()
+
+### Community 57 - "StateWatcher"
 Cohesion: 0.09
-Nodes (10): _apply_sibling_signature(), build_function_response(), build_single_function_response(), compress_contents(), estimate_msg_tokens(), estimate_tokens(), extract_model_parts(), normalize_response_parts() (+2 more)
+Nodes (4): PollFn, _QueueEntry, StateWatcher, _Subscription
 
-### Community 46 - "._gate_check"
+### Community 58 - "EventDrillDown.tsx"
 Cohesion: 0.13
-Nodes (8): get_user_from_slack(), handle_app_home_opened(), handle_app_mention(), handle_approve(), handle_create_event_modal(), handle_home_create_event(), handle_reject(), on_dm_message()
+Nodes (23): three, getEventPulses(), BrainCore(), CortexDevPage(), devQueryClient, CortexLiveFeedProps, EventDrillDown(), EventDrillDownProps (+15 more)
 
-### Community 48 - "handlers_dispatch.py"
-Cohesion: 0.11
-Nodes (7): _resolve_escalation_scope(), CIAnalysis, get_event_document(), list_events(), _esc(), _esc_join(), event_to_markdown()
+### Community 59 - "live_api_adapter.py"
+Cohesion: 0.10
+Nodes (4): PulseBatch, PulsePort, PulseObserver, PulseTracker
 
-### Community 49 - "server.js"
+### Community 60 - "dependencies.py"
+Cohesion: 0.09
+Nodes (13): get_aligner(), get_architect(), get_argocd_observer(), get_developer(), get_kargo_observer(), get_kg_store(), get_report_client(), get_sysadmin() (+5 more)
+
+### Community 61 - "server.js"
 Cohesion: 0.09
 Nodes (18): hasRegistryCredentials(), { BRAIN_HTTP_URL, DEFAULT_WORK_DIR }, fs, path, stageEventDocument(), fetchEventDocument(), fs, { handleRequest } (+10 more)
 
-### Community 50 - "CortexGraph.tsx"
-Cohesion: 0.14
-Nodes (25): graphology, eventColor(), getExecutiveNeurons(), getStructuralEdges(), DEFAULT_TYPE_BUDGET, evictLru(), KNOWLEDGE_RING, KNOWLEDGE_RING_TYPES (+17 more)
+### Community 62 - "useCortexData.ts"
+Cohesion: 0.19
+Nodes (24): getCognitiveGraph(), getCortexActivity(), getEventReport(), getKGServiceDetail(), getKGServices(), getKGStats(), getRecentPulses(), CortexPage() (+16 more)
 
-### Community 52 - "ChatInput.tsx"
-Cohesion: 0.14
-Nodes (19): createChatEvent(), ChatInput(), ChatInputProps, Draft, LastSubmission, STARTER_CHIPS, StarterChip, useSafeNavigate() (+11 more)
+### Community 63 - "ArchitectureGraph.tsx"
+Cohesion: 0.11
+Nodes (21): @dagrejs/dagre, @xyflow/react, applyDagreLayout(), applyGridLayout(), applyLayout(), ArchitectureGraphInner(), buildGraph(), computeIdHash() (+13 more)
 
-### Community 53 - "StateWatcher"
-Cohesion: 0.10
-Nodes (3): _QueueEntry, StateWatcher, _Subscription
-
-### Community 54 - "adf_to_markdown"
+### Community 64 - "adf_to_markdown"
 Cohesion: 0.12
 Nodes (10): _adf_to_text(), _escape_jql_string(), JiraIncidentAdapter, adf_to_markdown(), _apply_marks(), _children(), _render(), _render_list() (+2 more)
 
-### Community 55 - "KubernetesSpawnHealthAdapter"
-Cohesion: 0.11
-Nodes (3): KubernetesSpawnHealthAdapter, _PodHealthState, SpawnPollResult
+### Community 65 - "EphemeralProvisioner"
+Cohesion: 0.09
+Nodes (3): DispatchMetrics, EphemeralProvisioner, SpawnFailed
 
-### Community 58 - "ReconcileScheduler"
-Cohesion: 0.11
-Nodes (4): ReconcileScheduler, QueueTrigger, ResyncTrigger, StalenessGuard
+### Community 67 - "get_archivist"
+Cohesion: 0.10
+Nodes (12): get_archivist(), get_cognitive_graph(), aligner_pending_items(), delete_knowledge(), delete_lesson(), get_knowledge(), get_lesson(), get_memory() (+4 more)
 
-### Community 63 - "dependencies"
+### Community 68 - "cognitive_graph.py"
+Cohesion: 0.12
+Nodes (11): get_blackboard(), get_pulse_tracker(), dismiss_proposals(), DismissRequest, get_all_shadow_interventions(), get_cortex_activity(), get_cortex_status(), get_event_shadow_interventions() (+3 more)
+
+### Community 70 - "NeuronInfoPanel.tsx"
+Cohesion: 0.11
+Nodes (23): KGServiceDetail, AGENTS, DOMAINS, HEMISPHERE_X, NEURON_DESCRIPTIONS, PHASE_SKILL_FOLDERS, PHASE_TOOL_PRIORITY, PHASES (+15 more)
+
+### Community 71 - "llm/__init__.py"
+Cohesion: 0.16
+Nodes (5): FunctionCall, LLMChunk, LLMPort, LLMResponse, TokenUsage
+
+### Community 74 - "GitHubAppAuth"
+Cohesion: 0.11
+Nodes (3): _find_pem_file(), get_github_auth(), GitHubAppAuth
+
+### Community 75 - "dependencies"
 Cohesion: 0.08
 Nodes (24): dependencies, cronstrue, @dagrejs/dagre, graphology, graphology-layout-forceatlas2, lucide-react, mermaid, oidc-client-ts (+16 more)
 
-### Community 64 - "reconcile.py"
+### Community 76 - "reconcile.py"
 Cohesion: 0.15
 Nodes (9): _build_redis_client(), _fetch_commit_sha(), _fetch_file_content(), _fetch_tree(), _get_github_headers(), _get_gitlab_headers(), main(), _parse_frontmatter() (+1 more)
 
-### Community 65 - "http-handler.js"
+### Community 77 - "http-handler.js"
 Cohesion: 0.09
 Nodes (18): { AGENT_CLI, AGENT_MODEL, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL }, { claudeMergeGuard }, { executeCLI }, fs, {
   hasGitHubCredentials,
@@ -443,189 +500,173 @@ Nodes (18): { AGENT_CLI, AGENT_MODEL, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL }, 
   GITLAB_HOST,
 }, http, isLoopbackAddress(), { isReadOnlyRoleName } (+10 more)
 
-### Community 67 - "cognitive_graph.py"
-Cohesion: 0.13
-Nodes (10): get_brain(), get_pulse_tracker(), get_all_shadow_interventions(), get_cognitive_graph(), get_cortex_activity(), get_cortex_status(), get_event_shadow_interventions(), get_handoff_reports() (+2 more)
-
-### Community 68 - "compilerOptions"
+### Community 80 - "compilerOptions"
 Cohesion: 0.09
 Nodes (22): compilerOptions, allowImportingTsExtensions, erasableSyntaxOnly, jsx, lib, module, moduleDetection, moduleResolution (+14 more)
 
-### Community 69 - "llm/__init__.py"
-Cohesion: 0.17
-Nodes (4): LLMChunk, LLMPort, LLMResponse, TokenUsage
-
-### Community 70 - "claude-guard.js"
+### Community 81 - "claude-guard.js"
 Cohesion: 0.14
 Nodes (18): classifyInChild(), claudeMergeGuard(), { execFile, spawn }, gitHead(), GUARD_SCRIPT, { isReadOnlyRoleName, isMutatingRoleName, normalizeRole }, mergeGuard, path (+10 more)
 
-### Community 71 - "slack.py"
-Cohesion: 0.11
-Nodes (7): build_access_denied_home_view(), build_event_report_md(), create_feedback_block(), _md_table_to_text(), _md_to_mrkdwn(), _parse_md_table(), table_block_to_code_block()
-
-### Community 72 - "TokenUtilizationPage.tsx"
-Cohesion: 0.16
-Nodes (17): recharts, getFlowHistory(), FlowSnapshot, ObservationSeries, FlowHistoryPage(), formatTime(), RANGES, SparkCard() (+9 more)
-
-### Community 73 - "AgentRegistry"
-Cohesion: 0.12
-Nodes (3): AgentConnection, AgentRegistry, send_cancel()
-
-### Community 74 - "._build_system_prompt"
-Cohesion: 0.10
-Nodes (3): _init_tool_names(), _strip_tool_names(), _wrap_section()
-
-### Community 75 - "_sanitize_analysis_text"
-Cohesion: 0.10
-Nodes (9): _clamp_confidence(), _prepare_console_tail(), _redact_match(), _redact_secrets_in_text(), _sanitize_analysis_text(), _sanitize_console_tail(), _strip_newlines(), _validate_analysis() (+1 more)
-
-### Community 76 - "format_event_summary"
-Cohesion: 0.11
-Nodes (10): build_home_tab_view(), _context_line(), format_event_summary(), format_plan_block(), format_task_card(), format_turn(), resolve_source_emoji(), _section() (+2 more)
-
-### Community 78 - "cli-setup.js"
+### Community 82 - "cli-setup.js"
 Cohesion: 0.13
 Nodes (19): { AGENT_CLI }, AGY_HOOKS_PATH, AGY_MCP_PATH, AGY_SKILLS_DIR, CLAUDE_JSON_PATH, CLAUDE_SKILLS_DIR, { execFileSync }, filterSkillsByMode() (+11 more)
 
-### Community 80 - "PulseBatch"
-Cohesion: 0.12
-Nodes (4): PulseBatch, PulsePort, PulseObserver, PulseTracker
+### Community 84 - "ephemeral_provisioner.py"
+Cohesion: 0.15
+Nodes (3): SpawnHealthPort, SpawnPollResult, SpawnStatus
 
-### Community 81 - "jira.py"
+### Community 87 - "prompt.py"
 Cohesion: 0.16
-Nodes (7): approve_mission(), dismiss_mission(), _infer_phase(), _jira_config(), list_missions(), reanalyze_mission(), retry_mission()
+Nodes (11): _build_closed_block(), build_event_header(), _build_identity_block(), _build_journal_block(), _build_mermaid_block(), _build_related_block(), _build_subject_block(), _build_timing_block() (+3 more)
 
-### Community 85 - "UserContext"
-Cohesion: 0.13
-Nodes (9): _claims_to_user(), get_user_from_request(), get_user_from_websocket(), require_auth(), require_obs_admin(), UserContext, _validate_jwt(), dismiss_proposals() (+1 more)
-
-### Community 87 - "devDependencies"
+### Community 88 - "devDependencies"
 Cohesion: 0.10
 Nodes (20): devDependencies, autoprefixer, eslint, @eslint/js, eslint-plugin-react-hooks, eslint-plugin-react-refresh, globals, jsdom (+12 more)
 
-### Community 88 - "compilerOptions"
+### Community 89 - "compilerOptions"
 Cohesion: 0.10
 Nodes (19): compilerOptions, allowImportingTsExtensions, erasableSyntaxOnly, lib, module, moduleDetection, moduleResolution, noEmit (+11 more)
 
-### Community 89 - "dispatch_to_agent"
-Cohesion: 0.13
-Nodes (7): _build_prompt(), consume_wake_task(), _consume(), _dispatch_timeout_s(), dispatch_to_agent(), _consume_queue(), _sanitize_stdout()
+### Community 90 - "TokenUtilizationPage.tsx"
+Cohesion: 0.20
+Nodes (15): recharts, getFlowHistory(), FlowSnapshot, FlowHistoryPage(), formatTime(), RANGES, SparkCard(), SparkCardProps (+7 more)
 
-### Community 92 - "get_report"
+### Community 93 - "get_report"
 Cohesion: 0.11
 Nodes (6): get_report(), list_reports(), reports_spa_no_slash(), reports_spa_with_slash(), search_reports(), _serve_spa()
 
-### Community 93 - "gemini-sidecar/package.json"
+### Community 94 - "gemini-sidecar/package.json"
 Cohesion: 0.11
 Nodes (17): dependencies, adm-zip, jsonwebtoken, ws, description, engines, node, main (+9 more)
 
-### Community 97 - "catalog-skills.js"
+### Community 96 - "._build_system_prompt"
+Cohesion: 0.12
+Nodes (3): _init_tool_names(), _strip_tool_names(), _wrap_section()
+
+### Community 97 - ".get_event"
+Cohesion: 0.12
+Nodes (4): get_event_approval(), get_event_report(), get_event_turns(), rebuild_deep_memory()
+
+### Community 99 - "ShiftsPage.tsx"
+Cohesion: 0.23
+Nodes (16): getCurrentShift(), getShiftDetail(), getShiftsList(), ShiftReportFull, ShiftReportSummary, FailedClusterBadge(), getISOWeek(), getWeekDates() (+8 more)
+
+### Community 100 - "catalog-skills.js"
 Cohesion: 0.16
 Nodes (13): AdmZip, AGY_SKILLS_DIR, CLAUDE_SKILLS_DIR, downloadAndExtract(), fs, http, httpGet(), https (+5 more)
 
-### Community 103 - "generate_map.py"
+### Community 102 - "archivist.py"
+Cohesion: 0.16
+Nodes (7): _sanitize_lesson_text(), Entity, extract_entities(), _get_client(), KnowledgeGraphEntities, Relationship, PulseContext
+
+### Community 105 - "list_active_events"
+Cohesion: 0.12
+Nodes (6): _defer_timeline_fields(), _has_active_subscription(), list_active_events(), list_closed_events(), list_waiting_approval_events(), _serialize_evidence()
+
+### Community 108 - "generate_map.py"
 Cohesion: 0.19
 Nodes (6): _enumerate_gates(), _GateInfo, generate_phase_tool_map(), _load_gate_registry(), _render_markdown(), _render_ooda_overlay()
 
-### Community 104 - "approve_event"
-Cohesion: 0.17
-Nodes (4): can_approve_event(), resolve_approval_identity(), approve_event(), reject_event()
-
-### Community 114 - "close_event_by_user"
-Cohesion: 0.14
-Nodes (3): close_event_by_user(), CloseRequest, get_event_report()
-
-### Community 115 - "vcs_approval.py"
+### Community 111 - "NightwatcherObserver"
 Cohesion: 0.19
-Nodes (7): _github_active_item(), headhunter_pending_todos(), get_gitlab_auth(), _resolve_github_head(), _resolve_gitlab_head(), resolve_live_head_sha(), verify_merge_guard()
+Nodes (3): ShiftReport, NightwatcherObserver, get_phase_tools()
 
-### Community 118 - "scheduling/__init__.py"
-Cohesion: 0.22
-Nodes (5): GitHubPrRef, GitLabMrRef, GitLabPipelineRef, KargoStageRef, PollFn
+### Community 114 - "ServiceNode.tsx"
+Cohesion: 0.20
+Nodes (11): HealthStatus, NodeType, AppNodeData, ARGOCD_HEALTH_COLORS, SYNC_ICONS, GENERIC_TAGS, HEALTH_COLORS, NODE_ICONS (+3 more)
 
-### Community 120 - "._extract_context_flags"
+### Community 115 - "get_brain"
+Cohesion: 0.19
+Nodes (4): resolve_approval_identity(), get_brain(), approve_event(), reject_event()
+
+### Community 116 - ".get_blackboard"
+Cohesion: 0.21
+Nodes (5): handle_classify_event(), handle_close_event(), handle_request_user_approval(), handle_wait_for_user(), IdleTimeoutPort
+
+### Community 117 - "close_event_by_user"
+Cohesion: 0.14
+Nodes (4): get_token_meter(), close_event_by_user(), CloseRequest, get_event_document()
+
+### Community 122 - "._extract_context_flags"
 Cohesion: 0.15
 Nodes (3): compute_dispatch_backpressure(), ContextFlags, _safe_int_env()
 
-### Community 123 - "IncidentAdapterPort"
-Cohesion: 0.15
-Nodes (3): IdleTimeoutPort, IncidentAdapterPort, StateWatcherPort
+### Community 125 - "JarvisMemoryPage.tsx"
+Cohesion: 0.27
+Nodes (12): dismissProposals(), EnhancementProposal, getHandoffReports(), getProposals(), HandoffReport, FilterMode, formatDate(), formatTime() (+4 more)
 
-### Community 124 - "._send_turn_to_thread"
-Cohesion: 0.19
-Nodes (5): extract_tables(), _replace(), get_agent_notification_text(), get_turn_attachment_color(), _md_table_to_block_kit()
+### Community 131 - "CortexLiveFeed.tsx"
+Cohesion: 0.24
+Nodes (10): CortexHeartbeat(), CortexHeartbeatProps, ensureKeyframes(), CortexLiveFeed(), FILTER_PILLS, FilterKey, getStoredFilter(), MESSAGE_STYLES (+2 more)
 
-### Community 130 - "is_defer_event_available"
+### Community 133 - "handle_report_incident"
+Cohesion: 0.20
+Nodes (5): handle_report_incident(), _resolve_escalation_scope(), handle_notify_gitlab_result(), handle_search_open_incidents(), handle_respond_to_jarvis()
+
+### Community 134 - "is_defer_event_available"
 Cohesion: 0.18
 Nodes (6): count_agent_waits_in_dispatch_epoch(), evaluate_gates(), is_defer_event_available(), _msg_wait_loop(), _pred_wait_loop(), _single_tool_survives_gates()
 
-### Community 131 - "cortex-constants.ts"
-Cohesion: 0.18
-Nodes (10): AGENTS, DOMAINS, HEMISPHERE_X, NEURON_DESCRIPTIONS, PHASE_SKILL_FOLDERS, PHASE_TOOL_PRIORITY, PHASES, StructuralEdge (+2 more)
+### Community 135 - "CiContextCard.tsx"
+Cohesion: 0.31
+Nodes (9): CiContext, CiContextCardProps, ConsoleTailBlock(), FailedJobRow(), annotationReplacer(), PIPELINE_ANNOTATION_RE, REDACTION_TRIGGER_KEYWORDS, stripAnsi() (+1 more)
 
-### Community 132 - "NeuronInfoPanel.tsx"
-Cohesion: 0.29
-Nodes (10): asNumber(), asString(), asStringArray(), Badge(), describeNeuron(), Hdr(), NeuronInfoPanel(), AGENT_NEURON_COLORS (+2 more)
+### Community 136 - "cortex/types.ts"
+Cohesion: 0.24
+Nodes (9): EventSource, PulseTimelineProps, CognitiveGraphResponse, CortexHeartbeatMessage, FrictionIndicator, FrictionPattern, NeuronVisual, PulseBatch (+1 more)
 
-### Community 134 - "vite.config.ts"
+### Community 137 - "SecurityError"
+Cohesion: 0.24
+Nodes (4): _check_security(), safe_execution(), wrapper(), SecurityError
+
+### Community 138 - "vite.config.ts"
 Cohesion: 0.20
 Nodes (5): @tailwindcss/vite, @testing-library/react, vite, @vitejs/plugin-react, vitest
 
-### Community 137 - "entity_extractor.py"
-Cohesion: 0.33
-Nodes (5): Entity, extract_entities(), _get_client(), KnowledgeGraphEntities, Relationship
-
-### Community 139 - "has_unevaluated_close_blocker"
+### Community 142 - "has_unevaluated_close_blocker"
 Cohesion: 0.20
 Nodes (4): has_unevaluated_close_blocker(), _pred_jarvis_response(), _pred_unevaluated_close(), is_jarvis_acknowledgment()
 
-### Community 140 - "knowledge_graph_api.py"
-Cohesion: 0.31
-Nodes (4): get_kg_store(), get_service_detail(), get_stats(), list_services()
-
-### Community 141 - "parseReport.ts"
+### Community 144 - "nightwatcher_prompt.py"
 Cohesion: 0.24
-Nodes (9): JournalEntry, KNOWN_SECTIONS, ParsedReport, ParsedSection, ParsedTurn, parseJournal(), parseReportMarkdown(), parseTurns() (+1 more)
+Nodes (4): StagedEscalation, build_manifest_table(), build_system_prompt(), extract_event_links()
 
-### Community 143 - "get_quota_tracker"
+### Community 147 - "get_quota_tracker"
 Cohesion: 0.22
 Nodes (3): get_quota_tracker(), llm_stats(), receive_telemetry()
 
-### Community 147 - "create_chat_event"
+### Community 157 - "update_knowledge"
 Cohesion: 0.25
-Nodes (3): ChatEventRequest, ChatEventResponse, create_chat_event()
+Nodes (4): demote_lesson(), KnowledgeUpdateRequest, update_knowledge(), verify_lesson()
 
-### Community 158 - "scripts"
+### Community 160 - "scripts"
 Cohesion: 0.29
 Nodes (7): scripts, build, dev, lint, preview, test, test:watch
 
-### Community 159 - "validate-mutations.sh"
+### Community 161 - "validate-mutations.sh"
 Cohesion: 0.73
 Nodes (5): deny_budget(), in_list(), is_readonly_role(), validate-mutations.sh script, tmo()
 
-### Community 165 - "enforce_casual_domain"
-Cohesion: 0.33
-Nodes (4): can_override_domain(), _normalize_email(), enforce_casual_domain(), EnforceCasualRequest
-
 ## Knowledge Gaps
 - **13 isolated node(s):** `autoprefixer`, `cronstrue`, `graphology-layout-forceatlas2`, `jsdom`, `postcss` (+8 more)
-  These have ≤1 connection - possible missing edges. (Counts symbols only; 2125 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **119 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges. (Counts symbols only; 2126 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **105 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `BlackboardState` connect `BlackboardState` to `brain.py`, `models.py`, `ConversationTurn`, `nightwatcher_tools.py`, `Brain`, `EventDocument`, `create_chat_event`, `_is_event_closed_or_missing`, `queue.py`, `EventRepository`, `update_notebook_note`, `.get_event`, `observations_reporter.py`, `lifespan`, `enforce_casual_domain`, `.get_service`, `main.py`, `._restage_pending_signal`, `._count_pending`, `._stage_pending_signal`, `.__init__`, `handlers_dispatch.py`, `._commit_pending_signal`, `._drain_pending`, `LiveAPIAdapter`, `slack.py`, `jira.py`, `DashboardWSAdapter`, `get_report`, `approve_event`, `ScheduleRepository`, `close_event_by_user`, `HeadhunterJira`?**
-  _High betweenness centrality (0.102) - this node is a cross-community bridge._
+- **Why does `BlackboardState` connect `BlackboardState` to `logging`, `auth.py`, `os`, `BaseModel`, `Brain`, `_is_event_closed_or_missing`, `HeadhunterJira`, `nightwatcher_prompt.py`, `topology.py`, `EventDocument`, `ConversationTurn`, `observations_mgmt.py`, `brain.py`, `main.py`, `ConversationMessage`, `nightwatcher_tools.py`, `jenkins_observer.py`, `submit_feedback`, `.__init__`, `slack.py`, `queue.py`, `models.py`, `lifespan`, `live_api_adapter.py`, `dependencies.py`, `get_archivist`, `cognitive_graph.py`, `DashboardWSAdapter`, `LiveAPIAdapter`, `get_report`, `.get_event`, `FlowSnapshot`, `list_active_events`, `NightwatcherObserver`, `.list_observations`, `get_brain`, `close_event_by_user`, `EventEvidence`?**
+  _High betweenness centrality (0.126) - this node is a cross-community bridge._
 - **Are the 78 inferred relationships involving `BlackboardState` (e.g. with `DashboardWSAdapter` and `LiveAPIAdapter`) actually correct?**
   _`BlackboardState` has 78 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `autoprefixer`, `cronstrue`, `graphology-layout-forceatlas2` to the rest of the system?**
   _13 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `BlackboardState` be split into smaller, more focused modules?**
-  _Cohesion score 0.011284134506883321 - nodes in this community are weakly interconnected._
-- **Why does `Brain` connect `Brain` to `BlackboardState`, `brain.py`, `models.py`, `ConversationTurn`, `nightwatcher_tools.py`, `EventDocument`, `._run_agent_task`, `lifespan`, `._process_with_llm`, `main.py`, `._idle_timeout_warn`, `.__init__`, `.append_and_broadcast`, `.broadcast`, `StateWatcher`, `.next_turn_number`, `ReconcileScheduler`, `BrainSkillLoader`, `slack.py`, `._build_system_prompt`, `PulseBatch`, `._process_event_inner`, `ReflexSearcher`, `DashboardWSAdapter`, `._build_contents`, `src/ports.py`, `._execute_function_call`, `.start_event_loop`, `QuotaTracker`, `._extract_context_flags`, `IdleTimeoutManager`?**
-  _High betweenness centrality (0.064) - this node is a cross-community bridge._
+  _Cohesion score 0.014617017801731177 - nodes in this community are weakly interconnected._
+- **Why does `Brain` connect `Brain` to `BlackboardState`, `._cleanup_stale_events`, `.start_event_loop`, `os`, `._run_agent_task`, `EventDocument`, `ConversationTurn`, `brain.py`, `main.py`, `Pulse`, `agents/__init__.py`, `QueueTrigger`, `._process_with_llm`, `._format_merge_evidence`, `.__init__`, `slack.py`, `.append_and_broadcast`, `.broadcast`, `models.py`, `lifespan`, `StateWatcher`, `live_api_adapter.py`, `dependencies.py`, `BrainSkillLoader`, `IdleTimeoutManager`, `ReflexSearcher`, `DashboardWSAdapter`, `._build_contents`, `._build_system_prompt`, `FlowSnapshot`, `src/ports.py`, `QuotaTracker`, `._extract_context_flags`, `ReconcileScheduler`, `EventEvidence`?**
+  _High betweenness centrality (0.066) - this node is a cross-community bridge._
 - **Are the 20 inferred relationships involving `Brain` (e.g. with `DashboardWSAdapter` and `ReflexSearcher`) actually correct?**
   _`Brain` has 20 INFERRED edges - model-reasoned connections that need verification._
-- **Should `brain.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.028138974888200895 - nodes in this community are weakly interconnected._
+- **Should `client.ts` be split into smaller, more focused modules?**
+  _Cohesion score 0.04047976011994003 - nodes in this community are weakly interconnected._
