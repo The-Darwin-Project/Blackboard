@@ -287,4 +287,176 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(onNewTask).toHaveBeenCalledTimes(1);
     });
   });
+  describe('closed refetch eviction guard (active -> closed transition)', () => {
+    const asQuery = (data: unknown[], extra: Record<string, unknown> = {}) =>
+      ({ data, isLoading: false, isFetching: false, ...extra }) as never;
+
+    it('does not evict while the closed list is refetching after the event left the active list', () => {
+      const onNewTask = vi.fn();
+      const spyActive = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const spyClosed = vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      // Active list settles without evt-1 while the closed list is still refetching (stale, lacks evt-1)
+      spyActive.mockReturnValue(asQuery([mockEvents[1]]));
+      spyClosed.mockReturnValue(asQuery([], { isFetching: true }));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      // Closed refetch lands and now contains evt-1 -> still not evicted
+      spyClosed.mockReturnValue(asQuery([{ ...mockEvents[0], status: 'closed' }]));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+    });
+
+    it('still evicts once both lists settle without the previously seen event', () => {
+      const onNewTask = vi.fn();
+      const spyActive = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const spyClosed = vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+
+      spyActive.mockReturnValue(asQuery([mockEvents[1]]));
+      spyClosed.mockReturnValue(asQuery([], { isFetching: true }));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).not.toHaveBeenCalled();
+
+      spyClosed.mockReturnValue(asQuery([], { isFetching: false }));
+      rerender(<WorkspaceSessionsHub isOpen={true} selectedEventId="evt-1" onNewTask={onNewTask} />);
+      expect(onNewTask).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('project filter', () => {
+    const asQuery = (data: unknown[]) => ({ data, isLoading: false, isFetching: false }) as never;
+    const ctxEvent = (id: string, service: string, evidence: Record<string, unknown>) => ({
+      ...mockEvents[0],
+      id,
+      service,
+      evidence: { domain: 'clear', display_text: 'context event', ...evidence },
+    });
+
+    it('resets to "all" when the selected project leaves availableProjects', () => {
+      const spyActive = vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery(mockEvents));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+      const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: 'ProjectBeta' } });
+      expect(select.value).toBe('ProjectBeta');
+      expect(screen.queryByText(/auth-service/i)).not.toBeInTheDocument();
+
+      // ProjectBeta (evt-2) disappears from every list
+      spyActive.mockReturnValue(asQuery([mockEvents[0], mockEvents[2]]));
+      rerender(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      expect((screen.getByLabelText(/filter by project/i) as HTMLSelectElement).value).toBe('all');
+      expect(screen.getByText(/auth-service/i)).toBeInTheDocument();
+      expect(screen.getByText(/payment-service/i)).toBeInTheDocument();
+    });
+
+    it('derives the project from gitlab_context / github_context / kargo_context', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        ctxEvent('evt-gl', 'gl-service', { gitlab_context: { project: 'group/gitlab-proj' } }),
+        ctxEvent('evt-gh', 'gh-service', { github_context: { repo: 'org/github-repo' } }),
+        ctxEvent('evt-kg', 'kg-service', { kargo_context: { project: 'kargo-proj' } }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      const options = Array.from(select.options).map(o => o.value);
+      expect(options).toEqual(['all', 'group/gitlab-proj', 'kargo-proj', 'org/github-repo']);
+
+      fireEvent.change(select, { target: { value: 'org/github-repo' } });
+      expect(screen.getByText(/gh-service/i)).toBeInTheDocument();
+      expect(screen.queryByText(/gl-service/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/kg-service/i)).not.toBeInTheDocument();
+    });
+
+    it('prefers evidence.project over context payloads', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        ctxEvent('evt-p', 'pref-service', { project: 'Primary', gitlab_context: { project: 'Secondary' } }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      const options = Array.from((screen.getByLabelText(/filter by project/i) as HTMLSelectElement).options).map(o => o.value);
+      expect(options).toEqual(['all', 'Primary']);
+    });
+
+    it('matches events whose project has surrounding whitespace', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        ctxEvent('evt-ws', 'ws-service', { project: '  Padded  ' }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.change(screen.getByLabelText(/filter by project/i), { target: { value: 'Padded' } });
+      expect(screen.getByText(/ws-service/i)).toBeInTheDocument();
+    });
+
+    it('hides the project selector when no event carries a project', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([ctxEvent('evt-np', 'np-service', {})]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.queryByLabelText(/filter by project/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('"My Tasks" scope across sections', () => {
+    const asQuery = (data: unknown[]) => ({ data, isLoading: false, isFetching: false }) as never;
+    const other = (over: Record<string, unknown>) => ({ ...mockEvents[0], created_by_email: 'someone@else.com', ...over });
+
+    const withOthers = () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        ...mockEvents,
+        other({ id: 'evt-other-active', service: 'other-active' }),
+        other({ id: 'evt-other-deferred', service: 'other-deferred', status: 'deferred' }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([
+        ...mockClosedEvents,
+        other({ id: 'evt-other-closed', service: 'other-closed', status: 'closed' }),
+      ]));
+    };
+
+    it('shows only my tasks in active, deferred and closed sections, and everything under Global', () => {
+      withOthers();
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Closed & Failed/i }));
+
+      expect(screen.getByText('auth-service')).toBeInTheDocument();
+      expect(screen.getByText('payment-service')).toBeInTheDocument();
+      expect(screen.getByText('cache-service')).toBeInTheDocument();
+      expect(screen.queryByText('other-active')).not.toBeInTheDocument();
+      expect(screen.queryByText('other-deferred')).not.toBeInTheDocument();
+      expect(screen.queryByText('other-closed')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+      expect(screen.getByText('other-active')).toBeInTheDocument();
+      expect(screen.getByText('other-deferred')).toBeInTheDocument();
+      expect(screen.getByText('other-closed')).toBeInTheDocument();
+    });
+
+    it('matches on preferred_username when the profile has no email, via triggered_by', () => {
+      vi.spyOn(AuthContext, 'useAuth').mockReturnValue({
+        user: { profile: { preferred_username: 'Developer' } },
+        isAuthenticated: true,
+        isLoading: false,
+      } as never);
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        other({ id: 'evt-u', service: 'user-owned', created_by_email: null, evidence: { ...mockEvents[0].evidence, triggered_by: 'developer' } }),
+        other({ id: 'evt-x', service: 'not-mine' }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.getByText('user-owned')).toBeInTheDocument();
+      expect(screen.queryByText('not-mine')).not.toBeInTheDocument();
+    });
+
+    it('does not treat an ownerless event as mine when a profile identity is known', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+        other({ id: 'evt-n', service: 'ownerless', created_by_email: null }),
+      ]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.queryByText('ownerless')).not.toBeInTheDocument();
+    });
+  });
 });

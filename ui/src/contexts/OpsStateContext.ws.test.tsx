@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -27,7 +27,7 @@ vi.mock('../hooks/useQueue', async (orig) => {
   return { ...real, useActiveEvents: () => ({ data: [] }) };
 });
 
-import { OpsControlProvider } from './OpsStateContext';
+import { OpsControlProvider, useOpsControl } from './OpsStateContext';
 
 const KEY = ['activeEvents'];
 const baseEvent = {
@@ -82,5 +82,60 @@ describe('OpsControlProvider domain_updated / severity_updated', () => {
   it('ignores messages without an event_id', () => {
     act(() => wsHandler!({ type: 'domain_updated', domain: 'clear' }));
     expect(evidence().brain_domain).toBeUndefined();
+  });
+});
+
+describe('OpsControlProvider event_closed selection lifecycle', () => {
+  const STORAGE_KEY = 'darwin:selectedEventId';
+
+  const setup = (path: string, selected: string | null = 'evt-1') => {
+    window.history.pushState({}, '', path);
+    sessionStorage.clear();
+    if (selected) sessionStorage.setItem(STORAGE_KEY, selected);
+    const qc = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+    return renderHook(() => useOpsControl(), { wrapper });
+  };
+
+  afterEach(() => {
+    window.history.pushState({}, '', '/');
+    sessionStorage.clear();
+  });
+
+  it('on /workspace/<id>: keeps in-memory selection but clears sessionStorage', () => {
+    const { result } = setup('/workspace/evt-1');
+    expect(result.current.selectedEventId).toBe('evt-1');
+    act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-1' }));
+    expect(result.current.selectedEventId).toBe('evt-1');
+    expect(sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it('on exactly /workspace: keeps in-memory selection but clears sessionStorage', () => {
+    const { result } = setup('/workspace');
+    act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-1' }));
+    expect(result.current.selectedEventId).toBe('evt-1');
+    expect(sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it('on /: clears both in-memory selection and sessionStorage', () => {
+    const { result } = setup('/');
+    act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-1' }));
+    expect(result.current.selectedEventId).toBeNull();
+    expect(sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it('on /workspaces-other (prefix-only match): clears both', () => {
+    const { result } = setup('/workspaces-other');
+    act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-1' }));
+    expect(result.current.selectedEventId).toBeNull();
+    expect(sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it.each(['/', '/workspace/evt-1'])('on %s: a non-selected event closing preserves both', (path) => {
+    const { result } = setup(path);
+    act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-other' }));
+    expect(result.current.selectedEventId).toBe('evt-1');
+    expect(sessionStorage.getItem(STORAGE_KEY)).toBe('evt-1');
   });
 });

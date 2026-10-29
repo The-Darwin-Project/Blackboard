@@ -2,6 +2,7 @@
 // @ai-rules:
 // 1. [Constraint]: Derive conversation/diffs inside useMemo keyed on eventDoc?.conversation; never create a fresh [] before the memo.
 // 2. [Pattern]: Hooks run before the isOpen early return.
+// 3. [Gotcha]: DOMAIN_COLORS is indexed via Object.hasOwn on the lowercased domain so prototype keys and unknown domains fall back to casual.
 /**
  * Collapsible & resizable right sidebar for Agent Workspace.
  * Hosts Plan execution, Diff viewer, Swarm topology, Live Logs tabs, and Session Telemetry.
@@ -96,8 +97,10 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   const { hasPlan, steps: planSteps } = usePlanState(conversation);
 
   const eventEvidence = eventDoc?.event?.evidence as EventEvidence | undefined;
-  const brainDomain = (eventEvidence?.brain_domain || 'casual').toLowerCase() as keyof typeof DOMAIN_COLORS;
-  const domainColor = DOMAIN_COLORS[brainDomain] || DOMAIN_COLORS.casual;
+  const brainDomain = (eventEvidence?.brain_domain || 'casual').toLowerCase();
+  const domainColor = Object.hasOwn(DOMAIN_COLORS, brainDomain)
+    ? DOMAIN_COLORS[brainDomain as keyof typeof DOMAIN_COLORS]
+    : DOMAIN_COLORS.casual;
   const statusColor = STATUS_COLORS[eventDoc?.status || 'active'] || { bg: '#1e293b', text: '#94a3b8' };
   const userTrigger = eventEvidence?.triggered_by || eventDoc?.created_by_email;
 

@@ -232,6 +232,8 @@ export interface EventEvidence {
   argocd_app?: string | null;
   ci_context?: CiContext;
   project?: string | null;
+  gitlab_context?: { project?: string | null };
+  github_context?: { repo?: string | null };
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */

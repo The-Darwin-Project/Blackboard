@@ -3,8 +3,12 @@
 // 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in active or closed events and has since disappeared.
 //    A newly created / deep-linked ID is absent from a stale cache; evicting it would bounce the user to /workspace.
 // 2. [Pattern]: Eviction calls onNewTask (WorkspaceLayout.handleDeselectEvent uses replace:true so Back is not trapped).
-// 3. [Gotcha]: Skip eviction while any query refetch is in flight (isFetchingActive || isFetchingClosed); cached list may be stale.
-// 4. [Pattern]: Scoping: 'mine' (filtered by user email/username) vs 'all' (global). Optional project filter.
+// 3. [Gotcha]: Skip eviction while a closed refetch is in flight (active -> closed transition: the event leaves the active list
+//    before the closed list refetch lands) or while the active list is refetching; cached lists may be stale.
+// 4. [Pattern]: Scoping: 'mine' vs 'all' (Global) is a CLIENT-SIDE workspace view filter only (not an authz boundary; the API returns the same lists).
+//    'mine' matches the OIDC email or preferred_username against created_by_email / evidence.triggered_by. Optional project filter.
+//    Project is derived from evidence.project, then gitlab_context.project, github_context.repo, kargo_context.project (trimmed).
+//    A selected project that leaves availableProjects falls back to 'all' (effectiveProject).
 // 5. [Pattern]: Accordion folders: Active Tasks, Deferred Tasks, and Closed & Failed Tasks (defaults collapsed).
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
@@ -19,6 +23,19 @@ import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useAuth } from '../../contexts/AuthContext';
 import WorkspaceTaskItem from './WorkspaceTaskItem';
 import type { ActiveEvent } from '../../api/types';
+
+const asTrimmed = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+/** Project an event belongs to, tolerant of both evidence.project and backend context payloads. */
+function deriveProject(evt: ActiveEvent): string {
+  const ev = evt.evidence;
+  return (
+    asTrimmed(ev?.project)
+    || asTrimmed(ev?.gitlab_context?.project)
+    || asTrimmed(ev?.github_context?.repo)
+    || asTrimmed(ev?.kargo_context?.project)
+  );
+}
 
 interface WorkspaceSessionsHubProps {
   isOpen: boolean;
@@ -40,8 +57,9 @@ export default function WorkspaceSessionsHub({
 
   const selectedEventId = propSelectedEventId !== undefined ? propSelectedEventId : opsControl.selectedEventId;
 
-  // Identity resolution for scoping
-  const userIdentifier = (user?.profile?.email || (user?.profile as any)?.preferred_username || '').trim().toLowerCase();
+  // Identity resolution for scoping: either the email or the username claim may match the creator.
+  const profileEmail = asTrimmed(user?.profile?.email).toLowerCase();
+  const profileUsername = asTrimmed(user?.profile?.preferred_username).toLowerCase();
 
   // Scoping and filter state
   const [scope, setScope] = useState<'mine' | 'all'>('mine');
@@ -56,34 +74,26 @@ export default function WorkspaceSessionsHub({
   const availableProjects = useMemo(() => {
     const set = new Set<string>();
     [...rawActiveEvents, ...rawClosedEvents].forEach(evt => {
-      const proj = evt.evidence?.project;
-      if (proj && typeof proj === 'string' && proj.trim()) {
-        set.add(proj.trim());
-      }
+      const proj = deriveProject(evt);
+      if (proj) set.add(proj);
     });
     return Array.from(set).sort();
   }, [rawActiveEvents, rawClosedEvents]);
 
-  // Filter helper: matches current user
-  const matchesUser = (evt: ActiveEvent): boolean => {
-    if (!userIdentifier) return true; // fallback if no auth profile loaded
-    const createdBy = (evt.created_by_email || evt.evidence?.triggered_by || '').trim().toLowerCase();
-    return createdBy === userIdentifier;
-  };
-
-  // Filter helper: matches selected project
-  const matchesProject = (evt: ActiveEvent): boolean => {
-    if (selectedProject === 'all') return true;
-    return evt.evidence?.project === selectedProject;
-  };
+  // A selection whose project vanished from the lists resets to 'all' instead of hiding everything
+  const effectiveProject =
+    selectedProject === 'all' || availableProjects.includes(selectedProject) ? selectedProject : 'all';
 
   // Categorize events
   const { activeTasks, deferredTasks, closedTasks } = useMemo(() => {
-    const filterFn = (evt: ActiveEvent) => {
-      if (scope === 'mine' && !matchesUser(evt)) return false;
-      if (!matchesProject(evt)) return false;
-      return true;
+    const matchesUser = (evt: ActiveEvent): boolean => {
+      if (!profileEmail && !profileUsername) return true; // fallback if no auth profile loaded
+      const owners = [evt.created_by_email, evt.evidence?.triggered_by].map(o => asTrimmed(o).toLowerCase());
+      return owners.some(o => o !== '' && (o === profileEmail || o === profileUsername));
     };
+    const matchesProject = (evt: ActiveEvent): boolean =>
+      effectiveProject === 'all' || deriveProject(evt) === effectiveProject;
+    const filterFn = (evt: ActiveEvent) => (scope !== 'mine' || matchesUser(evt)) && matchesProject(evt);
 
     const active: ActiveEvent[] = [];
     const deferred: ActiveEvent[] = [];
@@ -103,13 +113,13 @@ export default function WorkspaceSessionsHub({
       deferredTasks: deferred,
       closedTasks: closed,
     };
-  }, [rawActiveEvents, rawClosedEvents, scope, selectedProject, userIdentifier]);
+  }, [rawActiveEvents, rawClosedEvents, scope, effectiveProject, profileEmail, profileUsername]);
 
   // Eviction tracking: check against UNFILTERED raw events to prevent filtering from kicking the user out
   const seenIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (isLoadingActive && isLoadingClosed) return;
+    if (isLoadingActive || isLoadingClosed || isFetchingClosed) return;
     const seen = seenIdsRef.current;
     const allCurrentRawIds = new Set([
       ...rawActiveEvents.map(e => e.id),
@@ -117,7 +127,7 @@ export default function WorkspaceSessionsHub({
     ]);
 
     if (selectedEventId && seen.has(selectedEventId) && !allCurrentRawIds.has(selectedEventId)) {
-      if (isFetchingActive || isFetchingClosed) return;
+      if (isFetchingActive) return;
       seen.delete(selectedEventId);
       onNewTask();
       return;
@@ -191,7 +201,7 @@ export default function WorkspaceSessionsHub({
           <div className="flex items-center gap-1.5 px-1 text-xs text-text-muted">
             <Filter size={11} className="flex-shrink-0" />
             <select
-              value={selectedProject}
+              value={effectiveProject}
               onChange={(e) => setSelectedProject(e.target.value)}
               className="w-full bg-bg-primary border border-border/50 rounded px-1.5 py-0.5 text-xs text-text-secondary focus:outline-none focus:border-accent"
               aria-label="Filter by project"

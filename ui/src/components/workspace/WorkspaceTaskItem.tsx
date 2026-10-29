@@ -2,7 +2,9 @@
 // @ai-rules:
 // 1. [Pattern]: Presentational; selection is reported through onSelect(id) and the parent owns navigation.
 // 2. [Pattern]: Matches EventNode visual density: status dot, SourceIcon, domain pill, agent badge, relative age, and DeferCountdownBar.
-// 3. [Constraint]: Uses div role="button" with keyboard accessibility to allow valid nested DeferCountdownBar interaction.
+// 3. [Constraint]: Uses div role="button" with keyboard accessibility (Enter/Space, repeat ignored) for the row.
+// 4. [Gotcha]: Domain/actor/status colour maps are indexed via Object.hasOwn so prototype keys
+//    ('constructor', 'toString', '__proto__') fall back to casual / neutral instead of resolving to Object.prototype members.
 /**
  * Single task session item with operational visibility parity.
  */
@@ -20,15 +22,21 @@ interface WorkspaceTaskItemProps {
 }
 
 export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: WorkspaceTaskItemProps) {
-  const domain = (evt.evidence?.brain_domain || evt.evidence?.domain || 'casual') as keyof typeof DOMAIN_COLORS;
-  const dc = DOMAIN_COLORS[domain] || DOMAIN_COLORS.casual;
-  const sc = STATUS_COLORS[evt.status] || STATUS_COLORS.active;
+  const domain: string = evt.evidence?.brain_domain || evt.evidence?.domain || 'casual';
+  const domainKey = domain.toLowerCase();
+  const dc = Object.hasOwn(DOMAIN_COLORS, domainKey)
+    ? DOMAIN_COLORS[domainKey as keyof typeof DOMAIN_COLORS]
+    : DOMAIN_COLORS.casual;
+  const statusBorder = (Object.hasOwn(STATUS_COLORS, evt.status) ? STATUS_COLORS[evt.status] : STATUS_COLORS.active).border;
+  const agent = evt.current_agent;
+  const agentColor = agent && Object.hasOwn(ACTOR_COLORS, agent) ? ACTOR_COLORS[agent] : '#64748b';
   const isWaiting = evt.status === 'waiting_approval';
   const isDeferred = evt.status === 'deferred';
   const age = relativeAge(evt.created);
   const summary = evt.evidence?.display_text?.trim() || evt.reason?.trim() || 'Interactive session';
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.repeat) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onSelect(evt.id);
@@ -56,7 +64,7 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
       <div className="flex items-center gap-1.5 w-full min-w-0">
         <span
           className={`w-2 h-2 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
-          style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }}
+          style={{ background: statusBorder, boxShadow: isWaiting ? `0 0 6px ${statusBorder}80` : 'none' }}
         />
         <SourceIcon
           source={evt.source}
@@ -67,23 +75,18 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
         <span className="text-xs font-mono font-medium truncate min-w-0 flex-1 text-text-primary">
           {evt.service || evt.id.slice(4, 12)}
         </span>
-        {dc && (
-          <span
-            className="text-[10px] px-1.5 py-0.5 rounded border font-mono uppercase flex-shrink-0 font-medium leading-[14px]"
-            style={{ background: dc.bg, color: dc.text, borderColor: `${dc.border}40` }}
-          >
-            {domain}
-          </span>
-        )}
-        {evt.current_agent && (
+        <span
+          className="text-[10px] px-1.5 py-0.5 rounded border font-mono uppercase flex-shrink-0 font-medium leading-[14px]"
+          style={{ background: dc.bg, color: dc.text, borderColor: `${dc.border}40` }}
+        >
+          {domain}
+        </span>
+        {agent && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 font-mono"
-            style={{
-              color: ACTOR_COLORS[evt.current_agent] || '#64748b',
-              background: `${ACTOR_COLORS[evt.current_agent] || '#64748b'}18`,
-            }}
+            style={{ color: agentColor, background: `${agentColor}18` }}
           >
-            {evt.current_agent}
+            {agent}
           </span>
         )}
       </div>

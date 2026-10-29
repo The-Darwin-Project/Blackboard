@@ -15,6 +15,9 @@
 //    request_user_approval (handlers_state.py, park), resume_if_parked (brain.py, resume) (#240).
 // 9. [Constraint]: domain_updated / severity_updated patch ONLY evidence.brain_domain / brain_severity.
 //    Base evidence.domain / severity are source-assessed and never overwritten (05-event-evidence-contract).
+// 10. [Constraint]: event_closed on the selected event ALWAYS clears sessionStorage; in-memory selectedEventId is cleared
+//    only OFF the workspace route (pathname === '/workspace' or under '/workspace/'; '/workspaces-x' does not match).
+//    On /workspace the in-memory selection survives so the inspector stays populated, while sessionStorage never resurrects the closed event on `/`.
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -25,6 +28,8 @@ import type { AgentRegistryEntry, EventEvidence, KargoStageStatus } from '../api
 const EVIDENCE_SEVERITIES: readonly string[] = ['info', 'warning', 'critical'];
 const isEvidenceSeverity = (v: unknown): v is EventEvidence['brain_severity'] =>
   typeof v === 'string' && EVIDENCE_SEVERITIES.includes(v);
+
+const SELECTED_EVENT_STORAGE_KEY = 'darwin:selectedEventId';
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
 
@@ -73,20 +78,20 @@ export function useOpsControlSafe(): OpsControl | null {
 
 export function OpsControlProvider({ children }: { children: ReactNode }) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(
-    () => sessionStorage.getItem('darwin:selectedEventId'),
+    () => sessionStorage.getItem(SELECTED_EVENT_STORAGE_KEY),
   );
   const selectedEventIdRef = useRef(selectedEventId);
 
   const selectEvent = useCallback((id: string) => {
     selectedEventIdRef.current = id;
     setSelectedEventId(id);
-    try { sessionStorage.setItem('darwin:selectedEventId', id); } catch { /* quota */ }
+    try { sessionStorage.setItem(SELECTED_EVENT_STORAGE_KEY, id); } catch { /* quota */ }
   }, []);
 
   const deselectEvent = useCallback(() => {
     selectedEventIdRef.current = null;
     setSelectedEventId(null);
-    sessionStorage.removeItem('darwin:selectedEventId');
+    sessionStorage.removeItem(SELECTED_EVENT_STORAGE_KEY);
   }, []);
 
   const [registeredAgents, setRegisteredAgents] = useState<AgentRegistryEntry[]>([]);
@@ -178,11 +183,17 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateHeadhunter();
         invalidateAligner();
         invalidateJenkins();
-        const isWorkspaceRoute = typeof window !== 'undefined' && window.location.pathname.startsWith('/workspace');
-        if (closedId === selectedEventIdRef.current && !isWorkspaceRoute) {
-          selectedEventIdRef.current = null;
-          setSelectedEventId(null);
-          sessionStorage.removeItem('darwin:selectedEventId');
+        if (closedId === selectedEventIdRef.current) {
+          // sessionStorage is always cleared so a closed event is never rehydrated when navigating back to `/`.
+          // In-memory selection is kept on /workspace so the open inspector is not blanked; the Workspace
+          // sessions hub owns eviction there (it observes the event leaving both active + closed lists).
+          sessionStorage.removeItem(SELECTED_EVENT_STORAGE_KEY);
+          const { pathname } = window.location;
+          const isWorkspaceRoute = pathname === '/workspace' || pathname.startsWith('/workspace/');
+          if (!isWorkspaceRoute) {
+            selectedEventIdRef.current = null;
+            setSelectedEventId(null);
+          }
         }
       }
     } else if (msg.type === 'event_status_changed') {

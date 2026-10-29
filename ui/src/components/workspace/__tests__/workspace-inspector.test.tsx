@@ -11,7 +11,7 @@ vi.mock('../../PlanProgress', () => ({
     <div data-testid="plan-progress">Plan with {conversation?.length || 0} turns</div>
   ),
   usePlanState: (conversation: unknown[]) => {
-    const hasPlan = Array.isArray(conversation) && conversation.some((t: any) => t.action === 'plan');
+    const hasPlan = Array.isArray(conversation) && (conversation as { action?: string }[]).some((t) => t.action === 'plan');
     return {
       hasPlan,
       planTurn: hasPlan ? conversation[0] : null,
@@ -28,6 +28,12 @@ vi.mock('../WorkspaceDiffViewer', () => ({
 
 vi.mock('../WorkspaceSwarmPanel', () => ({
   default: () => <div data-testid="workspace-swarm-panel">Swarm Panel</div>,
+}));
+
+vi.mock('../../CiContextCard', () => ({
+  default: ({ context }: { context: { cnv_version?: string } }) => (
+    <div data-testid="ci-context-card">CI {context.cnv_version}</div>
+  ),
 }));
 
 vi.mock('../../ActivityStream', () => ({
@@ -196,5 +202,89 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     // Verify Plan tab fallback renders friendly message instead of returning null
     expect(screen.getByText('No execution plan for this session')).toBeInTheDocument();
     expect(screen.getByText(/Structured execution plans appear here/i)).toBeInTheDocument();
+  });
+  describe('session overview', () => {
+    const mockDoc = (over: Record<string, unknown>) =>
+      vi.spyOn(queueHook, 'useEventDocument').mockReturnValue({
+        data: {
+          id: 'evt-ov',
+          service: 'overview-svc',
+          status: 'active',
+          source: 'chat',
+          conversation: [],
+          ...over,
+        },
+        isLoading: false,
+        isError: false,
+      } as never);
+
+    it.each([
+      ['absent', {}],
+      ['zero total', { token_usage: { total_tokens: 0, input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cached_tokens: 0, calls: 0 } }],
+    ])('hides the token telemetry when token_usage is %s', (_label, over) => {
+      mockDoc(over);
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('overview-svc')).toBeInTheDocument();
+      expect(screen.queryByText('Tokens')).not.toBeInTheDocument();
+      expect(screen.queryByText(/calls/)).not.toBeInTheDocument();
+    });
+
+    it('shows the live marker only while the session is not closed', () => {
+      mockDoc({ token_usage: { total_tokens: 100, input_tokens: 100, calls: 1 } });
+      const { unmount } = renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('live')).toBeInTheDocument();
+      unmount();
+
+      mockDoc({ status: 'closed', token_usage: { total_tokens: 100, input_tokens: 100, calls: 1 } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.queryByText('live')).not.toBeInTheDocument();
+    });
+
+    it('prefers evidence.triggered_by over created_by_email', () => {
+      mockDoc({
+        created_by_email: 'creator@example.com',
+        event: { evidence: { triggered_by: 'trigger@example.com' } },
+      });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('trigger@example.com')).toBeInTheDocument();
+      expect(screen.queryByText('creator@example.com')).not.toBeInTheDocument();
+    });
+
+    it('falls back to created_by_email when triggered_by is absent or null', () => {
+      mockDoc({ created_by_email: 'creator@example.com', event: { evidence: { triggered_by: null } } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('creator@example.com')).toBeInTheDocument();
+    });
+
+    it('renders no triggering user when neither identity is present', () => {
+      mockDoc({});
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+    });
+
+    it('renders the CI context card when evidence.ci_context is present and omits it otherwise', () => {
+      mockDoc({ event: { evidence: { ci_context: { cnv_version: '4.22' } } } });
+      const { unmount } = renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByTestId('ci-context-card').textContent).toBe('CI 4.22');
+      unmount();
+
+      mockDoc({ event: { evidence: {} } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.queryByTestId('ci-context-card')).not.toBeInTheDocument();
+    });
+
+    it('collapses and expands the overview card', () => {
+      mockDoc({ created_by_email: 'creator@example.com' });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText('creator@example.com')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /overview-svc/ }));
+      expect(screen.queryByText('creator@example.com')).not.toBeInTheDocument();
+    });
+
+    it.each(['constructor', '__proto__', 'weird', 'CHAOTIC'])('renders domain badge for %s without throwing', (domain) => {
+      mockDoc({ event: { evidence: { brain_domain: domain } } });
+      renderComponent({ selectedEventId: 'evt-ov' });
+      expect(screen.getByText(domain.toLowerCase())).toBeInTheDocument();
+    });
   });
 });
