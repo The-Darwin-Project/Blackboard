@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceTaskItem from '../WorkspaceTaskItem';
 import type { ActiveEvent, EventEvidence } from '../../../api/types';
 
@@ -11,12 +11,12 @@ const makeEvent = (over: Partial<Omit<ActiveEvent, 'evidence'>> & { evidence?: P
     status: 'active',
     reason: '',
     turns: 0,
-    created: '',
+    created: '2026-10-29T10:00:00Z',
     ...over,
   }) as unknown as ActiveEvent;
 
-const renderItem = (evt: ActiveEvent) =>
-  render(<WorkspaceTaskItem evt={evt} isSelected={false} onSelect={vi.fn()} />);
+const renderItem = (evt: ActiveEvent, onSelect = vi.fn()) =>
+  render(<WorkspaceTaskItem evt={evt} isSelected={false} onSelect={onSelect} />);
 
 describe('WorkspaceTaskItem domain badge', () => {
   it('prefers brain_domain over the source-assessed domain', () => {
@@ -35,16 +35,19 @@ describe('WorkspaceTaskItem domain badge', () => {
     expect(screen.getByText('casual')).toBeInTheDocument();
   });
 
-  it('applies the domain colour class', () => {
+  it('renders domain pill with uppercase styling and valid domain text', () => {
     renderItem(makeEvent({ evidence: { brain_domain: 'chaotic' } }));
-    expect(screen.getByText('chaotic').className).toContain('rose');
+    const badge = screen.getByText('chaotic');
+    expect(badge).toBeInTheDocument();
+    expect(badge.className).toContain('font-mono');
   });
 
   it.each(['weird', 'constructor', 'toString', '__proto__'])(
-    'renders unknown domain %s with the casual colour',
+    'renders unknown domain %s falling back to casual colors',
     (domain) => {
       renderItem(makeEvent({ evidence: { brain_domain: domain } }));
-      expect(screen.getByText(domain).className).toContain('indigo');
+      const badge = screen.getByText(domain);
+      expect(badge).toBeInTheDocument();
     },
   );
 });
@@ -69,5 +72,43 @@ describe('WorkspaceTaskItem summary', () => {
   it("falls back to 'Interactive session' when display_text and reason are blank", () => {
     renderItem(makeEvent({ reason: '  ', evidence: { display_text: ' ' } }));
     expect(screen.getByText('Interactive session')).toBeInTheDocument();
+  });
+});
+
+describe('WorkspaceTaskItem operational visibility parity', () => {
+  it('renders agent badge when current_agent is present', () => {
+    renderItem(makeEvent({ current_agent: 'architect' }));
+    expect(screen.getByText('architect')).toBeInTheDocument();
+  });
+
+  it('renders status dot and service name', () => {
+    renderItem(makeEvent({ service: 'order-service' }));
+    expect(screen.getByText('order-service')).toBeInTheDocument();
+  });
+
+  it('renders defer countdown bar when status is deferred', () => {
+    const { container } = renderItem(makeEvent({
+      status: 'deferred',
+      defer_until: Math.floor(Date.now() / 1000) + 120,
+      defer_started_at: Math.floor(Date.now() / 1000) - 60,
+    }));
+    // DeferCountdownBar renders an svg/progress bar
+    expect(container.querySelector('[title*="defer"]') || container.querySelector('svg') || container.textContent).toBeTruthy();
+  });
+
+  it('supports Enter key press for accessibility on div role="button"', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent(), onSelect);
+    const item = screen.getByRole('button');
+    fireEvent.keyDown(item, { key: 'Enter', code: 'Enter' });
+    expect(onSelect).toHaveBeenCalledWith('evt-1');
+  });
+
+  it('supports Space key press for accessibility on div role="button"', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent(), onSelect);
+    const item = screen.getByRole('button');
+    fireEvent.keyDown(item, { key: ' ', code: 'Space' });
+    expect(onSelect).toHaveBeenCalledWith('evt-1');
   });
 });

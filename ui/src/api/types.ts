@@ -231,6 +231,7 @@ export interface EventEvidence {
   kargo_context?: Record<string, string>;
   argocd_app?: string | null;
   ci_context?: CiContext;
+  project?: string | null;
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
@@ -254,6 +255,8 @@ export interface ActiveEvent {
   /** True when a StateWatcher subscription is actively polling for this event. */
   subscription_active?: boolean;
   token_total?: number;
+  created_by_email?: string | null;
+  current_agent?: string | null;
 }
 
 // =============================================================================

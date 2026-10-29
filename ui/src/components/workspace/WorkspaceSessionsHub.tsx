@@ -1,18 +1,22 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceSessionsHub.tsx
 // @ai-rules:
-// 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in activeEvents and has since disappeared.
+// 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in active or closed events and has since disappeared.
 //    A newly created / deep-linked ID is absent from a stale cache; evicting it would bounce the user to /workspace.
 // 2. [Pattern]: Eviction calls onNewTask (WorkspaceLayout.handleDeselectEvent uses replace:true so Back is not trapped).
-// 3. [Gotcha]: Skip eviction while a refetch is in flight; the cached list may still be stale.
+// 3. [Gotcha]: Skip eviction while any query refetch is in flight (isFetchingActive || isFetchingClosed); cached list may be stale.
+// 4. [Pattern]: Scoping: 'mine' (filtered by user email/username) vs 'all' (global). Optional project filter.
+// 5. [Pattern]: Accordion folders: Active Tasks, Deferred Tasks, and Closed & Failed Tasks (defaults collapsed).
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
- * Lists active events with Cynefin domain badges and provides a 'New Task' trigger.
+ * Supports dual-scope filtering ('My Workspace' vs 'Global Events'), project filter,
+ * and collapsible folders for Active, Deferred, and Closed/Failed tasks.
  */
-import { useEffect, useRef } from 'react';
-import { Plus } from 'lucide-react';
-import { useActiveEvents } from '../../hooks/useQueue';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import { Plus, ChevronDown, ChevronRight, Activity, Clock, CheckCircle2, User, Globe, Filter } from 'lucide-react';
+import { useActiveEvents, useClosedEvents } from '../../hooks/useQueue';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useOpsControl } from '../../contexts/OpsStateContext';
+import { useAuth } from '../../contexts/AuthContext';
 import WorkspaceTaskItem from './WorkspaceTaskItem';
 import type { ActiveEvent } from '../../api/types';
 
@@ -29,27 +33,98 @@ export default function WorkspaceSessionsHub({
   onSelectEvent: propOnSelectEvent,
   onNewTask,
 }: WorkspaceSessionsHubProps) {
-  const { data: events = [], isLoading, isFetching } = useActiveEvents();
+  const { data: rawActiveEvents = [], isLoading: isLoadingActive, isFetching: isFetchingActive } = useActiveEvents();
+  const { data: rawClosedEvents = [], isLoading: isLoadingClosed, isFetching: isFetchingClosed } = useClosedEvents(50);
   const opsControl = useOpsControl();
+  const { user } = useAuth();
 
   const selectedEventId = propSelectedEventId !== undefined ? propSelectedEventId : opsControl.selectedEventId;
 
-  // IDs seen in the active list. Pruned on eviction so a re-opened closed event is not evicted again.
-  const seenActiveIdsRef = useRef<Set<string>>(new Set());
+  // Identity resolution for scoping
+  const userIdentifier = (user?.profile?.email || (user?.profile as any)?.preferred_username || '').trim().toLowerCase();
 
-  // Eviction listener: clear selection only when a previously active event has left the active list
+  // Scoping and filter state
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const [selectedProject, setSelectedProject] = useState<string>('all');
+
+  // Accordion open/close state
+  const [activeOpen, setActiveOpen] = useState(true);
+  const [deferredOpen, setDeferredOpen] = useState(true);
+  const [closedOpen, setClosedOpen] = useState(false); // Default collapsed per design
+
+  // Distinct projects derived from all active + closed events
+  const availableProjects = useMemo(() => {
+    const set = new Set<string>();
+    [...rawActiveEvents, ...rawClosedEvents].forEach(evt => {
+      const proj = evt.evidence?.project;
+      if (proj && typeof proj === 'string' && proj.trim()) {
+        set.add(proj.trim());
+      }
+    });
+    return Array.from(set).sort();
+  }, [rawActiveEvents, rawClosedEvents]);
+
+  // Filter helper: matches current user
+  const matchesUser = (evt: ActiveEvent): boolean => {
+    if (!userIdentifier) return true; // fallback if no auth profile loaded
+    const createdBy = (evt.created_by_email || evt.evidence?.triggered_by || '').trim().toLowerCase();
+    return createdBy === userIdentifier;
+  };
+
+  // Filter helper: matches selected project
+  const matchesProject = (evt: ActiveEvent): boolean => {
+    if (selectedProject === 'all') return true;
+    return evt.evidence?.project === selectedProject;
+  };
+
+  // Categorize events
+  const { activeTasks, deferredTasks, closedTasks } = useMemo(() => {
+    const filterFn = (evt: ActiveEvent) => {
+      if (scope === 'mine' && !matchesUser(evt)) return false;
+      if (!matchesProject(evt)) return false;
+      return true;
+    };
+
+    const active: ActiveEvent[] = [];
+    const deferred: ActiveEvent[] = [];
+    rawActiveEvents.forEach(evt => {
+      if (!filterFn(evt)) return;
+      if (evt.status === 'deferred') {
+        deferred.push(evt);
+      } else {
+        active.push(evt);
+      }
+    });
+
+    const closed = rawClosedEvents.filter(filterFn);
+
+    return {
+      activeTasks: active,
+      deferredTasks: deferred,
+      closedTasks: closed,
+    };
+  }, [rawActiveEvents, rawClosedEvents, scope, selectedProject, userIdentifier]);
+
+  // Eviction tracking: check against UNFILTERED raw events to prevent filtering from kicking the user out
+  const seenIdsRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
-    if (isLoading) return;
-    const seen = seenActiveIdsRef.current;
-    const currentIds = new Set(events.map(e => e.id));
-    if (selectedEventId && seen.has(selectedEventId) && !currentIds.has(selectedEventId)) {
-      if (isFetching) return;
+    if (isLoadingActive && isLoadingClosed) return;
+    const seen = seenIdsRef.current;
+    const allCurrentRawIds = new Set([
+      ...rawActiveEvents.map(e => e.id),
+      ...rawClosedEvents.map(e => e.id),
+    ]);
+
+    if (selectedEventId && seen.has(selectedEventId) && !allCurrentRawIds.has(selectedEventId)) {
+      if (isFetchingActive || isFetchingClosed) return;
       seen.delete(selectedEventId);
       onNewTask();
       return;
     }
-    currentIds.forEach(id => seen.add(id));
-  }, [events, isLoading, isFetching, selectedEventId, onNewTask]);
+
+    allCurrentRawIds.forEach(id => seen.add(id));
+  }, [rawActiveEvents, rawClosedEvents, isLoadingActive, isLoadingClosed, isFetchingActive, isFetchingClosed, selectedEventId, onNewTask]);
 
   const handleSelect = (id: string) => {
     if (propOnSelectEvent) {
@@ -60,7 +135,7 @@ export default function WorkspaceSessionsHub({
   };
 
   const { size: width, isResizing, startResize, panelRef } = useResizablePanel({
-    direction: 'horizontal', min: 220, max: 450, defaultSize: 280,
+    direction: 'horizontal', min: 240, max: 480, defaultSize: 300,
     storageKey: 'darwin:workspaceSessionsWidth', enabled: isOpen,
   });
 
@@ -68,8 +143,9 @@ export default function WorkspaceSessionsHub({
 
   return (
     <aside ref={panelRef} className="flex-shrink-0 bg-bg-secondary border-r border-border h-full flex flex-col relative select-none" style={{ width }}>
-      <div className="p-3 border-b border-border flex items-center justify-between">
-        <span className="text-xs font-semibold text-text-primary tracking-wider uppercase">Active Tasks</span>
+      {/* Top Header: New Task + Title */}
+      <div className="p-3 border-b border-border flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-text-primary tracking-wider uppercase">Workspace</span>
         <button
           onClick={onNewTask}
           aria-label="New Task"
@@ -81,14 +157,167 @@ export default function WorkspaceSessionsHub({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {isLoading && <div className="p-4 text-center text-xs text-text-muted animate-pulse">Loading tasks...</div>}
-        {!isLoading && events.length === 0 && <div className="p-4 text-center text-xs text-text-muted">No active tasks. Click New to start.</div>}
-        {events.map((evt: ActiveEvent) => (
-          <WorkspaceTaskItem key={evt.id} evt={evt} isSelected={evt.id === selectedEventId} onSelect={handleSelect} />
-        ))}
+      {/* Scope Segmented Control: My Workspace vs Global */}
+      <div className="p-2 border-b border-border/60 bg-bg-tertiary/20 flex flex-col gap-2">
+        <div className="grid grid-cols-2 p-0.5 rounded-md bg-bg-tertiary/60 border border-border/40 text-xs">
+          <button
+            onClick={() => setScope('mine')}
+            className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded font-medium transition-colors ${
+              scope === 'mine'
+                ? 'bg-bg-primary text-text-primary shadow-xs'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+            title="Show tasks triggered by you"
+          >
+            <User size={12} />
+            <span>My Tasks</span>
+          </button>
+          <button
+            onClick={() => setScope('all')}
+            className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded font-medium transition-colors ${
+              scope === 'all'
+                ? 'bg-bg-primary text-text-primary shadow-xs'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+            title="Show all cluster and automated tasks"
+          >
+            <Globe size={12} />
+            <span>Global</span>
+          </button>
+        </div>
+
+        {/* Project Selector (shown if projects exist or when active) */}
+        {availableProjects.length > 0 && (
+          <div className="flex items-center gap-1.5 px-1 text-xs text-text-muted">
+            <Filter size={11} className="flex-shrink-0" />
+            <select
+              value={selectedProject}
+              onChange={(e) => setSelectedProject(e.target.value)}
+              className="w-full bg-bg-primary border border-border/50 rounded px-1.5 py-0.5 text-xs text-text-secondary focus:outline-none focus:border-accent"
+              aria-label="Filter by project"
+            >
+              <option value="all">All Projects</option>
+              {availableProjects.map(proj => (
+                <option key={proj} value={proj}>{proj}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
+      {/* Accordion Lists */}
+      <div className="flex-1 overflow-y-auto p-2 space-y-3">
+        {isLoadingActive && isLoadingClosed && (
+          <div className="p-4 text-center text-xs text-text-muted animate-pulse">Loading tasks...</div>
+        )}
+
+        {/* 1. Active Tasks Folder */}
+        <div className="space-y-1">
+          <button
+            onClick={() => setActiveOpen(v => !v)}
+            aria-expanded={activeOpen}
+            className="w-full flex items-center justify-between px-1.5 py-1 text-xs font-semibold text-text-secondary hover:bg-bg-tertiary/50 rounded transition-colors"
+          >
+            <div className="flex items-center gap-1.5">
+              {activeOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              <Activity size={13} className="text-emerald-400" />
+              <span>Active</span>
+            </div>
+            <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 font-normal">
+              {activeTasks.length}
+            </span>
+          </button>
+
+          {activeOpen && (
+            <div className="pl-1 space-y-1">
+              {activeTasks.length === 0 ? (
+                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No active tasks</div>
+              ) : (
+                activeTasks.map((evt) => (
+                  <WorkspaceTaskItem
+                    key={evt.id}
+                    evt={evt}
+                    isSelected={evt.id === selectedEventId}
+                    onSelect={handleSelect}
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 2. Deferred Tasks Folder */}
+        <div className="space-y-1">
+          <button
+            onClick={() => setDeferredOpen(v => !v)}
+            aria-expanded={deferredOpen}
+            className="w-full flex items-center justify-between px-1.5 py-1 text-xs font-semibold text-text-secondary hover:bg-bg-tertiary/50 rounded transition-colors"
+          >
+            <div className="flex items-center gap-1.5">
+              {deferredOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              <Clock size={13} className="text-violet-400" />
+              <span>Deferred</span>
+            </div>
+            <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-full bg-violet-500/10 text-violet-400 font-normal">
+              {deferredTasks.length}
+            </span>
+          </button>
+
+          {deferredOpen && (
+            <div className="pl-1 space-y-1">
+              {deferredTasks.length === 0 ? (
+                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No deferred tasks</div>
+              ) : (
+                deferredTasks.map((evt) => (
+                  <WorkspaceTaskItem
+                    key={evt.id}
+                    evt={evt}
+                    isSelected={evt.id === selectedEventId}
+                    onSelect={handleSelect}
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 3. Closed & Failed Tasks Folder (Default Collapsed) */}
+        <div className="space-y-1">
+          <button
+            onClick={() => setClosedOpen(v => !v)}
+            aria-expanded={closedOpen}
+            className="w-full flex items-center justify-between px-1.5 py-1 text-xs font-semibold text-text-secondary hover:bg-bg-tertiary/50 rounded transition-colors"
+          >
+            <div className="flex items-center gap-1.5">
+              {closedOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              <CheckCircle2 size={13} className="text-text-muted" />
+              <span>Closed &amp; Failed</span>
+            </div>
+            <span className="text-[11px] font-mono px-1.5 py-0.2 rounded-full bg-slate-500/10 text-text-muted font-normal">
+              {closedTasks.length}
+            </span>
+          </button>
+
+          {closedOpen && (
+            <div className="pl-1 space-y-1">
+              {closedTasks.length === 0 ? (
+                <div className="py-2 px-3 text-[11px] text-text-muted/70 italic">No closed tasks</div>
+              ) : (
+                closedTasks.map((evt) => (
+                  <WorkspaceTaskItem
+                    key={evt.id}
+                    evt={evt}
+                    isSelected={evt.id === selectedEventId}
+                    onSelect={handleSelect}
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Resize Handle */}
       <div className={`absolute top-0 right-0 w-1.5 h-full cursor-col-resize group ${isResizing ? 'bg-accent/40' : ''}`} onMouseDown={startResize}>
         <div className={`w-px h-full mx-auto transition-colors ${isResizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent/40'}`} />
       </div>

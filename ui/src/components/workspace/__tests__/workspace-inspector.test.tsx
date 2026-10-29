@@ -10,6 +10,14 @@ vi.mock('../../PlanProgress', () => ({
   default: ({ conversation }: { conversation: unknown[] }) => (
     <div data-testid="plan-progress">Plan with {conversation?.length || 0} turns</div>
   ),
+  usePlanState: (conversation: unknown[]) => {
+    const hasPlan = Array.isArray(conversation) && conversation.some((t: any) => t.action === 'plan');
+    return {
+      hasPlan,
+      planTurn: hasPlan ? conversation[0] : null,
+      steps: hasPlan ? [{ id: '1', agent: 'developer', summary: 'Step 1', status: 'completed' }] : [],
+    };
+  },
 }));
 
 vi.mock('../WorkspaceDiffViewer', () => ({
@@ -36,12 +44,35 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     vi.spyOn(queueHook, 'useEventDocument').mockReturnValue({
       data: {
         id: 'evt-123',
+        service: 'order-service',
+        status: 'active',
+        source: 'gitlab',
+        created_by_email: 'alice@example.com',
+        token_usage: {
+          total_tokens: 5000,
+          input_tokens: 3000,
+          output_tokens: 1500,
+          thinking_tokens: 500,
+          cached_tokens: 0,
+          calls: 2,
+        },
         conversation: [
           {
             turn: 1,
             actor: 'developer',
-            action: 'tool_result',
+            action: 'plan',
             timestamp: 1700000000,
+            taskForAgent: {
+              steps: [
+                { id: '1', agent: 'developer', summary: 'Check codebase' },
+              ],
+            },
+          },
+          {
+            turn: 2,
+            actor: 'developer',
+            action: 'tool_result',
+            timestamp: 1700000001,
             result: '```diff\ndiff --git a/file b/file\n@@ -1 +1 @@\n-a\n+b\n```',
           },
         ],
@@ -121,5 +152,49 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     const { container } = renderComponent({ isOpen: false });
     // When closed, either container is empty or hidden
     expect(container.querySelector('[data-testid="workspace-diff-viewer"]')).toBeNull();
+  });
+
+  it('renders session overview details, token telemetry, and fallback message when no plan is present', () => {
+    // Override eventDoc to have conversation turns but NO structured plan
+    vi.spyOn(queueHook, 'useEventDocument').mockReturnValue({
+      data: {
+        id: 'evt-1528dc00',
+        service: 'general',
+        status: 'active',
+        source: 'chat',
+        created_by_email: 'dhansis@redhat.com',
+        token_usage: {
+          total_tokens: 12500,
+          input_tokens: 8000,
+          output_tokens: 3500,
+          thinking_tokens: 1000,
+          cached_tokens: 0,
+          calls: 4,
+        },
+        conversation: [
+          {
+            turn: 1,
+            actor: 'user',
+            action: 'message',
+            timestamp: 1700000000,
+            message: 'Please review and edit guide',
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    } as never);
+
+    renderComponent({ isOpen: true, selectedEventId: 'evt-1528dc00' });
+
+    // Verify session overview card rendered
+    expect(screen.getByText('general')).toBeInTheDocument();
+    expect(screen.getByText('dhansis@redhat.com')).toBeInTheDocument();
+    expect(screen.getByText('12.5K')).toBeInTheDocument(); // token formatting
+    expect(screen.getByText('4 calls')).toBeInTheDocument();
+
+    // Verify Plan tab fallback renders friendly message instead of returning null
+    expect(screen.getByText('No execution plan for this session')).toBeInTheDocument();
+    expect(screen.getByText(/Structured execution plans appear here/i)).toBeInTheDocument();
   });
 });

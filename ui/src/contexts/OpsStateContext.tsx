@@ -178,7 +178,8 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateHeadhunter();
         invalidateAligner();
         invalidateJenkins();
-        if (closedId === selectedEventIdRef.current) {
+        const isWorkspaceRoute = typeof window !== 'undefined' && window.location.pathname.startsWith('/workspace');
+        if (closedId === selectedEventIdRef.current && !isWorkspaceRoute) {
           selectedEventIdRef.current = null;
           setSelectedEventId(null);
           sessionStorage.removeItem('darwin:selectedEventId');
