@@ -484,6 +484,8 @@ class EventDocument(BaseModel):
     sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
     unread_notes: int = Field(0, description="Count of unread sticky notes")
     token_usage: Optional[dict[str, int]] = Field(None, description="Token usage totals stamped at event close")
+    red_locked_at: Optional[float] = Field(None, description="Timestamp when QE locked failing ATDD acceptance criteria")
+    atdd_cycle_sec: Optional[float] = Field(None, description="ATDD cycle duration (seconds from red_locked_at to green_verified)")
 
 
 # =============================================================================
@@ -751,6 +753,8 @@ class FlowSnapshot(BaseModel):
     token_total_delta: int = 0
     token_calls_delta: int = 0
     token_total_cumulative: int = 0
+    tampering_strikes: int = 0
+    atdd_cycle_sec: float | None = None
 
 
 class PendingAnomaly(BaseModel):

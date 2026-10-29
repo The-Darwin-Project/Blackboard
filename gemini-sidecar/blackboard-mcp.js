@@ -41,13 +41,14 @@ const TOOLS = [
   },
   {
     name: 'bb_update_plan_step',
-    description: 'Mark a plan step as in_progress, completed, or blocked. Call this when you start or finish a step from the plan on the blackboard. The update is visible to the Brain, other agents, and the dashboard in real time.',
+    description: 'Mark a plan step as in_progress, completed, blocked, red_locked, or green_verified. Call this when you start or finish a step from the plan on the blackboard. The update is visible to the Brain, other agents, and the dashboard in real time.',
     inputSchema: {
       type: 'object',
       properties: {
         step_id: { type: 'string', description: 'Step ID from the plan (e.g., "1", "2")' },
-        status: { type: 'string', enum: ['in_progress', 'completed', 'blocked'], description: 'New status for this step' },
+        status: { type: 'string', enum: ['in_progress', 'completed', 'blocked', 'red_locked', 'green_verified'], description: 'New status for this step' },
         notes: { type: 'string', description: 'Optional: what was done or why blocked' },
+        test_evidence: { type: 'object', description: 'Test runner execution output, exit code, and failure assertion' },
       },
       required: ['step_id', 'status'],
     },
@@ -123,11 +124,15 @@ async function handleToolCall(name, args) {
     return await httpGet(SIDECAR_PORT, `/proxy/approval${q}`);
   }
   if (name === 'bb_update_plan_step') {
-    return await httpPost(SIDECAR_PORT, '/proxy/plan-step', {
+    const postBody = {
       step_id: args.step_id || '',
       status: args.status || 'completed',
       notes: args.notes || '',
-    });
+    };
+    if (args.test_evidence !== undefined) {
+      postBody.test_evidence = args.test_evidence;
+    }
+    return await httpPost(SIDECAR_PORT, '/proxy/plan-step', postBody);
   }
   return { error: `Unknown tool: ${name}` };
 }

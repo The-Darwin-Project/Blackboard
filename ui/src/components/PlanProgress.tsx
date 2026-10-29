@@ -14,6 +14,7 @@ interface PlanStep {
   summary: string;
   status: string;
   timestamp?: number;
+  test_evidence?: string;
 }
 
 interface PlanProgressProps {
@@ -22,9 +23,20 @@ interface PlanProgressProps {
 
 const STATUS_ICON: Record<string, string> = {
   completed: '\u2705',
+  green_verified: '\uD83D\uDFE2 \u2713',
+  red_locked: '\uD83D\uDD34 \uD83D\uDD12',
   in_progress: '\uD83D\uDD04',
   blocked: '\u26A0\uFE0F',
   pending: '\u2B1C',
+};
+
+const BORDER_COLOR: Record<string, string> = {
+  completed: '#22c55e',
+  green_verified: '#10b981',
+  red_locked: '#ef4444',
+  in_progress: '#3b82f6',
+  blocked: '#f59e0b',
+  pending: '#334155',
 };
 
 export function usePlanState(conversation: ConversationTurn[]) {
@@ -47,10 +59,12 @@ export function usePlanState(conversation: ConversationTurn[]) {
 
     for (const t of conversation) {
       if (t.action === 'plan_step' && t.taskForAgent) {
-        const tf = t.taskForAgent as { step_id?: string; status?: string };
+        const tf = t.taskForAgent as { step_id?: string; status?: string; summary?: string; test_evidence?: string };
         if (tf.step_id && stepMap.has(tf.step_id)) {
           const existing = stepMap.get(tf.step_id)!;
           existing.status = tf.status || 'completed';
+          if (tf.summary) existing.summary = tf.summary;
+          if (tf.test_evidence) existing.test_evidence = tf.test_evidence;
           existing.timestamp = t.timestamp;
         }
       }
@@ -65,7 +79,7 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
 
   if (!planTurn || steps.length === 0) return null;
 
-  const done = steps.filter(s => s.status === 'completed').length;
+  const done = steps.filter(s => s.status === 'completed' || s.status === 'green_verified').length;
   const source = (planTurn.taskForAgent as { source?: string })?.source || planTurn.actor;
   const reasoning = (planTurn.taskForAgent as { reasoning?: string })?.reasoning || '';
   const isAgentSourced = source !== 'architect' && source !== 'brain';
@@ -126,16 +140,13 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
       <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
         {steps.map((step) => {
           const isActive = step.status === 'in_progress';
-          const isDone = step.status === 'completed';
-          const isBlocked = step.status === 'blocked';
+          const isDone = step.status === 'completed' || step.status === 'green_verified';
           return (
             <div
               key={step.id}
               style={{
                 padding: '6px 10px',
-                borderLeft: `3px solid ${
-                  isDone ? '#22c55e' : isActive ? '#3b82f6' : isBlocked ? '#f59e0b' : '#334155'
-                }`,
+                borderLeft: `3px solid var(--step-border, ${BORDER_COLOR[step.status] || '#334155'})`,
                 marginLeft: 4,
                 marginBottom: 2,
                 background: isActive ? '#1e3a5f15' : 'transparent',
@@ -171,6 +182,24 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
               }}>
                 {step.summary || `Step ${step.id}`}
               </div>
+              {step.test_evidence && (
+                <details style={{ marginTop: 4, fontSize: 10, color: '#94a3b8' }}>
+                  <summary style={{ cursor: 'pointer', color: '#38bdf8' }}>Test Evidence</summary>
+                  <pre style={{
+                    marginTop: 2,
+                    padding: '4px 6px',
+                    background: '#0f172a',
+                    border: '1px solid #1e293b',
+                    borderRadius: 4,
+                    fontSize: 9,
+                    color: '#e2e8f0',
+                    overflowX: 'auto',
+                    whiteSpace: 'pre-wrap',
+                  }}>
+                    {step.test_evidence}
+                  </pre>
+                </details>
+              )}
               {step.timestamp && (
                 <div style={{ fontSize: 9, color: '#475569', marginTop: 2 }}>
                   {new Date(step.timestamp * 1000).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}

@@ -419,6 +419,8 @@ export interface FlowSnapshot {
   token_total_delta: number;
   token_calls_delta: number;
   token_total_cumulative: number;
+  tampering_strikes?: number;
+  atdd_cycle_sec?: number | null;
 }
 
 export interface AlignerPendingItem {

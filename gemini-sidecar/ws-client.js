@@ -176,6 +176,8 @@ async function handleTask(ws, msg) {
   const role = msg.role || AGENT_ROLE;
   const model = msg.model || '';
   const effort = msg.effort || '';
+  const workStyle = msg.work_style || 'autonomous';
+  process.env.DARWIN_WORK_STYLE = workStyle;
 
   if (!role) {
     sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'No role specified' });
@@ -270,7 +272,7 @@ async function handleTask(ws, msg) {
   try {
     // Set full task state BEFORE execution so callbacks (sendResults, sendMessage)
     // can access ws + taskId immediately. executeCLIStreaming will overwrite the child field.
-    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null, mode, model, effort, role });
+    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null, mode, model, effort, role, workStyle });
     resetTimer();
 
     restoreAllSkills();

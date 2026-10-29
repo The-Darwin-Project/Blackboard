@@ -59,6 +59,7 @@ function resolveModel(options, agentCli) {
 // Only roles listed here get --settings; all other roles are unaffected.
 const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || path.join(__dirname, 'claude-settings');
 const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
+const DEVELOPER_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/developer-permissions.json`;
 const ROLE_SETTINGS_FILE = {
     code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
     // Read-only roles on the Claude path (the agy path enforces these via validate-mutations.sh).
@@ -70,7 +71,10 @@ const ROLE_SETTINGS_FILE = {
 
 // Read-only role detection is shared (roles.js): name heuristics fail closed for unlisted read-only-looking roles.
 // Any role that is not an explicitly allowed mutating role gets the read-only deny file (fail closed).
-function settingsFileForRole(role) {
+function settingsFileForRole(role, workStyle) {
+    if (role === 'developer') {
+        return workStyle === 'atdd_green' ? DEVELOPER_SETTINGS_FILE : undefined;
+    }
     if (ROLE_SETTINGS_FILE[role]) return ROLE_SETTINGS_FILE[role];
     if (!role || !isMutatingRoleName(role) || isReadOnlyRoleName(role)) {
         return READONLY_SETTINGS_FILE;
@@ -89,7 +93,11 @@ const FALLBACK_MODEL = {
 // while providing almost no real restriction. Checking for a representative sample across
 // perimeter categories (git commit, git push, cluster mutations) catches wholesale content
 // tampering/corruption without needing to enumerate every rule in the real file.
-const REQUIRED_DENY_RULES = ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'];
+const REQUIRED_DENY_RULES_BY_ROLE = {
+    default: ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'],
+    developer: ['Edit(**/tests/**)', 'Write(**/tests/**)'],
+};
+const REQUIRED_DENY_RULES = REQUIRED_DENY_RULES_BY_ROLE.default;
 
 // agy rejects a model name that already carries an effort suffix alongside --effort, so
 // peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.
@@ -144,7 +152,8 @@ function buildCLICommand(prompt, options = {}) {
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const settingsFile = settingsFileForRole(effectiveRole);
+        const effectiveWorkStyle = options.workStyle || process.env.DARWIN_WORK_STYLE || 'autonomous';
+        const settingsFile = settingsFileForRole(effectiveRole, effectiveWorkStyle);
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
@@ -158,7 +167,8 @@ function buildCLICommand(prompt, options = {}) {
             try {
                 const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
                 const denyList = parsed && parsed.permissions && parsed.permissions.deny;
-                settingsValid = Array.isArray(denyList) && REQUIRED_DENY_RULES.every((rule) => denyList.includes(rule));
+                const requiredDenies = REQUIRED_DENY_RULES_BY_ROLE[effectiveRole] || REQUIRED_DENY_RULES_BY_ROLE.default;
+                settingsValid = Array.isArray(denyList) && requiredDenies.every((rule) => denyList.includes(rule));
             } catch (e) {
                 settingsValid = false;
             }
@@ -758,4 +768,5 @@ module.exports = {
     getRetryOptions,
     resolveModel,
     withTaskStorage,
+    settingsFileForRole,
 };

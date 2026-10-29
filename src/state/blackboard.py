@@ -1651,6 +1651,10 @@ return 1
         result: list[FlowSnapshot] = []
         for ts, group in sorted(buckets.items()):
             n = len(group)
+            valid_cycles = [
+                s.atdd_cycle_sec for s in group
+                if getattr(s, "atdd_cycle_sec", None) is not None
+            ]
             result.append(FlowSnapshot(
                 timestamp=float(ts),
                 # Gauges: round(sum/n)
@@ -1689,6 +1693,8 @@ return 1
                 dispatch_infra_fails=max(s.dispatch_infra_fails for s in group),
                 dispatch_circuit_breaks=max(s.dispatch_circuit_breaks for s in group),
                 token_total_cumulative=max(s.token_total_cumulative for s in group),
+                tampering_strikes=max((getattr(s, "tampering_strikes", 0) for s in group), default=0),
+                atdd_cycle_sec=(sum(valid_cycles) / len(valid_cycles)) if valid_cycles else None,
             ))
         return result
 

@@ -23,7 +23,7 @@
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
 # Shell tools supported by agents
-SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
+SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command execute"
 
 # Native file mutation tools: allowed for local workspace files; gated if targeting sensitive configuration or credentials.
 # Keep in sync with NATIVE_MUTATION in merge-guard.js.
@@ -131,26 +131,72 @@ if [ "$NEEDS_GUARD" = 1 ]; then
     # Approved and SHA matches -- fall through to the role-based checks below.
 fi
 
-# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
+# Resolve role and work style: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
 # AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
 ROLE="${AGENT_ROLE:-}"
-if [ -z "$ROLE" ]; then
+WORK_STYLE="${DARWIN_WORK_STYLE:-}"
+if [ -z "$ROLE" ] || [ -z "$WORK_STYLE" ]; then
     for _attempt in 1 2; do
         t=$(tmo 1) || deny_budget
-        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://127.0.0.1:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null || curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
             t=$(tmo 1) || deny_budget
-            ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            if [ -z "$ROLE" ]; then
+                ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            fi
+            if [ -z "$WORK_STYLE" ]; then
+                WORK_STYLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.workStyle||j.work_style||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            fi
             break
         fi
         sleep 0.1
     done
 fi
+[ -z "$WORK_STYLE" ] && WORK_STYLE="autonomous"
 
 # Fail-closed: empty/unresolved role must never bypass mutation controls. Only tools that can
 # mutate (shell, native file mutation, guarded MCP merge/write tools) reach this point and are denied.
 if [ -z "$ROLE" ]; then
     node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
     exit 0
+fi
+
+# --- ATDD Farley Setpoint Protection (Anti-Tampering Lock) ---
+# When work_style is atdd_green and role is developer, test/spec files are strictly read-only contracts.
+if [ "$WORK_STYLE" = "atdd_green" ] && [ "$ROLE" = "developer" ]; then
+    TAMPER_DETECTED=0
+    TEST_PAT="(tests?/|specs?/|.+[._-](test|spec)\.[a-zA-Z0-9]+|test_[^/]+\.py)"
+
+    if [ "$IS_MUTATION" = 1 ]; then
+        TARGET_PATH=$(printf '%s' "$INPUT" | timeout -k 1 2 node -e '
+          let s = "";
+          process.stdin.on("data", c => s += c);
+          process.stdin.on("end", () => {
+            try {
+              const d = JSON.parse(s);
+              const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
+              const p = args.TargetFile || args.file_path || args.path || args.notebook_path || "";
+              process.stdout.write(String(p));
+            } catch (_) {
+              process.stdout.write("");
+            }
+          });
+        ' 2>/dev/null)
+        if [ -n "$TARGET_PATH" ] && printf '%s\n' "$TARGET_PATH" | grep -qiE "(^|[[:space:]/])($TEST_PAT)"; then
+            TAMPER_DETECTED=1
+        fi
+    elif [ "$IS_SHELL" = 1 ] || [ -n "$COMMAND" ]; then
+        SHELL_MUT_PAT="(\brm\b.*($TEST_PAT)|\bsed\b.*-i.*($TEST_PAT)|>>?[[:space:]]*[^;&|]*($TEST_PAT)|\btee\b.*($TEST_PAT)|\bmv\b.*($TEST_PAT)|\bcp\b.*($TEST_PAT)|\btruncate\b.*($TEST_PAT)|\btouch\b.*($TEST_PAT))"
+        if printf '%s\n' "$COMMAND" | grep -qiE "$SHELL_MUT_PAT"; then
+            TAMPER_DETECTED=1
+        fi
+    fi
+
+    if [ "$TAMPER_DETECTED" = 1 ]; then
+        # Report tamper strike to sidecar proxy non-blocking
+        curl -s --connect-timeout 0.5 --max-time 1 -X POST "http://127.0.0.1:${SIDECAR_PORT:-9090}/proxy/tamper" >/dev/null 2>&1 || true
+        node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Tampering Guard: Role developer cannot modify test or spec files under atdd_green work_style. Setpoint is immutable.' }));"
+        exit 0
+    fi
 fi
 
 # Read-only role detection. Listed read-only roles match instantly; known mutating roles skip the check; anything

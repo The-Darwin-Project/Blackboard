@@ -454,3 +454,177 @@ describe('signal-terminated child (close(null, signal))', () => {
         }
     });
 });
+
+// =============================================================================
+// 4-Layer Farley ATDD Executable Specification: Scenario T-6
+// Claude Code Developer Deny Settings & Parameterized Validator
+// =============================================================================
+
+class ClaudeSettingsDriver {
+    constructor(mod, baseDir) {
+        this.mod = mod;
+        this.baseDir = baseDir || path.resolve(__dirname, '..');
+        this.claudeSettingsDir = path.resolve(this.baseDir, 'claude-settings');
+    }
+
+    buildCommand(options) {
+        return this.mod.buildCLICommand('test prompt', options);
+    }
+
+    resolveSettingsFile(role, workStyle) {
+        if (typeof this.mod.settingsFileForRole === 'function') {
+            return this.mod.settingsFileForRole(role, workStyle);
+        }
+        return undefined;
+    }
+
+    getDeveloperSettingsPath() {
+        return path.join(this.claudeSettingsDir, 'developer-permissions.json');
+    }
+
+    readDeveloperSettings() {
+        const filePath = this.getDeveloperSettingsPath();
+        if (!fs.existsSync(filePath)) {
+            return null;
+        }
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    }
+}
+
+class ClaudeSettingsDSL {
+    constructor(driver) {
+        this.driver = driver;
+    }
+
+    givenDeveloperWorkStyle(workStyle) {
+        return {
+            agentCli: 'claude',
+            role: 'developer',
+            workStyle,
+        };
+    }
+
+    whenBuildingCLICommand(options) {
+        return this.driver.buildCommand(options);
+    }
+
+    thenDeveloperSettingsFileAttached(cmd) {
+        const settingsIdx = cmd.args.indexOf('--settings');
+        assert.notEqual(settingsIdx, -1, 'Expected --settings flag to be passed to claude CLI');
+        const settingsPath = cmd.args[settingsIdx + 1];
+        assert.ok(
+            settingsPath.endsWith('developer-permissions.json'),
+            `Expected settings path to end with 'developer-permissions.json', got: ${settingsPath}`
+        );
+    }
+
+    thenNoSettingsFileAttached(cmd) {
+        const settingsIdx = cmd.args.indexOf('--settings');
+        assert.equal(settingsIdx, -1, `Expected no --settings flag for autonomous developer, got index: ${settingsIdx}`);
+    }
+
+    thenDeveloperPermissionsDenyTestsAndAllowGit() {
+        const settings = this.driver.readDeveloperSettings();
+        assert.ok(settings !== null, `Expected developer-permissions.json to exist at ${this.driver.getDeveloperSettingsPath()}`);
+        const denyRules = settings?.permissions?.deny || [];
+        assert.ok(Array.isArray(denyRules), 'Expected permissions.deny to be an array');
+
+        // Must deny tests and specs
+        const requiredDenies = ['Edit(**/tests/**)', 'Write(**/tests/**)'];
+        for (const req of requiredDenies) {
+            assert.ok(
+                denyRules.includes(req),
+                `Expected developer-permissions.json to include deny rule: ${req}`
+            );
+        }
+
+        // Must NOT deny git commit, git push, or kubectl apply
+        const bannedDenies = ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'];
+        for (const banned of bannedDenies) {
+            assert.ok(
+                !denyRules.includes(banned),
+                `developer-permissions.json must NOT deny: ${banned}`
+            );
+        }
+    }
+
+    thenSettingsFileForRoleGatedCorrectly() {
+        assert.equal(
+            typeof this.driver.mod.settingsFileForRole,
+            'function',
+            'Expected settingsFileForRole to be exported from cli-executor.js'
+        );
+        const greenPath = this.driver.resolveSettingsFile('developer', 'atdd_green');
+        assert.ok(
+            greenPath && greenPath.endsWith('developer-permissions.json'),
+            `Expected developer-permissions.json for ('developer', 'atdd_green'), got: ${greenPath}`
+        );
+        const autoPath = this.driver.resolveSettingsFile('developer', 'autonomous');
+        assert.equal(
+            autoPath,
+            undefined,
+            `Expected undefined for ('developer', 'autonomous'), got: ${autoPath}`
+        );
+    }
+}
+
+describe('Scenario T-6: Farley ATDD Developer Claude Deny Settings & Validator', () => {
+    it('attaches developer-permissions.json when workStyle is atdd_green', () => {
+        const { mod, restore } = freshExecutor({
+            AGENT_CLI: 'claude',
+            CLAUDE_SETTINGS_DIR: path.resolve(__dirname, '..', 'claude-settings'),
+        });
+        try {
+            const driver = new ClaudeSettingsDriver(mod);
+            const dsl = new ClaudeSettingsDSL(driver);
+
+            const options = dsl.givenDeveloperWorkStyle('atdd_green');
+            const cmd = dsl.whenBuildingCLICommand(options);
+            dsl.thenDeveloperSettingsFileAttached(cmd);
+        } finally {
+            restore();
+        }
+    });
+
+    it('attaches NO settings file for autonomous developer', () => {
+        const { mod, restore } = freshExecutor({
+            AGENT_CLI: 'claude',
+            CLAUDE_SETTINGS_DIR: path.resolve(__dirname, '..', 'claude-settings'),
+        });
+        try {
+            const driver = new ClaudeSettingsDriver(mod);
+            const dsl = new ClaudeSettingsDSL(driver);
+
+            const options = dsl.givenDeveloperWorkStyle('autonomous');
+            const cmd = dsl.whenBuildingCLICommand(options);
+            dsl.thenNoSettingsFileAttached(cmd);
+        } finally {
+            restore();
+        }
+    });
+
+    it('verifies developer-permissions.json denies tests and permits git commit/push', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude' });
+        try {
+            const driver = new ClaudeSettingsDriver(mod);
+            const dsl = new ClaudeSettingsDSL(driver);
+
+            dsl.thenDeveloperPermissionsDenyTestsAndAllowGit();
+        } finally {
+            restore();
+        }
+    });
+
+    it('gates settingsFileForRole strictly on atdd_green workStyle', () => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude' });
+        try {
+            const driver = new ClaudeSettingsDriver(mod);
+            const dsl = new ClaudeSettingsDSL(driver);
+
+            dsl.thenSettingsFileForRoleGatedCorrectly();
+        } finally {
+            restore();
+        }
+    });
+});
+

@@ -46,6 +46,17 @@ return results; FRIDAY manages temporal progression via the Ts control loop.
   and let FRIDAY schedule the next observation interval. The agent can be
   re-dispatched after the deferral if new evidence warrants it.
 
+## Work Styles and Sequential Micro-Batching
+
+Dispatch requests can specify `work_style` to enforce execution disciplines:
+- `atdd_red`: Specification phase. QE authors executable acceptance test harness and asserts domain failure (Red contract lock).
+- `atdd_green`: Implementation phase. Developer writes production code to satisfy failing tests; tests/specs are immutable setpoints.
+- `pair`: Collaborative pairing between agents.
+- `spike`: Timeboxed exploration or prototype before committing to architecture.
+- `autonomous`: Default execution discipline for independent tasks.
+
+When executing plans under ATDD, dispatch tasks in sequential micro-batches: First QE (`atdd_red`) to author and lock tests, then Developer (`atdd_green`) to turn tests green, ensuring clear boundaries and zero drift.
+
 Systemic failure consolidation (shared bottleneck detection, infrastructure-level
 investigation): see always/08-flow-engineering.md § Systemic Failures.
 

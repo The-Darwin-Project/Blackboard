@@ -339,6 +339,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "warrants lowering it. Omit to use the agent's configured default."
                     ),
                 },
+                "work_style": {
+                    "type": "string",
+                    "enum": ["autonomous", "pair", "atdd_red", "atdd_green", "spike"],
+                    "description": "Execution discipline for task dispatch (atdd_red: Specifier/failing test lock, atdd_green: Implementer/SUT only, pair, spike, autonomous). Default: autonomous.",
+                },
             },
             "required": ["agent_name", "task_instruction"],
         },

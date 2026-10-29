@@ -55,8 +55,28 @@ steps:
 ```
 
 The frontmatter YAML header is machine-readable by FRIDAY and executing agents (Developer, QE).
-The `status` field starts as `pending` and the executing team updates it to `in_progress`, `completed`, or `failed` as they work through the steps.
+The `status` field starts as `pending` and the executing team updates it to `in_progress`, `red_locked` (acceptance harness failing on domain assertion), `green_verified` (SUT passes locked acceptance criteria), `completed`, or `failed` as they work through the steps.
 The Markdown body below the frontmatter contains the full human-readable details for each step.
+
+## Dave Farley's 4-Layer ATDD Model
+
+Plans involving code changes must adhere to Dave Farley's 4-layer acceptance test design:
+1. **Layer 1: Domain Scenarios**:
+   - Written in natural domain terms using Given / When / Then structure.
+   - Completely free of technical plumbing, protocol syntax (HTTP, JSON, SQL), and implementation coupling.
+2. **Layer 2: Domain DSL**:
+   - Clean programmatic translation layer exposing domain actions (e.g. `dsl.given_active_event(...)`, `dsl.when_downsampler_invoked(...)`).
+   - Insulates tests from interface and protocol churn.
+3. **Layer 3: Protocol Drivers**:
+   - Technical adapters interacting with the system boundary (FastAPI TestClient, WebSocket mock drivers, CLI exec, DB clients).
+   - Only this layer touches HTTP status codes, headers, payloads, or network ports.
+4. **Layer 4: System Under Test (SUT)**:
+   - The production code being verified. Swappable and tested through the protocol drivers without testing private internals.
+
+### ATDD Closed-Loop Execution Flow:
+- **Red First (QE)**: QE agent authors executable acceptance harness across Layers 1-3, verifies it fails cleanly on Layer 4 for expected domain reasons, and locks criteria via `bb_update_plan_step(status="red_locked", test_evidence=...)`.
+- **Green Implementation (Developer)**: Developer agent implements Layer 4 production code until the acceptance harness passes cleanly. Test files are read-only contracts.
+- **Verification**: Step transitions to `green_verified`, recording cycle telemetry.
 
 ## Available Agents for Step Assignment
 

@@ -92,6 +92,15 @@ When working in `implement` mode (as part of the Developer + QE pair):
    re-enable auto-merge. When pushing to any MR/PR branch, always check
    auto-merge status first — see darwin-mr-lifecycle skill.
 
+## Dave Farley ATDD Protocol & Test Setpoint Protection
+
+When dispatched under `work_style="atdd_green"`:
+- **Test Setpoint Immutability**: Acceptance test specifications authored by QE (under `tests/`, `specs/`, `*.test.*`, `*.spec.*`, `test_*.py`) are strictly READ-ONLY contracts.
+- **Tampering Lock**: The sidecar PreToolUse hook (`validate-mutations.sh`) and engine deny settings enforce a strict anti-tampering lock. Any mutation of test files is intercepted, logged as a tampering strike, and denied.
+- **Production Implementation Only**: You write and modify code EXCLUSIVELY in the System Under Test (SUT) production source tree to satisfy the failing test contract.
+- **Verification**: You run test runners (e.g. `pytest`, `npm test`) to verify green status, but you NEVER edit or weaken the assertions.
+- When all tests pass, update the plan step to `green_verified` and attach test evidence via `bb_update_plan_step`.
+
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no huddle gate needed.
 
 ## Mode Boundaries

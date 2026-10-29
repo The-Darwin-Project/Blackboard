@@ -286,6 +286,7 @@ async function handleRequest(req, res) {
       taskMode: task?.mode || '',
       role: state.resolveRole('', task),
       taskId: task?.taskId || task?.eventId || '',
+      workStyle: state.resolveWorkStyle(task),
     }));
     return;
   }
@@ -645,6 +646,30 @@ async function handleRequest(req, res) {
     } catch (err) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/proxy/tamper' && req.method === 'POST') {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: loopback-only endpoint' }));
+      return;
+    }
+    try {
+      const task = state.getCurrentTask();
+      const eventId = task?.eventId;
+      if (!eventId) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, strikes: 0 }));
+        return;
+      }
+      const result = await proxyPost(`/events/${eventId}/tamper`, {});
+      res.writeHead(result.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result.data));
+    } catch (err) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, strikes: 0, error: err.message }));
     }
     return;
   }

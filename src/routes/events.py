@@ -13,7 +13,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
-from ..dependencies import get_blackboard
+from ..dependencies import get_blackboard, get_redis
 from ..models import ArchitectureEvent
 from ..state.blackboard import BlackboardState
 from ..utils.event_markdown import event_to_markdown
@@ -57,3 +57,18 @@ async def get_event_document(
     service_meta = await blackboard.get_service(event.service)
     content = event_to_markdown(event, service_meta, "")
     return PlainTextResponse(content=content, media_type="text/markdown")
+
+
+@router.post("/{event_id}/tamper")
+async def report_tampering(
+    event_id: str,
+    blackboard: BlackboardState = Depends(get_blackboard),
+    redis = Depends(get_redis),
+):
+    """Record a test specification tampering attempt reported by the sidecar guard."""
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(404, f"Event {event_id} not found")
+    new_count = await redis.incr("darwin:flow:tampering_strikes")
+    return {"ok": True, "strikes": new_count}
+

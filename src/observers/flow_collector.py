@@ -115,13 +115,24 @@ class FlowCollector:
         wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
 
         ages: list[float] = []
+        cycles: list[float] = []
         if status_map:
             events = await asyncio.gather(*[
                 self._blackboard.get_event(eid) for eid in status_map
             ])
             ages = [now - e.queued_at for e in events if e and e.queued_at is not None]
+            cycles = [e.atdd_cycle_sec for e in events if e and getattr(e, "atdd_cycle_sec", None) is not None]
 
         avg_age = sum(ages) / len(ages) if ages else 0.0
+        avg_cycle = sum(cycles) / len(cycles) if cycles else None
+
+        tampering_strikes = 0
+        try:
+            val = await self._blackboard.redis.get("darwin:flow:tampering_strikes")
+            if val:
+                tampering_strikes = int(val)
+        except Exception:
+            pass
 
         # Agent stats from registry
         busy = 0
@@ -224,4 +235,6 @@ class FlowCollector:
             token_total_delta=token_snap.get("total_tokens", 0),
             token_calls_delta=token_snap.get("calls", 0),
             token_total_cumulative=platform_totals.get("total_tokens", 0),
+            tampering_strikes=tampering_strikes,
+            atdd_cycle_sec=avg_cycle,
         )
