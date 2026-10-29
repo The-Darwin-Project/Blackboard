@@ -69,6 +69,9 @@ async def report_tampering(
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(404, f"Event {event_id} not found")
-    new_count = await redis.incr("darwin:flow:tampering_strikes")
+    # Fleet-wide cumulative counter: the flow collector snapshots this key (observers/flow_collector.py).
+    await redis.incr("darwin:flow:tampering_strikes")
+    # Event-scoped counter: the strike count returned to the sidecar is per event, not shared across events.
+    new_count = await redis.incr(f"darwin:flow:tampering_strikes:{event_id}")
     return {"ok": True, "strikes": new_count}
 

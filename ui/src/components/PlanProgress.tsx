@@ -14,7 +14,8 @@ interface PlanStep {
   summary: string;
   status: string;
   timestamp?: number;
-  test_evidence?: string;
+  // Backend (PlanStepRequest.test_evidence) sends a dict; legacy/other producers may send a plain string.
+  test_evidence?: string | Record<string, unknown>;
 }
 
 interface PlanProgressProps {
@@ -59,11 +60,10 @@ export function usePlanState(conversation: ConversationTurn[]) {
 
     for (const t of conversation) {
       if (t.action === 'plan_step' && t.taskForAgent) {
-        const tf = t.taskForAgent as { step_id?: string; status?: string; summary?: string; test_evidence?: string };
+        const tf = t.taskForAgent as { step_id?: string; status?: string; test_evidence?: string | Record<string, unknown> };
         if (tf.step_id && stepMap.has(tf.step_id)) {
           const existing = stepMap.get(tf.step_id)!;
           existing.status = tf.status || 'completed';
-          if (tf.summary) existing.summary = tf.summary;
           if (tf.test_evidence) existing.test_evidence = tf.test_evidence;
           existing.timestamp = t.timestamp;
         }
@@ -196,7 +196,7 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
                     overflowX: 'auto',
                     whiteSpace: 'pre-wrap',
                   }}>
-                    {step.test_evidence}
+                    {typeof step.test_evidence === 'string' ? step.test_evidence : JSON.stringify(step.test_evidence, null, 2)}
                   </pre>
                 </details>
               )}

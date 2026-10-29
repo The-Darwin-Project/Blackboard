@@ -203,3 +203,57 @@ describe('Claude PreToolUse for READ-ONLY roles (delegated to validate-mutations
     } finally { s.close(); }
   });
 });
+
+// =============================================================================
+// ATDD tamper lock on the CLAUDE path: developer + atdd_green runs the shared hook (validate-mutations.sh)
+// before the merge guard; autonomous developers are unaffected; the merge guard stays intact for both.
+// =============================================================================
+describe('claudeMergeGuard: developer ATDD tamper lock (C1)', () => {
+  const { claudeMergeGuard } = require('../claude-guard');
+  const NOT_APPROVED = { fetchApproval: async () => ({ approved: false }), sidecarPort: 1 }; // port 1: no sidecar to call back
+  const guard = (payload, workStyle) => claudeMergeGuard(payload, { ...NOT_APPROVED, role: 'developer', workStyle });
+  const tool = (tool_name, tool_input) => ({ tool_name, tool_input, cwd: repoFeat });
+
+  it('atdd_green: in-place sed and directory removal targeting tests are denied', async () => {
+    for (const cmd of ["sed -i 's/assert False/assert True/' tests/foo.py", 'rm -r tests', 'rm -f -r tests/']) {
+      const denial = await guard(bash(cmd, repoFeat), 'atdd_green');
+      assert.match(String(denial), /Tampering Guard/, `expected tamper denial: ${cmd}`);
+    }
+  });
+
+  it('atdd_green: native Write/Edit of test files is denied, production files and read-only shell are allowed', async () => {
+    assert.match(String(await guard(tool('Write', { file_path: 'tests/test_x.py', content: '' }), 'atdd_green')), /Tampering Guard/);
+    assert.match(String(await guard(tool('Edit', { file_path: 'src/__tests__/foo.js' }), 'atdd_green')), /Tampering Guard/);
+    assert.equal(await guard(tool('Write', { file_path: 'src/app.py', content: '' }), 'atdd_green'), null);
+    assert.equal(await guard(tool('Edit', { file_path: 'latest_version.py' }), 'atdd_green'), null);
+    assert.equal(await guard(bash('pytest tests/', repoFeat), 'atdd_green'), null);
+    assert.equal(await guard(bash('cat tests/x.py', repoFeat), 'atdd_green'), null);
+  });
+
+  it('autonomous: the same commands are allowed (lock only applies under atdd_green)', async () => {
+    for (const cmd of ["sed -i 's/a/b/' tests/foo.py", 'rm -r tests']) {
+      assert.equal(await guard(bash(cmd, repoFeat), 'autonomous'), null, `expected allow: ${cmd}`);
+    }
+    assert.equal(await guard(tool('Write', { file_path: 'tests/test_x.py', content: '' }), 'autonomous'), null);
+    assert.equal(await guard(bash('sed -i s/a/b/ tests/foo.py', repoFeat), undefined), null);
+  });
+
+  it('an unapproved merge is still denied under BOTH work styles (merge guard remains intact)', async () => {
+    for (const ws of ['atdd_green', 'autonomous']) {
+      const denial = await guard(bash('gh pr merge 297 --squash', repoFeat), ws);
+      assert.ok(denial, `expected merge denial under ${ws}`);
+      assert.doesNotMatch(denial, /Tampering Guard/);
+    }
+  });
+
+  it('end-to-end: /hooks/pre-tool-use passes the task work style to the guard', async () => {
+    const s = await setup({ approved: false }, 'developer');
+    try {
+      const state = require(STATE_PATH);
+      state.setCurrentTask({ eventId: 'evt-1', role: 'developer', workStyle: 'atdd_green' });
+      assert.ok(denied(await s.post(bash("sed -i 's/a/b/' tests/foo.py", repoFeat))), 'atdd_green task must deny');
+      state.setCurrentTask({ eventId: 'evt-1', role: 'developer', workStyle: 'autonomous' });
+      assert.ok(!denied(await s.post(bash("sed -i 's/a/b/' tests/foo.py", repoFeat))), 'autonomous task must allow');
+    } finally { s.close(); }
+  });
+});

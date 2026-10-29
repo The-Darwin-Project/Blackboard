@@ -152,6 +152,7 @@ async function handleRequest(req, res) {
       const payload = await parseBody(req).catch(() => null);
       const denial = await claudeMergeGuard(payload, {
         role: state.resolveRole(''),
+        workStyle: state.resolveWorkStyle(),
         sidecarPort: PORT,
         fetchApproval: () => {
           const eventId = state.getCurrentTask()?.eventId;
@@ -660,16 +661,18 @@ async function handleRequest(req, res) {
       const task = state.getCurrentTask();
       const eventId = task?.eventId;
       if (!eventId) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, strikes: 0 }));
+        console.warn(`[${new Date().toISOString()}] /proxy/tamper: no active event, tamper strike NOT recorded`);
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No active task: tamper strike not recorded' }));
         return;
       }
       const result = await proxyPost(`/events/${eventId}/tamper`, {});
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.data));
     } catch (err) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, strikes: 0, error: err.message }));
+      console.error(`[${new Date().toISOString()}] /proxy/tamper: Brain proxy failed, tamper strike NOT recorded: ${err.message}`);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
     }
     return;
   }

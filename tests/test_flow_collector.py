@@ -89,7 +89,11 @@ class FlowCollectorDSL:
         assert self.last_response.get("strikes") == expected_strikes
 
     def then_redis_key_incremented(self, expected_key: str = "darwin:flow:tampering_strikes"):
-        self.driver.mock_redis.incr.assert_awaited_with(expected_key)
+        self.driver.mock_redis.incr.assert_any_await(expected_key)
+
+    def then_redis_event_scoped_key_incremented_last(self, event_id: str):
+        # The returned strike count comes from the event-scoped key, so it must be the last incr.
+        self.driver.mock_redis.incr.assert_awaited_with(f"darwin:flow:tampering_strikes:{event_id}")
 
     def then_downsampled_strikes_is(self, expected_strikes: int):
         assert len(self.downsampled_results) == 1, f"Expected 1 bucket, got {len(self.downsampled_results)}"
@@ -135,6 +139,7 @@ class TestFlowCollectorScenarioT8:
 
             dsl.then_tamper_response_recorded(expected_strikes=3)
             dsl.then_redis_key_incremented("darwin:flow:tampering_strikes")
+            dsl.then_redis_event_scoped_key_incremented_last("evt-strike-01")
 
     def test_t8_downsample_snapshots_preserves_monotonic_strikes_with_max(self):
         """

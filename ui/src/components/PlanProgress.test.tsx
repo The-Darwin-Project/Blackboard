@@ -46,6 +46,11 @@ class PlanProgressDriver {
     return iconSpan?.textContent?.trim() || '';
   }
 
+  getTestEvidenceText(): string {
+    if (!this.container) throw new Error('Not rendered');
+    return this.container.querySelector('details pre')?.textContent || '';
+  }
+
   getStepBorderStyle(summary: string): string {
     const stepEl = this.getStepElement(summary);
     return stepEl.style.borderLeft || '';
@@ -93,8 +98,28 @@ class PlanProgressDSL {
     } as unknown as ConversationTurn);
   }
 
+  givenStepUpdatedWithEvidence(stepId: string, status: string, agent: string, testEvidence: unknown) {
+    this.turns.push({
+      turn: this.turns.length + 1,
+      actor: agent,
+      action: 'plan_step',
+      thoughts: `Updating step ${stepId} to ${status}`,
+      timestamp: 1700000010 + this.turns.length,
+      taskForAgent: {
+        step_id: stepId,
+        status,
+        test_evidence: testEvidence,
+      },
+    } as unknown as ConversationTurn);
+  }
+
   whenRendered() {
     return this.driver.renderComponent(this.turns);
+  }
+
+  thenTestEvidenceTextContains(...fragments: string[]) {
+    const text = this.driver.getTestEvidenceText();
+    for (const f of fragments) expect(text).toContain(f);
   }
 
   thenDoneCounterShows(expected: string) {
@@ -175,5 +200,32 @@ describe('Scenario T-5: Farley ATDD PlanProgress Acceptance Specification', () =
     // Then border styling reflects Farley ATDD status
     dsl.thenStepBorderColorIs('Step 1: Red test locked', '#ef4444');
     dsl.thenStepBorderColorIs('Step 2: Green verified', '#10b981');
+  });
+
+  it('T-5.4: renders dict test_evidence (backend contract) without throwing React Error #31', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    // Given a step whose plan_step turn carries test_evidence as an object, exactly as PlanStepRequest emits it
+    dsl.givenPlanWithSteps([{ id: '1', agent: 'qe', summary: 'Step 1: Red test locked' }]);
+    dsl.givenStepUpdatedWithEvidence('1', 'red_locked', 'qe', {
+      exit_code: 1,
+      output: 'FAILED tests/test_feature.py::test_x - AssertionError',
+    });
+
+    // When rendered, then it must not throw ("Objects are not valid as a React child") and shows the serialized JSON
+    expect(() => dsl.whenRendered()).not.toThrow();
+    dsl.thenTestEvidenceTextContains('"exit_code": 1', 'AssertionError');
+  });
+
+  it('T-5.5: still renders string test_evidence verbatim', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([{ id: '1', agent: 'developer', summary: 'Step 1: Green' }]);
+    dsl.givenStepUpdatedWithEvidence('1', 'green_verified', 'developer', '12 passed in 0.4s');
+
+    dsl.whenRendered();
+    dsl.thenTestEvidenceTextContains('12 passed in 0.4s');
   });
 });

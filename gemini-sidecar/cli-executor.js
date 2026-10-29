@@ -82,6 +82,12 @@ function settingsFileForRole(role, workStyle) {
     return undefined;
 }
 
+// Per-spawn env: the hook scripts (agy path) read DARWIN_WORK_STYLE from the CLI's environment. Set it per child from the
+// task's own workStyle -- never from a process-global write -- so concurrent/rejected tasks cannot change a running task's lock.
+function spawnEnv(workStyle) {
+    return workStyle ? { ...process.env, DARWIN_WORK_STYLE: workStyle } : process.env;
+}
+
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
     claude: 'claude-sonnet-5-5',
@@ -268,7 +274,8 @@ async function resolveResult(opts) {
     const task = state.getCurrentTask();
     const model = task?.model || '';
     const role = task?.role || '';
-    const retryFindings = await requestFindings(workDir, autoApprove, model, role);
+    const workStyle = task?.workStyle || '';
+    const retryFindings = await requestFindings(workDir, autoApprove, model, role, workStyle);
     if (retryFindings) {
         return { output: retryFindings, source: 'findings' };
     }
@@ -276,7 +283,7 @@ async function resolveResult(opts) {
     return { output: stdoutFallback(effectiveOutput), source: 'stdout' };
 }
 
-async function requestFindings(workDir, autoApprove, model, role) {
+async function requestFindings(workDir, autoApprove, model, role, workStyle) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
@@ -286,7 +293,7 @@ async function requestFindings(workDir, autoApprove, model, role) {
     // rejection through resolveResult's un-guarded `await requestFindings(...)` call.
     let binary, args;
     try {
-        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role }));
+        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role, workStyle }));
     } catch (e) {
         console.log(`[${new Date().toISOString()}] Retry findings buildCLICommand failed: ${e.message}`);
         return null;
@@ -294,7 +301,7 @@ async function requestFindings(workDir, autoApprove, model, role) {
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(workStyle),
             cwd: workDir,
             timeout: 60000,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -417,6 +424,7 @@ async function executeCLI(prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            workStyle: options.workStyle,
             sessionId: options.sessionId,
             conversationId: options.conversationId,
         });
@@ -428,7 +436,7 @@ async function executeCLI(prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(options.workStyle),
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -543,6 +551,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            workStyle: options.workStyle,
         });
 
         console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
@@ -552,7 +561,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(options.workStyle),
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],

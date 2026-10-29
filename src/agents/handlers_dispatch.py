@@ -208,6 +208,24 @@ async def handle_select_agent(
 # ---------------------------------------------------------------------------
 # message_agent
 # ---------------------------------------------------------------------------
+async def _sticky_work_style(ctx: ToolContext, event_id: str, agent_name: str) -> str:
+    """Work style the agent was last routed with on this event ("autonomous" only when never set).
+
+    Follow-up dispatches (message_agent / reply_to_agent redirect) must keep the lock the original
+    select_agent turn established -- e.g. a developer message during atdd_green must not drop to autonomous.
+    Never taken from tool args: the model must not be able to downgrade the lock through message_agent.
+    """
+    try:
+        event_doc = await ctx.get_blackboard().get_event(event_id)
+        for t in reversed(getattr(event_doc, "conversation", None) or []):
+            tfa = t.taskForAgent
+            if t.actor == "brain" and t.action == "route" and isinstance(tfa, dict) and tfa.get("agent") == agent_name:
+                return tfa.get("work_style") or "autonomous"
+    except Exception as e:
+        logger.warning(f"message_agent: work_style lookup failed for {agent_name} on {event_id}: {e}")
+    return "autonomous"
+
+
 async def handle_message_agent(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -293,6 +311,7 @@ async def handle_message_agent(
                 event_id, agent_name, agent, message, event_md_path,
                 routing_turn_num=turn.turn, mode="message",
                 parallel=event_has_active_task,
+                work_style=await _sticky_work_style(ctx, event_id, agent_name),
             )
             label = "parallel" if event_has_active_task else "idle, dispatch"
             logger.info(f"Brain message_agent -> {agent_name} ({label}) ({len(message)} chars)")

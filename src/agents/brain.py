@@ -4537,6 +4537,7 @@ class Brain:
                             event_id=event_id, task=task, event_md_path=event_md_path,
                             on_progress=on_progress, mode=mode,
                             session_id=resume_session_id,
+                            work_style=work_style,
                         )
             else:
                 if not agent:
@@ -4550,6 +4551,7 @@ class Brain:
                         on_progress=on_progress,
                         mode=mode,
                         session_id=resume_session_id,
+                        work_style=work_style,
                     )
 
             if result == RETRYABLE_SENTINEL:

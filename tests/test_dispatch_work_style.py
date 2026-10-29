@@ -283,3 +283,92 @@ class TestDispatchWorkStyleScenarioT1:
         assert expected.issubset(known_styles), (
             f"Expected KNOWN_WORK_STYLES to include {expected}, got {known_styles}"
         )
+
+
+# =============================================================================
+# T-1b: follow-up dispatches keep the lock (message_agent / reply_to_agent redirect)
+# =============================================================================
+from unittest.mock import patch  # noqa: E402
+
+from src.agents.handlers_dispatch import handle_message_agent, handle_reply_to_agent  # noqa: E402
+
+
+def _route_turn(agent: str, work_style: str, turn: int = 1) -> ConversationTurn:
+    return ConversationTurn(
+        turn=turn, actor="brain", action="route", waitingFor="select_agent",
+        selectedAgents=[agent],
+        taskForAgent={"agent": agent, "instruction": "x", "mode": "implement", "work_style": work_style},
+    )
+
+
+class FollowUpDSL:
+    """Domain DSL: an event whose developer was routed with a given work_style, then messaged."""
+
+    def __init__(self):
+        self.driver = MockToolContextDriver()
+        self.ctx = self.driver.ctx
+        self.ctx.ephemeral_only_roles = frozenset()
+        self.ctx.is_task_running.return_value = False  # agent idle -> message_agent dispatches a fresh task
+        self.ctx.get_active_agent_for_event.return_value = None
+        self.registry = AsyncMock()
+        self.registry.get_available = AsyncMock(return_value=MagicMock())
+
+    def given_conversation(self, turns: list[ConversationTurn]) -> None:
+        event_doc = MagicMock()
+        event_doc.conversation = turns
+        self.ctx.get_blackboard.return_value.get_event = AsyncMock(return_value=event_doc)
+
+    async def when_message_agent(self, args: dict) -> None:
+        with patch("src.dependencies.get_registry_and_bridge", return_value=(self.registry, None)):
+            await handle_message_agent(self.ctx, self.driver.event_id, args, response_parts=None)
+
+    async def when_reply_to_agent_redirected(self, args: dict) -> None:
+        with patch("src.dependencies.get_registry_and_bridge", return_value=(self.registry, None)):
+            await handle_reply_to_agent(self.ctx, self.driver.event_id, args, response_parts=None)
+
+    def then_dispatched_with_work_style(self, expected: str) -> None:
+        assert len(self.driver.run_agent_task_calls) == 1, self.driver.run_agent_task_calls
+        assert self.driver.run_agent_task_calls[0]["kwargs"].get("work_style") == expected
+
+
+class TestFollowUpPreservesWorkStyle:
+    @pytest.mark.asyncio
+    async def test_message_agent_preserves_atdd_green(self):
+        """A message to a developer routed with atdd_green must not reset the lock to autonomous."""
+        dsl = FollowUpDSL()
+        dsl.given_conversation([_route_turn("developer", "atdd_green")])
+        await dsl.when_message_agent({"agent_id": "developer", "message": "also fix the docs"})
+        dsl.then_dispatched_with_work_style("atdd_green")
+
+    @pytest.mark.asyncio
+    async def test_reply_to_agent_redirect_preserves_atdd_green(self):
+        """reply_to_agent with no active task redirects to message_agent and must keep the lock."""
+        dsl = FollowUpDSL()
+        dsl.given_conversation([_route_turn("developer", "atdd_green")])
+        await dsl.when_reply_to_agent_redirected({"agent_id": "developer", "message": "go ahead"})
+        dsl.then_dispatched_with_work_style("atdd_green")
+
+    @pytest.mark.asyncio
+    async def test_latest_route_for_that_agent_wins_and_other_agents_are_ignored(self):
+        dsl = FollowUpDSL()
+        dsl.given_conversation([
+            _route_turn("developer", "atdd_green", turn=1),
+            _route_turn("qe", "atdd_red", turn=2),
+            _route_turn("developer", "autonomous", turn=3),
+        ])
+        await dsl.when_message_agent({"agent_id": "developer", "message": "status?"})
+        dsl.then_dispatched_with_work_style("autonomous")
+
+    @pytest.mark.asyncio
+    async def test_unset_defaults_to_autonomous(self):
+        dsl = FollowUpDSL()
+        dsl.given_conversation([])
+        await dsl.when_message_agent({"agent_id": "developer", "message": "hi"})
+        dsl.then_dispatched_with_work_style("autonomous")
+
+    @pytest.mark.asyncio
+    async def test_work_style_in_tool_args_cannot_downgrade_the_lock(self):
+        dsl = FollowUpDSL()
+        dsl.given_conversation([_route_turn("developer", "atdd_green")])
+        await dsl.when_message_agent({"agent_id": "developer", "message": "m", "work_style": "autonomous"})
+        dsl.then_dispatched_with_work_style("atdd_green")

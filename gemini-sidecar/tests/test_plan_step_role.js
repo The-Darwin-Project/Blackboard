@@ -336,6 +336,38 @@ describe('other resolveRole call sites fixed by this PR', () => {
 // 4-Layer Farley ATDD Executable Specification: Scenario T-4 Sidecar MCP Bridge
 // =============================================================================
 
+// Resolves with the JSON-RPC response whose `id` matches (parsed line-by-line from the child's stdout), or null
+// after timeoutMs. Replaces fixed sleeps: the child is killed as soon as the answer arrives, never earlier.
+function awaitJsonRpcResponse(child, id, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    child.stdout.on('data', (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id === id) return finish(msg);
+        } catch { /* not a JSON-RPC line; keep reading */ }
+      }
+    });
+    child.on('error', () => finish(null));
+    child.on('close', () => finish(null));
+  });
+}
+
 class McpBridgeDriver {
   constructor(apps) {
     this.apps = apps;
@@ -348,8 +380,6 @@ class McpBridgeDriver {
       const child = cp.spawn(process.execPath, [mcpScript], {
         env: { ...process.env, SIDECAR_PORT: String(this.sidecarPort) },
       });
-      let stdout = '';
-      child.stdout.on('data', (d) => { stdout += d; });
       child.on('error', reject);
 
       const req = {
@@ -358,18 +388,9 @@ class McpBridgeDriver {
         method: 'tools/call',
         params: { name: toolName, arguments: args },
       };
+      const response = awaitJsonRpcResponse(child, req.id);
       child.stdin.write(JSON.stringify(req) + '\n');
-
-      setTimeout(() => {
-        child.kill();
-        const line = stdout.trim().split('\n').find((l) => l.includes('"result"'));
-        if (!line) return resolve(null);
-        try {
-          resolve(JSON.parse(line));
-        } catch (e) {
-          reject(e);
-        }
-      }, 300);
+      response.then(resolve);
     });
   }
 
@@ -378,20 +399,10 @@ class McpBridgeDriver {
     const mcpScript = path.resolve(__dirname, '..', 'blackboard-mcp.js');
     return new Promise((resolve, reject) => {
       const child = cp.spawn(process.execPath, [mcpScript]);
-      let stdout = '';
-      child.stdout.on('data', (d) => { stdout += d; });
       child.on('error', reject);
+      const response = awaitJsonRpcResponse(child, 1);
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
-      setTimeout(() => {
-        child.kill();
-        const line = stdout.trim().split('\n').find((l) => l.includes('"tools"'));
-        if (!line) return resolve([]);
-        try {
-          resolve(JSON.parse(line).result.tools);
-        } catch (e) {
-          reject(e);
-        }
-      }, 300);
+      response.then((msg) => resolve(msg?.result?.tools || []));
     });
   }
 }
@@ -471,3 +482,63 @@ describe('Scenario T-4 Sidecar MCP Bridge: Farley ATDD Status & Evidence', () =>
   });
 });
 
+
+// =============================================================================
+// /proxy/tamper: a tamper strike that was NOT recorded must be visible to the hook, not reported as ok
+// =============================================================================
+describe('POST /proxy/tamper reports unrecorded strikes honestly (M2)', () => {
+  const apps = [];
+  afterEach(async () => {
+    while (apps.length) {
+      const a = apps.pop();
+      await new Promise((resolve) => a.server.close(resolve));
+    }
+  });
+
+  it('forwards to /events/<id>/tamper and relays the Brain response when the strike is recorded', async () => {
+    const brain = await startFakeBrain({ body: { ok: true, strikes: 2 } });
+    setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${brain.port}`);
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask({ eventId: 'evt-tamper-1', role: 'developer', workStyle: 'atdd_green' });
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app, brain);
+
+    const res = await httpRequest(app.port, '/proxy/tamper', 'POST', {});
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true, strikes: 2 });
+    assert.equal(brain.getLastRequest().url, '/events/evt-tamper-1/tamper');
+  });
+
+  it('returns 409 (not a fake ok) when there is no active event', async () => {
+    const brain = await startFakeBrain();
+    setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${brain.port}`);
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask(null);
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app, brain);
+
+    const res = await httpRequest(app.port, '/proxy/tamper', 'POST', {});
+
+    assert.equal(res.status, 409);
+    assert.equal(res.body.ok, undefined);
+    assert.equal(brain.getLastRequest(), null, 'must not call the Brain without an event');
+  });
+
+  it('returns 502 (not a fake ok) when the Brain proxy call fails', async () => {
+    // Bind then close a port so the connection is refused.
+    const dead = await startFakeBrain();
+    const deadPort = dead.port;
+    await new Promise((resolve) => dead.server.close(resolve));
+    setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${deadPort}`);
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask({ eventId: 'evt-tamper-2', role: 'developer', workStyle: 'atdd_green' });
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app);
+
+    const res = await httpRequest(app.port, '/proxy/tamper', 'POST', {});
+
+    assert.equal(res.status, 502);
+    assert.match(res.body.error, /Brain proxy failed/);
+  });
+});

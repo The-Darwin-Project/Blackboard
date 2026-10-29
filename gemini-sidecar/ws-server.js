@@ -67,6 +67,7 @@ function setupWSServer(wss) {
         const model = msg.model || '';
         const effort = msg.effort || '';
         const role = msg.role || '';
+        const workStyle = msg.work_style || 'autonomous';
 
         if (!prompt) {
           ws.send(JSON.stringify({ type: 'error', event_id: eventId, message: 'Missing prompt' }));
@@ -128,7 +129,7 @@ function setupWSServer(wss) {
         // enable --resume for follow-ups. No PTY needed -- env vars handle auth in headless.
         try {
           const result = await executeCLIStreaming(ws, eventId, prompt, {
-            autoApprove, cwd: workDir, sessionId, model, effort, role,
+            autoApprove, cwd: workDir, sessionId, model, effort, role, workStyle,
           });
           wsSend(ws, {
             type: 'result',

@@ -99,6 +99,7 @@ class HookTamperDSL {
         this.targetPath = '';
         this.command = '';
         this.envOverrides = {};
+        this.rawArgs = null;
         this.executionResult = null;
     }
 
@@ -138,6 +139,16 @@ class HookTamperDSL {
         return this;
     }
 
+    givenDeveloperMutationWithRawArgs(tool, rawArgs) {
+        this.role = 'developer';
+        this.workStyle = 'atdd_green';
+        this.tool = tool;
+        this.targetPath = '';
+        this.command = '';
+        this.rawArgs = rawArgs;
+        return this;
+    }
+
     withCustomEnv(env) {
         this.envOverrides = { ...this.envOverrides, ...env };
         return this;
@@ -147,9 +158,11 @@ class HookTamperDSL {
         const inputJson = {
             toolCall: {
                 name: this.tool,
-                args: this.command
-                    ? { CommandLine: this.command, command: this.command }
-                    : { TargetFile: this.targetPath, file_path: this.targetPath, path: this.targetPath },
+                args: this.rawArgs
+                    ? this.rawArgs
+                    : this.command
+                        ? { CommandLine: this.command, command: this.command }
+                        : { TargetFile: this.targetPath, file_path: this.targetPath, path: this.targetPath },
             },
         };
 
@@ -282,5 +295,135 @@ describe('PreToolUse Hook Tampering Guard (T-2, T-3, T-7)', () => {
                 }
             );
         });
+    });
+    describe('T-2b: test-path matching (H2/A2) -- specific test globs, no over-blocking', () => {
+        const denied = [
+            { tool: 'Edit', path: 'src/__tests__/foo.js', label: '__tests__/ directory' },
+            { tool: 'Write', path: 'conftest.py', label: 'conftest.py' },
+            { tool: 'Write', path: 'pkg/sub/conftest.py', label: 'nested conftest.py' },
+            { tool: 'Edit', path: 'b_test.go', label: '*_test.go' },
+            { tool: 'Edit', path: 'tests/foo.py', label: 'tests/ directory' },
+            { tool: 'Edit', path: 'ui/src/App.spec.tsx', label: '*.spec.tsx' },
+        ];
+        for (const tc of denied) {
+            it(`denies ${tc.label} (${tc.path})`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperWithAtddGreen(tc.tool, tc.path);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('Tampering Guard');
+            });
+        }
+
+        for (const p of ['latest_version.py', 'attestation_service.py', 'src/contest_rules.py', 'src/latest/handler.py']) {
+            it(`allows production file ${p} whose name merely contains "test"`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperWithAtddGreen('Write', p);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsAllow();
+            });
+        }
+
+        it('developer-permissions.json no longer carries the over-broad *test* globs', () => {
+            const fs = require('node:fs');
+            const settings = JSON.parse(fs.readFileSync(
+                path.resolve(__dirname, '..', 'claude-settings', 'developer-permissions.json'), 'utf8'));
+            const deny = settings.permissions.deny;
+            assert.ok(!deny.includes('Edit(**/*test*)') && !deny.includes('Write(**/*test*)'), 'over-broad *test* glob still present');
+            for (const g of ['**/test_*.py', '**/*_test.py', '**/*_test.go', '**/*.test.*', '**/*.spec.*',
+                '**/test/**', '**/tests/**', '**/__tests__/**', '**/conftest.py']) {
+                assert.ok(deny.includes(`Edit(${g})`) && deny.includes(`Write(${g})`), `missing Edit/Write deny for ${g}`);
+            }
+        });
+    });
+
+    describe('T-2c: fail-closed on unresolved work style and unrecognized mutation targets (H4/H5)', () => {
+        it('developer with /hook-status unreachable and DARWIN_WORK_STYLE unset is denied (not defaulted to autonomous)', async () => {
+            const dsl = new HookTamperDSL();
+            dsl.givenDeveloperWithAtddGreen('Write', 'src/routes/queue.py');
+            dsl.withCustomEnv({ DARWIN_WORK_STYLE: '', SIDECAR_PORT: '1' });
+            await dsl.whenHookEvaluated();
+            dsl.thenDecisionIsDeny('failing closed');
+        });
+
+        it('a non-developer role with an unresolved work style is not subject to the lock', async () => {
+            const dsl = new HookTamperDSL();
+            dsl.givenQEWithAtddRed('Write', 'tests/test_feature.py');
+            dsl.withCustomEnv({ DARWIN_WORK_STYLE: '', SIDECAR_PORT: '1' });
+            await dsl.whenHookEvaluated();
+            dsl.thenDecisionIsAllow();
+        });
+
+        it('a mutation with no recognizable path key under atdd_green is denied', async () => {
+            for (const args of [{}, { unknown_key: 'tests/test_x.py' }, { content: 'x' }]) {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperMutationWithRawArgs('Write', args);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('failing closed');
+            }
+        });
+
+        it('alternate path keys (filePath, target_file, notebook_path) are honored', async () => {
+            for (const key of ['filePath', 'target_file', 'notebook_path']) {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperMutationWithRawArgs('Edit', { [key]: 'tests/test_x.py' });
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('Tampering Guard');
+            }
+            const ok = new HookTamperDSL();
+            ok.givenDeveloperMutationWithRawArgs('Edit', { filePath: 'src/app.py' });
+            await ok.whenHookEvaluated();
+            ok.thenDecisionIsAllow();
+        });
+
+        it('a test path hidden in edits[] (or alongside a benign path) is still caught', async () => {
+            const dsl = new HookTamperDSL();
+            dsl.givenDeveloperMutationWithRawArgs('MultiEdit', {
+                file_path: 'src/app.py',
+                edits: [{ old_string: 'a', new_string: 'b' }, { path: 'tests/test_x.py' }],
+            });
+            await dsl.whenHookEvaluated();
+            dsl.thenDecisionIsDeny('Tampering Guard');
+        });
+    });
+
+    describe('T-2d: shell tamper vectors beyond sed/rm/redirect (M1)', () => {
+        const denyCmds = [
+            ['python3 -c', `python3 -c "open('tests/test_x.py','w').write('')"`],
+            ['perl -pi', "perl -pi -e 's/False/True/' tests/test_x.py"],
+            ['node -e', `node -e "require('fs').unlinkSync('tests/a.test.js')"`],
+            ['ruby -e', `ruby -e "File.write('tests/x_spec.rb','')" `],
+            ['git checkout --', 'git checkout -- tests/'],
+            ['git restore', 'git restore tests'],
+            ['git apply targeting tests', 'git apply --include=tests/ change.patch'],
+            ['rm -r tests (no trailing slash)', 'rm -r tests'],
+            ['rm -f -r tests/ (trailing slash)', 'rm -f -r tests/'],
+            ['cp into tests', 'cp /tmp/x.py tests/test_x.py'],
+            ['mv into tests', 'mv /tmp/x.py tests/test_x.py'],
+            ['install into tests', 'install -m 644 /tmp/x.py tests/test_x.py'],
+            ['ln into tests', 'ln -sf /tmp/x.py tests/test_x.py'],
+            ['dd of=', 'dd if=/dev/zero of=tests/test_x.py'],
+            ['awk -i inplace', "awk -i inplace '{print}' tests/test_x.py"],
+        ];
+        for (const [label, cmd] of denyCmds) {
+            it(`denies ${label}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperShellCommandWithAtddGreen(cmd);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('Tampering Guard');
+            });
+        }
+
+        const allowCmds = [
+            'pytest tests/', 'python3 -m pytest tests/ -q', 'cat tests/test_x.py', 'git diff', 'git status',
+            'git checkout main', 'ls tests/', 'rm -r build/', 'ls latest/', 'npm test',
+        ];
+        for (const cmd of allowCmds) {
+            it(`allows read-only/unrelated command: ${cmd}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperShellCommandWithAtddGreen(cmd);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsAllow();
+            });
+        }
     });
 });

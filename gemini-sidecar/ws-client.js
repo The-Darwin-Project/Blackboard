@@ -176,8 +176,8 @@ async function handleTask(ws, msg) {
   const role = msg.role || AGENT_ROLE;
   const model = msg.model || '';
   const effort = msg.effort || '';
+  // Task-scoped only: NEVER write this to process.env (a busy-rejected task would clobber the running task's lock).
   const workStyle = msg.work_style || 'autonomous';
-  process.env.DARWIN_WORK_STYLE = workStyle;
 
   if (!role) {
     sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'No role specified' });
@@ -322,7 +322,7 @@ async function handleTask(ws, msg) {
 
       try {
         result = await executeCLIStreaming(wsProxy, eventId, prompt, {
-          autoApprove, cwd: workDir, sessionId, model, effort, role,
+          autoApprove, cwd: workDir, sessionId, model, effort, role, workStyle,
         });
       } catch (spawnErr) {
         if (attempt < CLI_429_MAX_RETRIES) {
@@ -419,4 +419,4 @@ function tryWake(from, content, eventId) {
     .finally(() => { _isWaking = false; });
 }
 
-module.exports = { startWSClient, tryWake };
+module.exports = { startWSClient, tryWake, handleTask };
