@@ -93,7 +93,7 @@ class Developer(AgentClient):
             super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id, work_style=work_style)
         )
         qe_task = asyncio.create_task(
-            self.qe.process(event_id, task, event_md_path, qe_on_progress, mode)
+            self.qe.process(event_id, task, event_md_path, qe_on_progress, mode, work_style=work_style)
         )
 
         dev_result = None

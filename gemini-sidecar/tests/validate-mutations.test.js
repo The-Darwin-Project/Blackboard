@@ -426,4 +426,49 @@ describe('PreToolUse Hook Tampering Guard (T-2, T-3, T-7)', () => {
             });
         }
     });
+
+    describe('Round-2 hardening (R2-1..R2-3)', () => {
+        const denyCmds = [
+            'rm te""sts/te""st_foo.py', 'rm t\\ests/x.py', "sed -i s/a/b/ 'tests'/x.py",
+            'echo x>tests/helper.py', 'git reset --hard', 'git clean -fdx', 'git stash pop',
+            'rsync a tests/', 'curl -o tests/x.py u', 'wget -O tests/x.py u',
+            'rm test.py', 'rm spec.js', 'rm app/tests.py',
+        ];
+        for (const cmd of denyCmds) {
+            it(`denies ${cmd}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperShellCommandWithAtddGreen(cmd);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('Tampering Guard');
+            });
+        }
+        const allowCmds = [
+            'pytest tests/', 'git status', 'git diff tests/', 'curl -s http://x',
+            'rm latest.py', 'rm contest.py', 'rm testing_utils.py',
+        ];
+        for (const cmd of allowCmds) {
+            it(`allows ${cmd}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperShellCommandWithAtddGreen(cmd);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsAllow();
+            });
+        }
+        for (const f of ['test.py', 'spec.js', 'app/tests.py']) {
+            it(`denies native Edit of ${f}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperWithAtddGreen('Edit', f);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsDeny('Tampering Guard');
+            });
+        }
+        for (const f of ['latest.py', 'contest.py', 'testing_utils.py']) {
+            it(`allows native Edit of ${f}`, async () => {
+                const dsl = new HookTamperDSL();
+                dsl.givenDeveloperWithAtddGreen('Edit', f);
+                await dsl.whenHookEvaluated();
+                dsl.thenDecisionIsAllow();
+            });
+        }
+    });
 });

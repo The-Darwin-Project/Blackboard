@@ -170,17 +170,34 @@ if [ -z "$WORK_STYLE" ]; then
     WORK_STYLE="autonomous"
 fi
 
+# Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
+CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
+
+# Normalize quotes and escapes so quote-splitting (e.g. `p"u"sh`, `d\"e\"lete`) cannot hide tokens,
+# while converting whitespace inside quotes to underscores to preserve flag-token boundaries.
+NORM_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
+  let s = "";
+  process.stdin.on("data", c => s += c);
+  process.stdin.on("end", () => {
+    s = s.replace(/\\ /g, "_");
+    s = s.replace(/\\(.)/g, "$1");
+    s = s.replace(/"([^"]*)"/g, (m, g) => g.replace(/\s+/g, "_"));
+    s = s.replace(/\x27([^\x27]*)\x27/g, (m, g) => g.replace(/\s+/g, "_"));
+    process.stdout.write(s);
+  });
+' 2>/dev/null || printf '%s' "$CHECK_CMD")
+
 # --- ATDD Farley Setpoint Protection (Anti-Tampering Lock) ---
 # When work_style is atdd_green and role is developer, test/spec files are strictly read-only contracts.
 if [ "$WORK_STYLE" = "atdd_green" ] && [ "$ROLE" = "developer" ]; then
     TAMPER_DETECTED=0
     # Keep in sync with developer-permissions.json (engine-level Edit/Write deny globs). Matched against native-tool paths.
-    TEST_PAT="(_{0,2}tests?_{0,2}/|specs?/|.+[._-](test|spec)\.[a-zA-Z0-9]+|test_[^/]+\.py|conftest\.py)"
+    TEST_PAT="(_{0,2}tests?_{0,2}/|specs?/|.+[._-](test|spec)\.[a-zA-Z0-9]+|test_[^/]+\.py|conftest\.py|(tests?|specs?)\.[a-zA-Z0-9]+\$)"
     # Shell variant: anchored on a path-token boundary (so `latest/` is not `test/`) and accepting a bare `tests`/`spec`
     # directory token with no trailing slash (`rm -r tests`).
-    _TB="(^|[[:space:]/=${_DQ}${_SQ}])"
+    _TB="(^|[[:space:]/=><${_DQ}${_SQ}])"
     _TE="(/|[[:space:]${_DQ}${_SQ};&|)]|\$)"
-    SH_TEST_PAT="(${_TB}(_{0,2}tests?_{0,2}|specs?)${_TE}|[^[:space:]]+[._-](test|spec)\.[a-zA-Z0-9]+|${_TB}test_[^/[:space:]]+\.py|${_TB}conftest\.py)"
+    SH_TEST_PAT="(${_TB}(_{0,2}tests?_{0,2}|specs?)${_TE}|[^[:space:]]+[._-](test|spec)\.[a-zA-Z0-9]+|${_TB}test_[^/[:space:]]+\.py|${_TB}conftest\.py|${_TB}(tests?|specs?)\.[a-zA-Z0-9]+${_TE})"
 
     if [ "$IS_MUTATION" = 1 ]; then
         t=$(tmo 2) || deny_budget
@@ -225,11 +242,24 @@ if [ "$WORK_STYLE" = "atdd_green" ] && [ "$ROLE" = "developer" ]; then
         SHELL_MUT_PAT+="|\bdd\b.*\bof[^[:space:]]*${SH_TEST_PAT}"
         SHELL_MUT_PAT+="|\b(python[0-9.]*|perl|node|nodejs|ruby)\b([[:space:]]+-[a-zA-Z0-9.]+)*[[:space:]]+(-[a-zA-Z0-9.]*[ceEipn][a-zA-Z0-9.]*|--eval|--print)\b.*${SH_TEST_PAT}"
         SHELL_MUT_PAT+="|\bg?awk\b.*-i[[:space:]]*inplace.*${SH_TEST_PAT}"
-        SHELL_MUT_PAT+="|\bgit${_G}[[:space:]]+(checkout|restore|apply)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bgit${_G}[[:space:]]+(checkout|restore|apply|reset|stash|clean|cherry-pick|revert|mv|rm|am|merge|pull|rebase)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bgit${_G}[[:space:]]+(reset[[:space:]]+(.*[[:space:]])?--hard|clean|stash[[:space:]]+(pop|apply))\b"
+        SHELL_MUT_PAT+="|\b(rsync|scp|patch|unzip|tar)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\b(curl|wget)\b.*(-o|-O|--output)[^;&|]*${SH_TEST_PAT}"
         SHELL_MUT_PAT+="|\bfind\b.*(-delete|-exec).*${SH_TEST_PAT})"
-        if printf '%s\n' "$COMMAND" | grep -qiE "$SHELL_MUT_PAT"; then
-            TAMPER_DETECTED=1
-        fi
+        # Quote/escape-collapsed variant: `te""sts/te""st_x.py`, `t\ests/x.py`, `'tests'/x.py` -> `tests/...`.
+        COLLAPSED_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
+          let s = "";
+          process.stdin.on("data", c => s += c);
+          process.stdin.on("end", () => process.stdout.write(s.replace(/\\(.)/g, "$1").replace(/["\x27]/g, "")));
+        ' 2>/dev/null || printf '%s' "$CHECK_CMD")
+        for _c in "$NORM_CMD" "$COLLAPSED_CMD" "$COMMAND"; do
+            _c="${_c//>/> }"  # unspaced redirect (`echo x>tests/f.py`): give the path token a boundary after `>`
+            if printf '%s\n' "$_c" | grep -qiE "$SHELL_MUT_PAT"; then
+                TAMPER_DETECTED=1
+                break
+            fi
+        done
     fi
 
     if [ "$TAMPER_DETECTED" = 1 ]; then
@@ -300,23 +330,6 @@ if [ "$IS_SHELL" = 0 ]; then
     echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only: tool $TOOL_NAME is not on the read-only allowlist\"}"
     exit 0
 fi
-
-# Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
-CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
-
-# Normalize quotes and escapes so quote-splitting (e.g. `p"u"sh`, `d\"e\"lete`) cannot hide tokens,
-# while converting whitespace inside quotes to underscores to preserve flag-token boundaries.
-NORM_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
-  let s = "";
-  process.stdin.on("data", c => s += c);
-  process.stdin.on("end", () => {
-    s = s.replace(/\\ /g, "_");
-    s = s.replace(/\\(.)/g, "$1");
-    s = s.replace(/"([^"]*)"/g, (m, g) => g.replace(/\s+/g, "_"));
-    s = s.replace(/\x27([^\x27]*)\x27/g, (m, g) => g.replace(/\s+/g, "_"));
-    process.stdout.write(s);
-  });
-' 2>/dev/null || printf '%s' "$CHECK_CMD")
 
 # --- Mutation denylist (infrastructure + end-of-flow git + network mutations) ---
 BLOCK_PATTERN=''

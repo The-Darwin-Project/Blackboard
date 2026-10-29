@@ -20,7 +20,15 @@
       "Edit(**/*.spec.*)",
       "Write(**/*.spec.*)",
       "Edit(**/conftest.py)",
-      "Write(**/conftest.py)"
+      "Write(**/conftest.py)",
+      "Edit(**/test.*)",
+      "Write(**/test.*)",
+      "Edit(**/tests.*)",
+      "Write(**/tests.*)",
+      "Edit(**/spec.*)",
+      "Write(**/spec.*)",
+      "Edit(**/specs.*)",
+      "Write(**/specs.*)"
     ]
   }
 }

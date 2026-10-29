@@ -372,3 +372,12 @@ class TestFollowUpPreservesWorkStyle:
         dsl.given_conversation([_route_turn("developer", "atdd_green")])
         await dsl.when_message_agent({"agent_id": "developer", "message": "m", "work_style": "autonomous"})
         dsl.then_dispatched_with_work_style("atdd_green")
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_fails_closed_for_developer(self):
+        """R2-5: if get_event raises, a developer message must not silently dispatch as autonomous."""
+        dsl = FollowUpDSL()
+        dsl.ctx.get_blackboard.return_value.get_event = AsyncMock(side_effect=RuntimeError("redis down"))
+        await dsl.when_message_agent({"agent_id": "developer", "message": "hi"})
+        assert dsl.driver.run_agent_task_calls == []
+        assert any("select_agent" in (t.thoughts or "") for t in dsl.driver.recorded_turns)

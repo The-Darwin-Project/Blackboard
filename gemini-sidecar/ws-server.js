@@ -74,6 +74,8 @@ function setupWSServer(wss) {
           return;
         }
 
+        // Register the task so state.resolveWorkStyle() (hook /hook-status) sees work_style on this legacy path too
+        state.setCurrentTask({ eventId, ws, cwd: workDir, child: null, model, effort, role, workStyle });
         // Reset callback result for new task
         state.resetCallbackResult();
         console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars, session: ${sessionId})`);
