@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(**/tests/**)",
+      "Write(**/tests/**)",
+      "Edit(**/test/**)",
+      "Write(**/test/**)",
+      "Edit(**/__tests__/**)",
+      "Write(**/__tests__/**)",
+      "Edit(**/specs/**)",
+      "Write(**/specs/**)",
+      "Edit(**/test_*.py)",
+      "Write(**/test_*.py)",
+      "Edit(**/*_test.py)",
+      "Write(**/*_test.py)",
+      "Edit(**/*_test.go)",
+      "Write(**/*_test.go)",
+      "Edit(**/*.test.*)",
+      "Write(**/*.test.*)",
+      "Edit(**/*.spec.*)",
+      "Write(**/*.spec.*)",
+      "Edit(**/conftest.py)",
+      "Write(**/conftest.py)",
+      "Edit(**/test.*)",
+      "Write(**/test.*)",
+      "Edit(**/tests.*)",
+      "Write(**/tests.*)",
+      "Edit(**/spec.*)",
+      "Write(**/spec.*)",
+      "Edit(**/specs.*)",
+      "Write(**/specs.*)"
+    ]
+  }
+}

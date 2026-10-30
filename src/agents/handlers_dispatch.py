@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from .dispatch import KNOWN_WORK_STYLES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventDocument, EventType
 from ..utils.event_markdown import event_to_markdown
 
@@ -112,6 +113,9 @@ async def handle_select_agent(
     task = args.get("task_instruction", "") or args.get("question", "")
     mode = args.get("mode", "")
     effort = args.get("effort", "")
+    work_style = args.get("work_style") or "autonomous"
+    if work_style not in KNOWN_WORK_STYLES:
+        work_style = "autonomous"
 
     if ctx.is_task_running(event_id):
         logger.info(f"Task already active for {event_id}, skipping dispatch")
@@ -156,7 +160,7 @@ async def handle_select_agent(
         waitingFor="select_agent",
         thoughts=f"Routing to {agent_name}: {task}",
         selectedAgents=[agent_name],
-        taskForAgent={"agent": agent_name, "instruction": task, "mode": mode, "effort": effort},
+        taskForAgent={"agent": agent_name, "instruction": task, "mode": mode, "effort": effort, "work_style": work_style},
         response_parts=response_parts,
     )
     await ctx.append_and_broadcast(event_id, turn)
@@ -186,6 +190,7 @@ async def handle_select_agent(
         await ctx.run_agent_task(
             event_id, agent_name, agent, task, event_md_path,
             routing_turn_num=turn.turn, mode=mode, effort=effort,
+            work_style=work_style,
         )
     else:
         logger.error(f"Agent '{agent_name}' not found in agents dict")
@@ -206,6 +211,27 @@ async def handle_select_agent(
 # ---------------------------------------------------------------------------
 # message_agent
 # ---------------------------------------------------------------------------
+async def _sticky_work_style(ctx: ToolContext, event_id: str, agent_name: str) -> str | None:
+    """Work style the agent was last routed with on this event ("autonomous" only when never set).
+
+    Returns None when the lookup itself failed: callers must fail closed for locked roles (developer).
+
+    Follow-up dispatches (message_agent / reply_to_agent redirect) must keep the lock the original
+    select_agent turn established -- e.g. a developer message during atdd_green must not drop to autonomous.
+    Never taken from tool args: the model must not be able to downgrade the lock through message_agent.
+    """
+    try:
+        event_doc = await ctx.get_blackboard().get_event(event_id)
+        for t in reversed(getattr(event_doc, "conversation", None) or []):
+            tfa = t.taskForAgent
+            if t.actor == "brain" and t.action == "route" and isinstance(tfa, dict) and tfa.get("agent") == agent_name:
+                return tfa.get("work_style") or "autonomous"
+    except Exception as e:
+        logger.warning(f"message_agent: work_style lookup failed for {agent_name} on {event_id}: {e}")
+        return None
+    return "autonomous"
+
+
 async def handle_message_agent(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -233,6 +259,24 @@ async def handle_message_agent(
             )
             await ctx.append_and_broadcast(event_id, followup)
             return True
+
+    sticky_style = await _sticky_work_style(ctx, event_id, agent_name)
+    if sticky_style is None and agent_name == "developer":
+        logger.warning(f"message_agent: work_style unresolved for developer on {event_id} -- failing closed")
+        followup = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain",
+            action="tool_result",
+            thoughts=(
+                "message_agent was NOT delivered: the developer's work_style could not be resolved, and "
+                "dispatching as autonomous could drop an ATDD lock. Re-dispatch via select_agent with an "
+                "explicit work_style."
+            ),
+            waitingFor="message_agent",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, followup)
+        return True
 
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
@@ -291,6 +335,7 @@ async def handle_message_agent(
                 event_id, agent_name, agent, message, event_md_path,
                 routing_turn_num=turn.turn, mode="message",
                 parallel=event_has_active_task,
+                work_style=sticky_style or "autonomous",
             )
             label = "parallel" if event_has_active_task else "idle, dispatch"
             logger.info(f"Brain message_agent -> {agent_name} ({label}) ({len(message)} chars)")

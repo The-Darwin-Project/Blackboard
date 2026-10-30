@@ -59,6 +59,7 @@ function resolveModel(options, agentCli) {
 // Only roles listed here get --settings; all other roles are unaffected.
 const CLAUDE_SETTINGS_DIR = process.env.CLAUDE_SETTINGS_DIR || path.join(__dirname, 'claude-settings');
 const READONLY_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/readonly-role-permissions.json`;
+const DEVELOPER_SETTINGS_FILE = `${CLAUDE_SETTINGS_DIR}/developer-permissions.json`;
 const ROLE_SETTINGS_FILE = {
     code_reviewer: `${CLAUDE_SETTINGS_DIR}/code-reviewer-permissions.json`,
     // Read-only roles on the Claude path (the agy path enforces these via validate-mutations.sh).
@@ -70,12 +71,21 @@ const ROLE_SETTINGS_FILE = {
 
 // Read-only role detection is shared (roles.js): name heuristics fail closed for unlisted read-only-looking roles.
 // Any role that is not an explicitly allowed mutating role gets the read-only deny file (fail closed).
-function settingsFileForRole(role) {
+function settingsFileForRole(role, workStyle) {
+    if (role === 'developer') {
+        return workStyle === 'atdd_green' ? DEVELOPER_SETTINGS_FILE : undefined;
+    }
     if (ROLE_SETTINGS_FILE[role]) return ROLE_SETTINGS_FILE[role];
     if (!role || !isMutatingRoleName(role) || isReadOnlyRoleName(role)) {
         return READONLY_SETTINGS_FILE;
     }
     return undefined;
+}
+
+// Per-spawn env: the hook scripts (agy path) read DARWIN_WORK_STYLE from the CLI's environment. Set it per child from the
+// task's own workStyle -- never from a process-global write -- so concurrent/rejected tasks cannot change a running task's lock.
+function spawnEnv(workStyle) {
+    return workStyle ? { ...process.env, DARWIN_WORK_STYLE: workStyle } : process.env;
 }
 
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
@@ -89,7 +99,11 @@ const FALLBACK_MODEL = {
 // while providing almost no real restriction. Checking for a representative sample across
 // perimeter categories (git commit, git push, cluster mutations) catches wholesale content
 // tampering/corruption without needing to enumerate every rule in the real file.
-const REQUIRED_DENY_RULES = ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'];
+const REQUIRED_DENY_RULES_BY_ROLE = {
+    default: ['Bash(git commit *)', 'Bash(git push *)', 'Bash(kubectl apply *)'],
+    developer: ['Edit(**/tests/**)', 'Write(**/tests/**)'],
+};
+const REQUIRED_DENY_RULES = REQUIRED_DENY_RULES_BY_ROLE.default;
 
 // agy rejects a model name that already carries an effort suffix alongside --effort, so
 // peel any trailing "-low|medium|high|xhigh|max" off the model and let it win as the effort.
@@ -144,7 +158,8 @@ function buildCLICommand(prompt, options = {}) {
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
         }
-        const settingsFile = settingsFileForRole(effectiveRole);
+        const effectiveWorkStyle = options.workStyle || process.env.DARWIN_WORK_STYLE || 'autonomous';
+        const settingsFile = settingsFileForRole(effectiveRole, effectiveWorkStyle);
         if (settingsFile) {
             // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
             // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
@@ -158,7 +173,8 @@ function buildCLICommand(prompt, options = {}) {
             try {
                 const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
                 const denyList = parsed && parsed.permissions && parsed.permissions.deny;
-                settingsValid = Array.isArray(denyList) && REQUIRED_DENY_RULES.every((rule) => denyList.includes(rule));
+                const requiredDenies = REQUIRED_DENY_RULES_BY_ROLE[effectiveRole] || REQUIRED_DENY_RULES_BY_ROLE.default;
+                settingsValid = Array.isArray(denyList) && requiredDenies.every((rule) => denyList.includes(rule));
             } catch (e) {
                 settingsValid = false;
             }
@@ -258,7 +274,8 @@ async function resolveResult(opts) {
     const task = state.getCurrentTask();
     const model = task?.model || '';
     const role = task?.role || '';
-    const retryFindings = await requestFindings(workDir, autoApprove, model, role);
+    const workStyle = task?.workStyle || '';
+    const retryFindings = await requestFindings(workDir, autoApprove, model, role, workStyle);
     if (retryFindings) {
         return { output: retryFindings, source: 'findings' };
     }
@@ -266,7 +283,7 @@ async function resolveResult(opts) {
     return { output: stdoutFallback(effectiveOutput), source: 'stdout' };
 }
 
-async function requestFindings(workDir, autoApprove, model, role) {
+async function requestFindings(workDir, autoApprove, model, role, workStyle) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
@@ -276,7 +293,7 @@ async function requestFindings(workDir, autoApprove, model, role) {
     // rejection through resolveResult's un-guarded `await requestFindings(...)` call.
     let binary, args;
     try {
-        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role }));
+        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role, workStyle }));
     } catch (e) {
         console.log(`[${new Date().toISOString()}] Retry findings buildCLICommand failed: ${e.message}`);
         return null;
@@ -284,7 +301,7 @@ async function requestFindings(workDir, autoApprove, model, role) {
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(workStyle),
             cwd: workDir,
             timeout: 60000,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -407,6 +424,7 @@ async function executeCLI(prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            workStyle: options.workStyle,
             sessionId: options.sessionId,
             conversationId: options.conversationId,
         });
@@ -418,7 +436,7 @@ async function executeCLI(prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(options.workStyle),
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -533,6 +551,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             model: options.model,
             effort: options.effort,
             role: options.role,
+            workStyle: options.workStyle,
         });
 
         console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
@@ -542,7 +561,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const child = spawn(binary, args, {
-            env: process.env,
+            env: spawnEnv(options.workStyle),
             cwd: workDir,
             timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -758,4 +777,5 @@ module.exports = {
     getRetryOptions,
     resolveModel,
     withTaskStorage,
+    settingsFileForRole,
 };

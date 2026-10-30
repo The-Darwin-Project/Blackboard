@@ -847,3 +847,184 @@ async def test_close_event_by_user_ignores_ownership(monkeypatch):
         app.dependency_overrides.clear()
 
     assert resp.status_code == 200
+
+
+# =============================================================================
+# 4-Layer Farley ATDD Executable Specification: Scenario T-4
+# Plan Step Status Transitions (red_locked, green_verified) & Test Evidence
+# =============================================================================
+class PlanStepProtocolDriver:
+    """Layer 3: Protocol driver adapting FastAPI in-process HTTP requests."""
+
+    def __init__(self, app, mock_bb, mock_brain):
+        self.app = app
+        self.mock_bb = mock_bb
+        self.mock_brain = mock_brain
+        self.broadcasted_turns: list[tuple[str, Any]] = []
+
+        async def _append_and_broadcast(event_id: str, turn: Any):
+            self.broadcasted_turns.append((event_id, turn))
+        self.mock_brain.append_and_broadcast = AsyncMock(side_effect=_append_and_broadcast)
+
+    async def post_plan_step(self, event_id: str, payload: dict) -> tuple[int, dict]:
+        from src import dependencies
+        self.app.dependency_overrides[dependencies.get_blackboard] = lambda: self.mock_bb
+        self.app.dependency_overrides[dependencies.get_brain] = lambda: self.mock_brain
+        orig_brain = dependencies._brain
+        dependencies._brain = self.mock_brain
+
+        try:
+            transport = ASGITransport(app=self.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post(f"/queue/{event_id}/plan-step", json=payload)
+                return resp.status_code, resp.json() if resp.is_success else {}
+        finally:
+            dependencies._brain = orig_brain
+            self.app.dependency_overrides.clear()
+
+
+class PlanStepDSL:
+    """Layer 2: Domain DSL operations for Farley plan-step verification."""
+
+    def __init__(self, driver: PlanStepProtocolDriver):
+        self.driver = driver
+        self.last_status_code: int | None = None
+        self.last_response: dict | None = None
+
+    def given_active_event_with_red_lock(self, event_id: str, red_locked_at: float | None = None):
+        event = _make_event_document(event_id)
+        if red_locked_at is not None:
+            mock_event = MagicMock(wraps=event)
+            mock_event.red_locked_at = red_locked_at
+            event = mock_event
+        self.driver.mock_bb.get_event = AsyncMock(return_value=event)
+        self.driver.mock_brain.next_turn_number = AsyncMock(return_value=5)
+
+    async def when_agent_updates_plan_step(
+        self,
+        event_id: str,
+        step_id: str,
+        status: str,
+        role: str,
+        notes: str = "",
+        test_evidence: dict | None = None,
+    ):
+        payload: dict[str, Any] = {
+            "step_id": step_id,
+            "status": status,
+            "role": role,
+            "notes": notes,
+        }
+        if test_evidence is not None:
+            payload["test_evidence"] = test_evidence
+
+        code, resp = await self.driver.post_plan_step(event_id, payload)
+        self.last_status_code = code
+        self.last_response = resp
+
+    def then_request_succeeded(self):
+        assert self.last_status_code == 200, f"Expected 200, got {self.last_status_code}"
+        assert self.last_response.get("ok") is True
+
+    def then_broadcast_turn_contains_test_evidence(self, expected_status: str, expected_evidence: dict):
+        assert len(self.driver.broadcasted_turns) > 0, "No turn broadcasted"
+        _, turn = self.driver.broadcasted_turns[-1]
+        task_for_agent = turn.taskForAgent or {}
+        assert task_for_agent.get("status") == expected_status, (
+            f"Expected status {expected_status!r}, got {task_for_agent.get('status')!r}"
+        )
+        assert "test_evidence" in task_for_agent, (
+            f"Expected 'test_evidence' in turn.taskForAgent, got keys: {list(task_for_agent.keys())}"
+        )
+        assert task_for_agent["test_evidence"] == expected_evidence
+
+    def then_event_stamped_with_red_locked_at(self, event_id: str):
+        stamps = [
+            call.kwargs for call in self.driver.mock_bb.stamp_event.await_args_list
+            if (call.args and call.args[0] == event_id) or call.kwargs.get("event_id") == event_id
+        ]
+        assert any("red_locked_at" in s for s in stamps), (
+            f"Expected stamp_event to record 'red_locked_at' on {event_id}, calls: {self.driver.mock_bb.stamp_event.await_args_list}"
+        )
+
+    def then_event_stamped_with_atdd_cycle_sec(self, event_id: str):
+        stamps = [
+            call.kwargs for call in self.driver.mock_bb.stamp_event.await_args_list
+            if (call.args and call.args[0] == event_id) or call.kwargs.get("event_id") == event_id
+        ]
+        assert any("atdd_cycle_sec" in s for s in stamps), (
+            f"Expected stamp_event to record 'atdd_cycle_sec' on {event_id}, calls: {self.driver.mock_bb.stamp_event.await_args_list}"
+        )
+
+
+class TestPlanStepFarleyATDDScenarioT4:
+    """Layer 1: Domain Scenarios for Scenario T-4."""
+
+    @pytest.mark.asyncio
+    async def test_red_locked_status_records_evidence_and_stamp(self):
+        """
+        Scenario: QE agent locks failing test specification with status='red_locked' and test_evidence.
+        Given an active event
+        When QE posts status='red_locked' with test runner failure evidence
+        Then status code is 200, turn includes test_evidence, and red_locked_at is stamped.
+        """
+        with patch("src.main.lifespan") as mock_lifespan:
+            mock_lifespan.return_value.__aenter__ = AsyncMock()
+            mock_lifespan.return_value.__aexit__ = AsyncMock()
+            from src.main import app
+
+            mock_bb = AsyncMock()
+            mock_brain = MagicMock()
+            driver = PlanStepProtocolDriver(app, mock_bb, mock_brain)
+            dsl = PlanStepDSL(driver)
+
+            dsl.given_active_event_with_red_lock("evt-atdd-01")
+            test_evidence = {"runner": "pytest", "exit_code": 1, "failed_assertion": "assert False"}
+
+            await dsl.when_agent_updates_plan_step(
+                event_id="evt-atdd-01",
+                step_id="step-1",
+                status="red_locked",
+                role="qe",
+                notes="Authoring Farley ATDD red test specification",
+                test_evidence=test_evidence,
+            )
+
+            dsl.then_request_succeeded()
+            dsl.then_broadcast_turn_contains_test_evidence("red_locked", test_evidence)
+            dsl.then_event_stamped_with_red_locked_at("evt-atdd-01")
+
+    @pytest.mark.asyncio
+    async def test_green_verified_status_computes_cycle_time(self):
+        """
+        Scenario: Developer agent completes implementation with status='green_verified'.
+        Given an active event with red_locked_at stamped
+        When Developer posts status='green_verified' with passing evidence
+        Then status code is 200, turn includes test_evidence, and atdd_cycle_sec is recorded.
+        """
+        with patch("src.main.lifespan") as mock_lifespan:
+            mock_lifespan.return_value.__aenter__ = AsyncMock()
+            mock_lifespan.return_value.__aexit__ = AsyncMock()
+            from src.main import app
+
+            mock_bb = AsyncMock()
+            mock_brain = MagicMock()
+            driver = PlanStepProtocolDriver(app, mock_bb, mock_brain)
+            dsl = PlanStepDSL(driver)
+
+            import time
+            dsl.given_active_event_with_red_lock("evt-atdd-02", red_locked_at=time.time() - 45.0)
+            passing_evidence = {"runner": "pytest", "exit_code": 0, "passed_tests": 12}
+
+            await dsl.when_agent_updates_plan_step(
+                event_id="evt-atdd-02",
+                step_id="step-1",
+                status="green_verified",
+                role="developer",
+                notes="Implementation complete; all tests passing",
+                test_evidence=passing_evidence,
+            )
+
+            dsl.then_request_succeeded()
+            dsl.then_broadcast_turn_contains_test_evidence("green_verified", passing_evidence)
+            dsl.then_event_stamped_with_atdd_cycle_sec("evt-atdd-02")

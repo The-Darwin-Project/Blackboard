@@ -288,6 +288,12 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
     );
   }
 
+  const isTamperingDenied = Boolean(
+    (turn.result && turn.result.includes('Tampering Guard')) ||
+    (turn.thoughts && turn.thoughts.includes('Tampering Guard')) ||
+    (turn.evidence && turn.evidence.includes('Tampering Guard'))
+  );
+
   return (
     <div style={{ ...(isHuman ? { borderRight: `3px solid ${color}`, paddingRight: 12, marginLeft: 'auto', maxWidth: '85%', textAlign: 'right' as const } : { borderLeft: `3px solid ${color}`, paddingLeft: 12 }), marginBottom: 12 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, ...(isHuman ? { justifyContent: 'flex-end' } : {}) }}>
@@ -298,6 +304,25 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
         <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{turn.user_name ? `${ACTOR_LABELS[turn.actor] ?? turn.actor} (${turn.user_name})` : (ACTOR_LABELS[turn.actor] ?? turn.actor)}</span>
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && recallApplied && <span title="Decision informed by RECALL (lesson memory)" style={{ fontSize: 10, color: '#a78bfa', background: 'rgba(168, 85, 247, 0.15)', padding: '1px 6px', borderRadius: 8, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}>🧠 RECALL</span>}
+        {!isHuman && isTamperingDenied && (
+          <span
+            title="Tool use denied by Tampering Guard: test setpoint is immutable during atdd_green work_style"
+            style={{
+              fontSize: 10,
+              color: '#f87171',
+              background: 'rgba(239, 68, 68, 0.15)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              padding: '1px 6px',
+              borderRadius: 8,
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+            }}
+          >
+            🛑 TAMPERING BLOCKED
+          </span>
+        )}
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
         {hasFloatingView && onViewReport && (

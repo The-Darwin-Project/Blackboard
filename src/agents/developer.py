@@ -63,6 +63,7 @@ class Developer(AgentClient):
         on_progress: Optional[Callable] = None,
         mode: str = "investigate",
         session_id: Optional[str] = None,
+        work_style: str = "autonomous",
     ) -> tuple[str, Optional[str]]:
         """Dev team dispatch with mode-based routing.
 
@@ -73,7 +74,7 @@ class Developer(AgentClient):
         """
         # investigate/execute -> Dev sidecar only, no QE
         if mode in ("investigate", "execute") or not self._qe_enabled:
-            return await super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id)
+            return await super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id, work_style=work_style)
 
         # test -> QE sidecar only, no Dev
         if mode == "test":
@@ -89,10 +90,10 @@ class Developer(AgentClient):
 
         # Phase 1: Fire Dev + QE concurrently
         dev_task = asyncio.create_task(
-            super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id)
+            super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id, work_style=work_style)
         )
         qe_task = asyncio.create_task(
-            self.qe.process(event_id, task, event_md_path, qe_on_progress, mode)
+            self.qe.process(event_id, task, event_md_path, qe_on_progress, mode, work_style=work_style)
         )
 
         dev_result = None
@@ -167,6 +168,7 @@ class Developer(AgentClient):
                         on_progress,
                         mode="implement",
                         session_id=dev_session_id,
+                        work_style=work_style,
                     )
                     if dev_session_id:
                         self._dev_sessions[event_id] = dev_session_id
@@ -211,6 +213,7 @@ class Developer(AgentClient):
             on_progress,
             mode="execute",
             session_id=dev_session_id,
+            work_style=work_style,
         )
         if dev_session_id:
             self._dev_sessions[event_id] = dev_session_id

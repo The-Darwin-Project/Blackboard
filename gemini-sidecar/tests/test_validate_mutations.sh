@@ -21,7 +21,7 @@ run_test() {
   local expected_decision="$4"
 
   local output
-  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" DARWIN_WORK_STYLE=autonomous bash "$HOOK" 2>/dev/null)" || true
 
   if ! echo "$output" | jq empty 2>/dev/null; then
     ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
@@ -48,7 +48,7 @@ run_test_deny_with_reason() {
   local expected_reason_substr="${4:-}"
 
   local output
-  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" bash "$HOOK" 2>/dev/null)" || true
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" DARWIN_WORK_STYLE=autonomous bash "$HOOK" 2>/dev/null)" || true
 
   if ! echo "$output" | jq empty 2>/dev/null; then
     ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
@@ -408,7 +408,7 @@ in_repo() { # dir name input role expected_decision  (allow check)
 # Subshell counters are lost, so evaluate by hand and bump the parent's counters.
 check_in() { # dir name command role expected(deny|allow)
   local dir="$1" name="$2" cmd="$3" role="$4" want="$5" out got
-  out="$(cd "$dir" && jq -cn --arg c "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$c}}}' | SIDECAR_PORT=1 AGENT_ROLE="$role" bash "$HOOK" 2>/dev/null)"
+  out="$(cd "$dir" && jq -cn --arg c "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$c}}}' | SIDECAR_PORT=1 AGENT_ROLE="$role" DARWIN_WORK_STYLE=autonomous bash "$HOOK" 2>/dev/null)"
   got="$(echo "$out" | jq -r '.decision')"
   if [[ "$got" == "$want" ]] && { [[ "$want" == allow ]] || [[ "$out" == *"Merge REFUSED"* ]]; }; then
     echo "PASS [$name]"; ((PASS++))
@@ -782,6 +782,26 @@ if [[ "$STOP_DECISIONS" == "continue continue continue stop " ]]; then
   ((PASS++))
 else
   ERRORS+=("FAIL [T-5a]: expected 'continue continue continue stop', got '$STOP_DECISIONS'")
+  ((FAIL++))
+fi
+
+# --- T-19: ATDD tamper lock fails CLOSED when the developer's work style cannot be resolved ---
+# (/hook-status unreachable on port 1, DARWIN_WORK_STYLE unset). The suite runs with DARWIN_WORK_STYLE=autonomous elsewhere.
+DEV_UNRESOLVED='{"toolCall":{"name":"Write","args":{"file_path":"src/app.py"}}}'
+OUT="$(echo "$DEV_UNRESOLVED" | env -u DARWIN_WORK_STYLE SIDECAR_PORT=1 AGENT_ROLE=developer bash "$HOOK" 2>/dev/null)"
+if [[ "$(echo "$OUT" | jq -r .decision)" == "deny" && "$OUT" == *"failing closed"* ]]; then
+  echo "PASS [T-19a: developer with unresolved work style fails closed]"
+  ((PASS++))
+else
+  ERRORS+=("FAIL [T-19a]: expected fail-closed deny, got: $OUT")
+  ((FAIL++))
+fi
+OUT="$(echo "$DEV_UNRESOLVED" | env -u DARWIN_WORK_STYLE SIDECAR_PORT=1 AGENT_ROLE=qe bash "$HOOK" 2>/dev/null)"
+if [[ "$(echo "$OUT" | jq -r .decision)" == "allow" ]]; then
+  echo "PASS [T-19b: non-developer role with unresolved work style is not subject to the lock]"
+  ((PASS++))
+else
+  ERRORS+=("FAIL [T-19b]: expected allow, got: $OUT")
   ((FAIL++))
 fi
 

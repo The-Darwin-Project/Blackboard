@@ -23,7 +23,7 @@
 READONLY_ROLES="explorer security_analyst architect code_reviewer reviewer"
 
 # Shell tools supported by agents
-SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command"
+SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command run_command execute"
 
 # Native file mutation tools: allowed for local workspace files; gated if targeting sensitive configuration or credentials.
 # Keep in sync with NATIVE_MUTATION in merge-guard.js.
@@ -32,7 +32,8 @@ MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content ed
 # Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
 # treated as a non-blocking error, i.e. FAIL-OPEN. So every external call below is capped by what is left
 # of HOOK_BUDGET_SEC (integer seconds, default 8 => 2s margin) and the script DENIES itself on exhaustion.
-# Worst-case ladder: classify <=2s, approval fetch <=3s, git rev-parse <=1s, verdict <=1s, role lookup <=2s.
+# Worst-case ladder: classify <=2s, approval fetch <=3s, git rev-parse <=1s, verdict <=1s, role lookup <=2s,
+# ATDD tamper lock: target-path extraction <=2s, /proxy/tamper strike report <=1s (skipped, never blocking, when the budget is gone).
 HOOK_T0=$SECONDS
 HOOK_BUDGET="${HOOK_BUDGET_SEC:-8}"
 # tmo <cap>: prints min(cap, seconds left); returns 1 when the budget is exhausted.
@@ -131,15 +132,21 @@ if [ "$NEEDS_GUARD" = 1 ]; then
     # Approved and SHA matches -- fall through to the role-based checks below.
 fi
 
-# Resolve role: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
+# Resolve role and work style: local sidecars have AGENT_ROLE set in env (no curl needed). Ephemeral agents have
 # AGENT_ROLE="" at start; their role arrives via WS and is exposed by /hook-status.
 ROLE="${AGENT_ROLE:-}"
-if [ -z "$ROLE" ]; then
+WORK_STYLE="${DARWIN_WORK_STYLE:-}"
+if [ -z "$ROLE" ] || [ -z "$WORK_STYLE" ]; then
     for _attempt in 1 2; do
         t=$(tmo 1) || deny_budget
-        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
+        if ROLE_DATA=$(curl -sf --connect-timeout 0.5 --max-time "$t" "http://127.0.0.1:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null || curl -sf --connect-timeout 0.5 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null); then
             t=$(tmo 1) || deny_budget
-            ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            if [ -z "$ROLE" ]; then
+                ROLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            fi
+            if [ -z "$WORK_STYLE" ]; then
+                WORK_STYLE=$(echo "$ROLE_DATA" | timeout -k 1 "$t" node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.workStyle||j.work_style||'')}catch{process.stdout.write('')}" 2>/dev/null)
+            fi
             break
         fi
         sleep 0.1
@@ -151,6 +158,119 @@ fi
 if [ -z "$ROLE" ]; then
     node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
     exit 0
+fi
+
+# An unresolved work style must not silently degrade to "autonomous" for the developer role: that would switch the
+# ATDD tamper lock off whenever /hook-status is unreachable. Other roles are not subject to the lock.
+if [ -z "$WORK_STYLE" ]; then
+    if [ "$ROLE" = "developer" ]; then
+        echo '{"decision": "deny", "reason": "Tampering Guard: work style for role developer could not be resolved (sidecar /hook-status unreachable and DARWIN_WORK_STYLE unset): failing closed"}'
+        exit 0
+    fi
+    WORK_STYLE="autonomous"
+fi
+
+# Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
+CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
+
+# Normalize quotes and escapes so quote-splitting (e.g. `p"u"sh`, `d\"e\"lete`) cannot hide tokens,
+# while converting whitespace inside quotes to underscores to preserve flag-token boundaries.
+NORM_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
+  let s = "";
+  process.stdin.on("data", c => s += c);
+  process.stdin.on("end", () => {
+    s = s.replace(/\\ /g, "_");
+    s = s.replace(/\\(.)/g, "$1");
+    s = s.replace(/"([^"]*)"/g, (m, g) => g.replace(/\s+/g, "_"));
+    s = s.replace(/\x27([^\x27]*)\x27/g, (m, g) => g.replace(/\s+/g, "_"));
+    process.stdout.write(s);
+  });
+' 2>/dev/null || printf '%s' "$CHECK_CMD")
+
+# --- ATDD Farley Setpoint Protection (Anti-Tampering Lock) ---
+# When work_style is atdd_green and role is developer, test/spec files are strictly read-only contracts.
+if [ "$WORK_STYLE" = "atdd_green" ] && [ "$ROLE" = "developer" ]; then
+    TAMPER_DETECTED=0
+    # Keep in sync with developer-permissions.json (engine-level Edit/Write deny globs). Matched against native-tool paths.
+    TEST_PAT="(_{0,2}tests?_{0,2}/|specs?/|.+[._-](test|spec)\.[a-zA-Z0-9]+|test_[^/]+\.py|conftest\.py|(tests?|specs?)\.[a-zA-Z0-9]+\$)"
+    # Shell variant: anchored on a path-token boundary (so `latest/` is not `test/`) and accepting a bare `tests`/`spec`
+    # directory token with no trailing slash (`rm -r tests`).
+    _TB="(^|[[:space:]/=><${_DQ}${_SQ}])"
+    _TE="(/|[[:space:]${_DQ}${_SQ};&|)]|\$)"
+    SH_TEST_PAT="(${_TB}(_{0,2}tests?_{0,2}|specs?)${_TE}|[^[:space:]]+[._-](test|spec)\.[a-zA-Z0-9]+|${_TB}test_[^/[:space:]]+\.py|${_TB}conftest\.py|${_TB}(tests?|specs?)\.[a-zA-Z0-9]+${_TE})"
+
+    if [ "$IS_MUTATION" = 1 ]; then
+        t=$(tmo 2) || deny_budget
+        TARGET_PATHS=$(printf '%s' "$INPUT" | timeout -k 1 "$t" node -e '
+          let s = "";
+          process.stdin.on("data", c => s += c);
+          process.stdin.on("end", () => {
+            try {
+              const d = JSON.parse(s);
+              const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
+              const keys = ["TargetFile", "file_path", "path", "target_file", "filePath", "notebook_path"];
+              const out = [];
+              const grab = (o) => {
+                if (!o || typeof o !== "object") return;
+                for (const k of keys) { if (typeof o[k] === "string" && o[k]) out.push(o[k]); }
+              };
+              grab(args);
+              if (Array.isArray(args.edits)) args.edits.forEach(grab);
+              process.stdout.write(out.join("\n"));
+            } catch (_) {
+              process.stdout.write("");
+            }
+          });
+        ' 2>/dev/null)
+        if [ -z "$TARGET_PATHS" ]; then
+            # A mutation whose target cannot be determined (unknown path key, unparseable payload, node failure)
+            # cannot be proven to leave the setpoint alone: fail closed. Not a tamper strike.
+            echo '{"decision": "deny", "reason": "Tampering Guard: mutation target path could not be determined under atdd_green: failing closed"}'
+            exit 0
+        fi
+        if printf '%s\n' "$TARGET_PATHS" | grep -qiE "(^|[[:space:]/])($TEST_PAT)"; then
+            TAMPER_DETECTED=1
+        fi
+    elif [ "$IS_SHELL" = 1 ] || [ -n "$COMMAND" ]; then
+        # Builtin writers, interpreter one-liners (python -c / perl -pi / node -e ...), dd of=, in-place awk and SCM
+        # writes (git checkout/restore/apply) aimed at test/spec paths. Read-only commands (pytest tests/, cat, git diff,
+        # git status) never match: every alternative needs a mutating verb.
+        SHELL_MUT_PAT="(\b(rm|unlink|rmdir|shred|mv|cp|install|ln|truncate|touch)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bsed\b.*-i.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|>>?[[:space:]]*[^;&|]*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\btee\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bdd\b.*\bof[^[:space:]]*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\b(python[0-9.]*|perl|node|nodejs|ruby)\b([[:space:]]+-[a-zA-Z0-9.]+)*[[:space:]]+(-[a-zA-Z0-9.]*[ceEipn][a-zA-Z0-9.]*|--eval|--print)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bg?awk\b.*-i[[:space:]]*inplace.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bgit${_G}[[:space:]]+(checkout|restore|apply|reset|stash|clean|cherry-pick|revert|mv|rm|am|merge|pull|rebase)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bgit${_G}[[:space:]]+(reset[[:space:]]+(.*[[:space:]])?--hard|clean|stash[[:space:]]+(pop|apply))\b"
+        SHELL_MUT_PAT+="|\b(rsync|scp|patch|unzip|tar)\b.*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\b(curl|wget)\b.*(-o|-O|--output)[^;&|]*${SH_TEST_PAT}"
+        SHELL_MUT_PAT+="|\bfind\b.*(-delete|-exec).*${SH_TEST_PAT})"
+        # Quote/escape-collapsed variant: `te""sts/te""st_x.py`, `t\ests/x.py`, `'tests'/x.py` -> `tests/...`.
+        COLLAPSED_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
+          let s = "";
+          process.stdin.on("data", c => s += c);
+          process.stdin.on("end", () => process.stdout.write(s.replace(/\\(.)/g, "$1").replace(/["\x27]/g, "")));
+        ' 2>/dev/null || printf '%s' "$CHECK_CMD")
+        for _c in "$NORM_CMD" "$COLLAPSED_CMD" "$COMMAND"; do
+            _c="${_c//>/> }"  # unspaced redirect (`echo x>tests/f.py`): give the path token a boundary after `>`
+            if printf '%s\n' "$_c" | grep -qiE "$SHELL_MUT_PAT"; then
+                TAMPER_DETECTED=1
+                break
+            fi
+        done
+    fi
+
+    if [ "$TAMPER_DETECTED" = 1 ]; then
+        # Report tamper strike to sidecar proxy, non-blocking: bounded by what is left of the hook budget; if none is
+        # left the report is skipped (the deny below must still be emitted before the hook is killed).
+        if t=$(tmo 1); then
+            curl -s --connect-timeout 0.5 --max-time "$t" -X POST "http://127.0.0.1:${SIDECAR_PORT:-9090}/proxy/tamper" >/dev/null 2>&1 || true
+        fi
+        node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Tampering Guard: Role developer cannot modify test or spec files under atdd_green work_style. Setpoint is immutable.' }));"
+        exit 0
+    fi
 fi
 
 # Read-only role detection. Listed read-only roles match instantly; known mutating roles skip the check; anything
@@ -210,23 +330,6 @@ if [ "$IS_SHELL" = 0 ]; then
     echo "{\"decision\": \"deny\", \"reason\": \"Role $ROLE is read-only: tool $TOOL_NAME is not on the read-only allowlist\"}"
     exit 0
 fi
-
-# Strip /dev/null redirects before checking (legitimate in read commands: `grep 2>/dev/null`)
-CHECK_CMD=$(printf '%s' "$COMMAND" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
-
-# Normalize quotes and escapes so quote-splitting (e.g. `p"u"sh`, `d\"e\"lete`) cannot hide tokens,
-# while converting whitespace inside quotes to underscores to preserve flag-token boundaries.
-NORM_CMD=$(printf '%s' "$CHECK_CMD" | node -e '
-  let s = "";
-  process.stdin.on("data", c => s += c);
-  process.stdin.on("end", () => {
-    s = s.replace(/\\ /g, "_");
-    s = s.replace(/\\(.)/g, "$1");
-    s = s.replace(/"([^"]*)"/g, (m, g) => g.replace(/\s+/g, "_"));
-    s = s.replace(/\x27([^\x27]*)\x27/g, (m, g) => g.replace(/\s+/g, "_"));
-    process.stdout.write(s);
-  });
-' 2>/dev/null || printf '%s' "$CHECK_CMD")
 
 # --- Mutation denylist (infrastructure + end-of-flow git + network mutations) ---
 BLOCK_PATTERN=''

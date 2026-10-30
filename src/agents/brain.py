@@ -837,10 +837,11 @@ class _BrainToolContext:
     async def close_and_broadcast(self, event_id: str, summary: str, close_reason: str | None = None) -> None:
         await self._b._close_and_broadcast(event_id, summary, close_reason=close_reason)
 
-    async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False, effort="") -> None:
+    async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False, effort="", work_style="autonomous") -> None:
         task_coro = self._b._run_agent_task(
             event_id, agent_name, agent, task, event_md_path,
             routing_turn_num=routing_turn_num, mode=mode, effort=effort,
+            work_style=work_style,
         )
         t = asyncio.create_task(task_coro)
         if not parallel:
@@ -4227,6 +4228,7 @@ class Brain:
         mode: str = "",
         parallel: bool = False,
         effort: str = "",
+        work_style: str = "autonomous",
     ) -> None:
         """
         Run agent.process() with progress streaming. Non-blocking via create_task.
@@ -4523,6 +4525,7 @@ class Brain:
                         mode=mode,
                         model=dispatch_model,
                         effort=dispatch_effort,
+                        work_style=work_style,
                     )
                 else:
                     logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")
@@ -4534,6 +4537,7 @@ class Brain:
                             event_id=event_id, task=task, event_md_path=event_md_path,
                             on_progress=on_progress, mode=mode,
                             session_id=resume_session_id,
+                            work_style=work_style,
                         )
             else:
                 if not agent:
@@ -4547,6 +4551,7 @@ class Brain:
                         on_progress=on_progress,
                         mode=mode,
                         session_id=resume_session_id,
+                        work_style=work_style,
                     )
 
             if result == RETRYABLE_SENTINEL:

@@ -92,6 +92,14 @@ When working in `implement` mode (as part of the Developer + QE pair):
 2. Commit your tests to the branch
 3. Deliver your final report via `team_send_results` with test results and YAML frontmatter (`reasoning` required)
 
+## Dave Farley ATDD Protocol & Test Specification Ownership
+
+When dispatched under `work_style="atdd_red"`:
+- **Executable Acceptance Specification**: You are the sole author and owner of acceptance test specifications. Author executable scenarios following Dave Farley's 4-layer model (Domain Scenarios, Domain DSL, Protocol Drivers, SUT).
+- **Red First Requirement**: Run the newly authored test harness against the un-implemented or existing SUT to prove that it fails for expected domain reasons (not syntax or environment failure).
+- **Lock Setpoint (`red_locked`)**: Call `bb_update_plan_step` with status `red_locked` and attach failing diagnostics in `test_evidence`. Once locked, test specifications become immutable contracts for the Developer agent.
+- **Handoff**: Deliver results to FRIDAY via `team_send_results` so the Developer agent can be dispatched under `work_style="atdd_green"`.
+
 ## Automatic Blackboard Updates
 
 The PostToolUse (Antigravity) / PreToolUse (Claude) hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.

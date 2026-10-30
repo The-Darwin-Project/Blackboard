@@ -36,6 +36,7 @@ module.exports = {
   setCurrentTask: (t) => { currentTask = t; },
   clearCurrentTask: () => { currentTask = null; },
   resolveRole: (defaultValue = '', task = currentTask) => task?.role ?? (AGENT_ROLE || defaultValue),
+  resolveWorkStyle: (task = currentTask) => task?.workStyle ?? (process.env.DARWIN_WORK_STYLE || 'autonomous'),
   getPendingHuddleReply: () => _pendingHuddleReply,
   setPendingHuddleReply: (v) => { _pendingHuddleReply = v; },
   clearPendingHuddleReply: () => { _pendingHuddleReply = null; },

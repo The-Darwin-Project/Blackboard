@@ -265,10 +265,11 @@ async def get_event_turns(
 class PlanStepRequest(BaseModel):
     """Request body for plan step status update from agent sidecar."""
     step_id: str = Field(..., description="Step ID from the plan")
-    status: str = Field(..., description="in_progress, completed, or blocked")
+    status: str = Field(..., description="in_progress, completed, blocked, red_locked, or green_verified")
     notes: str = Field("", description="What was done or why blocked")
     role: str = Field("", description="Agent role (auto-set by sidecar proxy)")
     event_id: str = Field("", description="Event ID (auto-set by sidecar proxy)")
+    test_evidence: dict | None = Field(default=None, description="Test runner execution output, exit code, and failure assertion")
 
 
 @router.post("/{event_id}/plan-step")
@@ -288,14 +289,27 @@ async def update_plan_step(
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
+    task_payload = {"step_id": req.step_id, "status": req.status}
+    if req.test_evidence is not None:
+        task_payload["test_evidence"] = req.test_evidence
+
     turn = ConversationTurn(
         turn=(await brain.next_turn_number(event_id)),
         actor=req.role or "agent",
         action="plan_step",
         thoughts=req.notes or f"Step {req.step_id}: {req.status}",
-        taskForAgent={"step_id": req.step_id, "status": req.status},
+        taskForAgent=task_payload,
     )
     await brain.append_and_broadcast(event_id, turn)
+
+    if req.status == "red_locked":
+        await blackboard.stamp_event(event_id, red_locked_at=time.time())
+    elif req.status == "green_verified":
+        red_locked_at = getattr(event, "red_locked_at", None)
+        if red_locked_at is not None:
+            cycle_sec = max(0.0, time.time() - red_locked_at)
+            await blackboard.stamp_event(event_id, atdd_cycle_sec=cycle_sec)
+
     return {"ok": True, "turn": turn.turn}
 
 

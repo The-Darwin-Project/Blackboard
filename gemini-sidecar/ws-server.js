@@ -67,12 +67,15 @@ function setupWSServer(wss) {
         const model = msg.model || '';
         const effort = msg.effort || '';
         const role = msg.role || '';
+        const workStyle = msg.work_style || 'autonomous';
 
         if (!prompt) {
           ws.send(JSON.stringify({ type: 'error', event_id: eventId, message: 'Missing prompt' }));
           return;
         }
 
+        // Register the task so state.resolveWorkStyle() (hook /hook-status) sees work_style on this legacy path too
+        state.setCurrentTask({ eventId, ws, cwd: workDir, child: null, model, effort, role, workStyle });
         // Reset callback result for new task
         state.resetCallbackResult();
         console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars, session: ${sessionId})`);
@@ -128,7 +131,7 @@ function setupWSServer(wss) {
         // enable --resume for follow-ups. No PTY needed -- env vars handle auth in headless.
         try {
           const result = await executeCLIStreaming(ws, eventId, prompt, {
-            autoApprove, cwd: workDir, sessionId, model, effort, role,
+            autoApprove, cwd: workDir, sessionId, model, effort, role, workStyle,
           });
           wsSend(ws, {
             type: 'result',

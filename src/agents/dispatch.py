@@ -77,6 +77,8 @@ KNOWN_AGENT_MODES = frozenset({
 
 KNOWN_EFFORT_LEVELS = frozenset({"low", "medium", "high", "max"})
 
+KNOWN_WORK_STYLES = frozenset({"autonomous", "pair", "atdd_red", "atdd_green", "spike"})
+
 # Modes the sidecar may send on wake_register (subset of task modes; extend if tryWake diversifies).
 WAKE_REGISTER_MODES = frozenset({"implement"})
 
@@ -124,6 +126,7 @@ async def dispatch_to_agent(
     mode: str = "",
     model: str = "",
     effort: str = "",
+    work_style: str = "autonomous",
 ) -> tuple[str, str | None]:
     """Send task to an available agent via persistent WS, return (result, session_id)."""
     if mode and mode not in KNOWN_AGENT_MODES:
@@ -136,6 +139,13 @@ async def dispatch_to_agent(
             "dispatch_to_agent: unknown effort %r for role=%s event=%s",
             effort, role, event_id,
         )
+    if not work_style or work_style not in KNOWN_WORK_STYLES:
+        if work_style:
+            logger.warning(
+                "dispatch_to_agent: unknown work_style %r for role=%s event=%s, defaulting to autonomous",
+                work_style, role, event_id,
+            )
+        work_style = "autonomous"
     prompt = _build_prompt(task, event_md_path)
     _check_security(prompt)
 
@@ -176,6 +186,7 @@ async def dispatch_to_agent(
             "mode": mode,
             "model": model,
             "effort": effort,
+            "work_style": work_style,
         })
         await registry.mark_busy(agent_conn.agent_id, event_id, task_id, role=role)
 

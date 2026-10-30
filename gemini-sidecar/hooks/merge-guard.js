@@ -903,7 +903,7 @@ function approvalVerdict(approval, localSha) {
 // Entry points
 // ---------------------------------------------------------------------------------------------
 // Keep in sync with SHELL_TOOLS in validate-mutations.sh. Claude Code's tool is named `Bash`.
-const SHELL_TOOLS = new Set(['bash', 'shell', 'run_in_terminal', 'execute_command', 'run_shell_command', 'run_command']);
+const SHELL_TOOLS = new Set(['bash', 'shell', 'run_in_terminal', 'execute_command', 'run_shell_command', 'run_command', 'execute']);
 
 // Classify a PreToolUse payload (agy {toolCall:{name,args}} or Claude {tool_name,tool_input}).
 // Returns null if malformed, else { name, guard, readok, cmd, isShell }.

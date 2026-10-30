@@ -152,6 +152,7 @@ async function handleRequest(req, res) {
       const payload = await parseBody(req).catch(() => null);
       const denial = await claudeMergeGuard(payload, {
         role: state.resolveRole(''),
+        workStyle: state.resolveWorkStyle(),
         sidecarPort: PORT,
         fetchApproval: () => {
           const eventId = state.getCurrentTask()?.eventId;
@@ -286,6 +287,7 @@ async function handleRequest(req, res) {
       taskMode: task?.mode || '',
       role: state.resolveRole('', task),
       taskId: task?.taskId || task?.eventId || '',
+      workStyle: state.resolveWorkStyle(task),
     }));
     return;
   }
@@ -643,6 +645,32 @@ async function handleRequest(req, res) {
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.data));
     } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/proxy/tamper' && req.method === 'POST') {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: loopback-only endpoint' }));
+      return;
+    }
+    try {
+      const task = state.getCurrentTask();
+      const eventId = task?.eventId;
+      if (!eventId) {
+        console.warn(`[${new Date().toISOString()}] /proxy/tamper: no active event, tamper strike NOT recorded`);
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No active task: tamper strike not recorded' }));
+        return;
+      }
+      const result = await proxyPost(`/events/${eventId}/tamper`, {});
+      res.writeHead(result.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result.data));
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] /proxy/tamper: Brain proxy failed, tamper strike NOT recorded: ${err.message}`);
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
     }

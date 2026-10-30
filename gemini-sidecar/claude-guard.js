@@ -7,7 +7,8 @@
 //    merge-class (analysis error, approval unreachable, git unavailable) => denial (fail CLOSED).
 //    For MUTATING roles, calls that are not merge-class are never blocked here. READ-ONLY roles (roles.js) are
 //    delegated wholesale to hooks/validate-mutations.sh (denylist + read-only tool allowlist + merge guard), on top of
-//    Claude's engine-level permission files (cli-executor.js ROLE_SETTINGS_FILE).
+//    Claude's engine-level permission files (cli-executor.js ROLE_SETTINGS_FILE). developer + atdd_green (deps.workStyle)
+//    additionally runs that hook first for the test/spec tamper lock, then continues to the merge guard.
 // 3. [Constraint]: Latency budget < the hook timeout (cli-setup.js, 10s): classify <=2.5s, approval
 //    fetch <=3s, git rev-parse <=1s. classify runs in a CHILD PROCESS (async) so git never blocks the
 //    event loop. A timed-out hook is a non-blocking error (fail-open), so we must answer with a denial
@@ -65,12 +66,18 @@ function classifyInChild(payload) {
 // denylist for shell, read-only tool allowlist for everything else, merge-approval guard) with the Claude payload
 // as-is (it understands {tool_name, tool_input}). Spawned, never execSync: the sidecar event loop stays free (the
 // script may call back into this process's /hook-status and /proxy/approval). Resolves to a denial reason or null.
-function readOnlyRoleHook(payload, role, sidecarPort) {
+function readOnlyRoleHook(payload, role, sidecarPort, workStyle) {
   return new Promise((resolve) => {
     const cwd = typeof payload?.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
     const child = spawn('bash', [VALIDATE_SCRIPT], {
       cwd,
-      env: { ...process.env, AGENT_ROLE: role, SIDECAR_PORT: String(sidecarPort || process.env.PORT || 9090) },
+      env: {
+        ...process.env,
+        AGENT_ROLE: role,
+        SIDECAR_PORT: String(sidecarPort || process.env.PORT || 9090),
+        // Task-scoped work style (never the process-global env) so the ATDD tamper lock sees the running task's style.
+        ...(workStyle ? { DARWIN_WORK_STYLE: workStyle } : {}),
+      },
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     let out = '';
@@ -95,13 +102,20 @@ function readOnlyRoleHook(payload, role, sidecarPort) {
 
 /**
  * @param {object} payload   Claude PreToolUse payload ({tool_name, tool_input, cwd, ...})
- * @param {{fetchApproval: () => Promise<object>, role?: string, sidecarPort?: number}} deps  fetchApproval resolves the Brain
- *   approval JSON for the current event; role is the resolved per-task role (read-only roles get the full hook policy)
+ * @param {{fetchApproval: () => Promise<object>, role?: string, sidecarPort?: number, workStyle?: string}} deps  fetchApproval
+ *   resolves the Brain approval JSON for the current event; role is the resolved per-task role (read-only roles get the
+ *   full hook policy); workStyle is the per-task work style (developer + atdd_green also gets the tamper-lock hook)
  * @returns {Promise<string|null>} denial reason, or null to allow
  */
 async function claudeMergeGuard(payload, deps) {
   const role = normalizeRole(deps.role);
   if (!isMutatingRoleName(role)) return readOnlyRoleHook(payload, role, deps.sidecarPort);
+  // ATDD Farley anti-tampering lock: developer + atdd_green runs the shared hook first (test/spec files are read-only).
+  // A denial is final; an allow still falls through to the merge guard below, which stays intact.
+  if (role === 'developer' && deps.workStyle === 'atdd_green') {
+    const tamperDenial = await readOnlyRoleHook(payload, role, deps.sidecarPort, deps.workStyle);
+    if (tamperDenial) return tamperDenial;
+  }
   let result;
   try {
     result = await classifyInChild(payload);

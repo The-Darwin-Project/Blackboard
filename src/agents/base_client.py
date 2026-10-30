@@ -105,6 +105,7 @@ class AgentClient:
         on_progress: Optional[Callable] = None,
         mode: str = "",
         session_id: Optional[str] = None,
+        work_style: str = "autonomous",
     ) -> tuple[str, Optional[str]]:
         """
         Send task to sidecar via WebSocket, stream progress, return (result, session_id).
@@ -115,7 +116,7 @@ class AgentClient:
         Serialized via asyncio.Lock to prevent concurrent WS recv conflicts.
         """
         async with self._lock:
-            return await self._process_inner(event_id, task, event_md_path, on_progress, mode, session_id)
+            return await self._process_inner(event_id, task, event_md_path, on_progress, mode, session_id, work_style)
 
     async def _process_inner(
         self,
@@ -125,6 +126,7 @@ class AgentClient:
         on_progress: Optional[Callable] = None,
         mode: str = "",
         session_id: Optional[str] = None,
+        work_style: str = "autonomous",
     ) -> tuple[str, Optional[str]]:
         """Inner process logic (called under lock). Returns (result, session_id)."""
         # Build prompt
@@ -156,6 +158,7 @@ class AgentClient:
                 "prompt": prompt,
                 "cwd": self.cwd,
                 "autoApprove": True,
+                "work_style": work_style,
             }
             if session_id:
                 task_msg["session_id"] = session_id
@@ -257,6 +260,7 @@ class AgentClient:
                             "prompt": prompt,
                             "cwd": self.cwd,
                             "autoApprove": True,
+                            "work_style": work_style,
                         }
                         if session_id:
                             retry_msg["session_id"] = session_id
