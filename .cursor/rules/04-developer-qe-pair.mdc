@@ -42,14 +42,12 @@ Agents communicate with the Brain via `team_huddle`:
 4. **Brain is unaware of QE.** Brain calls `developer.process()` as a single unit. The pair coordination is invisible to Brain. Brain's system prompt describes the pair but never routes to "qe" directly.
 1. **Brain dispatches Developer and QE independently.** Brain calls `select_agent("developer")` or `select_agent("qe")`. No intermediate Manager layer.
 2. **Sequential dispatch for implement mode.** Developer works first, Brain evaluates, then QE verifies. No concurrent fan-out in Phase A.
-3. **Shared workspace.** Both Dev and QE mount the same PVC subPath (`developer`). QE sees Dev's code changes in real-time. Helm deployment mounts `subPath: developer` at both `/data/gitops-developer` and `/data/gitops-qe`.
+3. **Shared workspace.** Both Dev and QE mount the shared squad workspace volume at `/data/workspace`. QE sees Dev's code changes in real-time.
 4. **Huddles go to Brain.** `team_huddle` sends to Brain (not a Manager). Brain replies via `reply_to_agent`. The intermediate phase uses `reply_to_agent` and `message_agent` tools only when huddle turns are present.
 5. **Agent rules describe WHAT, not HOW.** Rules files describe the agent's role and capabilities. No literal CLI commands, polling loops, or coordination protocols.
 
-5. **Shared workspace, not separate directories.** Both Dev and QE mount the same PVC subPath (`developer`). QE sees Dev's code changes in real-time. The Helm deployment mounts `subPath: developer` at both `/data/gitops-developer` and `/data/gitops-qe`.
 ## Code Contract
 
-6. **Agent rules describe WHAT, not HOW.** Rules files (`helm/files/developer.md`, `helm/files/qe.md`) describe the agent's role and capabilities. They must NOT contain literal CLI commands, polling loops, or coordination protocols. The CLI agents are smart enough to figure out HOW.
 ```
 brain.py:
   - select_agent enum: ["architect", "sysadmin", "developer", "qe"]
@@ -80,8 +78,8 @@ dispatch.py:
   - on_huddle parameter receives callback from brain.py
   - dispatch_to_agent unchanged -- stateless message broker
 
-deployment.yaml:
-  - QE sidecar: subPath: developer (shared workspace)
+deployment.yaml / tekton-eventlistener.yaml:
+  - Squad TaskRun: Dev and QE mount shared emptyDir workspace at /data/workspace
   - Brain env: QE_SIDECAR_URL, QDRANT_URL
   - Strategy: Recreate (Qdrant WAL exclusive lock)
 types.py:

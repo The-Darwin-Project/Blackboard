@@ -49,6 +49,8 @@ class KubernetesSpawnHealthAdapter:
     """
 
     SIDECAR_BOOT_TIMEOUT_SEC = 120
+    SQUAD_PORTS: tuple[int, ...] = (9091, 9092, 9093, 9094)
+    DEFAULT_HEALTH_PORT: int = 9090
 
     def __init__(self, namespace: str, max_workers: int = 20) -> None:
         self._namespace = namespace
@@ -212,7 +214,8 @@ class KubernetesSpawnHealthAdapter:
         if not pod_ip:
             return SpawnPollResult(status=SpawnStatus.RUNNING, pod_name=pod_name)
 
-        health_ok = self._probe_health(pod_ip)
+        ports = self._get_health_ports(pod)
+        health_ok = all(self._probe_health(pod_ip, port=p) for p in ports)
 
         with self._state_lock:
             state = self._health_state.get(event_id)
@@ -260,10 +263,26 @@ class KubernetesSpawnHealthAdapter:
                 status=SpawnStatus.RUNNING, reason=reason, pod_name=pod_name,
             )
 
-    def _probe_health(self, pod_ip: str) -> bool:
+    def _get_health_ports(self, pod) -> list[int]:
+        """Determine health check ports based on pod labels, name, or container names."""
+        labels = getattr(pod.metadata, "labels", None)
+        if isinstance(labels, dict):
+            if labels.get("darwin.io/roster") == "squad" or labels.get("darwin.io/service-name") == "squad-agent":
+                return list(self.SQUAD_PORTS)
+        pod_name = getattr(pod.metadata, "name", "")
+        if isinstance(pod_name, str) and "squad" in pod_name:
+            return list(self.SQUAD_PORTS)
+        containers = getattr(pod.spec, "containers", None)
+        if isinstance(containers, list):
+            container_names = {getattr(c, "name", "") for c in containers}
+            if {"architect", "developer", "sysadmin", "qe"}.intersection(container_names):
+                return list(self.SQUAD_PORTS)
+        return [self.DEFAULT_HEALTH_PORT]
+
+    def _probe_health(self, pod_ip: str, port: int = 9090) -> bool:
         """Synchronous HTTP health check — runs in thread pool."""
         try:
-            resp = httpx.get(f"http://{pod_ip}:9090/health", timeout=2.0)
+            resp = httpx.get(f"http://{pod_ip}:{port}/health", timeout=2.0)
             return resp.status_code == 200
         except Exception:
             return False

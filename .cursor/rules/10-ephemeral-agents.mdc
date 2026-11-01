@@ -5,14 +5,18 @@ globs: "**/dispatcher*.py,**/provisioner*.py,**/tekton*.py,**/agent_registry.py,
 alwaysApply: false
 ---
 
-# Ephemeral Agents (On-Call)
+# Ephemeral Agents (On-Call & Squad)
 
 ## Architecture
 
-* **Hybrid model**: Local sidecars handle user/aligner events. Ephemeral agents handle headhunter + future trigger sources.
-* **One agent per event**: Single container, stays alive across defer-wake cycles and role switches. Terminates on event close or idle timeout.
-* **Orchestration**: Tekton TaskRun via EventListener webhook. Brain fires HTTP POST with event_id, Tekton creates the container.
-* **ServiceAccount**: Ephemeral TaskRuns use the Brain's SA. No separate SA.
+* **Dual-tier ephemeral model**:
+  * **User-facing squad** (`roster="squad"`): User-facing events (`chat`, `slack`, `workspace`, `agent_workspace`) dispatch an on-demand Tekton TaskRun pod containing 4 role-specific sidecars (`architect`, `developer`, `sysadmin`, `qe`) and a `squad-keeper` step. Each sidecar has its fixed `AGENT_ROLE`, distinct listen port (9091–9094), and mounts a shared `/data/workspace` emptyDir volume.
+  * **Sensor shapeshifter** (`roster="single"`): Sensor events (`headhunter`, `timekeeper`) dispatch a single on-call agent container booting with `AGENT_ROLE=""` on port 9090 that dynamically switches roles per task dispatch.
+  * **Specialized reviewers**: Reviewer roles (`code_reviewer`, `security_analyst`, `explorer`) dispatched dynamically during events coexist in `AgentRegistry` keyed by `(bound_event_id, role)`.
+* **Orchestration**: Tekton TaskRun via EventListener webhook. Brain's `EphemeralProvisioner` fires HTTP POST with `event_id` (and `roster="squad"` for user-facing events).
+* **ServiceAccount**: Ephemeral TaskRuns use the dedicated unprivileged `<release>-agent` ServiceAccount with read-only RBAC (not the Brain's privileged SA).
+* **Secret Scoping**: In squad TaskRuns, secrets and environment variables are strictly scoped by role: ArgoCD and Kargo credentials mount only in `sysadmin`; Jenkins credentials mount only in `sysadmin` and `developer`.
+* **Pod Lifecycle & Termination**: Single on-call agents exit and write `.terminate` on idle timeout. Squad sidecars write `.idle-<role>` on idle; `squad-keeper` exits when all 4 roles are idle or when Brain sends explicit `type: "terminate"` on event completion. TaskRuns have a hard timeout fallback.
 
 ## Queue Discipline
 

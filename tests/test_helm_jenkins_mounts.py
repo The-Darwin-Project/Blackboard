@@ -112,3 +112,27 @@ class TestSquadSidecarIsolation:
         for role in ("developer", "qe"):
             assert "/secrets/argocd" not in _mount_paths(sidecars[role])
             assert "/secrets/kargo" not in _mount_paths(sidecars[role])
+
+
+class TestAgentRbacGating:
+    def test_agent_role_rendered_when_observer_disabled(self):
+        """<release>-agent Role and RoleBinding are rendered when ephemeralAgents is enabled,
+        even if observer.enabled=false (aligns gating with serviceaccount-agent.yaml)."""
+        docs = _render_chart("--set", "observer.enabled=false", "--set", "ephemeralAgents.enabled=true")
+        sa = _get_doc(docs, "ServiceAccount", "darwin-agent")
+        role = _get_doc(docs, "Role", "darwin-agent")
+        rb = _get_doc(docs, "RoleBinding", "darwin-agent")
+        crb = _get_doc(docs, "ClusterRoleBinding", "darwin-agent-cluster-reader")
+        assert sa is not None
+        assert role is not None
+        assert rb is not None
+        assert crb is not None
+
+    def test_agent_role_absent_when_ephemeral_agents_disabled(self):
+        """When ephemeralAgents.enabled=false, neither SA nor Role/RoleBinding are rendered."""
+        docs = _render_chart("--set", "ephemeralAgents.enabled=false")
+        names = {(d.get("kind"), d.get("metadata", {}).get("name")) for d in docs}
+        assert ("ServiceAccount", "darwin-agent") not in names
+        assert ("Role", "darwin-agent") not in names
+        assert ("RoleBinding", "darwin-agent") not in names
+        assert ("ClusterRoleBinding", "darwin-agent-cluster-reader") not in names

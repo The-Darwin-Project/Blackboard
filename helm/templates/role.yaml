@@ -185,7 +185,7 @@ roleRef:
   name: {{ .Release.Name }}-ephemeral-agent-cluster
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
-{{- if and .Values.observer.enabled .Values.ephemeralAgents.enabled }}
+{{- if .Values.ephemeralAgents.enabled }}
 ---
 # Read-only access for ephemeral agent / squad TaskRuns (serviceAccount: <release>-agent).
 # Agents previously ran as the brain SA; the dedicated SA gets only what investigation
