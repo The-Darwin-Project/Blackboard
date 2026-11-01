@@ -223,6 +223,22 @@ describe('CopyButton', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('12b. a copy that resolves after unmount does not start a feedback timer', async () => {
+    let resolveWrite: () => void = () => {};
+    writeTextMock.mockImplementation(() => new Promise<void>(r => { resolveWrite = r; }));
+    const { unmount } = render(<CopyButton text="evt-late-unmount" label="Copy Event ID" />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button'));
+      await Promise.resolve();
+    });
+    unmount();
+    await act(async () => {
+      resolveWrite();
+      await Promise.resolve();
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('13a. rapid clicks reset the timer instead of stacking', async () => {
     render(<CopyButton text="evt-rapid" label="Copy Event ID" />);
     const button = screen.getByRole('button');

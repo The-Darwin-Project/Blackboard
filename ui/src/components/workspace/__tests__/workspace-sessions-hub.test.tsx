@@ -624,6 +624,18 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(screen.queryByText(/No tasks waiting for approval/i)).not.toBeInTheDocument();
     });
 
+    it('M10: also suppresses the waiting empty-state while only the active query loads', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([], { isLoading: true, isFetching: true }));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([]));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+
+      expect(screen.getByText(/Loading tasks/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Waiting for Approval/i })).toBeInTheDocument();
+      expect(screen.queryByText(/No tasks waiting for approval/i)).not.toBeInTheDocument();
+    });
+
     describe('M11: eviction guards for the waiting source', () => {
       const setup = () => {
         const onNewTask = vi.fn();
@@ -743,6 +755,33 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
           .sort(([, x], [, y]) => (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
           .map(([n]) => n);
         expect(order).toEqual(['svc-b', 'svc-a', 'svc-c']);
+      });
+
+      const renderedOrder = (names: string[]) =>
+        names
+          .map(n => [n, screen.getByText(n)] as const)
+          .sort(([, x], [, y]) => (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+          .map(([n]) => n);
+
+      it('breaks created-timestamp ties by id even when the source delivers the higher id first', () => {
+        const a = waitingEvt({ id: 'w-a', service: 'svc-a', created: '2026-10-29T10:00:00Z' });
+        const c = waitingEvt({ id: 'w-c', service: 'svc-c', created: '2026-10-29T10:00:00Z' });
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([c, a]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        expect(renderedOrder(['svc-a', 'svc-c'])).toEqual(['svc-a', 'svc-c']);
+      });
+
+      it('sorts waiting rows with an unparseable created timestamp last (treated as epoch 0)', () => {
+        const bad = waitingEvt({ id: 'w-bad', service: 'svc-bad', created: 'not-a-date' });
+        const old = waitingEvt({ id: 'w-old', service: 'svc-old', created: '2020-01-01T00:00:00Z' });
+        const fresh = waitingEvt({ id: 'w-new', service: 'svc-new', created: '2026-10-29T10:00:00Z' });
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([bad, old, fresh]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        expect(renderedOrder(['svc-bad', 'svc-old', 'svc-new'])).toEqual(['svc-new', 'svc-old', 'svc-bad']);
       });
     });
   });

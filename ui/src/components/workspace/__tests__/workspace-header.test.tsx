@@ -145,6 +145,13 @@ describe('WorkspaceHeader (T-7, T-8, T-10)', () => {
       expect(screen.getByText(/^3 agents$/)).toBeInTheDocument();
     });
 
+    it('dedups role-only agents (no agent_id) by role across registered and ephemeral lists', () => {
+      opsState.registeredAgents = [{ role: 'qe', bound_event_id: 'evt-100' }];
+      opsState.ephemeralAgents = [{ role: 'qe', current_event_id: 'evt-100' }];
+      renderHeader();
+      expect(screen.getByText(/^1 agent$/)).toBeInTheDocument();
+    });
+
     it('counts a single keyless agent', () => {
       opsState.registeredAgents = [{ current_event_id: 'evt-100' }];
       renderHeader();
