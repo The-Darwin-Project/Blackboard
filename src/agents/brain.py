@@ -4375,7 +4375,7 @@ class Brain:
                             and event_doc is not None
                             and (
                                 event_doc.source in _USER_FACING_SOURCES
-                                or event_doc.source in ("headhunter", "timekeeper", "aligner", "jarvis")
+                                or event_doc.source in ("headhunter", "timekeeper")
                                 or getattr(event_doc, "subject_type", "service") == "kargo_stage"
                             )
                         )

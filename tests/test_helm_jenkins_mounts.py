@@ -49,23 +49,25 @@ def _env_map(item: dict) -> dict[str, str]:
 class TestJenkinsMountsInDeployment:
     def test_t9_sysadmin_mount_present_when_existing_secret_set(self):
         docs = _render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret")
-        deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        sysadmin = _get_named(deployment["spec"]["template"]["spec"]["containers"], "sysadmin-sidecar")
+        # In VMER-2103 squad sidecars are pruned from deployment; verified in TriggerTemplate sidecars
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        sysadmin = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "sysadmin")
         assert "/secrets/jenkins" in _mount_paths(sysadmin)
         assert _env_map(sysadmin)["JENKINS_URL"] == ""
 
     def test_t10_sysadmin_mount_absent_when_existing_secret_empty(self):
         docs = _render_chart()
         deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        sysadmin = _get_named(deployment["spec"]["template"]["spec"]["containers"], "sysadmin-sidecar")
-        assert "/secrets/jenkins" not in _mount_paths(sysadmin)
-        volume_names = {volume.get("name") for volume in deployment["spec"]["template"]["spec"]["volumes"]}
+        volume_names = {volume.get("name") for volume in deployment["spec"]["template"]["spec"].get("volumes") or []}
         assert "jenkins-secret" not in volume_names
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        sysadmin = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "sysadmin")
+        assert "/secrets/jenkins" not in _mount_paths(sysadmin)
 
     def test_t9b_developer_mount_present_when_existing_secret_set(self):
         docs = _render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret")
-        deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        developer = _get_named(deployment["spec"]["template"]["spec"]["containers"], "developer-sidecar")
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        developer = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "developer")
         assert "/secrets/jenkins" in _mount_paths(developer)
         assert _env_map(developer)["JENKINS_URL"] == ""
 
