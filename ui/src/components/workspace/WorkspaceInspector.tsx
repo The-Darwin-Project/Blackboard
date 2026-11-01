@@ -246,7 +246,7 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
           )
         )}
         {activeTab === 'diffs' && <WorkspaceDiffViewer diffs={diffs} />}
-        {activeTab === 'swarm' && <WorkspaceSwarmPanel />}
+        {activeTab === 'swarm' && <WorkspaceSwarmPanel selectedEventId={selectedEventId} />}
         {activeTab === 'logs' && <ActivityStream />}
       </div>
     </aside>

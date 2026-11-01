@@ -75,16 +75,19 @@ class AgentRegistry:
                     and aid != agent_id
                 ]
             elif event_id is not None:
-                # Ephemeral dedup-by-event_id: at most one ephemeral agent may be
-                # bound to a given event_id. Without this, a cross-CLI terminate
-                # (ephemeral_provisioner.terminate_agent) racing a fresh respawn
-                # for the same event could otherwise leave two connections briefly
-                # coexisting, and get_ephemeral()'s first-match scan could return
-                # the stale, terminating one instead of the new one.
+                # Ephemeral dedup-by-(event_id, primary role): at most one ephemeral
+                # agent per primary role may be bound to a given event_id. A cross-CLI
+                # terminate racing a fresh respawn (or a pod reconnect) must not leave
+                # two connections coexisting, or get_ephemeral()'s first-match scan could
+                # return the stale one. Squad sidecars have distinct primary roles, so
+                # they never evict each other; single-agent (shapeshifter, role "")
+                # pods still dedup by event as before. A busy agent is never evicted.
                 stale = [
                     aid for aid, conn in self._agents.items()
                     if conn.ephemeral
                     and conn.bound_event_id == event_id
+                    and not conn.busy
+                    and (conn.role or "") == (role or "")
                     and aid != agent_id
                 ]
             else:
@@ -92,6 +95,8 @@ class AgentRegistry:
 
             for aid in stale:
                 old = self._agents.pop(aid)
+                if old.current_task_id and self._on_task_orphaned:
+                    self._on_task_orphaned(old.current_task_id)
                 try:
                     await old.ws.close()
                 except Exception:
@@ -115,7 +120,10 @@ class AgentRegistry:
             )
 
         if ephemeral and event_id and self._on_ephemeral_registered:
-            self._on_ephemeral_registered(event_id)
+            try:
+                self._on_ephemeral_registered(event_id, role)
+            except TypeError:
+                self._on_ephemeral_registered(event_id)
 
     async def unregister(self, agent_id: str) -> None:
         async with self._lock:
@@ -158,13 +166,32 @@ class AgentRegistry:
                     return conn
             return None
 
-    async def get_ephemeral(self, event_id: str) -> AgentConnection | None:
-        """Find the ephemeral agent bound to a specific event."""
+    async def get_ephemeral(self, event_id: str, role: str | None = None) -> AgentConnection | None:
+        """Find the ephemeral agent bound to a specific event, optionally filtering by role.
+
+        Prefers exact role matches (primary role or current dynamic role). If no exact
+        match is found, falls back to an idle shapeshifter agent (conn.role == "") which
+        can adopt any requested role.
+        """
         async with self._lock:
+            shapeshifter = None
             for conn in self._agents.values():
                 if conn.ephemeral and conn.bound_event_id == event_id:
-                    return conn
-            return None
+                    if role is None:
+                        return conn
+                    if conn.role == role or conn.current_role == role:
+                        return conn
+                    if not conn.role and not conn.busy and shapeshifter is None:
+                        shapeshifter = conn
+            return shapeshifter
+
+    async def get_ephemerals(self, event_id: str) -> list[AgentConnection]:
+        """Find all ephemeral agents bound to a specific event."""
+        async with self._lock:
+            return [
+                conn for conn in self._agents.values()
+                if conn.ephemeral and conn.bound_event_id == event_id
+            ]
 
     async def mark_busy(self, agent_id: str, event_id: str, task_id: str, role: str | None = None) -> None:
         async with self._lock:

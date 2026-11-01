@@ -143,9 +143,9 @@ sidecars:
     limits:
       memory: 6Gi
       cpu: "6"
-  # Shared persistent storage for agent working directories (git clones)
+  # Shared persistent storage for agent working directories (legacy always-on sidecars)
   persistence:
-    enabled: true
+    enabled: false
     storageClassName: "" # Override via ArgoCD app parameters
     size: 20Gi
     accessModes:
@@ -493,6 +493,16 @@ ephemeralAgents:
     explorer: "claude"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
+  squad:
+    idleTimeoutMs: "3600000" # 1h idle timeout for squad sidecars
+    taskRunTimeout: "24h0m0s" # Hard ceiling for squad TaskRun
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "6Gi"
+        cpu: "6"
   pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup
   excludeNodes: []
   #  - hostname-to-exclude

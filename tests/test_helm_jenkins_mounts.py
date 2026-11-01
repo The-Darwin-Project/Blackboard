@@ -49,23 +49,25 @@ def _env_map(item: dict) -> dict[str, str]:
 class TestJenkinsMountsInDeployment:
     def test_t9_sysadmin_mount_present_when_existing_secret_set(self):
         docs = _render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret")
-        deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        sysadmin = _get_named(deployment["spec"]["template"]["spec"]["containers"], "sysadmin-sidecar")
+        # In VMER-2103 squad sidecars are pruned from deployment; verified in TriggerTemplate sidecars
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        sysadmin = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "sysadmin")
         assert "/secrets/jenkins" in _mount_paths(sysadmin)
         assert _env_map(sysadmin)["JENKINS_URL"] == ""
 
     def test_t10_sysadmin_mount_absent_when_existing_secret_empty(self):
         docs = _render_chart()
         deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        sysadmin = _get_named(deployment["spec"]["template"]["spec"]["containers"], "sysadmin-sidecar")
-        assert "/secrets/jenkins" not in _mount_paths(sysadmin)
-        volume_names = {volume.get("name") for volume in deployment["spec"]["template"]["spec"]["volumes"]}
+        volume_names = {volume.get("name") for volume in deployment["spec"]["template"]["spec"].get("volumes") or []}
         assert "jenkins-secret" not in volume_names
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        sysadmin = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "sysadmin")
+        assert "/secrets/jenkins" not in _mount_paths(sysadmin)
 
     def test_t9b_developer_mount_present_when_existing_secret_set(self):
         docs = _render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret")
-        deployment = _get_doc(docs, "Deployment", "darwin-brain")
-        developer = _get_named(deployment["spec"]["template"]["spec"]["containers"], "developer-sidecar")
+        trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+        developer = _get_named(trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"], "developer")
         assert "/secrets/jenkins" in _mount_paths(developer)
         assert _env_map(developer)["JENKINS_URL"] == ""
 
@@ -88,3 +90,49 @@ class TestJenkinsMountsInTriggerTemplate:
         env_map = _env_map(agent)
         assert "JENKINS_URL" not in env_map
         assert "JENKINS_INSECURE_TLS" not in env_map
+
+
+def _squad_sidecars(docs, *args):
+    trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+    return {c["name"]: c for c in trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"]}
+
+
+class TestSquadSidecarIsolation:
+    def test_squad_sidecars_have_distinct_ports(self):
+        sidecars = _squad_sidecars(_render_chart())
+        ports = {name: _env_map(c)["PORT"] for name, c in sidecars.items()}
+        assert ports == {"architect": "9091", "developer": "9093", "sysadmin": "9092", "qe": "9094"}
+
+    def test_squad_secrets_scoped_per_role(self):
+        sidecars = _squad_sidecars(_render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret"))
+        assert "/secrets/jenkins" in _mount_paths(sidecars["sysadmin"])
+        assert "/secrets/jenkins" in _mount_paths(sidecars["developer"])
+        assert "/secrets/jenkins" not in _mount_paths(sidecars["architect"])
+        assert "/secrets/jenkins" not in _mount_paths(sidecars["qe"])
+        for role in ("developer", "qe"):
+            assert "/secrets/argocd" not in _mount_paths(sidecars[role])
+            assert "/secrets/kargo" not in _mount_paths(sidecars[role])
+
+
+class TestAgentRbacGating:
+    def test_agent_role_rendered_when_observer_disabled(self):
+        """<release>-agent Role and RoleBinding are rendered when ephemeralAgents is enabled,
+        even if observer.enabled=false (aligns gating with serviceaccount-agent.yaml)."""
+        docs = _render_chart("--set", "observer.enabled=false", "--set", "ephemeralAgents.enabled=true")
+        sa = _get_doc(docs, "ServiceAccount", "darwin-agent")
+        role = _get_doc(docs, "Role", "darwin-agent")
+        rb = _get_doc(docs, "RoleBinding", "darwin-agent")
+        crb = _get_doc(docs, "ClusterRoleBinding", "darwin-agent-cluster-reader")
+        assert sa is not None
+        assert role is not None
+        assert rb is not None
+        assert crb is not None
+
+    def test_agent_role_absent_when_ephemeral_agents_disabled(self):
+        """When ephemeralAgents.enabled=false, neither SA nor Role/RoleBinding are rendered."""
+        docs = _render_chart("--set", "ephemeralAgents.enabled=false")
+        names = {(d.get("kind"), d.get("metadata", {}).get("name")) for d in docs}
+        assert ("ServiceAccount", "darwin-agent") not in names
+        assert ("Role", "darwin-agent") not in names
+        assert ("RoleBinding", "darwin-agent") not in names
+        assert ("ClusterRoleBinding", "darwin-agent-cluster-reader") not in names

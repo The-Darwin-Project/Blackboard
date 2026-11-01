@@ -405,7 +405,9 @@ def compute_dispatch_backpressure(conversation, active_event_count: int, thresho
     return active_event_count >= threshold
 
 
-# Volume mount paths (must match Helm deployment.yaml)
+# Volume mount paths for local sidecar dispatch. /data/gitops-<role> entries are legacy
+# (squad sidecars now run in ephemeral darwin-squad-agent pods); writes are skipped
+# when the volume is not mounted (see write_event_to_volume).
 VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
     "sysadmin": "/data/gitops-sysadmin",
@@ -908,6 +910,24 @@ _ROLE_EFFORT_MAP = {
 _ROLE_CLI_MAP = {
     "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "claude"),
 }
+
+_USER_FACING_SOURCES: frozenset[str] = frozenset({"chat", "slack", "workspace", "agent_workspace"})
+_SQUAD_ROSTER_ROLES: frozenset[str] = frozenset({"architect", "developer", "sysadmin", "qe"})
+
+
+def _select_dispatch_tier(source: str, role: str) -> str:
+    """Select ephemeral dispatch tier: 'squad' (4-agent team) vs 'single' (shapeshifter/specialist).
+
+    User-facing events (chat, slack, workspace) get the full 4-agent squad for core roles,
+    ensuring workload separation and capacity. Specialized roles (code_reviewer,
+    security_analyst, explorer) and sensor events (aligner, headhunter, timekeeper)
+    dispatch as single-agent pods.
+    """
+    if source.lower() in _USER_FACING_SOURCES:
+        if role.lower() in _SQUAD_ROSTER_ROLES:
+            return "squad"
+        return "single"
+    return "single"
 
 
 class Brain:
@@ -4350,13 +4370,14 @@ class Brain:
                     if agent_name in self.EPHEMERAL_ONLY_ROLES and self._ephemeral_provisioner:
                         use_ephemeral = True
 
-                    # Tier 1: Primary ephemeral sources (never fall back to local)
+                    # Tier 1: User-facing events or primary sensor ephemeral sources
                     if not use_ephemeral:
                         use_ephemeral = (
-                            self._ephemeral_provisioner
-                            and event_doc
+                            bool(self._ephemeral_provisioner)
+                            and event_doc is not None
                             and (
-                                event_doc.source in ("headhunter", "timekeeper")
+                                event_doc.source in _USER_FACING_SOURCES
+                                or event_doc.source in ("headhunter", "timekeeper")
                                 or getattr(event_doc, "subject_type", "service") == "kargo_stage"
                             )
                         )
@@ -4406,11 +4427,15 @@ class Brain:
                         _ctx = (getattr(evidence, "github_context", None)
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
+                        _source = (getattr(event_doc, "source", "") or "") if event_doc else ""
+                        _roster = _select_dispatch_tier(_source, agent_name)
                         try:
                             provision_result = await self._ephemeral_provisioner.ensure_agent(
                                 event_id, _install_id,
                                 model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
                                 cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
+                                role=agent_name,
+                                roster=_roster,
                             )
                         except Exception as e:
                             logger.exception("ensure_agent raised exception for %s: %s", event_id, e)
@@ -4456,6 +4481,30 @@ class Brain:
                                     logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                                 await self._defer_event_safely(
                                     event_id, 30, "All agents busy (local full + ephemeral circuit breaker)",
+                                )
+                                return
+                            elif await registry.get_available(agent_name) is None:
+                                # Tier 1 (user-facing/sensor) circuit break with no local
+                                # sidecar for this role: squad sidecars were removed from the
+                                # Brain pod, so falling through would dispatch to nothing.
+                                self._ephemeral_provisioner.record_dispatch_circuit_break()
+                                logger.warning(
+                                    "Ephemeral circuit breaker for %s and no local sidecar for %s -- deferring",
+                                    event_id, agent_name,
+                                )
+                                cb_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="dispatcher",
+                                    action="paused",
+                                    thoughts="Dispatch circuit open after repeated failures and no local sidecar available. Deferred 30s.",
+                                )
+                                try:
+                                    await self._append_and_broadcast(event_id, cb_turn)
+                                    await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                                except Exception:
+                                    logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
+                                await self._defer_event_safely(
+                                    event_id, 30, "Ephemeral circuit breaker, no local sidecar",
                                 )
                                 return
                             else:
@@ -5459,13 +5508,28 @@ class Brain:
             logger.warning(f"No volume path for agent: {agent_name}")
             return
 
-        events_dir = Path(base_path) / "events"
-        events_dir.mkdir(parents=True, exist_ok=True)
+        # Legacy /data/gitops-<role> mounts belonged to the in-pod squad sidecars that
+        # moved to ephemeral squad pods. Don't materialise them on the Brain's own
+        # filesystem when the volume is no longer mounted.
+        if base_path.startswith("/data/gitops-") and not Path(base_path).is_dir():
+            logger.debug("Volume %s not mounted for %s -- skipping event doc write", base_path, agent_name)
+            return
 
-        file_path = events_dir / f"event-{event_id}.md"
-        content = self._event_to_markdown(event, service_meta, mermaid)
-        file_path.write_text(content)
-        logger.debug(f"Wrote event MD to {file_path}")
+        try:
+            events_dir = Path(base_path) / "events"
+            events_dir.mkdir(parents=True, exist_ok=True)
+
+            file_path = events_dir / f"event-{event_id}.md"
+            content = self._event_to_markdown(event, service_meta, mermaid)
+            file_path.write_text(content)
+            logger.debug(f"Wrote event MD to {file_path}")
+        except OSError as e:
+            logger.warning(
+                "Failed to write event document %s to volume %s: %s",
+                event_id,
+                base_path,
+                e,
+            )
 
     @staticmethod
     def _parse_plan_frontmatter(raw: str) -> tuple[str | None, list[dict] | None, dict]:

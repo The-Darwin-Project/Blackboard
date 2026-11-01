@@ -997,3 +997,110 @@ class TestCrossCLIMismatchRealPath:
         found = await registry.get_ephemeral("evt-z")
         assert found is not None
         assert found.agent_id == "new-agent"
+
+
+class TestSquadHealthProbing:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_squad_pod_probes_all_squad_ports(self, mock_httpx_get):
+        """Squad pod probes ports 9091, 9092, 9093, 9094; healthy when all respond."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter, SpawnStatus
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "darwin-squad-evt-s1-abcde"
+        pod.metadata.uid = "uid-squad-1"
+        pod.metadata.labels = {"darwin.io/roster": "squad", "darwin.io/service-name": "squad-agent"}
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.8"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+
+        result = adapter._poll_sync("evt-s1")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_healthy"
+        assert mock_httpx_get.call_count == 4
+        probed_urls = [call.args[0] for call in mock_httpx_get.call_args_list]
+        for port in (9091, 9092, 9093, 9094):
+            assert f"http://10.0.0.8:{port}/health" in probed_urls
+
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_squad_pod_not_ready_if_any_port_unresponsive(self, mock_httpx_get):
+        """Squad pod is sidecar_not_ready if one of the 4 sidecars has not booted yet."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter, SpawnStatus
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "darwin-squad-evt-s2-abcde"
+        pod.metadata.uid = "uid-squad-2"
+        pod.metadata.labels = {"darwin.io/roster": "squad"}
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.9"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        def fake_get(url, timeout=2.0):
+            if "9094" in url:
+                raise ConnectionError("refused")
+            return MagicMock(status_code=200)
+
+        mock_httpx_get.side_effect = fake_get
+
+        result = adapter._poll_sync("evt-s2")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_not_ready"
+
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_squad_pod_crash_detection(self, mock_httpx_get):
+        """Squad pod: all healthy -> 1 sidecar crashes (2 consecutive misses) -> FAILED."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter, SpawnStatus
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "darwin-squad-evt-s3-abcde"
+        pod.metadata.uid = "uid-squad-3"
+        pod.metadata.labels = {"darwin.io/roster": "squad"}
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.10"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        # Poll 1: all healthy
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+        r1 = adapter._poll_sync("evt-s3")
+        assert r1.reason == "sidecar_healthy"
+
+        # Poll 2: developer (9093) crashes
+        def crash_dev(url, timeout=2.0):
+            if "9093" in url:
+                raise ConnectionError("refused")
+            return MagicMock(status_code=200)
+
+        mock_httpx_get.side_effect = crash_dev
+        r2 = adapter._poll_sync("evt-s3")
+        assert r2.status == SpawnStatus.RUNNING
+        assert r2.reason == "sidecar_suspect"
+
+        # Poll 3: still crashed -> FAILED
+        r3 = adapter._poll_sync("evt-s3")
+        assert r3.status == SpawnStatus.FAILED
+        assert "sidecar_crashed" in r3.reason

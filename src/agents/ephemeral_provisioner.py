@@ -94,6 +94,11 @@ class EphemeralProvisioner:
         self._poll_interval_sec = poll_interval_sec
         self._stall_timeout_sec = stall_timeout_sec
         self._pending: dict[str, asyncio.Event] = {}
+        self._pending_registrations: dict[tuple[str, str | None], list[asyncio.Event]] = {}
+        # event_id -> monotonic time of the last darwin-squad-agent spawn POST. One squad
+        # pod serves every role for an event, so concurrent ensure_agent() calls for other
+        # roles must wait for it to register instead of POSTing duplicate spawns.
+        self._squad_spawn_started: dict[str, float] = {}
         self._infra_failures: dict[str, int] = {}
         self._dispatch_metrics = DispatchMetrics()
 
@@ -119,9 +124,43 @@ class EphemeralProvisioner:
     def dispatch_metrics(self) -> DispatchMetrics:
         return _dc_replace(self._dispatch_metrics)
 
+    def _squad_spawn_inflight(self, event_id: str) -> bool:
+        """True while a squad pod spawned for this event may still be starting up."""
+        started = self._squad_spawn_started.get(event_id)
+        if started is None:
+            return False
+        if time.monotonic() - started >= self._deadline_sec:
+            self._squad_spawn_started.pop(event_id, None)
+            return False
+        return True
+
+    async def _spawn(
+        self, event_id: str, installation_id: str, model: str, cli: str,
+        roster: str, role: str | None,
+    ) -> None:
+        """POST a spawn unless a squad pod for this event is already starting."""
+        if roster == "squad":
+            if self._squad_spawn_inflight(event_id):
+                logger.info(
+                    "Squad spawn already in flight for %s -- waiting for role %s instead of re-spawning",
+                    event_id, role,
+                )
+                return
+            self._squad_spawn_started[event_id] = time.monotonic()
+        try:
+            if roster or role:
+                await self._trigger_taskrun(
+                    event_id, installation_id, model, cli, roster, role or "",
+                )
+            else:
+                await self._trigger_taskrun(event_id, installation_id, model, cli)
+        except Exception:
+            self._squad_spawn_started.pop(event_id, None)
+            raise
+
     async def ensure_agent(
         self, event_id: str, installation_id: str = "", model: str = "",
-        cli: str = "",
+        cli: str = "", role: str | None = None, roster: str = "",
     ) -> "AgentConnection | str | None":
         """Ensure an ephemeral agent exists for this event. Spawn if needed.
 
@@ -136,6 +175,10 @@ class EphemeralProvisioner:
         TaskRun pod. Only included in the POST body when non-empty, falling back to the
         TriggerTemplate's Helm default ("claude").
 
+        `role` (optional) specifies the requested agent role to wait for and verify.
+
+        `roster` (optional) specifies "squad" or "single" dispatch tier for Tekton routing.
+
         Returns ``AgentConnection`` on success, or:
         - ``INFRA_SENTINEL``: Tekton unreachable, caller should defer
         - ``None``: circuit breaker tripped, caller should fall back to sidecar
@@ -147,7 +190,7 @@ class EphemeralProvisioner:
         outright; its current task is left to finish and the existing
         (wrong-CLI) connection is returned instead.
         """
-        existing = await self._registry.get_ephemeral(event_id)
+        existing = await self._registry.get_ephemeral(event_id, role=role)
         if existing:
             if cli and (not existing.cli or existing.cli != cli):
                 if existing.busy:
@@ -175,10 +218,11 @@ class EphemeralProvisioner:
             return None
 
         try:
-            await self._trigger_taskrun(event_id, installation_id, model, cli)
+            await self._spawn(event_id, installation_id, model, cli, roster, role)
             agent = await self._wait_for_registration(
                 event_id, self._deadline_sec,
                 self._poll_interval_sec, self._stall_timeout_sec,
+                role=role,
             )
             self._infra_failures.pop(event_id, None)
             return agent
@@ -187,17 +231,19 @@ class EphemeralProvisioner:
                 "Ephemeral dispatch failed for %s (%d/%d): %s. Cleaning up and retrying.",
                 event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
+            self._squad_spawn_started.pop(event_id, None)
             await self._cancel_taskrun(event_id)
             if self._health_port:
                 self._health_port.clear_event(event_id)
             await asyncio.sleep(5)
 
             try:
-                await self._trigger_taskrun(event_id, installation_id, model, cli)
+                await self._spawn(event_id, installation_id, model, cli, roster, role)
                 retry_deadline = max(60.0, self._deadline_sec / 2)
                 agent = await self._wait_for_registration(
                     event_id, retry_deadline,
                     self._poll_interval_sec, self._stall_timeout_sec,
+                    role=role,
                 )
                 self._infra_failures.pop(event_id, None)
                 logger.info("Ephemeral retry succeeded for %s after cleanup", event_id)
@@ -208,46 +254,62 @@ class EphemeralProvisioner:
                     "Ephemeral retry also failed for %s (%d/%d): %s.",
                     event_id, failures + 1, MAX_INFRA_FAILURES, retry_exc or "handshake timeout",
                 )
+                self._squad_spawn_started.pop(event_id, None)
                 await self._cancel_taskrun(event_id)
                 if self._health_port:
                     self._health_port.clear_event(event_id)
                 return INFRA_SENTINEL
 
-    def on_ephemeral_registered(self, event_id: str) -> None:
+    def on_ephemeral_registered(self, event_id: str, role: str | None = None) -> None:
         """Called by registry.register() when an ephemeral agent registers."""
-        evt = self._pending.get(event_id)
-        if evt:
-            evt.set()
+        for (eid, r), waiters in list(self._pending_registrations.items()):
+            if eid == event_id and (r is None or not role or r == role):
+                for w in list(waiters):
+                    w.set()
 
     async def terminate_agent(self, event_id: str) -> None:
-        """Send terminate signal to ephemeral agent on event close.
+        """Send terminate signal to ephemeral agent(s) on event close and cancel TaskRun.
 
-        Deregisters the connection from the registry synchronously (not just
-        on eventual WS disconnect) so that a caller which immediately
-        respawns for the same event_id (see the cross-CLI-mismatch branch in
-        ``ensure_agent``) can never observe the stale, terminating agent via
-        ``registry.get_ephemeral()`` during the window before the old pod
-        actually tears down.
+        Deregisters all connections from the registry synchronously (not just
+        on eventual WS disconnect) and triggers _cancel_taskrun as an authoritative
+        fallback to guarantee Tekton Pod cleanup even if a container dropped WS.
         """
-        agent = await self._registry.get_ephemeral(event_id)
-        if agent and agent.ephemeral:
+        agents = await self._registry.get_ephemerals(event_id)
+        if not agents:
+            single = await self._registry.get_ephemeral(event_id)
+            if single:
+                agents = [single]
+
+        for agent in agents:
+            if agent and agent.ephemeral:
+                await self._registry.unregister(agent.agent_id)
+                try:
+                    await agent.ws.send_json({"type": "terminate", "event_id": event_id})
+                    logger.info("Sent terminate to ephemeral agent %s for %s", agent.agent_id, event_id)
+                except Exception:
+                    logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
+                try:
+                    await agent.ws.close()
+                except Exception:
+                    pass
+
+        # Only cancel when this event actually has (or is spawning) ephemeral pods;
+        # otherwise every event close would POST a no-op prune TaskRun.
+        had_spawn = bool(agents) or event_id in self._pending or event_id in self._squad_spawn_started
+        self._squad_spawn_started.pop(event_id, None)
+        if had_spawn:
             try:
-                await agent.ws.send_json({"type": "terminate", "event_id": event_id})
-                logger.info("Sent terminate to ephemeral agent for %s", event_id)
-            except Exception:
-                logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
-            await self._registry.unregister(agent.agent_id)
-            try:
-                await agent.ws.close()
-            except Exception:
-                pass
+                await self._cancel_taskrun(event_id)
+            except Exception as exc:
+                logger.warning("Cancel TaskRun fallback failed for %s: %s", event_id, exc)
+
         self._infra_failures.pop(event_id, None)
         if self._health_port:
             self._health_port.clear_event(event_id)
 
     async def _trigger_taskrun(
         self, event_id: str, installation_id: str = "", model: str = "",
-        cli: str = "",
+        cli: str = "", roster: str = "", role: str = "",
     ) -> None:
         payload = {
             "event_id": event_id, "action": "spawn", "installation_id": installation_id,
@@ -256,10 +318,14 @@ class EphemeralProvisioner:
             payload["model"] = model
         if cli:
             payload["cli"] = cli
+        if roster:
+            payload["roster"] = roster
+        if role:
+            payload["role"] = role
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(self._url, json=payload)
             resp.raise_for_status()
-            logger.info("Triggered TaskRun for %s (status=%d)", event_id, resp.status_code)
+            logger.info("Triggered TaskRun for %s (roster=%s, status=%d)", event_id, roster or "single", resp.status_code)
 
     async def _cancel_taskrun(self, event_id: str) -> None:
         """Trigger prune TaskRun to delete stuck TaskRuns for this event."""
@@ -277,6 +343,7 @@ class EphemeralProvisioner:
         deadline_sec: float = 300,
         poll_interval_sec: float = 10,
         stall_timeout_sec: float = 60,
+        role: str | None = None,
     ) -> "AgentConnection":
         """Wait for ephemeral agent WS registration with pod health polling.
 
@@ -286,17 +353,16 @@ class EphemeralProvisioner:
         """
         evt = asyncio.Event()
         self._pending[event_id] = evt
+        key = (event_id, role)
+        self._pending_registrations.setdefault(key, []).append(evt)
         start = time.monotonic()
         last_progress: float | None = None
 
         try:
             while True:
-                # Registration check FIRST — before deadline, so a late registration
-                # during a slow health poll is never missed (codereview R2 F1).
-                if evt.is_set():
-                    agent = await self._registry.get_ephemeral(event_id)
-                    if not agent:
-                        raise asyncio.TimeoutError("Registered but not in registry")
+                # Registration check FIRST: check registry directly
+                agent = await self._registry.get_ephemeral(event_id, role=role)
+                if agent:
                     return agent
 
                 elapsed = time.monotonic() - start
@@ -309,12 +375,23 @@ class EphemeralProvisioner:
                 wait_time = min(poll_interval_sec, remaining)
                 try:
                     await asyncio.wait_for(evt.wait(), timeout=wait_time)
-                    agent = await self._registry.get_ephemeral(event_id)
-                    if not agent:
+                    evt.clear()
+                    agent = await self._registry.get_ephemeral(event_id, role=role)
+                    if agent:
+                        return agent
+                    if role is None:
                         raise asyncio.TimeoutError("Registered but not in registry")
+                    any_agent = await self._registry.get_ephemeral(event_id)
+                    if not any_agent:
+                        raise asyncio.TimeoutError("Registered but not in registry")
+                except asyncio.TimeoutError as err:
+                    if "not in registry" in str(err):
+                        raise
+
+                # Check registry again before pod polling
+                agent = await self._registry.get_ephemeral(event_id, role=role)
+                if agent:
                     return agent
-                except asyncio.TimeoutError:
-                    pass
 
                 if self._health_port:
                     result = await self._health_port.poll_spawn_status(event_id)
@@ -337,3 +414,8 @@ class EphemeralProvisioner:
                         )
         finally:
             self._pending.pop(event_id, None)
+            waiters = self._pending_registrations.get(key, [])
+            if evt in waiters:
+                waiters.remove(evt)
+            if not waiters:
+                self._pending_registrations.pop(key, None)

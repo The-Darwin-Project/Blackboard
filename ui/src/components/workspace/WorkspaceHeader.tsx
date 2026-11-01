@@ -10,6 +10,7 @@ import { Link } from 'react-router-dom';
 import { PanelLeft, PanelRight, Radio } from 'lucide-react';
 import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useEventDocument } from '../../hooks/useQueue';
+import type { AgentRegistryEntry } from '../../api/types';
 
 interface WorkspaceHeaderProps {
   selectedEventId?: string | null;
@@ -27,9 +28,25 @@ export default function WorkspaceHeader({
   onToggleInspector,
 }: WorkspaceHeaderProps) {
   const opsControl = useOpsControl();
-  const effectiveEventId = selectedEventId ?? opsControl.selectedEventId;
+  const effectiveEventId = selectedEventId !== undefined ? selectedEventId : opsControl.selectedEventId;
   const { data: eventDoc } = useEventDocument(effectiveEventId || '');
-  const activeAgentCount = (opsControl.agents || opsControl.registeredAgents || []).length;
+  const agentList: AgentRegistryEntry[] = opsControl.agents || opsControl.registeredAgents || [];
+  const ephemerals: AgentRegistryEntry[] = opsControl.ephemeralAgents || [];
+  const seenIds = new Set<string>();
+  const allAgents: AgentRegistryEntry[] = [];
+  for (const agent of [...agentList, ...ephemerals]) {
+    const key = agent.agent_id || agent.role || '';
+    if (key && !seenIds.has(key)) {
+      seenIds.add(key);
+      allAgents.push(agent);
+    } else if (!key) {
+      allAgents.push(agent);
+    }
+  }
+
+  const activeAgentCount = effectiveEventId
+    ? allAgents.filter((a) => a.bound_event_id === effectiveEventId || a.current_event_id === effectiveEventId).length
+    : 0;
 
   const sessionLabel = eventDoc?.service || effectiveEventId || 'New Task';
 

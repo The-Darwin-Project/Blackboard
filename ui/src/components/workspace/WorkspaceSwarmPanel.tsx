@@ -2,16 +2,22 @@
 // @ai-rules:
 // 1. [Constraint]: Read agents from useOpsControl (WebSocket-fed); do not add REST polling here.
 // 2. [Pattern]: Prefer opsControl.agents, falling back to registeredAgents.
+// 3. [Constraint]: Filter agents strictly by effectiveEventId (bound_event_id or current_event_id).
 /**
  * Agent Swarm topology panel for Workspace Inspector.
- * Consumes useOpsControl without triggering duplicate REST polls.
+ * Strictly scoped to the currently selected task/event.
  */
 import { Bot } from 'lucide-react';
 import { useOpsControl } from '../../contexts/OpsStateContext';
 import type { AgentRegistryEntry } from '../../api/types';
 
-export default function WorkspaceSwarmPanel() {
-  const { registeredAgents, ephemeralAgents, agents } = useOpsControl();
+interface WorkspaceSwarmPanelProps {
+  selectedEventId?: string | null;
+}
+
+export default function WorkspaceSwarmPanel({ selectedEventId }: WorkspaceSwarmPanelProps = {}) {
+  const opsControl = useOpsControl();
+  const { registeredAgents, ephemeralAgents, agents } = opsControl;
   const agentList: AgentRegistryEntry[] = agents || registeredAgents || [];
   const ephemerals: AgentRegistryEntry[] = ephemeralAgents || [];
 
@@ -28,22 +34,31 @@ export default function WorkspaceSwarmPanel() {
     }
   }
 
-  if (allAgents.length === 0) {
+  const effectiveEventId = selectedEventId !== undefined ? selectedEventId : opsControl.selectedEventId;
+
+  const attachedAgents = allAgents.filter((agent) =>
+    Boolean(effectiveEventId) && (
+      agent.bound_event_id === effectiveEventId ||
+      agent.current_event_id === effectiveEventId
+    )
+  );
+
+  if (attachedAgents.length === 0) {
     return (
       <div className="p-8 text-center text-text-muted text-xs">
         <Bot size={24} className="mx-auto mb-2 opacity-40" />
-        No active agents connected in the swarm.
+        No agents active for this task.
       </div>
     );
   }
 
   return (
     <div className="p-3 space-y-2">
-      {allAgents.map((agent: AgentRegistryEntry, idx) => {
+      {attachedAgents.map((agent: AgentRegistryEntry, idx) => {
         const isBusy = Boolean(agent.busy);
         const statusLabel = isBusy ? 'Busy' : 'Idle';
-        const identifier = agent.role || agent.agent_id || `agent-${idx}`;
-        const activeEvent = agent.current_event_id || '—';
+        const identifier = agent.current_role || agent.role || agent.agent_id || `agent-${idx}`;
+        const activeEvent = agent.current_event_id || agent.bound_event_id || '—';
 
         return (
           <div
