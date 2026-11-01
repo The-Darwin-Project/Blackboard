@@ -1,0 +1,89 @@
+# BlackBoard/helm/templates/redis-deployment.yaml
+# @ai-rules:
+# 1. [Constraint]: Standalone Redis deployment for Darwin state store (PR 1 / VMER-2101).
+# 2. [Pattern]: Strategy Recreate protects PVC data directory from concurrent write corruption and prevents dual-pod split-brain.
+# 3. [Gotcha]: automountServiceAccountToken: false hardens against pod compromise.
+{{- if .Values.redis.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.redisLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "darwin.redisSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "darwin.redisLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+          args:
+            {{- if .Values.redis.persistence.enabled }}
+            - --dir
+            - /var/lib/redis/data
+            - --save
+            - "60 1"
+            {{- else }}
+            - --save
+            - ""
+            {{- end }}
+            - --stop-writes-on-bgsave-error
+            - "no"
+            - --requirepass
+            - "$(REDIS_PASSWORD)"
+          ports:
+            - name: redis
+              containerPort: {{ .Values.redis.port | default 6379 }}
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.redis.port | default 6379 }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -h 127.0.0.1 -p {{ .Values.redis.port | default 6379 }} ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} ping | grep -q PONG
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          {{- if .Values.redis.persistence.enabled }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /var/lib/redis/data
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      {{- if .Values.redis.persistence.enabled }}
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-redis-data
+      {{- end }}
+{{- end }}

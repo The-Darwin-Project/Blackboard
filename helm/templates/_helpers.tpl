@@ -83,6 +83,27 @@ app.kubernetes.io/component: slack-access-gate
 {{- end }}
 
 {{/*
+Redis standalone component labels.
+Used on: Deployment, Service, NetworkPolicy, PDB.
+*/}}
+{{- define "darwin.redisLabels" -}}
+app: darwin-redis
+app.kubernetes.io/name: darwin-redis
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: state-store
+{{- end }}
+
+{{/*
+Redis pod selector labels.
+Used on: Deployment.spec.selector, Service.spec.selector, PDB.spec.selector,
+         NetworkPolicy.spec.podSelector.
+*/}}
+{{- define "darwin.redisSelectorLabels" -}}
+app: darwin-redis
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
 Skills Catalog URL env block — included in sidecar containers and Tekton TriggerTemplate.
 Gated on .Values.jenkinsObserver.skillsCatalog.url being truthy (independent of .Values.jenkinsObserver.enabled).
 */}}

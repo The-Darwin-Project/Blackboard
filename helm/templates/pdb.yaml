@@ -43,3 +43,17 @@ spec:
   selector:
     matchLabels:
       app: darwin-dex
+---
+{{- if .Values.redis.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-redis
+  labels:
+    {{- include "darwin.redisLabels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "darwin.redisSelectorLabels" . | nindent 6 }}
+{{- end }}

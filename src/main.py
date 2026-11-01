@@ -105,8 +105,10 @@ async def lifespan(app: FastAPI):
         logger.info("Redis connection established")
     except Exception as e:
         logger.error(f"CRITICAL: Failed to connect to Redis: {e}")
-        logger.error("Redis is required for Blackboard state. Startup will continue but health checks will fail.")
-        redis = None
+        raise RuntimeError(
+            f"Failed to connect to Redis after retries: {e}. "
+            "Redis state store is required for Darwin Blackboard operation."
+        ) from e
     
     # Initialize Blackboard state
     if redis:

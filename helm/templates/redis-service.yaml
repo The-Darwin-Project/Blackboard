@@ -1,0 +1,23 @@
+# BlackBoard/helm/templates/redis-service.yaml
+# @ai-rules:
+# 1. [Constraint]: Internal ClusterIP service exposing standalone Redis on port 6379.
+# 2. [Pattern]: Name {{ .Release.Name }}-redis matches default REDIS_HOST convention.
+# 3. [Gotcha]: Selector must match darwin.redisSelectorLabels exactly.
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.redisLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port | default 6379 }}
+      targetPort: redis
+      protocol: TCP
+  selector:
+    {{- include "darwin.redisSelectorLabels" . | nindent 4 }}
+{{- end }}

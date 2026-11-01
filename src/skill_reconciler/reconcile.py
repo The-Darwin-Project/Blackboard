@@ -39,6 +39,7 @@ logger = logging.getLogger("skill_reconciler")
 
 from src.skill_reconciler.constants import (
     REDIS_KEY_CORPUS, REDIS_KEY_PHASE_CONFIG, REDIS_KEY_SYNC_STATE, REDIS_KEY_VERSION,
+    sanitize_redis_port,
 )
 from src.skill_reconciler.generate_map import CORPUS_KEY as _GENERATED_MAP_KEY, generate_phase_tool_map
 
@@ -52,7 +53,7 @@ SKILLS_PATH = os.getenv("SKILL_RECONCILER_SKILLS_PATH", "src/agents/brain_skills
 def _build_redis_client() -> redis.Redis:
     """Build sync Redis client using keyword args (no URL string -- avoids password leak in crash logs)."""
     host = os.getenv("REDIS_HOST", "localhost")
-    port = int(os.getenv("REDIS_PORT", "6379"))
+    port = sanitize_redis_port(os.getenv("REDIS_PORT", "6379"))
     password = os.getenv("REDIS_PASSWORD", "") or None
     return redis.Redis(host=host, port=port, password=password, db=0, decode_responses=True, socket_timeout=30)
 

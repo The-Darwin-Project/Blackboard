@@ -13,6 +13,7 @@ from .ports import (
     TopologyRepository,
 )
 from .redis_client import get_redis, RedisClient
+from src.skill_reconciler.constants import sanitize_redis_port
 
 __all__ = [
     "BlackboardState",
@@ -24,4 +25,5 @@ __all__ = [
     "TopologyRepository",
     "get_redis",
     "RedisClient",
+    "sanitize_redis_port",
 ]

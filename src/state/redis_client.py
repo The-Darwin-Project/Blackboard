@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import redis.asyncio as redis
 
@@ -27,10 +27,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global client instance (singleton)
+from src.skill_reconciler.constants import sanitize_redis_port
+
 _redis_client: Optional["Redis"] = None
 
-# Retry configuration
-REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "10"))
+# Retry configuration -- 30 attempts x 2s = 60s window for standalone Redis deployment startup
+REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "30"))
 REDIS_RETRY_DELAY = float(os.getenv("REDIS_RETRY_DELAY", "2.0"))
 
 
@@ -48,12 +50,13 @@ class RedisClient:
     def __init__(
         self,
         host: Optional[str] = None,
-        port: int = 6379,
+        port: Optional[Union[int, str]] = None,
         password: Optional[str] = None,
         db: int = 0,
     ):
         self.host = host or os.getenv("REDIS_HOST", "localhost")
-        self.port = port
+        raw_port = port if port is not None else os.getenv("REDIS_PORT", "6379")
+        self.port = sanitize_redis_port(raw_port)
         self.password = password or os.getenv("REDIS_PASSWORD", "")
         self.db = db
         self._client: Optional["Redis"] = None

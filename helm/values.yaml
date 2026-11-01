@@ -15,10 +15,12 @@ image:
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
-# Redis Sidecar Configuration
+# Redis State Store -- standalone Deployment + Service
 # =============================================================================
 redis:
   enabled: true
+  host: "" # Optional override; defaults to {{ .Release.Name }}-redis
+  port: 6379
   image:
     repository: redis
     tag: "7-alpine"
