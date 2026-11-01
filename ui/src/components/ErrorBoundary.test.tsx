@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { render, screen, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import ErrorBoundary from './ErrorBoundary';
@@ -95,5 +96,54 @@ describe('ErrorBoundary', () => {
     );
     expect(screen.queryByText('fresh event content')).toBeNull();
     expect(screen.getByText('Something went wrong. Try refreshing.')).toBeTruthy();
+  });
+
+  it('resets hasError when resetKey prop changes after catching an error', () => {
+    let shouldThrow = true;
+    function Flaky() {
+      if (shouldThrow) throw new Error('flaky');
+      return <div>recovered child</div>;
+    }
+
+    const { rerender } = render(
+      <ErrorBoundary resetKey="/workspace/evt-1">
+        <Flaky />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText('Something went wrong. Try refreshing.')).toBeTruthy();
+
+    shouldThrow = false;
+    rerender(
+      <ErrorBoundary resetKey="/workspace/evt-2">
+        <Flaky />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText('recovered child')).toBeTruthy();
+    expect(screen.queryByText('Something went wrong. Try refreshing.')).toBeNull();
+  });
+
+  it('preserves child component mount when resetKey changes and no error occurred', () => {
+    let mountCount = 0;
+    function Child() {
+      useEffect(() => {
+        mountCount++;
+      }, []);
+      return <div>healthy child</div>;
+    }
+
+    const { rerender } = render(
+      <ErrorBoundary resetKey="/workspace/evt-1">
+        <Child />
+      </ErrorBoundary>,
+    );
+    expect(mountCount).toBe(1);
+
+    rerender(
+      <ErrorBoundary resetKey="/workspace/evt-2">
+        <Child />
+      </ErrorBoundary>,
+    );
+    expect(mountCount).toBe(1);
+    expect(screen.getByText('healthy child')).toBeTruthy();
   });
 });

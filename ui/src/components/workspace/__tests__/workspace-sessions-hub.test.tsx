@@ -79,6 +79,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
 
     vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue({
       data: mockEvents,
@@ -131,6 +132,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    localStorage.clear();
   });
 
   it('renders active sessions with service name and Cynefin status/domain badges', () => {
@@ -791,5 +793,41 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
     const aside = container.querySelector('aside');
     expect(aside).not.toBeNull();
     expect(aside!.className).not.toContain('select-none');
+  });
+
+  describe('Scope persistence (localStorage)', () => {
+    it('hydrates initial scope from localStorage if present', () => {
+      localStorage.setItem('darwin:workspaceScope', 'all');
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      // In Global mode, project filter select is visible
+      expect(screen.getByRole('combobox')).toBeInTheDocument();
+      // And Global button has the active styling
+      const globalBtn = screen.getByRole('button', { name: /Global/i });
+      expect(globalBtn.className).toContain('text-text-primary');
+    });
+
+    it('persists scope changes to localStorage', () => {
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      // Default is 'mine'
+      expect(localStorage.getItem('darwin:workspaceScope')).toBeNull();
+
+      // Switch to Global
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+      expect(localStorage.getItem('darwin:workspaceScope')).toBe('all');
+
+      // Switch back to My Tasks
+      fireEvent.click(screen.getByRole('button', { name: /My Tasks/i }));
+      expect(localStorage.getItem('darwin:workspaceScope')).toBe('mine');
+    });
+
+    it('ignores invalid values in localStorage and defaults to mine', () => {
+      localStorage.setItem('darwin:workspaceScope', 'invalid-scope');
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      // My Tasks mode should not show project dropdown
+      expect(screen.queryByRole('combobox')).toBeNull();
+    });
   });
 });

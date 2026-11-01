@@ -7,6 +7,7 @@
 //    (isLoading* / isFetching* / isError* / data === undefined). A failed poll or in-flight refetch yields stale/empty lists and must never evict.
 // 4. [Pattern]: Scoping: 'mine' vs 'all' (Global) is a CLIENT-SIDE workspace view filter only (not an authz boundary; the API returns the same lists).
 //    'mine' matches the OIDC email or preferred_username against created_by_email / evidence.triggered_by.
+//    Scope preference is persisted to localStorage ('darwin:workspaceScope').
 //    The project filter exists ONLY in Global mode (scope === 'all') and is reset to 'all' when toggling to My Tasks.
 //    Project is derived from evidence.project, then gitlab_context.project, github_context.repo, kargo_context.project (trimmed).
 //    A selected project that leaves availableProjects falls back to 'all' (effectiveProject).
@@ -28,6 +29,7 @@ import WorkspaceTaskItem from './WorkspaceTaskItem';
 import type { ActiveEvent } from '../../api/types';
 
 const EMPTY_EVENTS: ActiveEvent[] = [];
+const SCOPE_STORAGE_KEY = 'darwin:workspaceScope';
 
 const createdMs = (evt: ActiveEvent): number => {
   const t = Date.parse(evt.created);
@@ -83,8 +85,27 @@ export default function WorkspaceSessionsHub({
   const profileUsername = asTrimmed(user?.profile?.preferred_username).toLowerCase();
 
   // Scoping and filter state
-  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const [scope, setScope] = useState<'mine' | 'all'>(() => {
+    try {
+      const stored = localStorage.getItem(SCOPE_STORAGE_KEY);
+      return stored === 'all' || stored === 'mine' ? stored : 'mine';
+    } catch {
+      return 'mine';
+    }
+  });
   const [selectedProject, setSelectedProject] = useState<string>('all');
+
+  const handleScopeChange = (nextScope: 'mine' | 'all') => {
+    setScope(nextScope);
+    if (nextScope === 'mine') {
+      setSelectedProject('all');
+    }
+    try {
+      localStorage.setItem(SCOPE_STORAGE_KEY, nextScope);
+    } catch {
+      // Storage unavailable or quota exceeded
+    }
+  };
 
   // Accordion open/close state
   const [waitingApprovalOpen, setWaitingApprovalOpen] = useState(true);
@@ -231,10 +252,7 @@ export default function WorkspaceSessionsHub({
       <div className="p-2 border-b border-border/60 bg-bg-tertiary/20 flex flex-col gap-2">
         <div className="grid grid-cols-2 p-0.5 rounded-md bg-bg-tertiary/60 border border-border/40 text-xs">
           <button
-            onClick={() => {
-              setScope('mine');
-              setSelectedProject('all');
-            }}
+            onClick={() => handleScopeChange('mine')}
             className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded font-medium transition-colors ${
               scope === 'mine'
                 ? 'bg-bg-primary text-text-primary shadow-xs'
@@ -246,7 +264,7 @@ export default function WorkspaceSessionsHub({
             <span>My Tasks</span>
           </button>
           <button
-            onClick={() => setScope('all')}
+            onClick={() => handleScopeChange('all')}
             className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded font-medium transition-colors ${
               scope === 'all'
                 ? 'bg-bg-primary text-text-primary shadow-xs'
