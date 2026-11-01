@@ -20,6 +20,7 @@ import CiContextCard from '../CiContextCard';
 import { extractDiffsFromConversation } from './diffParser';
 import { STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colors';
 import { formatTokenCount } from '../../utils/formatTokens';
+import CopyButton from './CopyButton';
 import type { ConversationTurn, TokenUsageDict, EventEvidence, CiContext } from '../../api/types';
 
 interface WorkspaceInspectorProps {
@@ -108,7 +109,7 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   if (!isOpen) return null;
 
   return (
-    <aside ref={panelRef} className="flex-shrink-0 bg-bg-secondary border-l border-border h-full flex flex-col relative select-none" style={{ width }}>
+    <aside ref={panelRef} className="flex-shrink-0 bg-bg-secondary border-l border-border h-full flex flex-col relative" style={{ width }}>
       <div className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize group" onMouseDown={startResize}>
         <div className={`w-px h-full mx-auto transition-colors ${isResizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent/40'}`} />
       </div>
@@ -176,13 +177,13 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span
-                className="px-1.5 py-0.2 rounded text-[10px] font-medium"
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium"
                 style={{ background: statusColor.bg, color: statusColor.text }}
               >
                 {eventDoc.status}
               </span>
               <span
-                className="px-1.5 py-0.2 rounded text-[10px] uppercase font-mono font-bold tracking-wider"
+                className="px-1.5 py-0.5 rounded text-[10px] uppercase font-mono font-bold tracking-wider"
                 style={{ background: `${domainColor.text}18`, color: domainColor.text, border: `1px solid ${domainColor.border}50` }}
               >
                 {brainDomain}
@@ -192,6 +193,10 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
 
           {isOverviewOpen && (
             <div className="px-3 pb-2.5 pt-1 space-y-2 text-[11px]">
+              <div className="flex items-center justify-between gap-1 text-text-muted">
+                <span className="truncate font-mono" title={eventDoc.id}>{eventDoc.id}</span>
+                <CopyButton text={eventDoc.id} label="Copy Event ID" iconSize={12} />
+              </div>
               <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-text-muted">
                 {eventDoc.source && (
                   <div className="flex items-center gap-1 truncate">

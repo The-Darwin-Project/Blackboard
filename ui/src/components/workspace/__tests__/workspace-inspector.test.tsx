@@ -206,6 +206,7 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     expect(screen.getByText('dhansis@redhat.com')).toBeInTheDocument();
     expect(screen.getByText('12.5K')).toBeInTheDocument(); // token formatting
     expect(screen.getByText('4 calls')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy Event ID' })).toBeInTheDocument();
 
     // Verify Plan tab fallback renders friendly message instead of returning null
     expect(screen.getByText('No execution plan for this session')).toBeInTheDocument();
@@ -354,5 +355,12 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(segment).toBeDefined();
       expect(segment!.style.background).toBe(rgb('#38bdf8'));
     });
+  });
+
+  it('does not apply select-none on the inspector <aside>, keeping text selectable', () => {
+    const { container } = renderComponent();
+    const aside = container.querySelector('aside');
+    expect(aside).not.toBeNull();
+    expect(aside!.className).not.toContain('select-none');
   });
 });

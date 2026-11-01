@@ -85,6 +85,7 @@ describe('WorkspaceCenterStage (T-5, T-6)', () => {
     expect(feed).toBeInTheDocument();
     expect(feed.getAttribute('data-event-id')).toBe('evt-123');
     expect(screen.getByText(/Feed for evt-123/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy Event ID' })).toBeInTheDocument();
   });
 
   it('T-5 cold-boot submission: triggers createChatEvent REST endpoint and calls onSelectEvent', async () => {

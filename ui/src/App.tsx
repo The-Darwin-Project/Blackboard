@@ -65,12 +65,12 @@ const queryClient = new QueryClient({
   },
 });
 
-// Keyed by pathname so navigating to another session (or back) resets a tripped boundary
+// Reset boundary on navigation without unmounting the layout when healthy
 function WorkspaceRoute() {
   const { pathname } = useLocation();
   return (
     <ErrorBoundary
-      key={pathname}
+      resetKey={pathname}
       fallback={
         <div className="h-screen bg-bg-primary flex flex-col items-center justify-center gap-3 text-sm">
           <span className="text-rose-400">Agent Workspace encountered an error. Try refreshing or returning to the Ops Center.</span>

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceTaskItem from '../WorkspaceTaskItem';
 import type { ActiveEvent, EventEvidence } from '../../../api/types';
@@ -26,7 +26,25 @@ const makeEvent = (over: Partial<Omit<ActiveEvent, 'evidence'>> & { evidence?: P
 const renderItem = (evt: ActiveEvent, onSelect = vi.fn()) =>
   render(<WorkspaceTaskItem evt={evt} isSelected={false} onSelect={onSelect} />);
 
-describe('WorkspaceTaskItem domain badge', () => {
+describe('WorkspaceTaskItem', () => {
+  let writeTextMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    writeTextMock = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  describe('domain badge', () => {
   it('prefers brain_domain over the source-assessed domain', () => {
     renderItem(makeEvent({ evidence: { brain_domain: 'complex', domain: 'disorder' } }));
     expect(screen.getByText('complex')).toBeInTheDocument();
@@ -145,23 +163,74 @@ describe('WorkspaceTaskItem operational visibility parity', () => {
   it('does not re-fire onSelect for auto-repeated keydown events', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    fireEvent.keyDown(screen.getByRole('button'), { key: 'Enter', repeat: true });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: 'Enter', repeat: true });
     expect(onSelect).not.toHaveBeenCalled();
   });
 
   it('supports Enter key press for accessibility on div role="button"', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    const item = screen.getByRole('button');
-    fireEvent.keyDown(item, { key: 'Enter', code: 'Enter' });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: 'Enter', code: 'Enter' });
     expect(onSelect).toHaveBeenCalledWith('evt-1');
   });
 
   it('supports Space key press for accessibility on div role="button"', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    const item = screen.getByRole('button');
-    fireEvent.keyDown(item, { key: ' ', code: 'Space' });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: ' ', code: 'Space' });
     expect(onSelect).toHaveBeenCalledWith('evt-1');
   });
+
+  it('renders CopyButton with accessible aria-label="Copy Event ID (evt-copy-test)"', () => {
+    renderItem(makeEvent({ id: 'evt-copy-test' }));
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    expect(copyBtn).toBeInTheDocument();
+  });
+
+  it('clicking CopyButton copies event ID without triggering card onSelect', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.click(copyBtn);
+    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Enter on the nested CopyButton does not trigger the row onSelect (e.target !== e.currentTarget guard)', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.keyDown(copyBtn, { key: 'Enter', code: 'Enter' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Space on the nested CopyButton does not trigger the row onSelect (e.target !== e.currentTarget guard)', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.keyDown(copyBtn, { key: ' ', code: 'Space' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Enter/Space on the row itself still selects it', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const row = screen.getByTitle('evt-copy-test');
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onSelect).toHaveBeenCalledWith('evt-copy-test');
+  });
+
+  it('reveals the copy affordance on hover/focus-within via group utilities and has no redundant focus-within utilities', () => {
+    renderItem(makeEvent({ id: 'evt-copy-test' }));
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    expect(copyBtn.className).toContain('group-hover:opacity-100');
+    expect(copyBtn.className).toContain('group-focus-within:opacity-100');
+    expect(copyBtn.className).not.toMatch(/(^|\s)focus-within:/);
+  });
+});
 });
