@@ -58,8 +58,10 @@ class TestHelmRedisDecomposition:
         c = containers[0]
         assert c["name"] == "redis"
         assert c["ports"][0]["containerPort"] == 6379
-        assert "tcpSocket" in c["readinessProbe"]
-        assert c["readinessProbe"]["tcpSocket"]["port"] == 6379
+        assert "tcpSocket" in c["livenessProbe"]
+        assert c["livenessProbe"]["tcpSocket"]["port"] == 6379
+        assert "exec" in c["readinessProbe"]
+        assert "redis-cli" in " ".join(c["readinessProbe"]["exec"]["command"])
 
     def test_standalone_redis_service_exists(self, manifests):
         """T-3: Standalone Redis Service must expose port 6379 as ClusterIP."""

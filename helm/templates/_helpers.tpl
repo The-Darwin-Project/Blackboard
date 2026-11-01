@@ -84,7 +84,7 @@ app.kubernetes.io/component: slack-access-gate
 
 {{/*
 Redis standalone component labels.
-Used on: Deployment, Service, ConfigMap, NetworkPolicy, PDB.
+Used on: Deployment, Service, NetworkPolicy, PDB.
 */}}
 {{- define "darwin.redisLabels" -}}
 app: darwin-redis

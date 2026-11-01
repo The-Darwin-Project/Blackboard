@@ -1,7 +1,7 @@
 # BlackBoard/helm/templates/redis-deployment.yaml
 # @ai-rules:
 # 1. [Constraint]: Standalone Redis deployment for Darwin state store (PR 1 / VMER-2101).
-# 2. [Pattern]: Strategy Recreate protects RWO PVC from multi-attach lockup.
+# 2. [Pattern]: Strategy Recreate protects PVC data directory from concurrent write corruption and prevents dual-pod split-brain.
 # 3. [Gotcha]: automountServiceAccountToken: false hardens against pod compromise.
 {{- if .Values.redis.enabled }}
 apiVersion: apps/v1
@@ -62,8 +62,11 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            tcpSocket:
-              port: {{ .Values.redis.port | default 6379 }}
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -h 127.0.0.1 -p {{ .Values.redis.port | default 6379 }} ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} ping | grep -q PONG
             initialDelaySeconds: 2
             periodSeconds: 5
           {{- if .Values.redis.persistence.enabled }}

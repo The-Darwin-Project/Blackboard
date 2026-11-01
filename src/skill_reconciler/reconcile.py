@@ -39,9 +39,9 @@ logger = logging.getLogger("skill_reconciler")
 
 from src.skill_reconciler.constants import (
     REDIS_KEY_CORPUS, REDIS_KEY_PHASE_CONFIG, REDIS_KEY_SYNC_STATE, REDIS_KEY_VERSION,
+    sanitize_redis_port,
 )
 from src.skill_reconciler.generate_map import CORPUS_KEY as _GENERATED_MAP_KEY, generate_phase_tool_map
-from src.state.redis_client import sanitize_redis_port
 
 POLL_INTERVAL = int(os.getenv("SKILL_RECONCILER_POLL_INTERVAL", "60"))
 GIT_PROVIDER = os.getenv("SKILL_RECONCILER_GIT_PROVIDER", "github")

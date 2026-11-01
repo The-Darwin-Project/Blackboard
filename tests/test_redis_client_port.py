@@ -41,3 +41,14 @@ class TestRedisClientPortSanitization:
         from src.skill_reconciler.reconcile import _build_redis_client
         client = _build_redis_client()
         assert client.connection_pool.connection_kwargs["port"] == 6379
+
+    def test_sanitize_redis_port_validation_range(self):
+        """Given out-of-range port numbers (<=0 or >65535), raises ValueError."""
+        with pytest.raises(ValueError, match="between 1 and 65535"):
+            sanitize_redis_port(0)
+        with pytest.raises(ValueError, match="between 1 and 65535"):
+            sanitize_redis_port(-1)
+        with pytest.raises(ValueError, match="between 1 and 65535"):
+            sanitize_redis_port(65536)
+        with pytest.raises(ValueError, match="not a valid integer"):
+            sanitize_redis_port("not-a-port")

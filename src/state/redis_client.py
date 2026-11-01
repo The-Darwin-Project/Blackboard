@@ -27,25 +27,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global client instance (singleton)
+from src.skill_reconciler.constants import sanitize_redis_port
+
 _redis_client: Optional["Redis"] = None
 
-
-def sanitize_redis_port(port: Union[int, str]) -> int:
-    """
-    Sanitize Redis port value, stripping any protocol/host prefix.
-    
-    Handles both integer port strings ('6379') and Kubernetes service link
-    injections ('tcp://10.96.0.1:6379') without raising ValueError.
-    """
-    if isinstance(port, int):
-        return port
-    port_str = str(port).strip()
-    if "://" in port_str:
-        port_str = port_str.split(":")[-1]
-    return int(port_str)
-
-# Retry configuration
-REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "10"))
+# Retry configuration -- 30 attempts x 2s = 60s window for standalone Redis deployment startup
+REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "30"))
 REDIS_RETRY_DELAY = float(os.getenv("REDIS_RETRY_DELAY", "2.0"))
 
 
