@@ -15,6 +15,7 @@
 
 const WebSocket = require('ws');
 const os = require('os');
+const fs = require('fs');
 const { executeCLIStreaming, prepareResultsDir, is429Error } = require('./cli-executor');
 const {
   hasGitHubCredentials, discoverAndGenerateTokens, setupGitCredentials, setupGitHubTooling,
@@ -55,7 +56,9 @@ function sendMsg(ws, taskId, data) {
 }
 
 function startWSClient(brainUrl) {
-  const agentId = EPHEMERAL ? `oncall-${os.hostname()}` : `${AGENT_ROLE}-${os.hostname()}`;
+  const agentId = EPHEMERAL
+    ? (AGENT_ROLE ? `${AGENT_ROLE}-${os.hostname()}` : `oncall-${os.hostname()}`)
+    : `${AGENT_ROLE}-${os.hostname()}`;
   let backoff = BACKOFF_MIN;
   let reconnectTimer = null;
   let _idleTimer = null;
@@ -65,6 +68,7 @@ function startWSClient(brainUrl) {
     if (_idleTimer) clearTimeout(_idleTimer);
     _idleTimer = setTimeout(() => {
       console.log(`[${new Date().toISOString()}] Idle timeout (${IDLE_TIMEOUT_MS}ms) -- ephemeral agent exiting`);
+      try { fs.writeFileSync('/data/workspace/.terminate', ''); } catch {}
       if (_activeWs) try { _activeWs.close(); } catch {}
       process.exit(0);
     }, IDLE_TIMEOUT_MS);
@@ -102,6 +106,7 @@ function startWSClient(brainUrl) {
       else if (msg.type === 'terminate') {
         console.log(`[${new Date().toISOString()}] Terminate received for ${msg.event_id || 'unknown'}`);
         cleanupActiveTask();
+        try { fs.writeFileSync('/data/workspace/.terminate', ''); } catch {}
         if (_activeWs) try { _activeWs.close(); } catch {}
         process.exit(0);
       }

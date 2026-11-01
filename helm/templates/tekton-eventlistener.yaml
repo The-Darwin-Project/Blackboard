@@ -20,6 +20,9 @@ spec:
     - name: installation_id
       description: GitHub App installation ID (empty for non-GitHub events)
       default: ""
+    - name: role
+      description: Optional initial role for the agent (empty for shapeshifter on-call)
+      default: ""
     - name: model
       description: Per-role model override from Brain (falls back to the Helm default when omitted)
       default: {{ .Values.ephemeralAgents.model | quote }}
@@ -41,7 +44,7 @@ spec:
           darwin.io/icon: "🎧"
           darwin.io/event-id: $(tt.params.event_id)
       spec:
-        serviceAccountName: {{ .Release.Name }}-brain
+        serviceAccountName: {{ .Release.Name }}-agent
         timeout: {{ .Values.ephemeralAgents.taskRunTimeout | quote }}
         {{- if .Values.ephemeralAgents.excludeNodes }}
         podTemplate:
@@ -61,9 +64,16 @@ spec:
           steps:
             - name: agent
               image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
               env:
                 - name: AGENT_ROLE
-                  value: ""
+                  value: $(tt.params.role)
+                - name: DEFAULT_WORK_DIR
+                  value: "/data/workspace"
                 - name: EVENT_ID
                   value: $(tt.params.event_id)
                 - name: GITHUB_INSTALLATION_ID
@@ -125,7 +135,7 @@ spec:
                 - name: KARGO_INSECURE
                   value: "true"
                 {{- end }}
-                {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                {{- if ($.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
                 - name: JENKINS_URL
                   value: "{{ .Values.jenkinsObserver.jenkins.url }}"
                 - name: JENKINS_INSECURE_TLS
@@ -253,6 +263,286 @@ spec:
                 name: {{ $.Release.Name }}-remote-clusters
             {{- end }}
 ---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: {{ .Release.Name }}-squad-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
+    app.kubernetes.io/name: darwin-brain
+spec:
+  params:
+    - name: event_id
+      description: Darwin event ID this squad is bound to
+    - name: installation_id
+      description: GitHub App installation ID (empty for non-GitHub events)
+      default: ""
+    - name: model
+      description: Per-role model override from Brain
+      default: {{ .Values.ephemeralAgents.model | quote }}
+    - name: cli
+      description: Per-role CLI binary override (claude or agy)
+      default: {{ .Values.ephemeralAgents.cli | quote }}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: TaskRun
+      metadata:
+        generateName: darwin-squad-$(tt.params.event_id)-
+        namespace: {{ .Release.Namespace }}
+        labels:
+          {{- include "darwin.ephemeralLabels" . | nindent 10 }}
+          darwin.io/event-id: $(tt.params.event_id)
+          darwin.io/roster: squad
+        annotations:
+          darwin.io/monitored: "true"
+          darwin.io/service-name: "squad-agent"
+          darwin.io/icon: "👥"
+          darwin.io/event-id: $(tt.params.event_id)
+      spec:
+        serviceAccountName: {{ .Release.Name }}-agent
+        timeout: {{ (.Values.ephemeralAgents.squad.taskRunTimeout | default .Values.ephemeralAgents.taskRunTimeout) | quote }}
+        {{- if .Values.ephemeralAgents.excludeNodes }}
+        podTemplate:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          {{- range .Values.ephemeralAgents.excludeNodes }}
+                          - {{ . | quote }}
+                          {{- end }}
+        {{- end }}
+        taskSpec:
+          sidecars:
+            {{- range $role := list "architect" "developer" "sysadmin" "qe" }}
+            - name: {{ $role }}
+              image: "{{ $.Values.sidecars.image.repository }}:{{ $.Values.sidecars.image.tag }}"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              env:
+                - name: AGENT_ROLE
+                  value: {{ $role | quote }}
+                - name: DEFAULT_WORK_DIR
+                  value: "/data/workspace"
+                - name: EVENT_ID
+                  value: $(tt.params.event_id)
+                - name: GITHUB_INSTALLATION_ID
+                  value: $(tt.params.installation_id)
+                - name: BRAIN_WS_URL
+                  value: "ws://{{ $.Release.Name }}-brain:8000{{ $.Values.app.agentWsPath }}"
+                - name: BRAIN_HTTP_URL
+                  value: "http://{{ $.Release.Name }}-brain:8000"
+                - name: AGENT_CLI
+                  value: $(tt.params.cli)
+                - name: AGENT_MODEL
+                  value: {{ index $.Values.ephemeralAgents.roleModels $role | default $.Values.ephemeralAgents.model | quote }}
+                - name: AGENT_PERMISSION_MODE
+                  value: {{ $.Values.ephemeralAgents.permissionMode | quote }}
+                - name: IDLE_TIMEOUT_MS
+                  value: {{ ($.Values.ephemeralAgents.squad.idleTimeoutMs | default $.Values.ephemeralAgents.idleTimeoutMs) | quote }}
+                - name: GOOGLE_CLOUD_PROJECT
+                  value: {{ $.Values.gcp.project | quote }}
+                - name: GOOGLE_CLOUD_LOCATION
+                  value: {{ $.Values.gcp.location | quote }}
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  value: "/var/secrets/google/agent-service-account.json"
+                - name: GOOGLE_GENAI_USE_VERTEXAI
+                  value: "true"
+                - name: CLAUDE_CODE_USE_VERTEX
+                  value: "1"
+                - name: ANTHROPIC_VERTEX_PROJECT_ID
+                  value: {{ $.Values.gcp.project | quote }}
+                - name: CLOUD_ML_REGION
+                  value: {{ $.Values.gcp.location | quote }}
+                - name: ANTHROPIC_MODEL
+                  value: {{ index $.Values.ephemeralAgents.roleModels $role | default $.Values.ephemeralAgents.model | quote }}
+                {{- if index $.Values.ephemeralAgents.roleEffort $role }}
+                - name: AGENT_EFFORT_LEVEL
+                  value: {{ index $.Values.ephemeralAgents.roleEffort $role | quote }}
+                {{- else if $.Values.ephemeralAgents.effortLevel }}
+                - name: AGENT_EFFORT_LEVEL
+                  value: {{ $.Values.ephemeralAgents.effortLevel | quote }}
+                {{- end }}
+                - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+                  value: "1"
+                {{- if $.Values.gitlab.enabled }}
+                - name: GITLAB_TOKEN_PATH
+                  value: "/secrets/gitlab/token"
+                - name: GITLAB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.gitlab.existingSecret | default (printf "%s-gitlab" $.Release.Name) }}
+                      key: host
+                {{- end }}
+                {{- if $.Values.argocd.enabled }}
+                - name: ARGOCD_SERVER
+                  value: {{ $.Values.argocd.server | quote }}
+                - name: ARGOCD_INSECURE
+                  value: "true"
+                {{- end }}
+                {{- if $.Values.kargo.enabled }}
+                - name: KARGO_SERVER
+                  value: {{ $.Values.kargo.server | quote }}
+                - name: KARGO_INSECURE
+                  value: "true"
+                {{- end }}
+                {{- if ($.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                - name: JENKINS_URL
+                  value: "{{ $.Values.jenkinsObserver.jenkins.url }}"
+                - name: JENKINS_INSECURE_TLS
+                  value: "{{ $.Values.jenkinsObserver.jenkins.insecureTls }}"
+                {{- end }}
+                {{- include "darwin.skillsCatalogEnv" $ | nindent 16 }}
+              computeResources:
+                requests:
+                  memory: {{ $.Values.ephemeralAgents.squad.resources.requests.memory | default $.Values.sidecars.resources.requests.memory | default "256Mi" | quote }}
+                  cpu: {{ $.Values.ephemeralAgents.squad.resources.requests.cpu | default $.Values.sidecars.resources.requests.cpu | default "100m" | quote }}
+                limits:
+                  memory: {{ $.Values.ephemeralAgents.squad.resources.limits.memory | default $.Values.sidecars.resources.limits.memory | default "6Gi" | quote }}
+                  cpu: {{ $.Values.ephemeralAgents.squad.resources.limits.cpu | default $.Values.sidecars.resources.limits.cpu | default "6" | quote }}
+              volumeMounts:
+                {{- if or $.Values.gcp.agentExistingSecret $.Values.gcp.existingSecret }}
+                - name: gcp-sa-key
+                  mountPath: /var/secrets/google
+                  readOnly: true
+                {{- end }}
+                {{- if $.Values.gitlab.enabled }}
+                - name: gitlab-token
+                  mountPath: /secrets/gitlab
+                  readOnly: true
+                {{- end }}
+                {{- if $.Values.argocd.enabled }}
+                - name: argocd-secret
+                  mountPath: /secrets/argocd
+                  readOnly: true
+                {{- end }}
+                {{- if $.Values.kargo.enabled }}
+                - name: kargo-secret
+                  mountPath: /secrets/kargo
+                  readOnly: true
+                {{- end }}
+                {{- if $.Values.registry.enabled }}
+                - name: registry-secret
+                  mountPath: /secrets/registry
+                  readOnly: true
+                {{- end }}
+                {{- if ($.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                - name: jenkins-secret
+                  mountPath: /secrets/jenkins
+                  readOnly: true
+                {{- end }}
+                {{- if ($.Values.github.existingSecret | trim) }}
+                - name: github-app-secret
+                  mountPath: /secrets/github
+                  readOnly: true
+                {{- end }}
+                {{- range $name, $cluster := $.Values.remoteClusters }}
+                {{- if $cluster.enabled }}
+                - name: remote-cluster-{{ $name }}
+                  mountPath: /secrets/remote-clusters/{{ $name }}
+                  readOnly: true
+                {{- end }}
+                {{- end }}
+                {{- if $.Values.remoteClusters }}
+                - name: remote-clusters-meta
+                  mountPath: /config/remote-clusters
+                  readOnly: true
+                {{- end }}
+                - name: gemini-rules
+                  mountPath: /tmp/agent-rules
+                  readOnly: true
+                - name: workspace
+                  mountPath: /data/workspace
+            {{- end }}
+          steps:
+            - name: squad-keeper
+              image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              computeResources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "100m"
+              volumeMounts:
+                - name: workspace
+                  mountPath: /data/workspace
+              script: |
+                #!/bin/sh
+                echo "Squad keeper running for $(tt.params.event_id)"
+                while [ ! -f /data/workspace/.terminate ]; do
+                  sleep 2
+                done
+                echo "Squad keeper observed termination sentinel, exiting."
+          volumes:
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              secret:
+                secretName: {{ .Values.gcp.agentExistingSecret | default .Values.gcp.existingSecret }}
+            {{- end }}
+            {{- if .Values.gitlab.enabled }}
+            - name: gitlab-token
+              secret:
+                secretName: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+            {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: argocd-secret
+              secret:
+                secretName: {{ .Values.argocd.existingSecret | default (printf "%s-argocd" .Release.Name) }}
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: kargo-secret
+              secret:
+                secretName: {{ .Values.kargo.existingSecret | default (printf "%s-kargo" .Release.Name) }}
+            {{- end }}
+            {{- if (.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+            - name: jenkins-secret
+              secret:
+                secretName: {{ .Values.jenkinsObserver.jenkins.existingSecret | trim | quote }}
+            {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              secret:
+                secretName: {{ .Values.registry.existingSecret | default (printf "%s-registry" .Release.Name) }}
+            {{- end }}
+            {{- if (.Values.github.existingSecret | trim) }}
+            - name: github-app-secret
+              secret:
+                secretName: {{ .Values.github.existingSecret | quote }}
+            {{- end }}
+            - name: gemini-rules
+              configMap:
+                name: {{ .Release.Name }}-gemini-rules
+            - name: workspace
+              emptyDir: {}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              secret:
+                secretName: {{ $cluster.existingSecret }}
+                items:
+                  - key: {{ $cluster.secretKey | default "kubeconfig" }}
+                    path: kubeconfig
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              configMap:
+                name: {{ $.Release.Name }}-remote-clusters
+            {{- end }}
+---
 # Prune TriggerTemplate -- deletes stuck TaskRuns by event_id label.
 # Triggered by POST {"event_id": "evt-xxx", "action": "cancel"}.
 apiVersion: triggers.tekton.dev/v1beta1
@@ -320,6 +610,8 @@ spec:
       value: $(body.event_id)
     - name: installation_id
       value: $(body.installation_id)
+    - name: role
+      value: $(body.role)
     - name: model
       value: $(body.model)
     - name: cli
@@ -348,13 +640,24 @@ spec:
               darwin.io/gitops-repo: "The-Darwin-Project/BlackBoard"
               darwin.io/config-path: "helm/templates/tekton-eventlistener.yaml"
   triggers:
+    - name: spawn-squad-agent
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn') && has(body.roster) && body.roster == 'squad' && (!has(body.installation_id) || body.installation_id == '' || body.installation_id.matches('^[0-9]+$'))"
+      bindings:
+        - ref: {{ .Release.Name }}-ephemeral-agent
+      template:
+        ref: {{ .Release.Name }}-squad-agent
     - name: spawn-ephemeral-agent
       interceptors:
         - ref:
             name: "cel"
           params:
             - name: "filter"
-              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn') && (!has(body.installation_id) || body.installation_id == '' || body.installation_id.matches('^[0-9]+$'))"
+              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn') && (!has(body.roster) || body.roster == 'single') && (!has(body.installation_id) || body.installation_id == '' || body.installation_id.matches('^[0-9]+$'))"
       bindings:
         - ref: {{ .Release.Name }}-ephemeral-agent
       template:

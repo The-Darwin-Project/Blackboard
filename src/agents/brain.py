@@ -909,6 +909,24 @@ _ROLE_CLI_MAP = {
     "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "claude"),
 }
 
+_USER_FACING_SOURCES: frozenset[str] = frozenset({"chat", "slack", "workspace", "agent_workspace"})
+_SQUAD_ROSTER_ROLES: frozenset[str] = frozenset({"architect", "developer", "sysadmin", "qe"})
+
+
+def _select_dispatch_tier(source: str, role: str) -> str:
+    """Select ephemeral dispatch tier: 'squad' (4-agent team) vs 'single' (shapeshifter/specialist).
+
+    User-facing events (chat, slack, workspace) get the full 4-agent squad for core roles,
+    ensuring workload separation and capacity. Specialized roles (code_reviewer,
+    security_analyst, explorer) and sensor events (aligner, headhunter, timekeeper)
+    dispatch as single-agent pods.
+    """
+    if source.lower() in _USER_FACING_SOURCES:
+        if role.lower() in _SQUAD_ROSTER_ROLES:
+            return "squad"
+        return "single"
+    return "single"
+
 
 class Brain:
     """
@@ -4350,13 +4368,14 @@ class Brain:
                     if agent_name in self.EPHEMERAL_ONLY_ROLES and self._ephemeral_provisioner:
                         use_ephemeral = True
 
-                    # Tier 1: Primary ephemeral sources (never fall back to local)
+                    # Tier 1: User-facing events or primary sensor ephemeral sources
                     if not use_ephemeral:
                         use_ephemeral = (
-                            self._ephemeral_provisioner
-                            and event_doc
+                            bool(self._ephemeral_provisioner)
+                            and event_doc is not None
                             and (
-                                event_doc.source in ("headhunter", "timekeeper")
+                                event_doc.source in _USER_FACING_SOURCES
+                                or event_doc.source in ("headhunter", "timekeeper", "aligner", "jarvis")
                                 or getattr(event_doc, "subject_type", "service") == "kargo_stage"
                             )
                         )
@@ -4406,11 +4425,15 @@ class Brain:
                         _ctx = (getattr(evidence, "github_context", None)
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
+                        _source = (getattr(event_doc, "source", "") or "") if event_doc else ""
+                        _roster = _select_dispatch_tier(_source, agent_name)
                         try:
                             provision_result = await self._ephemeral_provisioner.ensure_agent(
                                 event_id, _install_id,
                                 model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5-5"),
                                 cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
+                                role=agent_name,
+                                roster=_roster,
                             )
                         except Exception as e:
                             logger.exception("ensure_agent raised exception for %s: %s", event_id, e)
@@ -5459,13 +5482,21 @@ class Brain:
             logger.warning(f"No volume path for agent: {agent_name}")
             return
 
-        events_dir = Path(base_path) / "events"
-        events_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            events_dir = Path(base_path) / "events"
+            events_dir.mkdir(parents=True, exist_ok=True)
 
-        file_path = events_dir / f"event-{event_id}.md"
-        content = self._event_to_markdown(event, service_meta, mermaid)
-        file_path.write_text(content)
-        logger.debug(f"Wrote event MD to {file_path}")
+            file_path = events_dir / f"event-{event_id}.md"
+            content = self._event_to_markdown(event, service_meta, mermaid)
+            file_path.write_text(content)
+            logger.debug(f"Wrote event MD to {file_path}")
+        except OSError as e:
+            logger.warning(
+                "Failed to write event document %s to volume %s: %s",
+                event_id,
+                base_path,
+                e,
+            )
 
     @staticmethod
     def _parse_plan_frontmatter(raw: str) -> tuple[str | None, list[dict] | None, dict]:
