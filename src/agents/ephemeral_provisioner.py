@@ -95,6 +95,10 @@ class EphemeralProvisioner:
         self._stall_timeout_sec = stall_timeout_sec
         self._pending: dict[str, asyncio.Event] = {}
         self._pending_registrations: dict[tuple[str, str | None], list[asyncio.Event]] = {}
+        # event_id -> monotonic time of the last darwin-squad-agent spawn POST. One squad
+        # pod serves every role for an event, so concurrent ensure_agent() calls for other
+        # roles must wait for it to register instead of POSTing duplicate spawns.
+        self._squad_spawn_started: dict[str, float] = {}
         self._infra_failures: dict[str, int] = {}
         self._dispatch_metrics = DispatchMetrics()
 
@@ -119,6 +123,40 @@ class EphemeralProvisioner:
     @property
     def dispatch_metrics(self) -> DispatchMetrics:
         return _dc_replace(self._dispatch_metrics)
+
+    def _squad_spawn_inflight(self, event_id: str) -> bool:
+        """True while a squad pod spawned for this event may still be starting up."""
+        started = self._squad_spawn_started.get(event_id)
+        if started is None:
+            return False
+        if time.monotonic() - started >= self._deadline_sec:
+            self._squad_spawn_started.pop(event_id, None)
+            return False
+        return True
+
+    async def _spawn(
+        self, event_id: str, installation_id: str, model: str, cli: str,
+        roster: str, role: str | None,
+    ) -> None:
+        """POST a spawn unless a squad pod for this event is already starting."""
+        if roster == "squad":
+            if self._squad_spawn_inflight(event_id):
+                logger.info(
+                    "Squad spawn already in flight for %s -- waiting for role %s instead of re-spawning",
+                    event_id, role,
+                )
+                return
+            self._squad_spawn_started[event_id] = time.monotonic()
+        try:
+            if roster or role:
+                await self._trigger_taskrun(
+                    event_id, installation_id, model, cli, roster, role or "",
+                )
+            else:
+                await self._trigger_taskrun(event_id, installation_id, model, cli)
+        except Exception:
+            self._squad_spawn_started.pop(event_id, None)
+            raise
 
     async def ensure_agent(
         self, event_id: str, installation_id: str = "", model: str = "",
@@ -180,12 +218,7 @@ class EphemeralProvisioner:
             return None
 
         try:
-            if roster or role:
-                await self._trigger_taskrun(
-                    event_id, installation_id, model, cli, roster, role or "",
-                )
-            else:
-                await self._trigger_taskrun(event_id, installation_id, model, cli)
+            await self._spawn(event_id, installation_id, model, cli, roster, role)
             agent = await self._wait_for_registration(
                 event_id, self._deadline_sec,
                 self._poll_interval_sec, self._stall_timeout_sec,
@@ -198,18 +231,14 @@ class EphemeralProvisioner:
                 "Ephemeral dispatch failed for %s (%d/%d): %s. Cleaning up and retrying.",
                 event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
+            self._squad_spawn_started.pop(event_id, None)
             await self._cancel_taskrun(event_id)
             if self._health_port:
                 self._health_port.clear_event(event_id)
             await asyncio.sleep(5)
 
             try:
-                if roster or role:
-                    await self._trigger_taskrun(
-                        event_id, installation_id, model, cli, roster, role or "",
-                    )
-                else:
-                    await self._trigger_taskrun(event_id, installation_id, model, cli)
+                await self._spawn(event_id, installation_id, model, cli, roster, role)
                 retry_deadline = max(60.0, self._deadline_sec / 2)
                 agent = await self._wait_for_registration(
                     event_id, retry_deadline,
@@ -225,6 +254,7 @@ class EphemeralProvisioner:
                     "Ephemeral retry also failed for %s (%d/%d): %s.",
                     event_id, failures + 1, MAX_INFRA_FAILURES, retry_exc or "handshake timeout",
                 )
+                self._squad_spawn_started.pop(event_id, None)
                 await self._cancel_taskrun(event_id)
                 if self._health_port:
                     self._health_port.clear_event(event_id)
@@ -263,10 +293,15 @@ class EphemeralProvisioner:
                 except Exception:
                     pass
 
-        try:
-            await self._cancel_taskrun(event_id)
-        except Exception as exc:
-            logger.warning("Cancel TaskRun fallback failed for %s: %s", event_id, exc)
+        # Only cancel when this event actually has (or is spawning) ephemeral pods;
+        # otherwise every event close would POST a no-op prune TaskRun.
+        had_spawn = bool(agents) or event_id in self._pending or event_id in self._squad_spawn_started
+        self._squad_spawn_started.pop(event_id, None)
+        if had_spawn:
+            try:
+                await self._cancel_taskrun(event_id)
+            except Exception as exc:
+                logger.warning("Cancel TaskRun fallback failed for %s: %s", event_id, exc)
 
         self._infra_failures.pop(event_id, None)
         if self._health_port:

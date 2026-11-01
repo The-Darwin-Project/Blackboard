@@ -405,7 +405,9 @@ def compute_dispatch_backpressure(conversation, active_event_count: int, thresho
     return active_event_count >= threshold
 
 
-# Volume mount paths (must match Helm deployment.yaml)
+# Volume mount paths for local sidecar dispatch. /data/gitops-<role> entries are legacy
+# (squad sidecars now run in ephemeral darwin-squad-agent pods); writes are skipped
+# when the volume is not mounted (see write_event_to_volume).
 VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
     "sysadmin": "/data/gitops-sysadmin",
@@ -4481,6 +4483,30 @@ class Brain:
                                     event_id, 30, "All agents busy (local full + ephemeral circuit breaker)",
                                 )
                                 return
+                            elif await registry.get_available(agent_name) is None:
+                                # Tier 1 (user-facing/sensor) circuit break with no local
+                                # sidecar for this role: squad sidecars were removed from the
+                                # Brain pod, so falling through would dispatch to nothing.
+                                self._ephemeral_provisioner.record_dispatch_circuit_break()
+                                logger.warning(
+                                    "Ephemeral circuit breaker for %s and no local sidecar for %s -- deferring",
+                                    event_id, agent_name,
+                                )
+                                cb_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="dispatcher",
+                                    action="paused",
+                                    thoughts="Dispatch circuit open after repeated failures and no local sidecar available. Deferred 30s.",
+                                )
+                                try:
+                                    await self._append_and_broadcast(event_id, cb_turn)
+                                    await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                                except Exception:
+                                    logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
+                                await self._defer_event_safely(
+                                    event_id, 30, "Ephemeral circuit breaker, no local sidecar",
+                                )
+                                return
                             else:
                                 self._ephemeral_provisioner.record_dispatch_sidecar_fallback()
                                 logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
@@ -5480,6 +5506,13 @@ class Brain:
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
             logger.warning(f"No volume path for agent: {agent_name}")
+            return
+
+        # Legacy /data/gitops-<role> mounts belonged to the in-pod squad sidecars that
+        # moved to ephemeral squad pods. Don't materialise them on the Brain's own
+        # filesystem when the volume is no longer mounted.
+        if base_path.startswith("/data/gitops-") and not Path(base_path).is_dir():
+            logger.debug("Volume %s not mounted for %s -- skipping event doc write", base_path, agent_name)
             return
 
         try:

@@ -90,3 +90,25 @@ class TestJenkinsMountsInTriggerTemplate:
         env_map = _env_map(agent)
         assert "JENKINS_URL" not in env_map
         assert "JENKINS_INSECURE_TLS" not in env_map
+
+
+def _squad_sidecars(docs, *args):
+    trigger = _get_doc(docs, "TriggerTemplate", "darwin-squad-agent")
+    return {c["name"]: c for c in trigger["spec"]["resourcetemplates"][0]["spec"]["taskSpec"]["sidecars"]}
+
+
+class TestSquadSidecarIsolation:
+    def test_squad_sidecars_have_distinct_ports(self):
+        sidecars = _squad_sidecars(_render_chart())
+        ports = {name: _env_map(c)["PORT"] for name, c in sidecars.items()}
+        assert ports == {"architect": "9091", "developer": "9093", "sysadmin": "9092", "qe": "9094"}
+
+    def test_squad_secrets_scoped_per_role(self):
+        sidecars = _squad_sidecars(_render_chart("--set", "jenkinsObserver.jenkins.existingSecret=test-secret"))
+        assert "/secrets/jenkins" in _mount_paths(sidecars["sysadmin"])
+        assert "/secrets/jenkins" in _mount_paths(sidecars["developer"])
+        assert "/secrets/jenkins" not in _mount_paths(sidecars["architect"])
+        assert "/secrets/jenkins" not in _mount_paths(sidecars["qe"])
+        for role in ("developer", "qe"):
+            assert "/secrets/argocd" not in _mount_paths(sidecars[role])
+            assert "/secrets/kargo" not in _mount_paths(sidecars[role])

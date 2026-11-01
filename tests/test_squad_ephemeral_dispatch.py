@@ -254,3 +254,69 @@ async def test_stale_eviction_busy_guard(registry: AgentRegistry):
     ws1.close.assert_not_awaited()
     ephemerals = await registry.get_ephemerals("evt-300")
     assert len(ephemerals) == 2
+
+
+@pytest.mark.asyncio
+async def test_shapeshifter_reregistration_dedups_by_event(registry: AgentRegistry):
+    """Single-agent (role="") pods still dedup per event_id: a stale idle one is evicted."""
+    ws1 = AsyncMock()
+    await registry.register(
+        agent_id="oncall-pod-1", role="", ws=ws1, capabilities=[], cli="claude",
+        model="claude-sonnet-5-5", ephemeral=True, event_id="evt-400",
+    )
+    ws2 = AsyncMock()
+    await registry.register(
+        agent_id="oncall-pod-2", role="", ws=ws2, capabilities=[], cli="claude",
+        model="claude-sonnet-5-5", ephemeral=True, event_id="evt-400",
+    )
+    ws1.close.assert_awaited_once()
+    ephemerals = await registry.get_ephemerals("evt-400")
+    assert [c.agent_id for c in ephemerals] == ["oncall-pod-2"]
+
+
+@pytest.mark.asyncio
+async def test_squad_spawn_inflight_guard_no_duplicate_post(registry: AgentRegistry):
+    """Concurrent squad ensure_agent() calls for one event POST exactly one spawn."""
+    import asyncio
+
+    provisioner = EphemeralProvisioner(
+        registry=registry, event_listener_url="http://el", deadline_sec=5, poll_interval_sec=0.05,
+    )
+    posts: list[dict] = []
+
+    async def fake_post(event_id, installation_id="", model="", cli="", roster="", role=""):
+        posts.append({"event_id": event_id, "roster": roster, "role": role})
+
+    async def register_squad():
+        await asyncio.sleep(0.2)
+        for role in ("developer", "qe"):
+            await registry.register(
+                agent_id=f"{role}-pod", role=role, ws=AsyncMock(), capabilities=[],
+                cli="claude", model="m", ephemeral=True, event_id="evt-500",
+            )
+            provisioner.on_ephemeral_registered("evt-500", role)
+
+    with patch.object(provisioner, "_trigger_taskrun", side_effect=fake_post):
+        dev, qe, _ = await asyncio.gather(
+            provisioner.ensure_agent("evt-500", role="developer", roster="squad"),
+            provisioner.ensure_agent("evt-500", role="qe", roster="squad"),
+            register_squad(),
+        )
+    assert len(posts) == 1
+    assert dev.role == "developer" and qe.role == "qe"
+
+
+@pytest.mark.asyncio
+async def test_terminate_agent_cancels_taskrun_only_when_spawned(registry: AgentRegistry):
+    """terminate_agent() skips the prune TaskRun for events that never spawned anything."""
+    provisioner = EphemeralProvisioner(registry=registry, event_listener_url="http://el")
+    with patch.object(provisioner, "_cancel_taskrun", new_callable=AsyncMock) as cancel:
+        await provisioner.terminate_agent("evt-600")
+        cancel.assert_not_awaited()
+
+        await registry.register(
+            agent_id="developer-pod", role="developer", ws=AsyncMock(), capabilities=[],
+            cli="claude", model="m", ephemeral=True, event_id="evt-601",
+        )
+        await provisioner.terminate_agent("evt-601")
+        cancel.assert_awaited_once_with("evt-601")

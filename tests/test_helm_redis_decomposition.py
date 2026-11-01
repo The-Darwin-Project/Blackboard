@@ -112,8 +112,8 @@ class TestHelmRedisDecomposition:
         ]
         assert len(brain_deps) == 1, "Expected test-release-brain Deployment"
         dep = brain_deps[0]
-        # In VMER-2103 (Phase 3) squad sidecars and CephFS PVC are pruned, enabling RollingUpdate
-        assert dep["spec"]["strategy"]["type"] in ("Recreate", "RollingUpdate")
+        # In PR 1 Brain strategy must remain Recreate
+        assert dep["spec"]["strategy"]["type"] == "Recreate"
         
         containers = dep["spec"]["template"]["spec"]["containers"]
         container_names = [c["name"] for c in containers]

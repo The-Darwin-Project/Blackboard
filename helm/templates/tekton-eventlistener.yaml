@@ -70,8 +70,11 @@ spec:
                   drop:
                     - ALL
               env:
+                # Always a shapeshifter: the role comes from each WS task msg. Pinning AGENT_ROLE
+                # to the dispatch role would register the pod under that role only and break reuse
+                # for other roles on the same event (the `role` param is informational).
                 - name: AGENT_ROLE
-                  value: $(tt.params.role)
+                  value: ""
                 - name: DEFAULT_WORK_DIR
                   value: "/data/workspace"
                 - name: EVENT_ID
@@ -329,6 +332,16 @@ spec:
               env:
                 - name: AGENT_ROLE
                   value: {{ $role | quote }}
+                # Squad sidecars share one pod network namespace: each needs its own port
+                - name: PORT
+                  value: {{ index $.Values.sidecars $role "port" | quote }}
+                {{- if eq $role "developer" }}
+                - name: PEER_SIDECAR_PORT
+                  value: {{ $.Values.sidecars.qe.port | quote }}
+                {{- else if eq $role "qe" }}
+                - name: PEER_SIDECAR_PORT
+                  value: {{ $.Values.sidecars.developer.port | quote }}
+                {{- end }}
                 - name: DEFAULT_WORK_DIR
                   value: "/data/workspace"
                 - name: EVENT_ID
@@ -381,19 +394,19 @@ spec:
                       name: {{ $.Values.gitlab.existingSecret | default (printf "%s-gitlab" $.Release.Name) }}
                       key: host
                 {{- end }}
-                {{- if $.Values.argocd.enabled }}
+                {{- if and $.Values.argocd.enabled (has $role (list "architect" "sysadmin")) }}
                 - name: ARGOCD_SERVER
                   value: {{ $.Values.argocd.server | quote }}
                 - name: ARGOCD_INSECURE
                   value: "true"
                 {{- end }}
-                {{- if $.Values.kargo.enabled }}
+                {{- if and $.Values.kargo.enabled (has $role (list "architect" "sysadmin")) }}
                 - name: KARGO_SERVER
                   value: {{ $.Values.kargo.server | quote }}
                 - name: KARGO_INSECURE
                   value: "true"
                 {{- end }}
-                {{- if ($.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                {{- if and ($.Values.jenkinsObserver.jenkins.existingSecret | trim) (has $role (list "sysadmin" "developer")) }}
                 - name: JENKINS_URL
                   value: "{{ $.Values.jenkinsObserver.jenkins.url }}"
                 - name: JENKINS_INSECURE_TLS
@@ -418,12 +431,12 @@ spec:
                   mountPath: /secrets/gitlab
                   readOnly: true
                 {{- end }}
-                {{- if $.Values.argocd.enabled }}
+                {{- if and $.Values.argocd.enabled (has $role (list "architect" "sysadmin")) }}
                 - name: argocd-secret
                   mountPath: /secrets/argocd
                   readOnly: true
                 {{- end }}
-                {{- if $.Values.kargo.enabled }}
+                {{- if and $.Values.kargo.enabled (has $role (list "architect" "sysadmin")) }}
                 - name: kargo-secret
                   mountPath: /secrets/kargo
                   readOnly: true
@@ -433,7 +446,7 @@ spec:
                   mountPath: /secrets/registry
                   readOnly: true
                 {{- end }}
-                {{- if ($.Values.jenkinsObserver.jenkins.existingSecret | trim) }}
+                {{- if and ($.Values.jenkinsObserver.jenkins.existingSecret | trim) (has $role (list "sysadmin" "developer")) }}
                 - name: jenkins-secret
                   mountPath: /secrets/jenkins
                   readOnly: true
@@ -482,10 +495,17 @@ spec:
               script: |
                 #!/bin/sh
                 echo "Squad keeper running for $(tt.params.event_id)"
+                # Exit when the event closes (.terminate) or every role has gone idle
+                # (.idle-<role>); one idle role must not tear down the others.
                 while [ ! -f /data/workspace/.terminate ]; do
+                  all_idle=1
+                  for r in {{ range $role := list "architect" "developer" "sysadmin" "qe" }}{{ $role }} {{ end }}; do
+                    [ -f "/data/workspace/.idle-$r" ] || all_idle=0
+                  done
+                  [ "$all_idle" = 1 ] && break
                   sleep 2
                 done
-                echo "Squad keeper observed termination sentinel, exiting."
+                echo "Squad keeper observed termination/idle sentinels, exiting."
           volumes:
             {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: gcp-sa-key

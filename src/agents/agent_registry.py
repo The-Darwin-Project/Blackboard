@@ -74,17 +74,20 @@ class AgentRegistry:
                     and aid.rsplit("-", 1)[0] == prefix
                     and aid != agent_id
                 ]
-            elif event_id is not None and role:
-                # Ephemeral dedup-by-(event_id, role): at most one ephemeral agent
-                # per role may be bound to a given event_id. Only evict if not busy,
-                # and only match explicit primary role (prevents None==None or empty-string
-                # mass eviction, and protects active squad agents dynamically assigned to another role).
+            elif event_id is not None:
+                # Ephemeral dedup-by-(event_id, primary role): at most one ephemeral
+                # agent per primary role may be bound to a given event_id. A cross-CLI
+                # terminate racing a fresh respawn (or a pod reconnect) must not leave
+                # two connections coexisting, or get_ephemeral()'s first-match scan could
+                # return the stale one. Squad sidecars have distinct primary roles, so
+                # they never evict each other; single-agent (shapeshifter, role "")
+                # pods still dedup by event as before. A busy agent is never evicted.
                 stale = [
                     aid for aid, conn in self._agents.items()
                     if conn.ephemeral
                     and conn.bound_event_id == event_id
                     and not conn.busy
-                    and conn.role == role
+                    and (conn.role or "") == (role or "")
                     and aid != agent_id
                 ]
             else:

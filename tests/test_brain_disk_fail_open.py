@@ -21,15 +21,24 @@ def mock_brain():
 
 
 @pytest.mark.asyncio
-async def test_write_event_to_volume_mkdir_oserror_fail_open(mock_brain):
+async def test_write_event_to_volume_mkdir_oserror_fail_open(mock_brain, tmp_path):
     """Verifies that OSError on mkdir (e.g. unmounted PVC) is logged and does not crash."""
-    with patch("pathlib.Path.mkdir", side_effect=OSError("Read-only file system / PVC unmounted")):
-        with patch("src.agents.brain.logger.warning") as mock_warning:
-            # Should not raise exception
-            await mock_brain.write_event_to_volume("evt-fail-100", "architect")
-            mock_warning.assert_called_once()
-            assert "Failed to write event document %s" in mock_warning.call_args[0][0]
-            assert mock_warning.call_args[0][1] == "evt-fail-100"
+    with patch.dict(VOLUME_PATHS, {"architect": str(tmp_path / "gitops-architect")}):
+        with patch("pathlib.Path.mkdir", side_effect=OSError("Read-only file system / PVC unmounted")):
+            with patch("src.agents.brain.logger.warning") as mock_warning:
+                # Should not raise exception
+                await mock_brain.write_event_to_volume("evt-fail-100", "architect")
+                mock_warning.assert_called_once()
+                assert "Failed to write event document %s" in mock_warning.call_args[0][0]
+                assert mock_warning.call_args[0][1] == "evt-fail-100"
+
+
+@pytest.mark.asyncio
+async def test_write_event_to_volume_skips_unmounted_legacy_gitops_path(mock_brain, tmp_path):
+    """Legacy /data/gitops-<role> paths are not created when the volume is not mounted."""
+    with patch("pathlib.Path.mkdir") as mock_mkdir:
+        await mock_brain.write_event_to_volume("evt-skip-400", "architect")
+        mock_mkdir.assert_not_called()
 
 
 @pytest.mark.asyncio

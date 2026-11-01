@@ -12,6 +12,7 @@
 // 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
 // 10. [Pattern]: Role-gated pre-warm: security_analyst downloads vuln DBs (trivy, grype) before CLI spawn. MUST use async exec (not execSync). Non-blocking on failure.
 // 11. [Gotcha]: Pong handler MUST fire before `await handleTask` -- ws library delivers messages sequentially. If pong is after the await, it's gated behind handleTask completion (pre-warm ~77s), causing Brain heartbeat timeout disconnect.
+// 12. [Pattern]: Squad idle/terminate sentinels: idle -> per-role /data/workspace/.idle-<role>; Brain `terminate` -> /data/workspace/.terminate (whole squad pod). squad-keeper (tekton-eventlistener.yaml) exits on .terminate or when all roles are idle.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -55,6 +56,16 @@ function sendMsg(ws, taskId, data) {
   wsSend(ws, { ...data, task_id: taskId });
 }
 
+// Squad pods run one sidecar per role next to a squad-keeper step that holds the TaskRun open.
+// An idle role drops only its own `.idle-<role>` marker (the keeper exits once every role is
+// idle); `.terminate` (event closed) tears the whole pod down. Single-agent pods
+// (AGENT_ROLE="") ARE the step, so exiting is enough and the marker is harmless.
+const SENTINEL_DIR = '/data/workspace';
+function signalIdleExit() {
+  const name = AGENT_ROLE ? `.idle-${AGENT_ROLE}` : '.terminate';
+  try { fs.writeFileSync(`${SENTINEL_DIR}/${name}`, ''); } catch {}
+}
+
 function startWSClient(brainUrl) {
   const agentId = EPHEMERAL
     ? (AGENT_ROLE ? `${AGENT_ROLE}-${os.hostname()}` : `oncall-${os.hostname()}`)
@@ -68,7 +79,7 @@ function startWSClient(brainUrl) {
     if (_idleTimer) clearTimeout(_idleTimer);
     _idleTimer = setTimeout(() => {
       console.log(`[${new Date().toISOString()}] Idle timeout (${IDLE_TIMEOUT_MS}ms) -- ephemeral agent exiting`);
-      try { fs.writeFileSync('/data/workspace/.terminate', ''); } catch {}
+      signalIdleExit();
       if (_activeWs) try { _activeWs.close(); } catch {}
       process.exit(0);
     }, IDLE_TIMEOUT_MS);
