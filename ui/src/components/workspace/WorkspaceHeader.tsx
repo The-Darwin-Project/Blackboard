@@ -2,6 +2,8 @@
 // @ai-rules:
 // 1. [Constraint]: Hooks only; selection comes from the selectedEventId prop with opsControl as fallback, and the header never mutates selection.
 // 2. [Pattern]: The Ops Center link is a router <Link> to '/', leaving the isolated workspace perspective.
+// 3. [Gotcha]: activeAgentCount dedups by agent_id || role across registered + ephemeral agents; keyless agents get a unique fallback key so they still count.
+// 4. [Gotcha]: CopyButton is keyed by the effective event id so the transient "Copied" state never leaks across selection changes.
 /**
  * Header for the Agent Workspace perspective.
  * Features PWA brand icon, active session title, swarm count, panel toggles, and Ops Center link.
@@ -28,8 +30,13 @@ export default function WorkspaceHeader({
   const effectiveEventId = selectedEventId !== undefined ? selectedEventId : opsControl.selectedEventId;
   const { data: eventDoc } = useEventDocument(effectiveEventId || '');
   const agents: AgentRegistryEntry[] = [...(opsControl.agents || opsControl.registeredAgents || []), ...(opsControl.ephemeralAgents || [])];
+  // Dedup by agent_id || role; keyless agents are kept (unique per-index fallback key) rather than dropped.
   const activeAgentCount = effectiveEventId
-    ? new Set(agents.filter(a => a.bound_event_id === effectiveEventId || a.current_event_id === effectiveEventId).map(a => a.agent_id || a.role).filter(Boolean)).size
+    ? new Set(
+        agents
+          .filter(a => a.bound_event_id === effectiveEventId || a.current_event_id === effectiveEventId)
+          .map((a, i) => a.agent_id || a.role || `__keyless:${i}`),
+      ).size
     : 0;
   const sessionLabel = eventDoc?.service || effectiveEventId || 'New Task';
 
@@ -58,7 +65,7 @@ export default function WorkspaceHeader({
         </span>
 
         {effectiveEventId && (
-          <CopyButton text={effectiveEventId} label="Copy Event ID" iconSize={12} className="flex-shrink-0" />
+          <CopyButton key={effectiveEventId} text={effectiveEventId} label="Copy Event ID" iconSize={12} className="flex-shrink-0" />
         )}
 
         {activeAgentCount > 0 && (

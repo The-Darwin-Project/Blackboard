@@ -1,19 +1,22 @@
 // BlackBoard/ui/src/components/workspace/WorkspaceSessionsHub.tsx
 // @ai-rules:
-// 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in active or closed events and has since disappeared.
-//    A newly created / deep-linked ID is absent from a stale cache; evicting it would bounce the user to /workspace.
+// 1. [Constraint]: Only evict selectedEventId if it was previously OBSERVED in the active, waiting_approval or closed lists and has since
+//    disappeared from ALL three. A newly created / deep-linked ID is absent from a stale cache; evicting it would bounce the user to /workspace.
 // 2. [Pattern]: Eviction calls onNewTask (WorkspaceLayout.handleDeselectEvent uses replace:true so Back is not trapped).
-// 3. [Gotcha]: Skip eviction while a closed refetch is in flight (active -> closed transition: the event leaves the active list
-//    before the closed list refetch lands) or while the active list is refetching; cached lists may be stale.
+// 3. [Gotcha]: Eviction is skipped while ANY of the 3 sources (active, waiting_approval, closed) is loading, fetching, errored or has no data yet
+//    (isLoading* / isFetching* / isError* / data === undefined). A failed poll or in-flight refetch yields stale/empty lists and must never evict.
 // 4. [Pattern]: Scoping: 'mine' vs 'all' (Global) is a CLIENT-SIDE workspace view filter only (not an authz boundary; the API returns the same lists).
-//    'mine' matches the OIDC email or preferred_username against created_by_email / evidence.triggered_by. Optional project filter.
+//    'mine' matches the OIDC email or preferred_username against created_by_email / evidence.triggered_by.
+//    The project filter exists ONLY in Global mode (scope === 'all') and is reset to 'all' when toggling to My Tasks.
 //    Project is derived from evidence.project, then gitlab_context.project, github_context.repo, kargo_context.project (trimmed).
 //    A selected project that leaves availableProjects falls back to 'all' (effectiveProject).
-// 5. [Pattern]: Accordion folders: Waiting for Approval, Active Tasks, Deferred Tasks, and Closed & Failed Tasks (defaults collapsed).
+// 5. [Pattern]: Accordion folders: Waiting for Approval (shown in Global, or in My Tasks only when non-empty), Active, Deferred, and
+//    Closed & Failed (defaults collapsed). An event renders in exactly one folder: waiting rows are dropped when the id is in closed or is
+//    in active with a non-waiting status (stale waiting cache); waiting rows are sorted deterministically (created desc, then id).
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
- * Supports dual-scope filtering ('My Workspace' vs 'Global Events'), project filter,
- * and collapsible folders for Active, Deferred, and Closed/Failed tasks.
+ * Supports dual-scope filtering ('My Tasks' vs 'Global'), a Global-only project filter,
+ * and collapsible folders for Waiting for Approval, Active, Deferred, and Closed/Failed tasks.
  */
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { Plus, ChevronDown, ChevronRight, Activity, Clock, CheckCircle2, User, Globe, Filter, AlertCircle } from 'lucide-react';
@@ -23,6 +26,13 @@ import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useAuth } from '../../contexts/AuthContext';
 import WorkspaceTaskItem from './WorkspaceTaskItem';
 import type { ActiveEvent } from '../../api/types';
+
+const EMPTY_EVENTS: ActiveEvent[] = [];
+
+const createdMs = (evt: ActiveEvent): number => {
+  const t = Date.parse(evt.created);
+  return Number.isNaN(t) ? 0 : t;
+};
 
 const asTrimmed = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 
@@ -51,9 +61,18 @@ export default function WorkspaceSessionsHub({
   onSelectEvent: propOnSelectEvent,
   onNewTask,
 }: WorkspaceSessionsHubProps) {
-  const { data: rawActiveEvents = [], isLoading: isLoadingActive, isFetching: isFetchingActive } = useActiveEvents();
-  const { data: rawClosedEvents = [], isLoading: isLoadingClosed, isFetching: isFetchingClosed } = useClosedEvents(50);
-  const { data: rawWaitingApprovalEvents = [], isLoading: isLoadingWaiting, isFetching: isFetchingWaiting } = useWaitingApprovalEvents();
+  const {
+    data: activeData, isLoading: isLoadingActive, isFetching: isFetchingActive, isError: isErrorActive,
+  } = useActiveEvents();
+  const {
+    data: closedData, isLoading: isLoadingClosed, isFetching: isFetchingClosed, isError: isErrorClosed,
+  } = useClosedEvents(50);
+  const {
+    data: waitingData, isLoading: isLoadingWaiting, isFetching: isFetchingWaiting, isError: isErrorWaiting,
+  } = useWaitingApprovalEvents();
+  const rawActiveEvents = activeData ?? EMPTY_EVENTS;
+  const rawClosedEvents = closedData ?? EMPTY_EVENTS;
+  const rawWaitingApprovalEvents = waitingData ?? EMPTY_EVENTS;
   const opsControl = useOpsControl();
   const { user } = useAuth();
 
@@ -98,22 +117,29 @@ export default function WorkspaceSessionsHub({
       scope === 'mine' || effectiveProject === 'all' || deriveProject(evt) === effectiveProject;
     const filterFn = (evt: ActiveEvent) => (scope !== 'mine' || matchesUser(evt)) && matchesProject(evt);
 
-    const waiting: ActiveEvent[] = [];
-    rawWaitingApprovalEvents.forEach(evt => {
-      if (filterFn(evt)) waiting.push(evt);
+    // Identity-level dedup against the UNFILTERED lists so one event never renders in two folders:
+    // closed wins over waiting, and a non-waiting active row wins over a stale waiting cache entry.
+    const closedIds = new Set(rawClosedEvents.map(e => e.id));
+    const activeNonWaitingIds = new Set(
+      rawActiveEvents.filter(e => e.status !== 'waiting_approval').map(e => e.id),
+    );
+    const isSupersededWaiting = (id: string) => closedIds.has(id) || activeNonWaitingIds.has(id);
+
+    const waitingById = new Map<string, ActiveEvent>();
+    [...rawWaitingApprovalEvents, ...rawActiveEvents.filter(e => e.status === 'waiting_approval')].forEach(evt => {
+      if (!filterFn(evt) || isSupersededWaiting(evt.id) || waitingById.has(evt.id)) return;
+      waitingById.set(evt.id, evt);
     });
+    const waiting = Array.from(waitingById.values()).sort(
+      (a, b) => createdMs(b) - createdMs(a) || a.id.localeCompare(b.id),
+    );
 
     const active: ActiveEvent[] = [];
     const deferred: ActiveEvent[] = [];
     rawActiveEvents.forEach(evt => {
-      if (!filterFn(evt)) return;
-      if (evt.status === 'waiting_approval') {
-        if (!waiting.some(w => w.id === evt.id)) waiting.push(evt);
-      } else if (evt.status === 'deferred') {
-        deferred.push(evt);
-      } else {
-        active.push(evt);
-      }
+      if (!filterFn(evt) || evt.status === 'waiting_approval') return;
+      if (evt.status === 'deferred') deferred.push(evt);
+      else active.push(evt);
     });
 
     const closed = rawClosedEvents.filter(filterFn);
@@ -130,7 +156,11 @@ export default function WorkspaceSessionsHub({
   const seenIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (isLoadingActive || isLoadingClosed || isFetchingClosed || isLoadingWaiting || isFetchingWaiting) return;
+    // Any source still loading/refetching, failed, or never delivered data => lists may be stale or empty; never evict or record.
+    if (isLoadingActive || isLoadingClosed || isLoadingWaiting) return;
+    if (isFetchingClosed || isFetchingWaiting) return;
+    if (isErrorActive || isErrorClosed || isErrorWaiting) return;
+    if (activeData === undefined || closedData === undefined || waitingData === undefined) return;
     const seen = seenIdsRef.current;
     const allCurrentRawIds = new Set([
       ...rawActiveEvents.map(e => e.id),
@@ -156,6 +186,12 @@ export default function WorkspaceSessionsHub({
     isFetchingActive,
     isFetchingClosed,
     isFetchingWaiting,
+    isErrorActive,
+    isErrorClosed,
+    isErrorWaiting,
+    activeData,
+    closedData,
+    waitingData,
     selectedEventId,
     onNewTask,
   ]);

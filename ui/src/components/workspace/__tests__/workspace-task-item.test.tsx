@@ -199,22 +199,38 @@ describe('WorkspaceTaskItem operational visibility parity', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it('activating CopyButton via Enter key copies event ID without triggering card onSelect', () => {
+  it('Enter on the nested CopyButton does not trigger the row onSelect (e.target !== e.currentTarget guard)', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
     const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
     fireEvent.keyDown(copyBtn, { key: 'Enter', code: 'Enter' });
-    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it('activating CopyButton via Space key copies event ID without triggering card onSelect', () => {
+  it('Space on the nested CopyButton does not trigger the row onSelect (e.target !== e.currentTarget guard)', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
     const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
     fireEvent.keyDown(copyBtn, { key: ' ', code: 'Space' });
-    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Enter/Space on the row itself still selects it', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const row = screen.getByTitle('evt-copy-test');
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onSelect).toHaveBeenCalledWith('evt-copy-test');
+  });
+
+  it('reveals the copy affordance on hover/focus-within via group utilities and has no redundant focus-within utilities', () => {
+    renderItem(makeEvent({ id: 'evt-copy-test' }));
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    expect(copyBtn.className).toContain('group-hover:opacity-100');
+    expect(copyBtn.className).toContain('group-focus-within:opacity-100');
+    expect(copyBtn.className).not.toMatch(/(^|\s)focus-within:/);
   });
 });
 });

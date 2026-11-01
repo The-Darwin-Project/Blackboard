@@ -208,8 +208,12 @@ describe('WorkspaceLayout (T-2, T-3, T-4, T-14, T-15)', () => {
 
   it('does not apply select-none on root container, restoring native text selection across workspace', () => {
     const { container } = renderLayout('/workspace');
-    const root = container.firstElementChild as HTMLElement;
+    // LocationProbe renders before <Routes>, so container.firstElementChild is the probe, not the layout root.
+    const root = container.querySelector('.h-screen') as HTMLElement | null;
     expect(root).not.toBeNull();
-    expect(root.className).not.toContain('select-none');
+    expect(root).toBe(screen.getByTestId('workspace-layout'));
+    expect(container.firstElementChild).not.toBe(root);
+    expect(root!.className).toContain('h-screen');
+    expect(root!.className).not.toContain('select-none');
   });
 });

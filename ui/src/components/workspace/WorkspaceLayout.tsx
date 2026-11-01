@@ -64,7 +64,7 @@ export default function WorkspaceLayout() {
   });
 
   return (
-    <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
+    <div data-testid="workspace-layout" className="h-screen bg-bg-primary flex flex-col overflow-hidden">
       <WorkspaceHeader
         selectedEventId={selectedEventId}
         isSessionsOpen={isSessionsOpen}

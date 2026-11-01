@@ -1,6 +1,13 @@
 // BlackBoard/ui/src/components/workspace/CopyButton.tsx
+// @ai-rules:
+// 1. [Constraint]: Native <button type="button"> only; do NOT add a custom onKeyDown. The browser already fires onClick for Enter/Space,
+//    and a duplicate key handler double-copies on Firefox. Parent row key handlers are shielded by the row's e.target !== e.currentTarget guard.
+// 2. [Constraint]: Text is sanitized before it reaches the clipboard (C0/DEL/C1 controls, U+2028/U+2029, bidi controls) via sanitizeClipboardText.
+// 3. [Pattern]: Feedback ('copied') is transient (2000ms) and is reset, with its timer, whenever the `text` prop changes or the component unmounts.
+//    A copy that resolves after `text` changed must not flag the new value as copied (guarded by textRef).
+// 4. [Gotcha]: execCommand('copy') returning false is a failure (no 'copied' state); the temporary textarea is always removed in finally.
 import { useState, useRef, useEffect } from 'react';
-import type { MouseEvent, KeyboardEvent } from 'react';
+import type { MouseEvent } from 'react';
 import { Copy, Check } from 'lucide-react';
 
 export interface CopyButtonProps {
@@ -10,37 +17,53 @@ export interface CopyButtonProps {
   iconSize?: number;
 }
 
+/** Strips C0/DEL/C1 controls, line/paragraph separators and bidi controls from clipboard text. */
+// eslint-disable-next-line no-control-regex
+const CLIPBOARD_UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const sanitizeClipboardText = (text: string): string => text.replace(CLIPBOARD_UNSAFE_CHARS, '');
+
 export function CopyButton({ text, label = 'Copy Event ID', className = '', iconSize = 12 }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const textRef = useRef(text);
+  textRef.current = text;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = null;
     };
   }, []);
 
-  const triggerCopySuccess = () => {
-    if (!mountedRef.current) return;
+  // A different value must never inherit the previous value's "Copied" feedback.
+  useEffect(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setCopied(false);
+  }, [text]);
+
+  const triggerCopySuccess = (copiedText: string) => {
+    if (!mountedRef.current || textRef.current !== copiedText) return;
     if (timerRef.current) clearTimeout(timerRef.current);
     setCopied(true);
     timerRef.current = setTimeout(() => {
+      timerRef.current = null;
       if (mountedRef.current) setCopied(false);
     }, 2000);
   };
 
   const handleCopy = async () => {
     if (!text) return;
-    // eslint-disable-next-line no-control-regex
-    const sanitized = text.replace(/[\r\n\x1b]/g, '');
+    const requested = text;
+    const sanitized = sanitizeClipboardText(requested);
 
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(sanitized);
-        triggerCopySuccess();
+        triggerCopySuccess(requested);
         return;
       } catch {
         // Fall back to execCommand
@@ -60,7 +83,7 @@ export function CopyButton({ text, label = 'Copy Event ID', className = '', icon
       document.body.appendChild(textarea);
       textarea.select();
       const success = document.execCommand('copy');
-      if (success) triggerCopySuccess();
+      if (success) triggerCopySuccess(requested);
     } catch {
       // Both failed; safely suppress without toggling copied feedback
     } finally {
@@ -75,28 +98,18 @@ export function CopyButton({ text, label = 'Copy Event ID', className = '', icon
     if (text) void handleCopy();
   };
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.stopPropagation();
-      e.preventDefault();
-      if (text) void handleCopy();
-    }
-  };
-
   const disabled = !text;
   const currentLabel = copied
     ? (label.startsWith('Copy ') ? `Copied ${label.slice(5)}` : 'Copied!')
     : label;
-  const currentTitle = copied ? 'Copied!' : label;
 
   return (
     <button
       type="button"
       disabled={disabled}
       aria-label={currentLabel}
-      title={currentTitle}
+      title={currentLabel}
       onClick={handleClick}
-      onKeyDown={handleKeyDown}
       className={`inline-flex items-center justify-center p-1 rounded transition-colors ${
         disabled
           ? 'opacity-40 cursor-not-allowed'

@@ -356,4 +356,11 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(segment!.style.background).toBe(rgb('#38bdf8'));
     });
   });
+
+  it('does not apply select-none on the inspector <aside>, keeping text selectable', () => {
+    const { container } = renderComponent();
+    const aside = container.querySelector('aside');
+    expect(aside).not.toBeNull();
+    expect(aside!.className).not.toContain('select-none');
+  });
 });

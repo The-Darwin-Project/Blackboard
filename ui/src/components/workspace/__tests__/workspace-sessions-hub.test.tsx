@@ -565,4 +565,192 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(screen.queryByText('other-approval-service')).not.toBeInTheDocument();
     });
   });
+
+  describe('project filter reset on scope toggle (M8)', () => {
+    it('resets the project select to "all" after Global -> My Tasks -> Global', () => {
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+      const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: 'ProjectBeta' } });
+      expect(select.value).toBe('ProjectBeta');
+
+      fireEvent.click(screen.getByRole('button', { name: /My Tasks/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+
+      const reopened = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      expect(reopened.value).toBe('all');
+      expect(screen.getByText('auth-service')).toBeInTheDocument();
+      expect(screen.getByText('billing-service')).toBeInTheDocument();
+    });
+  });
+
+  describe('Waiting for Approval folder (M9, M10, M11)', () => {
+    const asQuery = (data: unknown[], extra: Record<string, unknown> = {}) =>
+      ({ data, isLoading: false, isFetching: false, ...extra }) as never;
+    const waitingEvt = (over: Record<string, unknown> = {}) => ({
+      ...mockEvents[1], created_by_email: 'developer@redhat.com', ...over,
+    });
+    const countBadge = (name: RegExp) => screen.getByRole('button', { name }).querySelector('span.font-mono')?.textContent;
+
+    it('M9: shows the count badge for the waiting list and hides the folder in My Tasks when empty', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      const spyWaiting = vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+        waitingEvt({ id: 'w-1', service: 'wait-one' }),
+        waitingEvt({ id: 'w-2', service: 'wait-two' }),
+      ]));
+      const { rerender } = render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(countBadge(/Waiting for Approval/i)).toBe('2');
+
+      spyWaiting.mockReturnValue(asQuery([]));
+      rerender(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.queryByRole('button', { name: /Waiting for Approval/i })).not.toBeInTheDocument();
+
+      // Global mode always shows the folder, with a zero count and the empty-state text
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+      expect(countBadge(/Waiting for Approval/i)).toBe('0');
+      expect(screen.getByText(/No tasks waiting for approval/i)).toBeInTheDocument();
+    });
+
+    it('M10: shows the loading banner and suppresses the waiting empty-state while only the waiting query loads', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([], { isLoading: true, isFetching: true }));
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+
+      expect(screen.getByText(/Loading tasks/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Waiting for Approval/i })).toBeInTheDocument();
+      expect(screen.queryByText(/No tasks waiting for approval/i)).not.toBeInTheDocument();
+    });
+
+    describe('M11: eviction guards for the waiting source', () => {
+      const setup = () => {
+        const onNewTask = vi.fn();
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        const spyWaiting = vi.spyOn(queueHook, 'useWaitingApprovalEvents')
+          .mockReturnValue(asQuery([waitingEvt({ id: 'w-sel', service: 'sel-service' })]));
+        const ui = () => <WorkspaceSessionsHub isOpen={true} selectedEventId="w-sel" onNewTask={onNewTask} />;
+        const utils = render(ui());
+        expect(onNewTask).not.toHaveBeenCalled();
+        return { onNewTask, spyWaiting, rerender: () => utils.rerender(ui()) };
+      };
+
+      it('does not evict a selected event that lives only in waiting_approval while it is present', () => {
+        const { onNewTask, rerender } = setup();
+        rerender();
+        expect(onNewTask).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['isLoadingWaiting', { isLoading: true }],
+        ['isFetchingWaiting', { isFetching: true }],
+        ['isErrorWaiting', { isError: true }],
+      ])('defers eviction while %s is true, then evicts once settled', (_name, flags) => {
+        const { onNewTask, spyWaiting, rerender } = setup();
+        spyWaiting.mockReturnValue(asQuery([], flags as Record<string, unknown>));
+        rerender();
+        expect(onNewTask).not.toHaveBeenCalled();
+
+        spyWaiting.mockReturnValue(asQuery([]));
+        rerender();
+        expect(onNewTask).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ['active', 'useActiveEvents'],
+        ['closed', 'useClosedEvents'],
+      ] as const)('does not evict when the %s query errored (stale/empty list)', (_n, hook) => {
+        const { onNewTask, spyWaiting, rerender } = setup();
+        spyWaiting.mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, hook).mockReturnValue(asQuery([], { isError: true }));
+        rerender();
+        expect(onNewTask).not.toHaveBeenCalled();
+      });
+
+      it('does not evict while a source has no data yet (data undefined)', () => {
+        const { onNewTask, spyWaiting, rerender } = setup();
+        spyWaiting.mockReturnValue({ data: undefined, isLoading: false, isFetching: false } as never);
+        rerender();
+        expect(onNewTask).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('M11: two-way dedup', () => {
+      it('renders an event present in waiting and active (non-waiting) only once, in Active', () => {
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+          { ...mockEvents[0], id: 'dup-1', service: 'dup-service', status: 'active' },
+        ]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+          waitingEvt({ id: 'dup-1', service: 'dup-service' }),
+        ]));
+        render(<WorkspaceSessionsHub isOpen={true} selectedEventId="dup-1" onNewTask={vi.fn()} />);
+
+        expect(screen.getAllByText('dup-service')).toHaveLength(1);
+        expect(screen.queryByRole('button', { name: /Waiting for Approval/i })).not.toBeInTheDocument();
+        expect(countBadge(/^Active/i)).toBe('1');
+      });
+
+      it('renders an event present in waiting and closed only once, in Closed & Failed', () => {
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([
+          { ...mockClosedEvents[0], id: 'dup-2', service: 'dup-closed', created_by_email: 'developer@redhat.com' },
+        ]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+          waitingEvt({ id: 'dup-2', service: 'dup-closed' }),
+        ]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        fireEvent.click(screen.getByRole('button', { name: /Closed & Failed/i }));
+
+        expect(screen.getAllByText('dup-closed')).toHaveLength(1);
+        expect(screen.queryByRole('button', { name: /Waiting for Approval/i })).not.toBeInTheDocument();
+      });
+
+      it('renders a deferred active row only once when a stale waiting entry exists', () => {
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([
+          { ...mockEvents[2], id: 'dup-3', service: 'dup-deferred' },
+        ]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+          waitingEvt({ id: 'dup-3', service: 'dup-deferred' }),
+        ]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        expect(screen.getAllByText('dup-deferred')).toHaveLength(1);
+      });
+
+      it('keeps an event that is waiting in both lists in the waiting folder exactly once', () => {
+        const evt = waitingEvt({ id: 'dup-4', service: 'dup-waiting' });
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([evt]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([evt]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        expect(screen.getAllByText('dup-waiting')).toHaveLength(1);
+        expect(countBadge(/Waiting for Approval/i)).toBe('1');
+      });
+
+      it('sorts waiting rows deterministically (created desc, then id) regardless of source order', () => {
+        const a = waitingEvt({ id: 'w-a', service: 'svc-a', created: '2026-10-29T10:00:00Z' });
+        const b = waitingEvt({ id: 'w-b', service: 'svc-b', created: '2026-10-29T11:00:00Z' });
+        const c = waitingEvt({ id: 'w-c', service: 'svc-c', created: '2026-10-29T10:00:00Z' });
+        vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([c]));
+        vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+        vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([a, b]));
+        render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+        const order = ['svc-a', 'svc-b', 'svc-c']
+          .map(n => [n, screen.getByText(n)] as const)
+          .sort(([, x], [, y]) => (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+          .map(([n]) => n);
+        expect(order).toEqual(['svc-b', 'svc-a', 'svc-c']);
+      });
+    });
+  });
+
+  it('does not apply select-none on the sessions hub <aside>, keeping text selectable', () => {
+    const { container } = render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+    const aside = container.querySelector('aside');
+    expect(aside).not.toBeNull();
+    expect(aside!.className).not.toContain('select-none');
+  });
 });
