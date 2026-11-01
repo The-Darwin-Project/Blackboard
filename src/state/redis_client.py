@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import redis.asyncio as redis
 
@@ -28,6 +28,21 @@ logger = logging.getLogger(__name__)
 
 # Global client instance (singleton)
 _redis_client: Optional["Redis"] = None
+
+
+def sanitize_redis_port(port: Union[int, str]) -> int:
+    """
+    Sanitize Redis port value, stripping any protocol/host prefix.
+    
+    Handles both integer port strings ('6379') and Kubernetes service link
+    injections ('tcp://10.96.0.1:6379') without raising ValueError.
+    """
+    if isinstance(port, int):
+        return port
+    port_str = str(port).strip()
+    if "://" in port_str:
+        port_str = port_str.split(":")[-1]
+    return int(port_str)
 
 # Retry configuration
 REDIS_RETRY_ATTEMPTS = int(os.getenv("REDIS_RETRY_ATTEMPTS", "10"))
@@ -48,12 +63,13 @@ class RedisClient:
     def __init__(
         self,
         host: Optional[str] = None,
-        port: int = 6379,
+        port: Optional[Union[int, str]] = None,
         password: Optional[str] = None,
         db: int = 0,
     ):
         self.host = host or os.getenv("REDIS_HOST", "localhost")
-        self.port = port
+        raw_port = port if port is not None else os.getenv("REDIS_PORT", "6379")
+        self.port = sanitize_redis_port(raw_port)
         self.password = password or os.getenv("REDIS_PASSWORD", "")
         self.db = db
         self._client: Optional["Redis"] = None

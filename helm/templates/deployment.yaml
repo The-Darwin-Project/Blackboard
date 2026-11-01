@@ -49,9 +49,11 @@ spec:
               containerPort: 8000
               protocol: TCP
           env:
-            # Redis connection (localhost sidecar)
+            # Redis connection (standalone deployment)
             - name: REDIS_HOST
-              value: "localhost"
+              value: "{{ .Values.redis.host | default (printf "%s-redis" .Release.Name) }}"
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port | default 6379 }}"
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -754,54 +756,7 @@ spec:
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
         
-        # =================================================================
-        # Redis Sidecar
-        # =================================================================
-        {{- if .Values.redis.enabled }}
-        - name: redis
-          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
-          imagePullPolicy: IfNotPresent
-          # Override command to bypass Red Hat entrypoint and configure Redis directly
-          command:
-            - redis-server
-          args:
-            {{- if .Values.redis.persistence.enabled }}
-            - --dir
-            - /var/lib/redis/data  # PVC mount path -- ensures RDB snapshots persist across restarts
-            - --save
-            - "60 1"           # RDB snapshot every 60s if at least 1 key changed
-            {{- else }}
-            - --save
-            - ""               # No persistence on ephemeral storage
-            {{- end }}
-            - --stop-writes-on-bgsave-error
-            - "no"
-            - --requirepass
-            - "$(REDIS_PASSWORD)"
-          ports:
-            - name: redis
-              containerPort: 6379
-              protocol: TCP
-          env:
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-redis
-                  key: password
-          resources:
-            {{- toYaml .Values.redis.resources | nindent 12 }}
-          {{- if .Values.redis.persistence.enabled }}
-          volumeMounts:
-            - name: redis-data
-              mountPath: /var/lib/redis/data
-          {{- end }}
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-        {{- end }}
+        # Redis moved to standalone Deployment (redis-deployment.yaml)
         
         # Qdrant moved to standalone Deployment (qdrant-deployment.yaml)
         
@@ -825,9 +780,9 @@ spec:
             - name: SKILL_RECONCILER_SKILLS_PATH
               value: "{{ .Values.skillReconciler.skillsPath }}"
             - name: REDIS_HOST
-              value: "localhost"
+              value: "{{ .Values.redis.host | default (printf "%s-redis" .Release.Name) }}"
             - name: REDIS_PORT
-              value: "6379"
+              value: "{{ .Values.redis.port | default 6379 }}"
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1577,11 +1532,7 @@ spec:
           secret:
             secretName: {{ .Values.sidecars.qe.gcpSecret }}
         {{- end }}
-        {{- if and .Values.redis.enabled .Values.redis.persistence.enabled }}
-        - name: redis-data
-          persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-redis-data
-        {{- end }}
+        # Redis PVC now managed by redis-deployment.yaml
         # Qdrant PVC now managed by qdrant-deployment.yaml
         # GitOps data volumes - shared PVC with subPaths per agent
         {{- if .Values.sidecars.persistence.enabled }}
