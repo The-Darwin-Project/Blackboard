@@ -6,12 +6,20 @@
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
 // 5. [Pattern]: ctxMenu cleared on all collapse paths (collapseSidebar, toggleSidebar, chevron button).
 // 6. [Pattern]: ChatInput only visible when !selectedEventId (event chat lives in EventChatPanel).
+// 7. [Pattern]: Agents tree is driven ONLY by registeredAgents (no static/offline ghost rows). partitionAgents() precedence:
+//    bound_event_id 'nw-*' -> Sensors; other bound_event_id -> Squad (even for sensor roles); unbound + SENSOR_ROLES -> Sensors; else Standalone.
+//    Sensor/role checks use the DISPLAY role (current_role || role) because on-call agents register with role '' and only get current_role per dispatch.
+// 8. [Gotcha]: Agent click routing: 'nw-sweep-*' -> setHotspot(boundId); other 'nw-*' and unbound -> setHotspot(role); other bound -> selectEvent.
+//    Never selectEvent a non-event id. An agent with no resolvable role (label falls back to 'oncall') is a click no-op: 'oncall' is not a tile id.
+// 9. [Gotcha]: Squads are shown for every bound_event_id in the registry, even if the event is not in active/recently-closed lists (stale or beyond the 20-item closed window): label falls back to 'Squad • <shortId>'.
+//    Registry is authoritative; OpsStateContext.ephemeralAgents does the active-event filtering for other consumers.
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
-import { useOpsControl, AGENTS } from '../../contexts/OpsStateContext';
+import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield, Users, Radar } from 'lucide-react';
+import type { AgentRegistryEntry } from '../../api/types';
+import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending, useJenkinsPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS } from '../../constants/colors';
@@ -36,6 +44,98 @@ const MIN_WIDTH = 64;
 const DEFAULT_WIDTH = 500;
 const EXPANDED_MIN_WIDTH = 250;
 const MAX_WIDTH = 800;
+
+const ROLE_ICONS: Record<string, React.ComponentType<{ size?: number; style?: React.CSSProperties; className?: string }>> = {
+  architect: Compass,
+  sysadmin: Terminal,
+  developer: Code2,
+  qe: FlaskConical,
+  security_analyst: Shield,
+  code_reviewer: Code2,
+  explorer: Compass,
+  aligner: Radar,
+  headhunter: GitMerge,
+  timekeeper: Clock,
+  nightwatcher: Radar,
+};
+
+const ROLE_SORT_ORDER: Record<string, number> = {
+  architect: 1,
+  developer: 2,
+  sysadmin: 3,
+  qe: 4,
+  security_analyst: 5,
+  code_reviewer: 6,
+  explorer: 7,
+  aligner: 8,
+  headhunter: 9,
+  timekeeper: 10,
+  nightwatcher: 11,
+};
+
+const UNKNOWN_ROLE_SORT = 99;
+const FALLBACK_ROLE_LABEL = 'oncall';
+const FALLBACK_ROLE_COLOR = '#8b5cf6';
+const BUSY_COLOR = '#22c55e';
+const IDLE_COUNT_COLOR = '#64748b';
+
+/** Roles that identify sensor / on-call sweep agents when they are not bound to an event. */
+const SENSOR_ROLES = new Set(['aligner', 'headhunter', 'timekeeper', 'nightwatcher']);
+
+/** Role shown for an agent: per-dispatch current_role wins over the registered role. May be ''. */
+const resolveAgentRole = (a: AgentRegistryEntry): string => a.current_role || a.role || '';
+
+interface AgentGroups {
+  squads: Map<string, AgentRegistryEntry[]>;
+  sensors: AgentRegistryEntry[];
+  standalone: AgentRegistryEntry[];
+}
+
+/** Split registered agents into event squads, sensors and standalone (see @ai-rules 7). */
+function partitionAgents(agents: AgentRegistryEntry[]): AgentGroups {
+  const groups: AgentGroups = { squads: new Map(), sensors: [], standalone: [] };
+  for (const a of agents) {
+    const bound = a.bound_event_id;
+    if (bound?.startsWith('nw-')) {
+      groups.sensors.push(a);
+    } else if (bound) {
+      const list = groups.squads.get(bound) ?? [];
+      list.push(a);
+      groups.squads.set(bound, list);
+    } else if (SENSOR_ROLES.has(resolveAgentRole(a))) {
+      groups.sensors.push(a);
+    } else {
+      groups.standalone.push(a);
+    }
+  }
+  return groups;
+}
+
+function sortAgents(list: AgentRegistryEntry[]): AgentRegistryEntry[] {
+  return [...list].sort((a, b) => {
+    const roleA = resolveAgentRole(a);
+    const roleB = resolveAgentRole(b);
+    const orderA = ROLE_SORT_ORDER[roleA] ?? UNKNOWN_ROLE_SORT;
+    const orderB = ROLE_SORT_ORDER[roleB] ?? UNKNOWN_ROLE_SORT;
+    return orderA - orderB || roleA.localeCompare(roleB);
+  });
+}
+
+/** Busy: task id, else event id (both truncated), else 'working'. Idle: 'idle'. */
+function agentSublabel(a: AgentRegistryEntry): string {
+  if (!a.busy) return 'idle';
+  const id = a.current_task_id || a.current_event_id;
+  return id ? id.slice(0, 12) : 'working';
+}
+
+const groupCountColor = (list: AgentRegistryEntry[]): string =>
+  list.some(a => a.busy) ? BUSY_COLOR : IDLE_COUNT_COLOR;
+
+const shortEventId = (eventId: string): string =>
+  eventId.startsWith('evt-') ? eventId.slice(4, 12) : eventId.slice(0, 8);
+
+const squadLabelFor = (eventId: string, service?: string): string =>
+  service ? `Squad • ${service} (${shortEventId(eventId)})` : `Squad • ${shortEventId(eventId)}`;
 
 export default function EventSidebar() {
   const { selectedEventId, selectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsControl();
@@ -104,6 +204,55 @@ export default function EventSidebar() {
   const deferredEvts = events.filter(e => e.status === 'deferred');
   const approvalEvts = isDemoMode ? [] : (waitingApprovalEvents || []);
 
+  const { squads: squadGroups, sensors: sensorAgents, standalone: standaloneAgents } = partitionAgents(registeredAgents);
+
+  const renderAgentNode = (a: AgentRegistryEntry) => {
+    const role = resolveAgentRole(a);
+    const displayRole = role || FALLBACK_ROLE_LABEL;
+    const color = ACTOR_COLORS[role] || FALLBACK_ROLE_COLOR;
+    const AgentIcon = ROLE_ICONS[role] || Bot;
+    const isBusy = a.busy;
+    // 'oncall' is only a display label, not a grid tile id: never focus it.
+    const focusTile = (id: string | null) => { if (role) setHotspot(id); };
+
+    return (
+      <TreeNode
+        key={a.agent_id}
+        icon={
+          <span className="flex items-center gap-1.5">
+            <span
+              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+              style={{
+                background: isBusy ? BUSY_COLOR : `${BUSY_COLOR}80`,
+                boxShadow: isBusy ? `0 0 6px ${BUSY_COLOR}80` : 'none',
+                transition: 'all 0.3s',
+              }}
+            />
+            <AgentIcon size={14} style={{ color }} />
+          </span>
+        }
+        label={displayRole}
+        labelColor={color}
+        sublabel={agentSublabel(a)}
+        sublabelColor={isBusy ? BUSY_COLOR : undefined}
+        onClick={() => {
+          const bound = a.bound_event_id;
+          if (bound?.startsWith('nw-sweep-')) {
+            setHotspot(bound);
+          } else if (bound && !bound.startsWith('nw-')) {
+            selectEvent(bound);
+          } else {
+            focusTile(role);
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(displayRole, a, focusTile) });
+        }}
+      />
+    );
+  };
+
   return (
     <div ref={sidebarRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative"
       style={{ width }}>
@@ -123,85 +272,63 @@ export default function EventSidebar() {
           {/* System tree - constrained when event selected so chat gets remaining space */}
           <div className="overflow-auto flex-1">
           <CollapsibleSection title="System" defaultOpen={!selectedEventId} badge={
-            <span className="text-[12px] text-text-muted">{AGENTS.length + events.length + kargoStages.length + demoHH.length + schedules.length}</span>
+            <span className="text-[12px] text-text-muted">{registeredAgents.length + events.length + kargoStages.length + demoHH.length + schedules.length}</span>
           }>
             <div className="px-0.5">
             {/* Agents Group */}
             <TreeGroup icon={<Bot size={16} />} label="Agents"
-              count={AGENTS.length + registeredAgents.filter(a => a.ephemeral).length}
-              countColor={registeredAgents.some(a => a.busy) ? '#22c55e' : '#64748b'}
+              count={registeredAgents.length}
+              countColor={groupCountColor(registeredAgents)}
               forceCollapsed={!!selectedEventId}>
-              {AGENTS.map(name => {
-                const reg = registeredAgents.find(r => r.role === name && !r.ephemeral);
-                const isBusy = reg?.busy || false;
-                const isRegistered = !!reg;
-                const color = ACTOR_COLORS[name] || '#6b7280';
-                // code_reviewer is EPHEMERAL_ONLY (no persistent sidecar) and never appears in
-                // AGENTS (OpsStateContext.tsx tracks persistent-sidecar busy/idle state only) --
-                // no icon mapped here for it; adding one would be dead code until AGENTS itself
-                // is extended to cover ephemeral-only roles. (security_analyst below shares this
-                // same property but predates this PR -- out of scope here.)
-                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical, security_analyst: Shield } as Record<string, typeof Compass>)[name];
+              {registeredAgents.length === 0 && <EmptyLabel>No active agents</EmptyLabel>}
+
+              {/* Event-bound squads */}
+              {Array.from(squadGroups.entries()).map(([eventId, squadAgents]) => {
+                const event = events.find(e => e.id === eventId) || recentClosed.find(e => e.id === eventId);
+
                 return (
-                  <TreeNode key={name}
-                    icon={
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                          style={{
-                            background: isBusy ? '#22c55e' : isRegistered ? '#22c55e80' : '#334155',
-                            boxShadow: isBusy ? '0 0 6px #22c55e80' : 'none',
-                            transition: 'all 0.3s',
-                          }} />
-                        {AgentIcon && <AgentIcon size={14} style={{ color }} />}
-                      </span>
-                    }
-                    label={name}
-                    labelColor={color}
-                    sublabel={isBusy ? reg?.current_event_id?.slice(0, 12) : isRegistered ? 'idle' : 'offline'}
-                    sublabelColor={isBusy ? '#22c55e' : undefined}
-                    onClick={() => setHotspot(name)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(name, reg, setHotspot) });
-                    }}
-                  />
+                  <TreeGroup
+                    key={eventId}
+                    nested
+                    icon={<Users size={14} className="text-accent" />}
+                    label={squadLabelFor(eventId, event?.service)}
+                    count={squadAgents.length}
+                    countColor={groupCountColor(squadAgents)}
+                  >
+                    {sortAgents(squadAgents).map(renderAgentNode)}
+                  </TreeGroup>
                 );
               })}
-              {/* OnCall (ephemeral) agents */}
-              {registeredAgents.filter(a => a.ephemeral).map(a => {
-                const displayRole = a.current_role || a.role || 'oncall';
-                const color = ACTOR_COLORS[displayRole] || '#8b5cf6';
-                return (
-                  <TreeNode key={a.agent_id}
-                    icon={
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                          style={{
-                            background: a.busy ? '#8b5cf6' : '#8b5cf680',
-                            boxShadow: a.busy ? '0 0 6px #8b5cf680' : 'none',
-                            transition: 'all 0.3s',
-                          }} />
-                        <Bot size={14} style={{ color }} />
-                      </span>
-                    }
-                    label={`${displayRole}`}
-                    labelColor={color}
-                    sublabel={a.bound_event_id?.slice(4, 16) || (a.busy ? 'working' : 'idle')}
-                    sublabelColor={a.busy ? '#8b5cf6' : undefined}
-                    onClick={() => {
-                      if (a.bound_event_id?.startsWith('nw-sweep-')) {
-                        setHotspot(a.bound_event_id);
-                      } else if (a.bound_event_id) {
-                        selectEvent(a.bound_event_id);
-                      }
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(displayRole, a, setHotspot) });
-                    }}
-                  />
-                );
-              })}
+
+              {/* Sensors and on-call sweep agents */}
+              {sensorAgents.length > 0 && (
+                <TreeGroup
+                  nested
+                  icon={<Radar size={14} className="text-cyan-400" />}
+                  label="Sensors & On-Call"
+                  count={sensorAgents.length}
+                  countColor={groupCountColor(sensorAgents)}
+                >
+                  {sortAgents(sensorAgents).map(renderAgentNode)}
+                </TreeGroup>
+              )}
+
+              {/* Standalone (non-event, non-sensor) agents */}
+              {standaloneAgents.length > 0 && (
+                squadGroups.size > 0 || sensorAgents.length > 0 ? (
+                  <TreeGroup
+                    nested
+                    icon={<Bot size={14} className="text-text-muted" />}
+                    label="Standalone"
+                    count={standaloneAgents.length}
+                    countColor={groupCountColor(standaloneAgents)}
+                  >
+                    {sortAgents(standaloneAgents).map(renderAgentNode)}
+                  </TreeGroup>
+                ) : (
+                  sortAgents(standaloneAgents).map(renderAgentNode)
+                )
+              )}
             </TreeGroup>
 
             {/* Events Group -- never forceCollapsed so user can hot-swap between events */}
