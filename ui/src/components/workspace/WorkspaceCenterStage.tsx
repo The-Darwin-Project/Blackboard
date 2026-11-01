@@ -15,6 +15,7 @@ import ErrorBoundary from '../ErrorBoundary';
 import WorkspaceEmptyState from './WorkspaceEmptyState';
 import { X } from 'lucide-react';
 import { useSafeNavigate } from './useSafeNavigate';
+import CopyButton from './CopyButton';
 
 interface WorkspaceCenterStageProps {
   selectedEventId: string | null;
@@ -53,6 +54,7 @@ export default function WorkspaceCenterStage({
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-xs font-mono font-medium text-text-primary">{selectedEventId}</span>
+          <CopyButton text={selectedEventId} label="Copy Event ID" iconSize={12} />
         </div>
         <button
           onClick={handleCloseSession}

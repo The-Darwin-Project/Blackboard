@@ -14,6 +14,7 @@ import { ACTOR_COLORS, STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colo
 import SourceIcon from '../SourceIcon';
 import DeferCountdownBar from '../DeferCountdownBar';
 import { relativeAge } from '../ops/TreePrimitives';
+import CopyButton from './CopyButton';
 
 interface WorkspaceTaskItemProps {
   evt: ActiveEvent;
@@ -36,6 +37,7 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
   const summary = evt.evidence?.display_text?.trim() || evt.reason?.trim() || 'Interactive session';
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
     if (e.repeat) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -50,7 +52,7 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
       onClick={() => onSelect(evt.id)}
       onKeyDown={handleKeyDown}
       title={evt.id}
-      className={`w-full text-left p-2.5 rounded-lg border transition-all flex flex-col gap-1.5 cursor-pointer select-none ${
+      className={`group w-full text-left p-2.5 rounded-lg border transition-all flex flex-col gap-1.5 cursor-pointer select-none ${
         isSelected
           ? 'bg-accent/10 border-accent/40 shadow-sm'
           : isWaiting
@@ -75,6 +77,12 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
         <span className="text-xs font-mono font-medium truncate min-w-0 flex-1 text-text-primary">
           {evt.service || evt.id.slice(4, 12)}
         </span>
+        <CopyButton
+          text={evt.id}
+          label={`Copy Event ID (${evt.id})`}
+          iconSize={11}
+          className="opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto transition-opacity flex-shrink-0"
+        />
         <span
           className="text-[10px] px-1.5 py-0.5 rounded border font-mono uppercase flex-shrink-0 font-medium leading-[14px]"
           style={{ background: dc.bg, color: dc.text, borderColor: `${dc.border}40` }}

@@ -205,4 +205,11 @@ describe('WorkspaceLayout (T-2, T-3, T-4, T-14, T-15)', () => {
 
     expect(screen.getByTestId('location').getAttribute('data-nav-type')).toBe('REPLACE');
   });
+
+  it('does not apply select-none on root container, restoring native text selection across workspace', () => {
+    const { container } = renderLayout('/workspace');
+    const root = container.firstElementChild as HTMLElement;
+    expect(root).not.toBeNull();
+    expect(root.className).not.toContain('select-none');
+  });
 });

@@ -10,6 +10,7 @@ import { Link } from 'react-router-dom';
 import { PanelLeft, PanelRight, Radio } from 'lucide-react';
 import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useEventDocument } from '../../hooks/useQueue';
+import CopyButton from './CopyButton';
 import type { AgentRegistryEntry } from '../../api/types';
 
 interface WorkspaceHeaderProps {
@@ -21,33 +22,15 @@ interface WorkspaceHeaderProps {
 }
 
 export default function WorkspaceHeader({
-  selectedEventId,
-  isSessionsOpen,
-  onToggleSessions,
-  isInspectorOpen,
-  onToggleInspector,
+  selectedEventId, isSessionsOpen, onToggleSessions, isInspectorOpen, onToggleInspector,
 }: WorkspaceHeaderProps) {
   const opsControl = useOpsControl();
   const effectiveEventId = selectedEventId !== undefined ? selectedEventId : opsControl.selectedEventId;
   const { data: eventDoc } = useEventDocument(effectiveEventId || '');
-  const agentList: AgentRegistryEntry[] = opsControl.agents || opsControl.registeredAgents || [];
-  const ephemerals: AgentRegistryEntry[] = opsControl.ephemeralAgents || [];
-  const seenIds = new Set<string>();
-  const allAgents: AgentRegistryEntry[] = [];
-  for (const agent of [...agentList, ...ephemerals]) {
-    const key = agent.agent_id || agent.role || '';
-    if (key && !seenIds.has(key)) {
-      seenIds.add(key);
-      allAgents.push(agent);
-    } else if (!key) {
-      allAgents.push(agent);
-    }
-  }
-
+  const agents: AgentRegistryEntry[] = [...(opsControl.agents || opsControl.registeredAgents || []), ...(opsControl.ephemeralAgents || [])];
   const activeAgentCount = effectiveEventId
-    ? allAgents.filter((a) => a.bound_event_id === effectiveEventId || a.current_event_id === effectiveEventId).length
+    ? new Set(agents.filter(a => a.bound_event_id === effectiveEventId || a.current_event_id === effectiveEventId).map(a => a.agent_id || a.role).filter(Boolean)).size
     : 0;
-
   const sessionLabel = eventDoc?.service || effectiveEventId || 'New Task';
 
   return (
@@ -73,6 +56,10 @@ export default function WorkspaceHeader({
         <span className="text-xs font-mono text-text-secondary truncate max-w-[200px]">
           {sessionLabel}
         </span>
+
+        {effectiveEventId && (
+          <CopyButton text={effectiveEventId} label="Copy Event ID" iconSize={12} className="flex-shrink-0" />
+        )}
 
         {activeAgentCount > 0 && (
           <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-950/40 border border-emerald-800/40 text-emerald-400">

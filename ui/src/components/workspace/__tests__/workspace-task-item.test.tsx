@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceTaskItem from '../WorkspaceTaskItem';
 import type { ActiveEvent, EventEvidence } from '../../../api/types';
@@ -26,7 +26,25 @@ const makeEvent = (over: Partial<Omit<ActiveEvent, 'evidence'>> & { evidence?: P
 const renderItem = (evt: ActiveEvent, onSelect = vi.fn()) =>
   render(<WorkspaceTaskItem evt={evt} isSelected={false} onSelect={onSelect} />);
 
-describe('WorkspaceTaskItem domain badge', () => {
+describe('WorkspaceTaskItem', () => {
+  let writeTextMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    writeTextMock = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  describe('domain badge', () => {
   it('prefers brain_domain over the source-assessed domain', () => {
     renderItem(makeEvent({ evidence: { brain_domain: 'complex', domain: 'disorder' } }));
     expect(screen.getByText('complex')).toBeInTheDocument();
@@ -145,23 +163,58 @@ describe('WorkspaceTaskItem operational visibility parity', () => {
   it('does not re-fire onSelect for auto-repeated keydown events', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    fireEvent.keyDown(screen.getByRole('button'), { key: 'Enter', repeat: true });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: 'Enter', repeat: true });
     expect(onSelect).not.toHaveBeenCalled();
   });
 
   it('supports Enter key press for accessibility on div role="button"', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    const item = screen.getByRole('button');
-    fireEvent.keyDown(item, { key: 'Enter', code: 'Enter' });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: 'Enter', code: 'Enter' });
     expect(onSelect).toHaveBeenCalledWith('evt-1');
   });
 
   it('supports Space key press for accessibility on div role="button"', () => {
     const onSelect = vi.fn();
     renderItem(makeEvent(), onSelect);
-    const item = screen.getByRole('button');
-    fireEvent.keyDown(item, { key: ' ', code: 'Space' });
+    const card = screen.getAllByRole('button')[0];
+    fireEvent.keyDown(card, { key: ' ', code: 'Space' });
     expect(onSelect).toHaveBeenCalledWith('evt-1');
   });
+
+  it('renders CopyButton with accessible aria-label="Copy Event ID (evt-copy-test)"', () => {
+    renderItem(makeEvent({ id: 'evt-copy-test' }));
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    expect(copyBtn).toBeInTheDocument();
+  });
+
+  it('clicking CopyButton copies event ID without triggering card onSelect', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.click(copyBtn);
+    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('activating CopyButton via Enter key copies event ID without triggering card onSelect', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.keyDown(copyBtn, { key: 'Enter', code: 'Enter' });
+    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('activating CopyButton via Space key copies event ID without triggering card onSelect', () => {
+    const onSelect = vi.fn();
+    renderItem(makeEvent({ id: 'evt-copy-test' }), onSelect);
+    const copyBtn = screen.getByRole('button', { name: 'Copy Event ID (evt-copy-test)' });
+    fireEvent.keyDown(copyBtn, { key: ' ', code: 'Space' });
+    expect(writeTextMock).toHaveBeenCalledWith('evt-copy-test');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});
 });

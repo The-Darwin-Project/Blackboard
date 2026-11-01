@@ -38,6 +38,7 @@ describe('WorkspaceHeader (T-7, T-8, T-10)', () => {
     expect(screen.getByText(/Darwin/i)).toBeInTheDocument();
     expect(screen.getByText(/payment-service|evt-100/i)).toBeInTheDocument();
     expect(screen.getByText(/1 agent/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy Event ID' })).toBeInTheDocument();
   });
 
   it('T-7: hides swarm pill when selectedEventId is null (New Task)', () => {
@@ -56,6 +57,7 @@ describe('WorkspaceHeader (T-7, T-8, T-10)', () => {
     expect(screen.getByText(/Darwin/i)).toBeInTheDocument();
     expect(screen.getByText(/New Task/i)).toBeInTheDocument();
     expect(screen.queryByText(/agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy Event ID' })).not.toBeInTheDocument();
   });
 
   it('T-10: contains perspective switcher link to Operations Center (/)', () => {

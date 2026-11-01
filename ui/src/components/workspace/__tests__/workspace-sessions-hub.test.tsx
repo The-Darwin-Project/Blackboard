@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceSessionsHub from '../WorkspaceSessionsHub';
 import * as queueHook from '../../../hooks/useQueue';
@@ -92,6 +92,12 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       isFetching: false,
     } as never);
 
+    vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue({
+      data: [],
+      isLoading: false,
+      isFetching: false,
+    } as never);
+
     vi.spyOn(AuthContext, 'useAuth').mockReturnValue({
       user: {
         profile: {
@@ -121,6 +127,10 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       connected: true,
       send: vi.fn(),
     } as never);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('renders active sessions with service name and Cynefin status/domain badges', () => {
@@ -204,6 +214,48 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
 
     fireEvent.change(projectSelect, { target: { value: 'ProjectBeta' } });
     expect(screen.queryByText(/auth-service/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/billing-service/i)).toBeInTheDocument();
+  });
+
+  it('hides project dropdown in "My Tasks" mode and shows it in "Global" mode with "All Repositories / Projects"', () => {
+    render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+    // In 'My Tasks' mode (default), project dropdown is hidden
+    expect(screen.queryByLabelText(/filter by project/i)).not.toBeInTheDocument();
+
+    // In 'Global' mode, project dropdown is visible with updated label
+    fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+    const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+    expect(select.options[0].textContent).toBe('All Repositories / Projects');
+
+    // Toggling back to 'My Tasks' hides the dropdown and resets selection
+    fireEvent.change(select, { target: { value: 'ProjectBeta' } });
+    fireEvent.click(screen.getByRole('button', { name: /My Tasks/i }));
+    expect(screen.queryByLabelText(/filter by project/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/auth-service/i)).toBeInTheDocument();
+  });
+
+  it('renders Waiting for Approval accordion folder in Global mode and allows toggling', () => {
+    vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue({
+      data: [mockEvents[1]], // evt-2 billing-service
+      isLoading: false,
+      isFetching: false,
+    } as never);
+    render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+
+    // Waiting for Approval folder is present and open by default
+    const waitingAccordion = screen.getByRole('button', { name: /Waiting for Approval/i });
+    expect(waitingAccordion).toBeInTheDocument();
+    expect(screen.getByText(/billing-service/i)).toBeInTheDocument();
+
+    // Toggle closed
+    fireEvent.click(waitingAccordion);
+    expect(screen.queryByText(/billing-service/i)).not.toBeInTheDocument();
+
+    // Toggle open again
+    fireEvent.click(waitingAccordion);
     expect(screen.getByText(/billing-service/i)).toBeInTheDocument();
   });
 
@@ -382,6 +434,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       ]));
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
 
       const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
       const options = Array.from(select.options).map(o => o.value);
@@ -399,6 +452,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       ]));
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
       const options = Array.from((screen.getByLabelText(/filter by project/i) as HTMLSelectElement).options).map(o => o.value);
       expect(options).toEqual(['all', 'Primary']);
     });
@@ -409,6 +463,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       ]));
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
       const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
       const padded = Array.from(select.options).filter(o => o.value !== 'all');
       expect(padded.map(o => o.value)).toEqual(['Padded']);
@@ -417,10 +472,12 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(screen.getByText(/ws-service/i)).toBeInTheDocument();
     });
 
-    it('hides the project selector when no event carries a project', () => {
+    it('hides the project selector in Global mode when no event carries a project', () => {
       vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([ctxEvent('evt-np', 'np-service', {})]));
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
       expect(screen.queryByLabelText(/filter by project/i)).not.toBeInTheDocument();
     });
   });
@@ -482,6 +539,30 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
       render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
       expect(screen.queryByText('ownerless')).not.toBeInTheDocument();
+    });
+
+    it('renders Waiting for Approval in My Tasks mode when personal tasks have status waiting_approval', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+        { ...mockEvents[1], id: 'evt-my-approval', service: 'my-approval-service', created_by_email: 'developer@redhat.com' },
+      ]));
+
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.getByRole('button', { name: /Waiting for Approval/i })).toBeInTheDocument();
+      expect(screen.getByText('my-approval-service')).toBeInTheDocument();
+    });
+
+    it('hides Waiting for Approval folder in My Tasks mode when user has no pending approvals', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useClosedEvents').mockReturnValue(asQuery([]));
+      vi.spyOn(queueHook, 'useWaitingApprovalEvents').mockReturnValue(asQuery([
+        { ...mockEvents[1], id: 'evt-other-approval', service: 'other-approval-service', created_by_email: 'other@redhat.com' },
+      ]));
+
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      expect(screen.queryByRole('button', { name: /Waiting for Approval/i })).not.toBeInTheDocument();
+      expect(screen.queryByText('other-approval-service')).not.toBeInTheDocument();
     });
   });
 });
