@@ -57,6 +57,8 @@ def _make_brain() -> Brain:
 @pytest.fixture
 def registry_and_bridge():
     registry = MagicMock()
+    # Default: a local sidecar is available (Tier-1 circuit-break falls through to local dispatch)
+    registry.get_available = AsyncMock(return_value=MagicMock())
     bridge = MagicMock()
     with patch(
         "src.dependencies.get_registry_and_bridge",
@@ -194,6 +196,45 @@ class TestCircuitBreakerFallbackGate:
 
         assert mock_dispatch.call_args.kwargs["model"] == ""
         assert mock_dispatch.call_args.kwargs["effort"] == "low"
+
+
+class TestTier1CircuitBreakNoLocalSidecar:
+    """Tier-1 (headhunter) circuit break with no local sidecar -> defer 30s, never dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_provision_none_no_local_sidecar_defers_30s(self, registry_and_bridge):
+        registry, _ = registry_and_bridge
+        registry.get_available = AsyncMock(return_value=None)
+        brain = _make_brain()
+        brain._ephemeral_provisioner = AsyncMock()
+        brain._ephemeral_provisioner.ensure_agent = AsyncMock(return_value=None)
+        brain._ephemeral_provisioner.record_dispatch_circuit_break = MagicMock()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback = MagicMock()
+        brain._defer_event_safely = AsyncMock(return_value=True)
+
+        with patch(
+            "src.agents.brain.dispatch_to_agent",
+            new_callable=AsyncMock,
+            return_value=("should not run", None),
+        ) as mock_dispatch:
+            await brain._run_agent_task(
+                event_id="evt-hh0001", agent_name="sysadmin", agent=None,
+                task="Scale the deployment", event_md_path="/tmp/x.md",
+                routing_turn_num=1, mode="execute", effort="",
+            )
+
+        registry.get_available.assert_awaited_once_with("sysadmin")
+        brain._ephemeral_provisioner.record_dispatch_circuit_break.assert_called_once()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback.assert_not_called()
+        brain._defer_event_safely.assert_awaited_once()
+        assert brain._defer_event_safely.await_args.args[:2] == ("evt-hh0001", 30)
+        paused = [
+            c.args[1] for c in brain._append_and_broadcast.await_args_list
+            if len(c.args) > 1 and getattr(c.args[1], "action", "") == "paused"
+        ]
+        assert len(paused) == 1
+        assert paused[0].actor == "dispatcher"
+        mock_dispatch.assert_not_called()
 
 
 class TestCodeReviewerRouting:
