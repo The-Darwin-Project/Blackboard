@@ -3,7 +3,6 @@
 # 1. [Pattern]: Stateless tool handlers. All state lives in NightwatcherContext dataclass.
 # 2. [Constraint]: write_incident merges LLM judgment (args) + code-prefilled (cluster dict). Never mix.
 # 3. [Constraint]: validate_cluster_plan and reconcile_cluster_plan are pure -- no side effects, no async, never mutate the caller's cluster list.
-# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent).
 # 4. [Pattern]: build_report_tool() and build_summary_tool() generate dynamic tool dicts per iteration.
 # 5. [Pattern]: get_phase_tools() filters static schemas. Dynamic tools are built separately by the cart loop.
 # 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
@@ -11,6 +10,7 @@
 # 8. [Constraint]: build_report_tool() includes link guidance in BOTH normal and overflow description branches.
 # 9. [Pattern]: _handle_extend_incident follows same 3-param signature (args, ctx, cluster) as write. Unified bookkeeping.
 # 10. [Constraint]: write_incident result MUST contain "Incident created" substring (dedup sentinel in handlers_dispatch.py:357).
+# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent).
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
 
@@ -71,6 +71,7 @@ class NightwatcherContext:
     escalations_by_id: dict[str, "StagedEscalation"] = field(default_factory=dict)
     declared_clusters: list[dict] = field(default_factory=list)
     failed_cluster_events: list[str] = field(default_factory=list)
+    committed_event_ids: set[str] = field(default_factory=set)  # already SREM'd from inflight (see Nightwatcher._commit_processed)
     _summary_text: str = ""
 
 
@@ -440,7 +441,7 @@ async def _handle_write_incident(args: dict, ctx: NightwatcherContext, cluster: 
         return "Jira incident adapter not configured. Incident not created."
     platform = cluster.get("platform", "")
     affected_events = cluster.get("events", [])
-    summary = args.get("summary", "")[:200]
+    summary = (args.get("summary") or "")[:200]
     status = args.get("status", "New")
     if VALID_STATUSES and status not in VALID_STATUSES:
         fallback_status = VALID_STATUSES[0] if VALID_STATUSES else "New"
@@ -498,7 +499,7 @@ async def _handle_extend_incident(args: dict, ctx: NightwatcherContext, cluster:
         return "No extends_issue_key provided. Cannot extend incident."
     platform = cluster.get("platform", "")
     affected_events = cluster.get("events", [])
-    summary = args.get("summary", "")[:200]
+    summary = (args.get("summary") or "")[:200]
     comment_body = args.get("comment", "")
 
     from .nightwatcher_prompt import extract_full_links
@@ -570,7 +571,7 @@ def build_extend_tool(cluster: dict, index: int, total: int, completed_reports: 
 
 
 async def _handle_post_shift_summary(args: dict, ctx: NightwatcherContext) -> str:
-    summary = args.get("summary", "")
+    summary = args.get("summary") or ""
     if not summary.strip():
         return "Error: summary is empty. Provide the shift report text including escalation count, incident count, and key findings."
     ctx._summary_text = summary

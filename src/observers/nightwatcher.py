@@ -14,6 +14,11 @@
 # 11. [Constraint]: On quota/generic failure, events already in ctx.created_incidents are COMMITTED (Jira write is not
 #     idempotent); only the uncommitted remainder is restaged. Never restage a member whose incident exists.
 # 12. [Constraint]: auto_reconcile is enabled ONLY on the final declare_clusters attempt (_run_clustering_agent).
+# 13. [Constraint]: The cart commits each cluster's members to Jira-done IMMEDIATELY after its incident is created (not at the end),
+#     so a crash/SIGTERM/CancelledError later in the sweep cannot make requeue_inflight() re-file an existing incident.
+# 14. [Gotcha]: INFLIGHT_TTL EXPIREs (deletes) the inflight SET after 1h -- it never requeues. Anything stranded there is lost unless
+#     requeue_inflight() runs first (on start() or the failure-path fallback in _settle_failed_batch).
+# 15. [Gotcha]: self._batch_ctx is per-sweep mutable state; safe only because _sweep() runs strictly sequentially (single poll loop).
 """
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
@@ -266,19 +271,32 @@ class NightwatcherObserver:
             if cooldown_s > 0:
                 await asyncio.sleep(cooldown_s)
 
+    @staticmethod
+    def _incidented_ids(ctx) -> set[str]:
+        """Event IDs that already have a Jira incident/extension (pure, no I/O)."""
+        return {eid for inc in ctx.created_incidents for eid in inc.affected_events} if ctx else set()
+
     async def _commit_processed(self, ctx, json_members, escalations) -> set[str]:
         """Commit events whose Jira incident already exists; clear their escalation flags.
 
-        Returns the set of committed event IDs. Safe to call repeatedly (SREM is idempotent).
+        Idempotent and incremental: only events not yet in ctx.committed_event_ids are sent to
+        Redis, and an event is marked committed only after commit_inflight succeeded (a failed
+        call is retried by the next invocation). Returns ALL incidented event IDs.
         """
-        done_ids = {eid for inc in ctx.created_incidents for eid in inc.affected_events} if ctx else set()
-        done_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in done_ids]
-        if done_jsons:
-            await self.blackboard.commit_inflight(done_jsons)
+        done_ids = self._incidented_ids(ctx)
+        if not ctx:
+            return done_ids
+        fresh = done_ids - ctx.committed_event_ids
+        if not fresh:
+            return done_ids
+        fresh_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in fresh]
+        if fresh_jsons:
+            await self.blackboard.commit_inflight(fresh_jsons)
+        ctx.committed_event_ids |= fresh
 
-        # Clear escalation flags for successfully committed services (best-effort:
+        # Clear escalation flags for newly committed services (best-effort:
         # if clear fails, recovery or next escalation cycle will reset the flag)
-        for eid in done_ids:
+        for eid in fresh:
             esc = ctx.escalations_by_id.get(eid)
             if esc and esc.service:
                 try:
@@ -304,17 +322,42 @@ class NightwatcherObserver:
         """
         from ..models import ShiftReport
         ctx = getattr(self, "_batch_ctx", None)
-        done_ids: set[str] = set()
+        # Independent of Redis: which events already have a Jira incident.
+        done_ids = self._incidented_ids(ctx)
+
+        # Step A: commit incidented events. Isolated so a failure here can never skip the restage below.
+        commit_ok = True
         try:
-            done_ids = await self._commit_processed(ctx, json_members, escalations)
-            rest = [jm for jm, e in zip(json_members, escalations) if e.event_id not in done_ids]
-            if rest:
+            await self._commit_processed(ctx, json_members, escalations)
+        except Exception:
+            commit_ok = False
+            logger.exception("Nightwatcher: failed to commit %d incidented events during %s settle", len(done_ids), status)
+
+        # Step B: give every NON-incidented member back to pending.
+        rest = [jm for jm, e in zip(json_members, escalations) if e.event_id not in done_ids]
+        if rest:
+            try:
                 if requeue_all and not done_ids:
                     await self.blackboard.requeue_inflight()
                 else:
                     await self.blackboard.restage_orphans(rest)
-        except Exception:
-            logger.exception("Nightwatcher: failed to settle %s batch (inflight TTL will recover leftovers)", status)
+            except Exception:
+                logger.exception("Nightwatcher: failed to restage %d members during %s settle", len(rest), status)
+                # Fallback: requeue_inflight() moves EVERYTHING still in inflight back to pending. That is only
+                # safe when no incidented event can still be sitting in inflight (commit succeeded or none exist);
+                # otherwise it would re-file existing Jira incidents.
+                if commit_ok:
+                    try:
+                        await self.blackboard.requeue_inflight()
+                    except Exception:
+                        logger.exception(
+                            "Nightwatcher: requeue fallback failed -- %d members remain in inflight and are LOST when "
+                            "INFLIGHT_TTL expires (the TTL deletes the set, it does not requeue) unless the pod restarts first",
+                            len(rest))
+                else:
+                    logger.error(
+                        "Nightwatcher: commit AND restage failed -- NOT calling requeue_inflight() (would duplicate Jira "
+                        "incidents for %d incidented events). Manual recovery required.", len(done_ids))
 
         created = list(ctx.created_incidents) if ctx else []
         batch_report = ShiftReport(
@@ -556,12 +599,15 @@ class NightwatcherObserver:
                     report_record = {
                         "index": i,
                         "platform": cluster.get("platform", ""),
-                        "summary": response.function_call.args.get("summary", "")[:200],
+                        "summary": (response.function_call.args.get("summary") or "")[:200],
                         "priority": response.function_call.args.get("priority", "Normal"),
                         "status": response.function_call.args.get("status", "New"),
                         "affected_events": cluster.get("events", []),
                     }
                     completed_reports.append(report_record)
+                    # Jira write is not idempotent: take this cluster's members out of inflight NOW so a
+                    # later crash / SIGTERM / CancelledError cannot requeue them and file a duplicate.
+                    await self._commit_processed(ctx, json_members, escalations)
                     break
                 else:
                     if retry < MAX_CART_RETRIES:
@@ -603,7 +649,8 @@ class NightwatcherObserver:
         else:
             logger.warning("Nightwatcher: summary LLM call did not produce post_shift_summary tool call")
 
-        # Step 5: Commit processed events (restage of failed clusters already done in Step 3)
+        # Step 5: Safety net -- per-cluster commits above already removed incidented events; this is a no-op
+        # unless an earlier commit failed (it is retried here).
         await self._commit_processed(ctx, json_members, escalations)
 
         report = ShiftReport(

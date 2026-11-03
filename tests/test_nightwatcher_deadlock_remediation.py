@@ -17,8 +17,8 @@ Jira: VMER-2236 (Plan: nightwatcher-backlog-and-quota-deadlock)
   S-*  _sweep: quota_exhausted report, partial-incident commit vs restage, batch loop, env validation
 """
 
-import asyncio
 import json
+import re
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -511,67 +511,124 @@ def test_t6_get_redis_client_target_resolution(monkeypatch):
         drain.get_redis_client()
 
 
-def _drain_redis(now, items):
-    r = MagicMock()
-    r.zrange.return_value = items
-    r.zcard.return_value = len(items)
+def _drain_redis(items):
+    """Real (sync) fakeredis seeded with (member, score) pairs on the pending ZSET."""
+    import fakeredis
+    r = fakeredis.FakeRedis()
+    if items:
+        r.zadd("darwin:nightwatcher:pending", {m: sc for m, sc in items})
     return r
 
 
-def test_t6_classification_protects_critical_by_default():
-    from scripts.drain_nightwatcher_backlog import classify_backlog
+def _pending_members(r):
+    return {m.decode() for m in r.zrange("darwin:nightwatcher:pending", 0, -1)}
+
+
+def test_t6_prune_is_bounded_windowed_and_protects_critical(tmp_path):
+    """MEDIUM: never loads the whole ZSET -- every ZRANGEBYSCORE has a LIMIT of batch_size -- and
+    Critical members sitting at the head of the range do not stall or get removed."""
+    from scripts import drain_nightwatcher_backlog as drain
+    now = 1_000_000.0
+    crit = [json.dumps({"event_id": f"c{i}", "priority": "Critical"}) for i in range(3)]
+    stale = [json.dumps({"event_id": f"s{i}", "priority": "Normal"}) for i in range(7)]
+    fresh = [json.dumps({"event_id": "fresh", "priority": "Normal"})]
+    items = ([(m, now - 40 * 86400 + i) for i, m in enumerate(crit)]       # oldest -> head of window
+             + [(m, now - 30 * 86400 + i) for i, m in enumerate(stale)]
+             + [(m, now - 86400) for m in fresh])
+    r = _drain_redis(items)
+    calls = []
+    real = r.zrangebyscore
+
+    def spy(*a, **kw):
+        calls.append(kw)
+        return real(*a, **kw)
+    r.zrangebyscore = spy
+    backup = tmp_path / "b.jsonl"
+
+    with patch("time.time", return_value=now):
+        removable, protected = drain.prune_stale(r, 7, 2, protect_critical=True, execute=True,
+                                                 backup_path=str(backup))
+
+    assert (removable, protected) == (7, 3)
+    assert _pending_members(r) == set(crit) | set(fresh)
+    assert calls and all(c.get("num") == 2 and "start" in c for c in calls)   # bounded windows only
+    assert {json.loads(l)["member"] for l in backup.read_text().splitlines()} == set(stale)
+    assert (backup.stat().st_mode & 0o777) == 0o600                            # LOW: owner-only
+
+
+def test_t6_backup_permissions_are_enforced_on_preexisting_file(tmp_path):
+    from scripts import drain_nightwatcher_backlog as drain
+    path = tmp_path / "pre.jsonl"
+    path.write_text("")
+    path.chmod(0o644)
+    drain._open_backup(str(path)).close()
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_t6_include_critical_removes_everything_stale(tmp_path):
+    from scripts import drain_nightwatcher_backlog as drain
     now = 1_000_000.0
     crit = json.dumps({"event_id": "c", "priority": "Critical"})
-    normal = json.dumps({"event_id": "n", "priority": "Normal"})
-    r = _drain_redis(now, [
-        (crit.encode(), now - 30 * 86400), (normal.encode(), now - 30 * 86400),
-        (b"fresh", now - 1 * 86400), (b"edge", now - 7 * 86400 + 1),
-    ])
+    r = _drain_redis([(crit, now - 30 * 86400), ("junk-not-json", now - 30 * 86400), ("fresh", now - 86400)])
     with patch("time.time", return_value=now):
-        stale_n, active_n, stale, active = classify_backlog(r, 7, protect_critical=True)
-        assert (stale_n, active_n) == (1, 3) and stale[0][0] == normal
-        stale_n2, _, stale2, _ = classify_backlog(r, 7, protect_critical=False)
-        assert stale_n2 == 2 and crit in [s[0] for s in stale2]
+        removable, protected = drain.prune_stale(r, 7, 10, protect_critical=False, execute=True,
+                                                 backup_path=str(tmp_path / "b.jsonl"))
+    assert (removable, protected) == (2, 0)
+    assert _pending_members(r) == {"fresh"}
 
 
-def test_t6_dry_run_and_execute_with_backup(tmp_path):
+def test_t6_age_boundary_is_exclusive():
+    """score == cutoff is NOT stale (matches `score < cutoff`)."""
     from scripts import drain_nightwatcher_backlog as drain
     now = 1_000_000.0
-    items = [(f"stale-{i}".encode(), now - (10 + i) * 86400) for i in range(5)] + [(b"active", now - 86400)]
-    r = _drain_redis(now, items)
-    backup = tmp_path / "backup.jsonl"
+    r = _drain_redis([("edge", now - 7 * 86400), ("just-older", now - 7 * 86400 - 1)])
+    with patch("time.time", return_value=now):
+        removable, _ = drain.prune_stale(r, 7, 10, execute=False)
+    assert removable == 1
 
+
+def test_t6_dry_run_and_default_do_not_mutate_or_create_backup(tmp_path, monkeypatch):
+    from scripts import drain_nightwatcher_backlog as drain
+    monkeypatch.chdir(tmp_path)
+    now = 1_000_000.0
+    items = [(f"stale-{i}", now - (10 + i) * 86400) for i in range(5)] + [("active", now - 86400)]
+    r = _drain_redis(items)
     with patch("time.time", return_value=now), patch.object(drain, "get_redis_client", return_value=r):
         assert drain.main(["--dry-run", "--age-off-days", "7"]) == 0
-        assert drain.main(["--age-off-days", "7"]) == 0  # no --execute -> still read-only
-        r.pipeline.assert_not_called()
-        assert not backup.exists()
-
-        pipe = MagicMock()
-        r.pipeline.return_value = pipe
-        assert drain.main(["--execute", "--age-off-days", "7", "--batch-size", "2",
-                           "--delay-seconds", "0", "--backup-file", str(backup)]) == 0
-
-    assert pipe.execute.call_count == 3                      # 5 stale items / batch of 2
-    assert pipe.zrem.call_count == 5
-    removed = {c.args[1] for c in pipe.zrem.call_args_list}
-    assert removed == {f"stale-{i}" for i in range(5)}       # active item untouched
-    backed_up = [json.loads(line)["member"] for line in backup.read_text().splitlines()]
-    assert set(backed_up) == removed                          # every removed member was backed up first
+        assert drain.main(["--age-off-days", "7", "--execute", "--dry-run"]) == 0   # dry-run wins
+        assert drain.main(["--age-off-days", "7"]) == 0                             # no --execute
+    assert len(_pending_members(r)) == 6
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_t6_execute_writes_backup_before_zrem(tmp_path):
+def test_t6_execute_batches_and_backs_up_before_zrem(tmp_path):
     from scripts import drain_nightwatcher_backlog as drain
     now = 1_000_000.0
-    r = _drain_redis(now, [(b"stale", now - 30 * 86400)])
-    backup = tmp_path / "b.jsonl"
-    order: list[str] = []
-    pipe = MagicMock()
-    pipe.execute.side_effect = lambda: order.append(f"execute:backup_lines={len(backup.read_text().splitlines())}")
-    r.pipeline.return_value = pipe
-    with patch("time.time", return_value=now), patch.object(drain, "get_redis_client", return_value=r):
-        drain.main(["--execute", "--backup-file", str(backup), "--delay-seconds", "0"])
-    assert order == ["execute:backup_lines=1"]
+    items = [(f"stale-{i}", now - (10 + i) * 86400) for i in range(5)] + [("active", now - 86400)]
+    r = _drain_redis(items)
+    backup = tmp_path / "backup.jsonl"
+    order: list[int] = []
+    real_pipeline = r.pipeline
+
+    def pipeline(*a, **kw):
+        pipe = real_pipeline(*a, **kw)
+        real_exec = pipe.execute
+
+        def execute(*ea, **ek):
+            order.append(len(backup.read_text().splitlines()))   # backup lines present at ZREM time
+            return real_exec(*ea, **ek)
+        pipe.execute = execute
+        return pipe
+    r.pipeline = pipeline
+
+    with patch("time.time", return_value=now), patch.object(drain, "get_redis_client", return_value=r), \
+            patch.object(drain.time, "sleep") as sleep:
+        assert drain.main(["--execute", "--age-off-days", "7", "--batch-size", "2",
+                           "--delay-seconds", "3", "--backup-file", str(backup)]) == 0
+
+    assert _pending_members(r) == {"active"}
+    assert order == [2, 4, 5]                                     # each ZREM preceded by its backup lines
+    assert sleep.call_count == 2                                  # between full windows only
 
 
 # ==============================================================================
@@ -855,3 +912,424 @@ def test_s_ports_signature_matches_implementation():
     impl = inspect.signature(BlackboardState.lease_pending_escalations).parameters
     assert list(port) == list(impl) == ["self", "before_ts", "limit"]
     assert port["limit"].default == impl["limit"].default == 25
+
+
+# ==============================================================================
+# E2E: REAL Redis (fakeredis) + scripted LLM/Jira, integrated from QE's probe suite
+# (/data/workspace/results/pr305-qe/test_nightwatcher_sweep_e2e_qe.py)
+# ==============================================================================
+
+PENDING = BlackboardState.NIGHTWATCHER_PENDING
+INFLIGHT = BlackboardState.NIGHTWATCHER_INFLIGHT
+
+
+def e2e_esc(i):
+    return StagedEscalation(event_id=f"evt-{i:03d}", service=f"svc-{i}", source="aligner", reason="ci",
+                            summary="s", platform="Konflux", description="d", staged_at=1000.0 + i,
+                            priority="Normal")
+
+
+@pytest.fixture
+def e2e_env(monkeypatch):
+    monkeypatch.setenv("NIGHTWATCHER_BATCH_SIZE", "2")
+    monkeypatch.setenv("NIGHTWATCHER_MIN_PENDING", "1")
+    monkeypatch.setenv("NIGHTWATCHER_MAX_BATCHES", "10")
+    monkeypatch.setenv("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", "0")
+
+
+@pytest.fixture
+async def board(e2e_env):
+    r = fakeredis.aioredis.FakeRedis()
+    b = BlackboardState.__new__(BlackboardState)  # skip __init__ (Lua registration)
+    b.redis = r
+    b.clear_escalation_flag = AsyncMock()
+    yield b
+    await r.aclose()
+
+
+class ScriptedLLM:
+    """Dispatches on the call shape so it works for any batch composition.
+
+    one_cluster_per_event: declare one cluster per leased event (else one cluster for the batch).
+    hooks: callables run at specific (batch_no, stage) points; may raise.
+    """
+
+    def __init__(self, one_cluster_per_event=False, boom=None, skip_write_for=()):
+        self.batch = 0
+        self.stage = "analysis"
+        self.events: list[str] = []
+        self.clusters: list[list[str]] = []
+        self.cluster_idx = 0
+        self.one = one_cluster_per_event
+        self.boom = boom or {}            # {(batch_no, stage[, cluster_idx]): Exception}
+        self.skip_write_for = set(skip_write_for)
+        self.analysis_calls = 0
+
+    async def generate(self, **kw):
+        tools = kw.get("tools")
+        names = [t.get("name") for t in (tools if isinstance(tools, list) else [])] if tools else []
+        flat = str(tools)
+        contents = kw["contents"]
+        text0 = contents[0]["parts"][0]["text"]
+        if "post_shift_summary" in flat:
+            self._maybe_boom("summary")
+            return fc("post_shift_summary", {"summary": f"batch {self.batch} done"})
+        if "declare_clusters" in flat and "write_incident" not in flat:
+            self._maybe_boom("declare")
+            evs = self.events
+            self.clusters = [[e] for e in evs] if self.one else [evs]
+            self.cluster_idx = 0
+            return fc("declare_clusters", {"clusters": [
+                {"events": c, "root_cause": f"rc-{c[0]}", "platform": "Konflux", "services": ["svc"]}
+                for c in self.clusters]})
+        if "write_incident" in flat:
+            cl = self.clusters[self.cluster_idx]
+            self._maybe_boom("write", self.cluster_idx)
+            self.cluster_idx += 1
+            if cl[0] in self.skip_write_for:
+                return MockResponse(text="no tool call")
+            return fc("write_incident", {"summary": f"inc {cl[0]}", "description": "d",
+                                          "priority": "Normal", "status": "New"})
+        # analysis phase (set_phase) -- first call of a new batch carries the manifest as contents[0]
+        found = re.findall(r"\*\*(evt-\d+)\*\*", text0)
+        if len(contents) == 1:
+            self.batch += 1
+            self.stage = "analysis"
+            self.events = found
+            self.analysis_calls = 0
+        self._maybe_boom("analysis")
+        self.analysis_calls += 1
+        phase = "investigate" if self.analysis_calls == 1 else "report"
+        return fc("set_phase", {"phase": phase})
+
+    def _maybe_boom(self, stage, idx=None):
+        for key in ((self.batch, stage, idx), (self.batch, stage)):
+            if key in self.boom:
+                raise self.boom.pop(key)
+
+
+def e2e_observer(board, llm, jira=None):
+    obs = NightwatcherObserver(
+        blackboard=board, registry=AsyncMock(), bridge=AsyncMock(), provisioner=AsyncMock(),
+        incident_adapter=AsyncMock(), archivist=AsyncMock(), slack_notify=AsyncMock(),
+    )
+    adapter = AsyncMock()
+    adapter.generate = llm.generate
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    n = iter(range(1, 100))
+    obs._incident_adapter.create_incident = jira or AsyncMock(
+        side_effect=lambda f: {"issue_key": f"VMER-{next(n)}", "issue_url": "u"})
+    obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
+    return obs
+
+
+async def e2e_stage(board, n):
+    for i in range(1, n + 1):
+        await board.stage_escalation(e2e_esc(i))
+
+
+async def e2e_snapshot(board):
+    pend = {StagedEscalation.model_validate_json(m).event_id for m in await board.redis.zrange(PENDING, 0, -1)}
+    infl = {StagedEscalation.model_validate_json(m).event_id for m in await board.redis.smembers(INFLIGHT)}
+    return pend, infl
+
+
+async def e2e_latest_report(board):
+    keys = [k async for k in board.redis.scan_iter(match=f"{BlackboardState.SHIFT_PREFIX}*")]
+    assert len(keys) == 1, keys                      # one cumulative report key per sweep (date:window)
+    from src.models import ShiftReport
+    return ShiftReport.model_validate_json(await board.redis.get(keys[0]))
+
+
+@pytest.mark.asyncio
+async def test_e2e_multi_batch_drain_empties_backlog_into_one_cumulative_report(board):
+    await e2e_stage(board, 5)
+    obs = e2e_observer(board, ScriptedLLM())
+    await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == set() and infl == set()
+    rep = await e2e_latest_report(board)
+    assert rep.status == "completed"
+    assert len(rep.incidents) == 3                                  # batches of 2,2,1
+    assert sorted(e.event_id for e in rep.manifest) == [f"evt-{i:03d}" for i in range(1, 6)]
+    assert rep.metrics["escalation_count"] == 5 and rep.metrics["incident_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_e2e_quota_exhausted_on_batch2_keeps_batch1_committed_and_restages_batch2(board):
+    await e2e_stage(board, 5)
+    llm = ScriptedLLM(boom={(2, "analysis"): QuotaExhaustedError("Quota exhausted")})
+    obs = e2e_observer(board, llm)
+    await obs._sweep()                                               # must not raise
+    pend, infl = await e2e_snapshot(board)
+    assert infl == set()                                             # no zombie inflight
+    assert pend == {"evt-003", "evt-004", "evt-005"}                 # batch 2 restaged + batch 3 never leased
+    assert not pend & {"evt-001", "evt-002"}                         # batch 1 never restaged -> no dup Jira
+    rep = await e2e_latest_report(board)
+    assert rep.status == "quota_exhausted"
+    assert [i.jira_issue_key for i in rep.incidents] == ["VMER-1"]
+    assert sorted(e.event_id for e in rep.manifest) == ["evt-001", "evt-002"]
+    assert obs._incident_adapter.create_incident.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_e2e_quota_exhausted_mid_cart_commits_incidented_cluster_only(board):
+    """Batch 1: 2 clusters; 1st incident created, QuotaExhausted on the 2nd cluster's LLM call."""
+    await e2e_stage(board, 2)
+    llm = ScriptedLLM(one_cluster_per_event=True,
+                      boom={(1, "write", 1): QuotaExhaustedError("Quota exhausted")})
+    obs = e2e_observer(board, llm)
+    await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == {"evt-002"} and infl == set()
+    rep = await e2e_latest_report(board)
+    assert rep.status == "quota_exhausted"
+    assert [e.event_id for e in rep.manifest] == ["evt-001"]
+
+
+@pytest.mark.asyncio
+async def test_e2e_no_duplicate_incidents_across_sweeps_after_quota_failure(board):
+    """Sweep 1 dies mid-batch-2; sweep 2 (healthy) finishes. Every event must get exactly one incident."""
+    await e2e_stage(board, 5)
+    obs1 = e2e_observer(board, ScriptedLLM(boom={(2, "analysis"): QuotaExhaustedError("q")}))
+    await obs1._sweep()
+    obs2 = e2e_observer(board, ScriptedLLM())
+    await obs2._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == set() and infl == set()
+    covered = []
+    for obs in (obs1, obs2):
+        for call in obs._incident_adapter.create_incident.await_args_list:
+            covered.append(call.args[0]["summary"])
+    ev_in_summaries = [re.search(r"evt-\d+", s).group(0) for s in covered]
+    assert len(ev_in_summaries) == len(set(ev_in_summaries))        # no event had 2 incidents
+    assert len(covered) == 1 + 2                                     # b1 (evt1,2) + {3,4},{5} in sweep 2
+
+
+@pytest.mark.asyncio
+async def test_e2e_generic_failure_after_partial_incident_does_not_duplicate(board):
+    await e2e_stage(board, 2)
+    llm = ScriptedLLM(one_cluster_per_event=True, boom={(1, "write", 1): RuntimeError("boom")})
+    obs = e2e_observer(board, llm)
+    await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == {"evt-002"} and infl == set()
+    assert (await e2e_latest_report(board)).status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_e2e_failure_before_any_incident_requeues_all(board):
+    await e2e_stage(board, 3)
+    obs = e2e_observer(board, ScriptedLLM(boom={(1, "declare"): RuntimeError("boom")}))
+    await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == {"evt-001", "evt-002", "evt-003"} and infl == set()
+
+
+@pytest.mark.asyncio
+async def test_e2e_max_batches_leaves_remainder_pending(board, monkeypatch):
+    monkeypatch.setenv("NIGHTWATCHER_MAX_BATCHES", "2")
+    await e2e_stage(board, 7)
+    obs = e2e_observer(board, ScriptedLLM())
+    await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert pend == {"evt-005", "evt-006", "evt-007"} and infl == set()
+    assert (await e2e_latest_report(board)).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_e2e_failed_cluster_is_restaged_and_not_leased_again_in_same_sweep(board):
+    """A refused cluster is restaged (original staged_at, so FIFO puts it at the front of the next lease).
+    Known trade-off: it can be re-leased by a later batch of the same sweep (bounded by MAX_BATCHES).
+    Invariants asserted: terminates, nothing lost, nothing duplicated, no zombie inflight."""
+    await e2e_stage(board, 4)
+    llm = ScriptedLLM(one_cluster_per_event=True, skip_write_for={"evt-001"})
+    obs = e2e_observer(board, llm)
+    with patch("src.observers.nightwatcher.MAX_CART_RETRIES", 0):
+        await obs._sweep()
+    seen = [c.args[0]["summary"] for c in obs._incident_adapter.create_incident.await_args_list]
+    # evt-001 never gets an incident (LLM refuses) -- assert the sweep terminates and nothing is lost/duplicated.
+    assert len(seen) == len(set(seen))
+    pend, infl = await e2e_snapshot(board)
+    assert infl == set()
+    assert "evt-001" in pend                                         # still pending for next sweep, not lost
+
+
+@pytest.mark.asyncio
+async def test_e2e_no_cooldown_sleep_after_final_allowed_batch(board, monkeypatch):
+    """Kills the `batch_no >= max_batches` -> `>` mutant: no wasted cooldown/count after the last batch."""
+    monkeypatch.setenv("NIGHTWATCHER_MAX_BATCHES", "2")
+    monkeypatch.setenv("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", "12")
+    await e2e_stage(board, 7)
+    obs = e2e_observer(board, ScriptedLLM())
+    with patch("src.observers.nightwatcher.asyncio.sleep", new=AsyncMock()) as sleep:
+        await obs._sweep()
+    assert [c.args[0] for c in sleep.call_args_list] == [12.0]       # between batch 1 and 2 only
+
+
+# ---- Round-2 regressions (ai-review HIGH findings on fbdd08f5) ----
+
+@pytest.mark.asyncio
+async def test_probe_high1_incidented_events_survive_hard_stop_before_commit(board):
+    """HIGH #1 (crash window). Pod SIGTERM => CancelledError (BaseException, not caught by `except Exception`)
+    after the Jira incident is written but before the end-of-sweep commit. Per-cluster commit means the
+    incidented events are already out of inflight, so requeue_inflight() on restart cannot re-file them."""
+    import asyncio
+    await _stage_board(board, 2)
+    llm = ScriptedLLM(boom={(1, "summary"): asyncio.CancelledError()})
+    obs = e2e_observer(board, llm)
+    with pytest.raises(asyncio.CancelledError):
+        await obs._sweep()
+    assert obs._incident_adapter.create_incident.await_count == 1    # Jira incident exists for evt-001+002
+    assert await board.requeue_inflight() == 0, "incidented events were still inflight -> would be re-filed after restart"
+    pend, infl = await e2e_snapshot(board)
+    assert pend == set() and infl == set()
+
+
+@pytest.mark.asyncio
+async def test_round2_cancel_mid_cart_commits_finished_clusters_only(board):
+    """CancelledError while cluster 2 is being written: cluster 1 is committed (never requeued),
+    cluster 2 (no incident yet) stays inflight and is safely recovered by requeue_inflight()."""
+    import asyncio
+    await _stage_board(board, 2)
+    llm = ScriptedLLM(one_cluster_per_event=True, boom={(1, "write", 1): asyncio.CancelledError()})
+    obs = e2e_observer(board, llm)
+    with pytest.raises(asyncio.CancelledError):
+        await obs._sweep()
+    pend, infl = await e2e_snapshot(board)
+    assert infl == {"evt-002"} and pend == set()
+    assert await board.requeue_inflight() == 1
+    pend, infl = await e2e_snapshot(board)
+    assert pend == {"evt-002"} and infl == set()                     # evt-001 (incidented) is never requeued
+    assert obs._incident_adapter.create_incident.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_round2_commit_happens_per_cluster_before_next_cluster_is_written(board):
+    """Directly pins the ordering: when cluster 2's incident is created, cluster 1 is already out of inflight."""
+    await _stage_board(board, 2)
+    inflight_seen: list[set[str]] = []
+
+    async def create(fields):
+        _, infl = await e2e_snapshot(board)
+        inflight_seen.append(infl)
+        return {"issue_key": f"VMER-{len(inflight_seen)}", "issue_url": "u"}
+    obs = e2e_observer(board, ScriptedLLM(one_cluster_per_event=True), jira=AsyncMock(side_effect=create))
+    await obs._sweep()
+    assert inflight_seen == [{"evt-001", "evt-002"}, {"evt-002"}]    # cluster 1 committed before cluster 2 write
+    assert (await e2e_snapshot(board)) == (set(), set())
+
+
+@pytest.mark.asyncio
+async def test_probe_high2_settle_double_fault_strands_inflight(board):
+    """HIGH #2: restage itself raises inside _settle_failed_batch -> fall back to requeue_inflight()
+    so nothing is stranded in inflight (where the 1h TTL would DELETE it)."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM(boom={(1, "analysis"): QuotaExhaustedError("q")}))
+    real = board.restage_orphans
+    board.restage_orphans = AsyncMock(side_effect=ConnectionError("redis blip"))
+    await obs._sweep()
+    board.restage_orphans = real
+    pend, infl = await e2e_snapshot(board)
+    assert infl == set(), f"stranded inflight (never auto-recovered in a running pod): {infl}"
+    assert pend == {"evt-001", "evt-002"}
+    assert (await e2e_latest_report(board)).status == "quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_round2_commit_failure_does_not_block_restage(board):
+    """HIGH #2: commit of incidented events fails, but the non-incidented remainder is still restaged."""
+    await _stage_board(board, 2)
+    llm = ScriptedLLM(one_cluster_per_event=True, boom={(1, "write", 1): QuotaExhaustedError("q")})
+    obs = e2e_observer(board, llm)
+    real_commit = board.commit_inflight
+    board.commit_inflight = AsyncMock(side_effect=ConnectionError("redis blip"))
+    await obs._sweep()                                               # must not raise
+    board.commit_inflight = real_commit
+    pend, infl = await e2e_snapshot(board)
+    assert "evt-002" in pend                                         # restage ran despite the commit fault
+    assert "evt-001" not in pend                                     # incidented event must NOT be re-queued
+    # the per-cluster commit fault aborts the cart as a generic failure (safe: remainder restaged)
+    assert (await e2e_latest_report(board)).status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_round2_double_fault_with_failed_commit_never_requeues_everything():
+    """If commit failed AND restage failed, requeue_inflight() would re-file existing incidents -> must not run."""
+    escs = [make_escalation("evt-1"), make_escalation("evt-2")]
+    obs, raw = _sweep_obs(escs, raise_in_cart=QuotaExhaustedError("x"), created=[incident("evt-1")])
+    obs.blackboard.commit_inflight = AsyncMock(side_effect=ConnectionError("blip"))
+    obs.blackboard.restage_orphans = AsyncMock(side_effect=ConnectionError("blip"))
+    await obs._sweep()
+    obs.blackboard.requeue_inflight.assert_not_called()
+    assert obs.blackboard.persist_shift_report.call_args[0][0].status == "quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_round2_double_fault_requeue_fallback_failure_is_survivable():
+    escs = [make_escalation("evt-1")]
+    obs, raw = _sweep_obs(escs, raise_in_analysis=QuotaExhaustedError("x"))
+    obs.blackboard.restage_orphans = AsyncMock(side_effect=ConnectionError("blip"))
+    obs.blackboard.requeue_inflight = AsyncMock(side_effect=ConnectionError("blip"))
+    await obs._sweep()                                               # no exception escapes
+    obs.blackboard.requeue_inflight.assert_awaited_once()
+    assert obs.blackboard.persist_shift_report.call_args[0][0].status == "quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_round2_commit_processed_is_incremental_and_idempotent():
+    escs = [make_escalation("evt-1"), make_escalation("evt-2")]
+    raw = [e.model_dump_json() for e in escs]
+    obs = make_observer()
+    obs.blackboard.commit_inflight = AsyncMock()
+    obs.blackboard.clear_escalation_flag = AsyncMock()
+    ctx = make_ctx(escs, created=[incident("evt-1")])
+    assert await obs._commit_processed(ctx, raw, escs) == {"evt-1"}
+    ctx.created_incidents.append(incident("evt-2", key="VMER-2"))
+    assert await obs._commit_processed(ctx, raw, escs) == {"evt-1", "evt-2"}
+    assert await obs._commit_processed(ctx, raw, escs) == {"evt-1", "evt-2"}   # no-op
+    assert [c.args[0] for c in obs.blackboard.commit_inflight.call_args_list] == [[raw[0]], [raw[1]]]
+    assert obs.blackboard.clear_escalation_flag.await_count == 2
+    # a failed commit is NOT marked committed, so it is retried
+    ctx2 = make_ctx(escs, created=[incident("evt-1")])
+    obs.blackboard.commit_inflight = AsyncMock(side_effect=[ConnectionError("x"), None])
+    with pytest.raises(ConnectionError):
+        await obs._commit_processed(ctx2, raw, escs)
+    assert ctx2.committed_event_ids == set()
+    await obs._commit_processed(ctx2, raw, escs)
+    assert obs.blackboard.commit_inflight.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", ["false", "true"])
+async def test_probe_high3_report_incident_null_summary_both_branches(enabled):
+    """HIGH #3: explicit `summary: null` must not raise on the direct-Jira (false) or staging (true) branch,
+    including the set_escalation_flag summary (lines 483/532)."""
+    from unittest.mock import MagicMock
+    from src.agents import handlers_dispatch
+    from src.models import EventDocument, EventEvidence, EventInput
+    bb = AsyncMock(spec=BlackboardState)
+    bb.get_active_events.return_value = []
+    bb.get_event.return_value = EventDocument(
+        id="evt-x", source="aligner", service="svc-a", subject_type="service",
+        event=EventInput(reason="cpu", evidence=EventEvidence(display_text="cpu", source_type="aligner")))
+    ctx = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.has_incident_been_created.return_value = False
+    ctx.next_turn_number = AsyncMock(return_value=1)
+    ctx.append_and_broadcast = AsyncMock()
+    ctx.emit_pulse = AsyncMock()
+    adapter = AsyncMock(create_incident=AsyncMock(return_value={"issue_key": "VMER-1", "issue_url": "u"}))
+    ctx.get_incident_adapter.return_value = adapter
+    with patch.dict("os.environ", {"NIGHTWATCHER_ENABLED": enabled}):
+        res = await handlers_dispatch.handle_report_incident(
+            ctx, "evt-x", {"summary": None, "description": "d", "priority": "Normal"}, None)
+    assert res is True
+    if enabled == "false":
+        assert adapter.create_incident.call_args[0][0]["summary"] == ""
+    bb.set_escalation_flag.assert_awaited_once()
+    assert bb.set_escalation_flag.call_args[0][2] == "escalated"     # null summary -> default text, not a crash
+
+
+async def _stage_board(board, n):
+    await e2e_stage(board, n)

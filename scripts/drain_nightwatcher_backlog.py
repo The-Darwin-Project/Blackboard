@@ -1,9 +1,10 @@
 # scripts/drain_nightwatcher_backlog.py
 # @ai-rules:
 # 1. [Constraint]: Mutations require an explicit --execute. Default and --dry-run are read-only.
-# 2. [Constraint]: Every pruned member is appended to a JSONL backup BEFORE ZREM (deletion is otherwise irreversible).
-# 3. [Constraint]: Targets the same Redis the app uses: REDIS_URL wins, else REDIS_HOST/REDIS_PORT/REDIS_PASSWORD. The target host is always logged.
-# 4. [Gotcha]: This script only AGES OFF stale members. It does NOT drain the live backlog -- the Nightwatcher sweep does that
+# 2. [Constraint]: Every pruned member is appended to a JSONL backup (created 0o600) and fsynced BEFORE ZREM (deletion is otherwise irreversible).
+# 3. [Constraint]: Memory/Redis work is bounded: ZRANGEBYSCORE ... LIMIT offset batch_size windows; never load the whole ZSET.
+# 4. [Constraint]: Targets the same Redis the app uses: REDIS_URL wins, else REDIS_HOST/REDIS_PORT/REDIS_PASSWORD. The target host is always logged.
+# 5. [Gotcha]: This script only AGES OFF stale members. It does NOT drain the live backlog -- the Nightwatcher sweep does that
 #    (NIGHTWATCHER_BATCH_SIZE x NIGHTWATCHER_MAX_BATCHES per sweep).
 """
 Standalone backlog age-off utility for Nightwatcher.
@@ -141,28 +142,81 @@ def _priority_of(item_str: str) -> str:
         return ""
 
 
-def classify_backlog(
-    client: Redis, age_off_days: int, protect_critical: bool = False
-) -> tuple[int, int, list[tuple[str, float]], list[tuple[str, float]]]:
-    """Partition items into stale (older than age_off_days) and active.
+def _open_backup(path: str):
+    """Open the JSONL backup append-only with owner-only (0o600) permissions.
 
-    With protect_critical, stale items whose priority is Critical are classified active (kept).
+    The payloads contain service names, summaries and descriptions, so the file must not be
+    group/world readable regardless of umask (mode only applies on creation; fchmod covers reuse).
     """
-    now = time.time()
-    cutoff_ts = now - (age_off_days * 86400)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, "a", encoding="utf-8")
 
-    items_with_scores = client.zrange(NIGHTWATCHER_PENDING, 0, -1, withscores=True)
-    stale_items: list[tuple[str, float]] = []
-    active_items: list[tuple[str, float]] = []
 
-    for raw_val, score in items_with_scores:
-        item_str = raw_val if isinstance(raw_val, str) else raw_val.decode()
-        if score < cutoff_ts and not (protect_critical and _priority_of(item_str) == "Critical"):
-            stale_items.append((item_str, score))
-        else:
-            active_items.append((item_str, score))
+def prune_stale(
+    client: Redis,
+    age_off_days: int,
+    batch_size: int,
+    protect_critical: bool = True,
+    execute: bool = False,
+    delay_seconds: int = 0,
+    backup_path: str | None = None,
+) -> tuple[int, int]:
+    """Walk stale members (score < now - age_off_days) in bounded windows of batch_size.
 
-    return len(stale_items), len(active_items), stale_items, active_items
+    Memory and Redis work per call are O(batch_size): ZRANGEBYSCORE ... LIMIT offset batch_size,
+    never the whole ZSET. Protected (Critical) members stay in the range, so the window offset
+    advances past them; removed members shift the range down, so the offset does not advance for
+    them. With execute=True each window is appended to the backup (fsynced) BEFORE its ZREM.
+    Returns (stale_removed_or_would_remove, protected_kept).
+    """
+    cutoff_ts = time.time() - (age_off_days * 86400)
+    max_score = f"({cutoff_ts}"  # exclusive upper bound: score < cutoff
+    offset = 0
+    removable = 0
+    protected = 0
+    backup = _open_backup(backup_path) if (execute and backup_path) else None
+    try:
+        while True:
+            window = client.zrangebyscore(
+                NIGHTWATCHER_PENDING, "-inf", max_score, start=offset, num=batch_size, withscores=True
+            )
+            if not window:
+                break
+            to_remove: list[tuple[str, float]] = []
+            for raw_val, score in window:
+                item_str = raw_val if isinstance(raw_val, str) else raw_val.decode()
+                if protect_critical and _priority_of(item_str) == "Critical":
+                    protected += 1
+                else:
+                    to_remove.append((item_str, score))
+            removable += len(to_remove)
+            kept = len(window) - len(to_remove)
+            if not execute:
+                offset += len(window)          # read-only scan: nothing shifts
+            else:
+                if to_remove:
+                    for item_str, score in to_remove:
+                        backup.write(json.dumps({"score": score, "member": item_str}) + "\n")
+                    backup.flush()
+                    os.fsync(backup.fileno())
+                    pipe = client.pipeline()
+                    for item_str, _ in to_remove:
+                        pipe.zrem(NIGHTWATCHER_PENDING, item_str)
+                    pipe.execute()
+                    logger.info("Pruned %d stale items (total %d)", len(to_remove), removable)
+                offset += kept
+                if len(window) == batch_size and delay_seconds > 0:
+                    time.sleep(delay_seconds)
+            if len(window) < batch_size:
+                break
+    finally:
+        if backup is not None:
+            backup.close()
+    return removable, protected
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -174,43 +228,28 @@ def main(argv: list[str] | None = None) -> int:
     total_pending = client.zcard(NIGHTWATCHER_PENDING)
     logger.info("Current pending queue cardinality: %d", total_pending)
 
-    stale_count, active_count, stale_items, active_items = classify_backlog(
-        client, args.age_off_days, protect_critical=not args.include_critical
+    execute = bool(args.execute) and not args.dry_run
+    backup_path = None
+    if execute:
+        backup_path = args.backup_file or f"nightwatcher-pruned-{int(time.time())}.jsonl"
+        logger.info("Pruning items older than %d days in windows of %d (backup: %s)...",
+                    args.age_off_days, args.batch_size, backup_path)
+    else:
+        logger.info("Dry-run mode active (or --execute omitted). No mutations performed.")
+
+    removable, protected = prune_stale(
+        client, args.age_off_days, args.batch_size,
+        protect_critical=not args.include_critical,
+        execute=execute, delay_seconds=args.delay_seconds, backup_path=backup_path,
     )
     logger.info(
-        "Classification (cutoff %d days, critical %s): %d stale items, %d kept",
-        args.age_off_days,
-        "included" if args.include_critical else "protected",
-        stale_count,
-        active_count,
+        "%s %d stale items older than %d days; %d stale Critical items %s; %d items remain",
+        "Pruned" if execute else "Would prune", removable, args.age_off_days,
+        protected, "included" if args.include_critical else "protected",
+        total_pending - (removable if execute else 0),
     )
-
-    if args.dry_run or not args.execute:
-        logger.info("Dry-run mode active (or --execute omitted). No mutations performed.")
-        return 0
-
-    if stale_count > 0:
-        backup_path = args.backup_file or f"nightwatcher-pruned-{int(time.time())}.jsonl"
-        logger.info(
-            "Pruning %d stale items older than %d days in batches of %d (backup: %s)...",
-            stale_count, args.age_off_days, args.batch_size, backup_path,
-        )
-        with open(backup_path, "a", encoding="utf-8") as backup:
-            for i in range(0, stale_count, args.batch_size):
-                batch = stale_items[i : i + args.batch_size]
-                for item_str, score in batch:
-                    backup.write(json.dumps({"score": score, "member": item_str}) + "\n")
-                backup.flush()
-                os.fsync(backup.fileno())
-                pipe = client.pipeline()
-                for item_str, _ in batch:
-                    pipe.zrem(NIGHTWATCHER_PENDING, item_str)
-                pipe.execute()
-                logger.info("Pruned batch %d-%d of %d stale items", i + 1, min(i + len(batch), stale_count), stale_count)
-                if i + args.batch_size < stale_count and args.delay_seconds > 0:
-                    time.sleep(args.delay_seconds)
-        logger.info("Successfully pruned %d stale items (backup: %s).", stale_count, backup_path)
-
+    if execute and removable:
+        logger.info("Backup written to %s", backup_path)
     return 0
 
 

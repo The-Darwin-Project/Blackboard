@@ -480,7 +480,7 @@ async def handle_report_incident(
                 try:
                     await bb.set_escalation_flag(
                         event_doc.service, event_id,
-                        args.get("summary", "escalated")[:100],
+                        (args.get("summary") or "escalated")[:100],
                         scope=esc_scope,
                     )
                 except Exception as ef:
@@ -512,7 +512,7 @@ async def handle_report_incident(
             fields = {
                 "project_key": os.getenv("JIRA_INCIDENT_PROJECT_KEY", ""),
                 "issue_type": os.getenv("JIRA_INCIDENT_ISSUE_TYPE", ""),
-                "summary": args.get("summary", "")[:200],
+                "summary": (args.get("summary") or "")[:200],
                 "description": description,
                 "priority": args.get("priority", "Normal"),
                 "labels": [l.strip() for l in os.getenv("JIRA_INCIDENT_LABELS", "").split(",") if l.strip()],
@@ -529,7 +529,7 @@ async def handle_report_incident(
                     try:
                         await bb.set_escalation_flag(
                             event_doc.service, event_id,
-                            args.get("summary", "escalated")[:100],
+                            (args.get("summary") or "escalated")[:100],
                             scope=esc_scope_jira,
                         )
                     except Exception as ef:
