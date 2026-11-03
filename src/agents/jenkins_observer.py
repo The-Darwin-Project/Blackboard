@@ -64,13 +64,14 @@ creates events with source="aligner" + subject_type="ci_gating" for FRIDAY.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import logging
 import math
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
@@ -397,6 +398,7 @@ class JenkinsObserver:
         self._flood_threshold = int(os.getenv("JENKINS_OBSERVER_FLOOD_THRESHOLD", "3"))
         self._dry_run = os.getenv("JENKINS_OBSERVER_DRY_RUN", "true").lower() == "true"
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        self._wip_counter: Any = None
         self._views = [
             v.strip() for v in os.getenv("JENKINS_OBSERVER_VIEWS", "").split(",") if v.strip()
         ]
@@ -562,11 +564,22 @@ class JenkinsObserver:
             self._llm_adapter = create_adapter("gemini", project, location, model)
         return self._llm_adapter
 
+    def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
+        """Inject global WIP counter (e.g. Brain.count_global_wip)."""
+        self._wip_counter = counter
+
+    async def _local_count_wip(self) -> int:
+        status_map = await self.blackboard.get_active_events_with_status()
+        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+
     async def _get_wip_headroom(self) -> int:
         """Query current WIP usage and return available headroom."""
         try:
-            status_map = await self.blackboard.get_active_events_with_status()
-            wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+            wip_used = (
+                await self._wip_counter(include_new=True)
+                if self._wip_counter is not None
+                else await self._local_count_wip()
+            )
             return max(0, self._wip_cap - wip_used)
         except Exception as e:
             logger.warning("JenkinsObserver: WIP headroom query failed (%s), defaulting to 5", e)

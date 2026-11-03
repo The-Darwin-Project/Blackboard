@@ -41,6 +41,7 @@ Two-phase flow:
 from __future__ import annotations
 
 import base64
+from collections.abc import Awaitable, Callable
 import json
 import logging
 import os
@@ -260,6 +261,7 @@ class HeadhunterJira:
         self._jira_label = os.getenv("HEADHUNTER_JIRA_LABEL", "darwin")
         self._model = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-5-5")
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        self._wip_counter: Any = None
         self._claude_adapter = None
         # Label-driven skill selection: env HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>
         self._skill_urls: dict[str, str] = {}
@@ -713,10 +715,41 @@ class HeadhunterJira:
                     keys.add(jira_ctx.get("issue_key", ""))
         return keys - {""}
 
-    async def check_flow_gate(self) -> bool:
-        """Back off when system is at global WIP capacity (conservative count)."""
+    def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
+        """Inject global WIP counter (e.g. Brain.count_global_wip)."""
+        self._wip_counter = counter
+
+    async def _local_count_wip(self) -> int:
         status_map = await self.blackboard.get_active_events_with_status()
-        wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+
+    async def check_flow_gate(self) -> bool:
+        """Back off when system is at global WIP capacity."""
+        if self._wip_counter is not None:
+            try:
+                wip_used = await self._wip_counter(include_new=True)
+            except Exception as e:
+                logger.warning(
+                    "Injected WIP counter failed in check_flow_gate, falling back to local: %s",
+                    e,
+                )
+                try:
+                    wip_used = await self._local_count_wip()
+                except Exception as local_err:
+                    logger.error(
+                        "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
+                        local_err,
+                    )
+                    return False
+        else:
+            try:
+                wip_used = await self._local_count_wip()
+            except Exception as local_err:
+                logger.error(
+                    "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
+                    local_err,
+                )
+                return False
         return wip_used < self._wip_cap
 
     # =========================================================================

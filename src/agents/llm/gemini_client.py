@@ -44,6 +44,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+from .quota_tracker import Reservation
 from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -116,9 +117,11 @@ class GeminiAdapter:
         """Rough pre-request token estimate (char count / 4)."""
         return max(1, len(str(contents)) // 4)
 
-    def _record_usage(self, usage_metadata, estimate: int) -> TokenUsage | None:
+    def _record_usage(self, usage_metadata, estimate: int, reservation: Reservation | None = None) -> TokenUsage | None:
         """Extract full TokenUsage from usage_metadata and record with QuotaTracker."""
         if usage_metadata is None:
+            if self._tracker and isinstance(reservation, Reservation):
+                self._tracker.rollback(reservation)
             return None
 
         total = getattr(usage_metadata, "total_token_count", None) or 0
@@ -134,13 +137,22 @@ class GeminiAdapter:
             candidates_t = max(0, total - input_t - thinking_t)
         output_t = candidates_t or 0
 
-        if self._tracker and total:
-            self._tracker.record(total, estimate)
-            stats = self._tracker.get_stats()
-            logger.debug(
-                f"LLM usage: {total} tokens (est={estimate}), "
-                f"bucket={stats['utilization_pct']}%"
-            )
+        if self._tracker:
+            if total > 0:
+                if isinstance(reservation, Reservation):
+                    self._tracker.record(total, estimate, reservation=reservation)
+                else:
+                    self._tracker.record(total, estimate)
+                stats = self._tracker.get_stats()
+                logger.debug(
+                    f"LLM usage: {total} tokens (est={estimate}), "
+                    f"bucket={stats['utilization_pct']}%"
+                )
+            elif isinstance(reservation, Reservation):
+                self._tracker.rollback(reservation)
+
+        if total <= 0:
+            return None
 
         return TokenUsage(
             input_tokens=input_t,
@@ -336,16 +348,22 @@ class GeminiAdapter:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
+        reservation = None
         if self._tracker:
-            await self._tracker.acquire(estimate)
+            reservation = await self._tracker.acquire(estimate, max_wait_seconds=30.0)
 
-        response = await self._client.aio.models.generate_content(
-            model=self._model_name,
-            contents=self._convert_contents(contents),
-            config=config,
-        )
-
-        token_usage = self._record_usage(getattr(response, "usage_metadata", None), estimate)
+        reservation_recorded = False
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=self._model_name,
+                contents=self._convert_contents(contents),
+                config=config,
+            )
+            token_usage = self._record_usage(getattr(response, "usage_metadata", None), estimate, reservation=reservation)
+            reservation_recorded = True
+        finally:
+            if not reservation_recorded and self._tracker and reservation:
+                self._tracker.rollback(reservation)
 
         raw_parts = None
         if response.candidates:
@@ -429,28 +447,31 @@ class GeminiAdapter:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
+        reservation = None
         if self._tracker:
-            await self._tracker.acquire(estimate)
+            reservation = await self._tracker.acquire(estimate, max_wait_seconds=30.0)
 
-        stream = await self._client.aio.models.generate_content_stream(
-            model=self._model_name,
-            contents=self._convert_contents(contents),
-            config=config,
-        )
-        drain_timeout = _parse_drain_timeout(
-            os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=self.DRAIN_TIMEOUT_S
-        )
-        token_usage: TokenUsage | None = None
-        thought_parts: list = []
-        last_parts = None
+        stream_iter = None
         last_usage = None
-        last_grounding = None
-        pending_fc = None
-        dropped_fcs = 0
-        drain_deadline = 0.0
-        stream_iter = stream.__aiter__()
-        loop = asyncio.get_running_loop()
+        reservation_recorded = False
         try:
+            stream = await self._client.aio.models.generate_content_stream(
+                model=self._model_name,
+                contents=self._convert_contents(contents),
+                config=config,
+            )
+            drain_timeout = _parse_drain_timeout(
+                os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=self.DRAIN_TIMEOUT_S
+            )
+            token_usage: TokenUsage | None = None
+            thought_parts: list = []
+            last_parts = None
+            last_grounding = None
+            pending_fc = None
+            dropped_fcs = 0
+            drain_deadline = 0.0
+            stream_iter = stream.__aiter__()
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     if pending_fc is None:
@@ -519,24 +540,29 @@ class GeminiAdapter:
                     pending_fc = chunk_fcs[0]
                     dropped_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + drain_timeout
-        finally:
-            # Runs on clean end, drain abort, error, cancel and aclose (@ai-rules 15). Usage first: it is
-            # synchronous, so a second cancel can't skip it; then close the SDK stream.
-            try:
-                token_usage = self._record_usage(last_usage, estimate)
-            finally:
-                await self._close_stream(stream_iter)
 
-        if dropped_fcs:
-            logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")
-        if last_grounding:
-            logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
-        output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
-        all_parts = thought_parts + output_parts
-        yield LLMChunk(
-            function_call=FunctionCall(name=pending_fc.name, args=pending_fc.args or {}) if pending_fc else None,
-            done=True,
-            raw_parts=all_parts,
-            grounding_metadata=last_grounding,
-            usage=token_usage,
-        )
+            if dropped_fcs:
+                logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")
+            if last_grounding:
+                logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
+            output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+            all_parts = thought_parts + output_parts
+
+            token_usage = self._record_usage(last_usage, estimate, reservation=reservation)
+            reservation_recorded = True
+
+            yield LLMChunk(
+                function_call=FunctionCall(name=pending_fc.name, args=pending_fc.args or {}) if pending_fc else None,
+                done=True,
+                raw_parts=all_parts,
+                grounding_metadata=last_grounding,
+                usage=token_usage,
+            )
+        finally:
+            # Runs on clean end, drain abort, error, cancel, GeneratorExit and aclose (@ai-rules 15).
+            try:
+                if not reservation_recorded:
+                    self._record_usage(last_usage, estimate, reservation=reservation)
+            finally:
+                if stream_iter is not None:
+                    await self._close_stream(stream_iter)

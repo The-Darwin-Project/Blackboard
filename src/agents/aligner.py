@@ -34,6 +34,7 @@ AIR GAP: This module may import google-genai (for configure_filter) but NOT kube
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import logging
 import os
@@ -112,6 +113,7 @@ class Aligner:
         self._poll_interval = int(os.getenv("ALIGNER_POLL_INTERVAL", "30"))
         self._dwell_seconds = float(os.getenv("ALIGNER_DWELL_SECONDS", "30"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        self._wip_counter = None
         self._flood_threshold = int(os.getenv("ALIGNER_FLOOD_THRESHOLD", "3"))
         self._pending_count: int = 0
     
@@ -332,15 +334,26 @@ class Aligner:
                 resolved, restaged, available, self._wip_cap,
             )
 
+    def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
+        """Inject global WIP counter (e.g. Brain.count_global_wip)."""
+        self._wip_counter = counter
+
+    async def _local_count_wip(self) -> int:
+        status_map = await self.blackboard.get_active_events_with_status()
+        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+
     async def _get_wip_headroom(self) -> int:
         """Query current WIP usage and return available headroom for new events.
 
-        Mirrors Headhunter.check_flow_gate() — counts NEW + ACTIVE + DEFERRED
-        to prevent input buffer growth, not just in-process work.
+        Uses injected Brain._count_global_wip(include_new=True) if wired,
+        or falls back to local status map.
         """
         try:
-            status_map = await self.blackboard.get_active_events_with_status()
-            wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+            wip_used = (
+                await self._wip_counter(include_new=True)
+                if self._wip_counter is not None
+                else await self._local_count_wip()
+            )
             return max(0, self._wip_cap - wip_used)
         except Exception as e:
             logger.warning("Failed to query WIP headroom: %s (defaulting to 5)", e)

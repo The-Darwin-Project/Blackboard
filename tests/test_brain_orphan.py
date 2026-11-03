@@ -118,6 +118,44 @@ class TestOrphanRequeue:
         brain.blackboard.redis.lpush.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_skip_when_active_task_still_running(self):
+        """T-8: Blank event is skipped if _active_tasks has a running task."""
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 240)
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        brain._active_tasks["evt-orphan-1"] = mock_task
+
+        await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        brain.blackboard.redis.lpush.assert_not_awaited()
+        assert "evt-orphan-1" not in brain._orphan_requeue_count
+
+    @pytest.mark.asyncio
+    async def test_pacing_skips_when_last_attempt_under_180s(self):
+        """T-8: Blank event is skipped if last requeue attempt was within 180s."""
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 240)
+        brain._orphan_last_attempt["evt-orphan-1"] = time.time() - 60.0  # 60s ago
+
+        await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        brain.blackboard.redis.lpush.assert_not_awaited()
+        assert "evt-orphan-1" not in brain._orphan_requeue_count
+
+    @pytest.mark.asyncio
+    async def test_pacing_allows_requeue_when_last_attempt_over_180s(self):
+        """T-8: Blank event is requeued if last requeue attempt was > 180s ago."""
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 400)
+        brain._orphan_last_attempt["evt-orphan-1"] = time.time() - 200.0  # 200s ago
+
+        await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        brain.blackboard.redis.lpush.assert_awaited_once_with("darwin:queue", "evt-orphan-1")
+        assert brain._orphan_requeue_count["evt-orphan-1"] == 1
+
+    @pytest.mark.asyncio
     async def test_cap_at_3_closes_as_error(self):
         """After 3 re-queue attempts, event is closed with error turn."""
         brain = _make_brain()

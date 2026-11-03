@@ -350,7 +350,8 @@ class TestGeminiGenerateStreamDrainHardening:
         chunks = self._collect(self._adapter(stream, tracker=tracker))
 
         assert chunks[-1].usage.total_tokens == 135
-        tracker.acquire.assert_awaited_once_with(50)
+        tracker.acquire.assert_awaited_once()
+        assert tracker.acquire.await_args.args[0] == 50
         tracker.record.assert_called_once_with(135, 50)
 
     def test_tracker_records_when_consumer_closes_early(self):
