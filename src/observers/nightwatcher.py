@@ -144,7 +144,10 @@ class NightwatcherObserver:
         except Exception:
             logger.warning("Field notes digest failed (non-fatal)", exc_info=True)
 
-        escalations, json_members = await self.blackboard.lease_pending_escalations(time.time())
+        NIGHTWATCHER_BATCH_SIZE = int(os.getenv("NIGHTWATCHER_BATCH_SIZE", "25"))
+        escalations, json_members = await self.blackboard.lease_pending_escalations(
+            time.time(), limit=NIGHTWATCHER_BATCH_SIZE
+        )
         pending_count = len(escalations)
         logger.info("Nightwatcher sweep: %d pending escalations", pending_count)
 
@@ -167,6 +170,7 @@ class NightwatcherObserver:
             return
 
         system_prompt = build_system_prompt(escalations, window_start, window_end)
+        from ..agents.llm.quota_tracker import QuotaExhaustedError
         try:
             contents, ctx = await self._run_analysis_loop(
                 escalations, json_members, system_prompt,
@@ -178,6 +182,18 @@ class NightwatcherObserver:
                 shift_date, window, window_start, window_end,
                 sweep_start, pending_count,
             )
+        except QuotaExhaustedError as qe:
+            logger.warning(
+                "Nightwatcher sweep paused due to quota exhaustion (cooling down 60s): %s", qe
+            )
+            await self.blackboard.restage_orphans(json_members)
+            quota_report = ShiftReport(
+                shift_date=shift_date, window=window,
+                window_start=window_start, window_end=window_end,
+                status="quota_exhausted", started_at=sweep_start, completed_at=time.time(),
+            )
+            await self.blackboard.persist_shift_report(quota_report)
+            await asyncio.sleep(60.0)
         except Exception:
             logger.exception("Nightwatcher sweep failed, requeueing and persisting failed report")
             await self.blackboard.requeue_inflight()
@@ -193,8 +209,8 @@ class NightwatcherObserver:
                                  sweep_start, pending_count):
         """LLM-driven analysis loop: review + investigate phases."""
         adapter = await self._get_adapter()
-        escalation_text = "\n\n".join(
-            f"**{e.event_id}** | {e.service} | {e.platform} | {e.summary}\n{e.description}"
+        escalation_text = "\n".join(
+            f"- **{e.event_id}** | {e.service} | {e.platform} | {(e.summary or '')[:140]}"
             for e in escalations
         )
         contents = [{"role": "user", "parts": [{"text": escalation_text}]}]
@@ -290,7 +306,10 @@ class NightwatcherObserver:
             record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
                 from .nightwatcher_tools import _handle_declare_clusters
-                result = await _handle_declare_clusters(response.function_call.args, ctx)
+                is_last_attempt = (attempt == MAX_DECLARE_RETRIES)
+                result = await _handle_declare_clusters(
+                    response.function_call.args, ctx, auto_reconcile=is_last_attempt
+                )
                 if ctx.declared_clusters:
                     logger.info("Nightwatcher: cluster plan accepted on attempt %d", attempt + 1)
                     contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})

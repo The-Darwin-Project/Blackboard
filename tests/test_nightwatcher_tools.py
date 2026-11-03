@@ -423,15 +423,25 @@ class TestValidateClusterPlan:
         assert ok is True
         assert error == ""
 
-    def test_missing_events(self):
-        """Returns specific error listing missing event IDs."""
+    def test_missing_events_without_auto_reconcile(self):
+        """Returns specific error listing missing event IDs when auto_reconcile=False."""
         clusters = [
             {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
         ]
-        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"}, auto_reconcile=False)
         assert ok is False
         assert "evt-2" in error
         assert "evt-3" in error
+
+    def test_missing_events_auto_reconciled(self):
+        """Auto-reconciles missing event IDs into a fallback cluster when auto_reconcile=True."""
+        clusters = [
+            {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"}, auto_reconcile=True)
+        assert ok is True
+        assert len(clusters) == 2
+        assert set(clusters[1]["events"]) == {"evt-2", "evt-3"}
 
     def test_duplicate_events(self):
         """Event in 2 clusters rejected."""

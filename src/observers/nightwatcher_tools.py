@@ -84,7 +84,9 @@ def get_phase_tools(phase: str) -> list[dict]:
 from ..agents.llm.types import VALID_PLATFORMS, VALID_STATUSES, VALID_PRIORITIES
 
 
-def validate_cluster_plan(clusters: list[dict], manifest_ids: set[str]) -> tuple[bool, str]:
+def validate_cluster_plan(
+    clusters: list[dict], manifest_ids: set[str], auto_reconcile: bool = True
+) -> tuple[bool, str]:
     """Validate that clusters cover the full manifest with no overlaps or unknowns."""
     if not clusters:
         return False, "No clusters declared. You must create at least one cluster."
@@ -104,7 +106,23 @@ def validate_cluster_plan(clusters: list[dict], manifest_ids: set[str]) -> tuple
             all_assigned.add(eid)
     missing = manifest_ids - all_assigned
     if missing:
-        return False, f"Events not assigned to any cluster: {', '.join(sorted(missing))}"
+        if not auto_reconcile:
+            return False, f"Events not assigned to any cluster: {', '.join(sorted(missing))}"
+        default_platform = (
+            clusters[0].get("platform")
+            if (clusters and clusters[0].get("platform") in VALID_PLATFORMS)
+            else (next(iter(VALID_PLATFORMS)) if VALID_PLATFORMS else "general")
+        )
+        fallback_cluster = {
+            "title": "Unassigned Staged Escalations (Auto-Reconciled)",
+            "platform": default_platform,
+            "events": sorted(list(missing)),
+            "reasoning": "Automatically grouped by Railway Validator: unassigned during model clustering pass.",
+        }
+        clusters.append(fallback_cluster)
+        logger.warning(
+            "Railway Validator: auto-reconciled %d unassigned events into fallback cluster", len(missing)
+        )
     return True, ""
 
 
@@ -343,9 +361,9 @@ async def _handle_search_existing_incidents(args: dict, ctx: NightwatcherContext
     return f"Open incidents from prior sweeps ({len(open_incidents)}):\n" + "\n".join(lines)
 
 
-async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext) -> str:
+async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext, auto_reconcile: bool = False) -> str:
     clusters = args.get("clusters", [])
-    ok, error = validate_cluster_plan(clusters, ctx.manifest_ids)
+    ok, error = validate_cluster_plan(clusters, ctx.manifest_ids, auto_reconcile=auto_reconcile)
     if not ok:
         return f"Cluster plan validation failed: {error}"
     ctx.declared_clusters = clusters

@@ -85,8 +85,14 @@ class QuotaTracker:
         """Block until the bucket has capacity for estimated_tokens.
 
         Returns a Reservation handle on success.
-        Raises QuotaExhaustedError if max_wait_seconds is exceeded.
+        Raises QuotaExhaustedError if max_wait_seconds is exceeded or if payload exceeds burst limit.
         """
+        if estimated_tokens > self._burst_limit:
+            raise QuotaExhaustedError(
+                f"Estimated tokens ({estimated_tokens}) exceed burst limit ({self._burst_limit}). "
+                "Reduce batch size before retrying."
+            )
+
         deadline = time.monotonic() + max_wait_seconds
         throttled = False
 

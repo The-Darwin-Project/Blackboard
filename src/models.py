@@ -634,7 +634,7 @@ class StagedEscalation(BaseModel):
     service: str = Field(..., description="Affected service or kargo stage")
     source: str = Field(..., description="Event source: aligner | headhunter | timekeeper")
     reason: str = Field(..., description="Original event reason")
-    summary: str = Field(..., max_length=200, description="Brain's report_incident summary")
+    summary: str | None = Field(default="", max_length=200, description="Brain's report_incident summary")
     scope: str = Field("health", description="Escalation scope for clear targeting (health, kargo, sync)")
     platform: str = Field("", description="Affected platform (Konflux, Kargo, etc.)")
     priority: str = Field("Normal", description="Normal | Major | Critical")
