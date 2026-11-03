@@ -333,11 +333,11 @@ class TestExplorerRoleMaps:
         assert "explorer" in Brain.EPHEMERAL_ONLY_ROLES
 
     def test_explorer_model_map(self):
-        """Explorer has an entry in the role model map."""
+        """Explorer has an entry in the role model map resolving to claude-haiku-5-5."""
         from src.agents.brain import _ROLE_MODEL_MAP
 
         assert "explorer" in _ROLE_MODEL_MAP
-        assert _ROLE_MODEL_MAP["explorer"]  # non-empty string
+        assert _ROLE_MODEL_MAP["explorer"] == "claude-haiku-5-5"
 
     def test_explorer_effort_map(self):
         """Explorer effort resolves to 'low'."""
