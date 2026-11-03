@@ -121,6 +121,7 @@ class TestQuotaTrackerReservationLifecycle:
             stats = tracker.get_stats()
             assert res.id not in tracker._active_reservations
             assert stats["active_reservations"] == 0
+            assert stats["total_tokens"] == 0
 
     @pytest.mark.asyncio
     async def test_record_ignores_already_finalized_reservation(self, tracker):

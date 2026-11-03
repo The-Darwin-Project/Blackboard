@@ -113,7 +113,7 @@ class Aligner:
         self._poll_interval = int(os.getenv("ALIGNER_POLL_INTERVAL", "30"))
         self._dwell_seconds = float(os.getenv("ALIGNER_DWELL_SECONDS", "30"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
-        self._wip_counter = None
+        self._wip_counter: Callable[..., Awaitable[int]] | None = None
         self._flood_threshold = int(os.getenv("ALIGNER_FLOOD_THRESHOLD", "3"))
         self._pending_count: int = 0
     

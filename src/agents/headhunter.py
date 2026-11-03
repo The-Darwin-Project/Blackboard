@@ -112,7 +112,7 @@ class Headhunter:
         self._close_signal = close_signal
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
-        self._wip_counter = None
+        self._wip_counter: Callable[..., Awaitable[int]] | None = None
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.7-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")

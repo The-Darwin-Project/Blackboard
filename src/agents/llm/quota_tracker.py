@@ -75,7 +75,9 @@ class QuotaTracker:
             if res.timestamp < stale_cutoff
         ]
         for res_id in stale_ids:
-            del self._active_reservations[res_id]
+            res = self._active_reservations.pop(res_id, None)
+            if res is not None:
+                self._total_tokens = max(0, self._total_tokens - res.tokens)
 
         return max(0, sum(tokens for _, tokens, *_ in self._window))
 

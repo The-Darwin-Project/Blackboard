@@ -169,6 +169,47 @@ class TestScanReconcileGuards:
         assert brain._escalate_to_human.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_escalation_failure_backs_off_and_does_not_retry_storm(self):
+        """When _escalate_to_human raises an exception, the event backs off 60s without spamming on every scan."""
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="Err 1"),
+            ConversationTurn(turn=2, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="Err 2"),
+            ConversationTurn(turn=3, actor="brain", action="error", status=MessageStatus.SENT, thoughts="Err 3"),
+        ]
+        event = _make_event("evt-err-storm", conversation=turns)
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock(side_effect=RuntimeError("Slack unavailable"))
+
+        # Scan 1: Escalation fails
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-err-storm" not in result
+        assert "evt-err-storm" not in brain._escalated_error_events
+        assert brain._escalate_to_human.call_count == 1
+
+        # Scan 2 (immediate / within 60s): Backoff active, no retry storm
+        result_2 = await brain._scan_active_for_reconcile()
+        assert "evt-err-storm" not in result_2
+        assert brain._escalate_to_human.call_count == 1  # Not called again
+
+        # Scan 3 (after 60s backoff): Retries escalation
+        brain._last_error_retry["evt-err-storm"] = time.time() - 65.0
+        result_3 = await brain._scan_active_for_reconcile()
+        assert "evt-err-storm" not in result_3
+        assert brain._escalate_to_human.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_escalate_to_human_failure_does_not_mutate_waiting_for_user(self):
+        """_escalate_to_human sets _waiting_for_user only after successful completion, not on partial failure."""
+        event = _make_event("evt-esc-fail")
+        brain = _make_brain(event)
+        brain._execute_function_call = AsyncMock(side_effect=RuntimeError("Slack down"))
+
+        with pytest.raises(RuntimeError):
+            await brain._escalate_to_human("evt-esc-fail", event, 3, 180.0)
+
+        assert "evt-esc-fail" not in brain._waiting_for_user
+
+    @pytest.mark.asyncio
     async def test_t6_thinking_loop_guard_paces_re_enqueue_after_30m(self):
         """T-6: When trailing_thoughts >= 2 and idle >= 1800s, event re-enqueues once, paces for 300s, and next scan skips."""
         turns = [

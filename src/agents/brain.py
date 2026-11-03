@@ -5125,7 +5125,6 @@ class Brain:
         No force-close -- the human decides what to do.
         """
         idle_min = int(idle_seconds // 60)
-        self._waiting_for_user[event_id] = time.time()
 
         email = None
         evidence = event.event.evidence
@@ -5174,6 +5173,7 @@ class Brain:
             waitingFor="user",
         )
         await self._append_and_broadcast(event_id, wait_turn)
+        self._waiting_for_user[event_id] = time.time()
         logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
 
     async def _handle_orphan_blank_event(self, event_id: str, event: EventDocument) -> None:
@@ -6180,14 +6180,22 @@ class Brain:
             if trailing_errors > 0:
                 if trailing_errors >= 3:
                     if eid not in self._escalated_error_events:
-                        idle_sec = (time.time() - last_retry) if (last_retry := self._last_error_retry.get(eid)) is not None else 0.0
+                        now = time.time()
+                        last_retry = self._last_error_retry.get(eid, 0.0)
+                        if last_retry > 0.0 and (now - last_retry < 60.0):
+                            logger.debug(
+                                f"Scan pacing: escalation backoff active for {eid} ({now - last_retry:.1f}s < 60.0s)"
+                            )
+                            continue
+                        self._last_error_retry[eid] = now
+                        idle_sec = (now - last_retry) if last_retry > 0.0 else 0.0
                         try:
                             await self._escalate_to_human(
                                 eid, event, trailing_errors, idle_sec
                             )
                             self._escalated_error_events.add(eid)
                         except Exception as e:
-                            logger.error(f"Failed to escalate {eid} to human after {trailing_errors} errors: {e}")
+                            logger.error(f"Failed to escalate {eid} to human after {trailing_errors} errors (will back off 60s): {e}")
                     continue
 
                 last_retry = self._last_error_retry.get(eid, 0.0)
@@ -6250,6 +6258,11 @@ class Brain:
                         bypass_count = self._thinking_bypass_count.get(eid, 0)
                         if bypass_count >= 3:
                             if eid not in self._escalated_thinking_events:
+                                now = time.time()
+                                last_bypass = self._thinking_bypass_time.get(eid, 0.0)
+                                if last_bypass > 0.0 and (now - last_bypass < 60.0):
+                                    continue
+                                self._thinking_bypass_time[eid] = now
                                 try:
                                     await self._escalate_to_human(
                                         eid, event, trailing_thoughts, time_since
@@ -6260,7 +6273,7 @@ class Brain:
                                         eid, trailing_thoughts, bypass_count,
                                     )
                                 except Exception as e:
-                                    logger.error(f"Failed to escalate thinking loop {eid} to human: {e}")
+                                    logger.error(f"Failed to escalate thinking loop {eid} to human (will back off 60s): {e}")
                             continue
 
                         now = time.time()
