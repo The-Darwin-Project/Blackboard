@@ -161,6 +161,11 @@
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
 #     prevent hot retry loops (has_unread=True -> process_event -> fail -> repeat).
+#     _handle_orphan_blank_event also skips when _event_locks[eid] is held (triage in flight) and
+#     processing_started_at is re-stamped on NEW->ACTIVE admission (_restamp_processing_start), so
+#     WIP-gate queue time never ages an event toward reaping. Scan escalations re-check
+#     _escalation_blocked() (active task / held lock) right before _escalate_to_human.
+#     Thinking-bypass state is NOT reset by automated nudge turns (_is_automated_nudge).
 # 38. [Pattern]: _waiting_for_jarvis (dict[str,float]) is SEPARATE from _waiting_for_user.
 #     Maps event_id -> respond_jarvis turn timestamp. _jarvis_wait_tasks holds asyncio.Task
 #     for nudge timer. _jarvis_wait_count tracks escalation (1st: 2 nudges, 2nd: 1, 3rd: 0,
@@ -527,6 +532,18 @@ _MAX_BATCH_SIZE = 4
 # Actors whose turns never count as participant input (agent/user/jarvis responses):
 # brain's own output and the dispatcher's synthetic routing/status turns.
 _NON_PARTICIPANT_ACTORS = frozenset({"brain", "dispatcher"})
+
+
+def _is_automated_nudge(turn) -> bool:
+    """True for the Brain health-check nudge turn (actor=user, source=automated).
+
+    Accepts ConversationTurn objects or raw dicts. Nudges are system-injected, so they
+    must not count as real progress when deciding to reset thinking-loop state.
+    """
+    if isinstance(turn, dict):
+        return turn.get("actor") == "user" and turn.get("source") == "automated"
+    return getattr(turn, "actor", None) == "user" and getattr(turn, "source", None) == "automated"
+
 
 # Thinking-pulse streaming: emit at most every _INTERVAL_S seconds OR once _CHAR_DELTA new
 # thinking chars accumulated; each pulse carries only the last _TAIL_CHARS (redacted) chars.
@@ -1336,7 +1353,9 @@ class Brain:
             last_t = event.conversation[-1]
             act = last_t.action if hasattr(last_t, "action") else (last_t.get("action") if isinstance(last_t, dict) else None)
             actor = last_t.actor if hasattr(last_t, "actor") else (last_t.get("actor") if isinstance(last_t, dict) else None)
-            if not (actor == "brain" and act == "thoughts"):
+            # Automated nudges fire on the same idle threshold as the bypass; resetting on them would
+            # let nudge->think cycles dodge the 3-strike cap forever.
+            if not (actor == "brain" and act == "thoughts") and not _is_automated_nudge(last_t):
                 self._thinking_bypass_count.pop(event_id, None)
                 self._thinking_bypass_time.pop(event_id, None)
                 self._escalated_thinking_events.discard(event_id)
@@ -1451,6 +1470,7 @@ class Brain:
                 # User/JARVIS: rush into WIP immediately, no cap check
                 if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
                     logger.info(f"Event {event_id} (bypass:{event.source}) transitioned NEW -> ACTIVE")
+                    await self._restamp_processing_start(event_id, event)
                     await self._broadcast({
                         "type": "event_status_changed",
                         "event_id": event_id,
@@ -1468,6 +1488,7 @@ class Brain:
                     return
                 if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
                     logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
+                    await self._restamp_processing_start(event_id, event)
                     await self._broadcast({
                         "type": "event_status_changed",
                         "event_id": event_id,
@@ -5176,6 +5197,28 @@ class Brain:
         self._waiting_for_user[event_id] = time.time()
         logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
 
+    def _escalation_blocked(self, event_id: str) -> bool:
+        """True if a worker task or the per-event lock became active since the scan loaded the event.
+
+        The scan re-reads state across awaits; escalating (wait_for_user + Slack DM) on top of a live
+        worker would double-escalate. Checked synchronously right before _escalate_to_human.
+        """
+        task = self._active_tasks.get(event_id)
+        if task is not None and not task.done():
+            return True
+        lock = self._event_locks.get(event_id)
+        return lock is not None and lock.locked()
+
+    async def _restamp_processing_start(self, event_id: str, event: EventDocument) -> None:
+        """Re-anchor processing_started_at on NEW -> ACTIVE admission.
+
+        The first stamp happens before the WIP gate, so time spent queued in NEW would otherwise
+        age the event toward the orphan reaper (180s) the moment it is admitted.
+        """
+        now = time.time()
+        await self.blackboard.stamp_event(event_id, processing_started_at=now)
+        event.processing_started_at = now
+
     async def _handle_orphan_blank_event(self, event_id: str, event: EventDocument) -> None:
         """Handle a blank event (no conversation) stuck in the active set.
 
@@ -5186,6 +5229,9 @@ class Brain:
         task = self._active_tasks.get(event_id)
         if task and not task.done():
             return
+        lock = self._event_locks.get(event_id)  # .get(): the defaultdict would create (and leak) an entry
+        if lock is not None and lock.locked():
+            return  # Brain triage/processing is in flight -- not an orphan
         anchor = event.processing_started_at or event.queued_at
         if anchor is None:
             return
@@ -6180,6 +6226,9 @@ class Brain:
             if trailing_errors > 0:
                 if trailing_errors >= 3:
                     if eid not in self._escalated_error_events:
+                        if self._escalation_blocked(eid):
+                            logger.debug(f"Scan: skip error escalation for {eid} (worker/lock active)")
+                            continue
                         now = time.time()
                         last_retry = self._last_error_retry.get(eid, 0.0)
                         if last_retry > 0.0 and (now - last_retry < 60.0):
@@ -6258,6 +6307,9 @@ class Brain:
                         bypass_count = self._thinking_bypass_count.get(eid, 0)
                         if bypass_count >= 3:
                             if eid not in self._escalated_thinking_events:
+                                if self._escalation_blocked(eid):
+                                    logger.debug(f"Scan: skip thinking escalation for {eid} (worker/lock active)")
+                                    continue
                                 now = time.time()
                                 last_bypass = self._thinking_bypass_time.get(eid, 0.0)
                                 if last_bypass > 0.0 and (now - last_bypass < 60.0):
@@ -6294,7 +6346,10 @@ class Brain:
                         to_enqueue.append(eid)
                         continue
                     else:
-                        if eid in self._thinking_bypass_count:
+                        # Skip reset when the trailing turn is an automated nudge (see M4 in process_event)
+                        if eid in self._thinking_bypass_count and not (
+                            event.conversation and _is_automated_nudge(event.conversation[-1])
+                        ):
                             self._thinking_bypass_count.pop(eid, None)
                             self._thinking_bypass_time.pop(eid, None)
                             self._escalated_thinking_events.discard(eid)

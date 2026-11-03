@@ -610,3 +610,85 @@ class TestPhaseInitialization:
         appended = brain.blackboard.append_turn.call_args[0][1]
         assert appended.action == "phase"
         assert "(confirmed)" in appended.thoughts
+
+
+# =========================================================================
+# M3: orphan reaper false-positive guards (lock held, anchor re-stamped on admission)
+# =========================================================================
+
+class TestOrphanReaperLockAndAdmissionAnchor:
+    @pytest.mark.asyncio
+    async def test_skip_when_event_lock_held(self):
+        """Brain triage holds _event_locks[eid] with no _active_tasks entry: not an orphan."""
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 600)
+
+        async with brain._event_locks["evt-orphan-1"]:
+            await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        brain.blackboard.redis.lpush.assert_not_awaited()
+        assert "evt-orphan-1" not in brain._orphan_requeue_count
+        assert "evt-orphan-1" not in brain._orphan_last_attempt  # pacing not consumed while locked
+
+    @pytest.mark.asyncio
+    async def test_requeues_once_lock_released(self):
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 600)
+        async with brain._event_locks["evt-orphan-1"]:
+            pass  # created, then released
+
+        await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        brain.blackboard.redis.lpush.assert_awaited_once_with("darwin:queue", "evt-orphan-1")
+
+    @pytest.mark.asyncio
+    async def test_lock_check_does_not_create_lock_entry(self):
+        """defaultdict leak guard: checking an unknown event must not insert a lock."""
+        brain = _make_brain()
+        event = _make_blank_event(processing_started_at=time.time() - 10)
+
+        await brain._handle_orphan_blank_event("evt-orphan-1", event)
+
+        assert "evt-orphan-1" not in brain._event_locks
+
+    @pytest.mark.asyncio
+    async def test_admission_restamps_processing_started_at(self):
+        """NEW -> ACTIVE admission after WIP gate re-anchors processing_started_at to 'now'."""
+        brain = _make_brain()
+        stale = time.time() - 600  # stamped before the event sat queued in NEW
+        event = _make_blank_event(processing_started_at=stale)
+        event.queued_at = stale
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.transition_event_status = AsyncMock(return_value=True)
+        brain._count_global_wip = AsyncMock(return_value=0)
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("stop here"))
+        before = time.time()
+
+        with pytest.raises(RuntimeError, match="stop here"):
+            await brain._process_event_inner("evt-orphan-1")
+
+        brain.blackboard.transition_event_status.assert_awaited()
+        stamps = [
+            c.kwargs["processing_started_at"]
+            for c in brain.blackboard.stamp_event.await_args_list
+            if "processing_started_at" in c.kwargs
+        ]
+        assert stamps and stamps[-1] >= before
+        assert event.processing_started_at >= before
+
+    @pytest.mark.asyncio
+    async def test_wip_gated_event_is_not_restamped(self, monkeypatch):
+        """Still queued in NEW (gate closed): no transition, anchor untouched."""
+        monkeypatch.setenv("MAX_ACTIVE_EVENTS", "5")
+        brain = _make_brain()
+        stale = time.time() - 600
+        event = _make_blank_event(processing_started_at=stale)
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.transition_event_status = AsyncMock(return_value=True)
+        brain._count_global_wip = AsyncMock(return_value=5)
+
+        await brain._process_event_inner("evt-orphan-1")
+
+        brain.blackboard.transition_event_status.assert_not_awaited()
+        brain.blackboard.stamp_event.assert_not_awaited()
+        assert event.processing_started_at == stale

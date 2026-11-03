@@ -268,3 +268,186 @@ class TestScanReconcileGuards:
         assert "evt-think-esc" not in result
         brain._escalate_to_human.assert_called_once()
         assert "evt-think-esc" in brain._escalated_thinking_events
+
+
+def _nudge_turn(n: int, status: MessageStatus = MessageStatus.EVALUATED) -> ConversationTurn:
+    return ConversationTurn(
+        turn=n, actor="user", action="message", source="automated", status=status,
+        thoughts="Automated health check: idle.",
+    )
+
+
+def _running_task():
+    from unittest.mock import MagicMock
+    task = MagicMock()
+    task.done.return_value = False
+    return task
+
+
+class TestEscalationRaceGuard:
+    """M2: re-verify no live worker / held lock immediately before _escalate_to_human."""
+
+    @staticmethod
+    def _three_errors(eid: str):
+        return [
+            ConversationTurn(turn=1, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="E1"),
+            ConversationTurn(turn=2, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="E2"),
+            ConversationTurn(turn=3, actor="brain", action="error", status=MessageStatus.EVALUATED, thoughts="E3"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_error_escalation_skipped_when_worker_starts_after_guard1(self):
+        eid = "evt-race-task"
+        event = _make_event(eid, conversation=self._three_errors(eid))
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+
+        async def get_event_then_worker_starts(_eid):
+            brain._active_tasks[_eid] = _running_task()  # Guard 1 already passed; worker appears now
+            return event
+
+        brain.blackboard.get_event = AsyncMock(side_effect=get_event_then_worker_starts)
+
+        result = await brain._scan_active_for_reconcile()
+
+        assert eid not in result
+        brain._escalate_to_human.assert_not_called()
+        # Nothing stamped, so the next scan can still escalate once the worker is gone
+        assert eid not in brain._escalated_error_events
+        assert eid not in brain._last_error_retry
+
+    @pytest.mark.asyncio
+    async def test_error_escalation_skipped_when_event_lock_held_then_proceeds_after_release(self):
+        eid = "evt-race-lock"
+        event = _make_event(eid, conversation=self._three_errors(eid))
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+
+        async with brain._event_locks[eid]:
+            result = await brain._scan_active_for_reconcile()
+            assert eid not in result
+            brain._escalate_to_human.assert_not_called()
+            assert eid not in brain._escalated_error_events
+
+        await brain._scan_active_for_reconcile()
+        brain._escalate_to_human.assert_called_once()
+        assert eid in brain._escalated_error_events
+
+    @pytest.mark.asyncio
+    async def test_finished_task_does_not_block_escalation(self):
+        from unittest.mock import MagicMock
+        eid = "evt-race-done"
+        event = _make_event(eid, conversation=self._three_errors(eid))
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+        done_task = MagicMock()
+        done_task.done.return_value = True
+
+        async def get_event_with_done_task(_eid):
+            brain._active_tasks[_eid] = done_task
+            return event
+
+        brain.blackboard.get_event = AsyncMock(side_effect=get_event_with_done_task)
+        # Guard 1 sees no task on entry; the done task registered mid-scan must not block
+        await brain._scan_active_for_reconcile()
+
+        brain._escalate_to_human.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_thinking_escalation_skipped_when_worker_starts_after_guard1(self):
+        eid = "evt-race-think"
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="A"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="B"),
+        ]
+        event = _make_event(eid, conversation=turns)
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+        brain._thinking_bypass_count[eid] = 3
+        brain._last_processed[eid] = time.time() - 1900.0
+
+        async def get_event_then_worker_starts(_eid):
+            brain._active_tasks[_eid] = _running_task()
+            return event
+
+        brain.blackboard.get_event = AsyncMock(side_effect=get_event_then_worker_starts)
+
+        await brain._scan_active_for_reconcile()
+
+        brain._escalate_to_human.assert_not_called()
+        assert eid not in brain._escalated_thinking_events
+        assert eid not in brain._thinking_bypass_time
+
+
+class TestThinkingBypassNotResetByNudge:
+    """M4: automated nudge turns must not reset _thinking_bypass_count (3-strike cap)."""
+
+    @staticmethod
+    def _thoughts_then_nudge():
+        return [
+            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="A"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="B"),
+            _nudge_turn(3),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_scan_keeps_bypass_count_when_trailing_turn_is_nudge(self):
+        eid = "evt-nudge-scan"
+        event = _make_event(eid, conversation=self._thoughts_then_nudge())
+        brain = _make_brain(event)
+        brain._thinking_bypass_count[eid] = 2
+        brain._thinking_bypass_time[eid] = time.time() - 400
+        brain._escalated_thinking_events.add(eid)
+        brain._last_processed[eid] = time.time() - 120.0
+
+        await brain._scan_active_for_reconcile()
+
+        assert brain._thinking_bypass_count.get(eid) == 2
+        assert eid in brain._thinking_bypass_time
+        assert eid in brain._escalated_thinking_events
+
+    @pytest.mark.asyncio
+    async def test_scan_still_resets_on_real_progress_turn(self):
+        eid = "evt-progress-scan"
+        turns = self._thoughts_then_nudge() + [
+            ConversationTurn(turn=4, actor="developer", action="execute", status=MessageStatus.EVALUATED, result="done"),
+        ]
+        event = _make_event(eid, conversation=turns)
+        brain = _make_brain(event)
+        brain._thinking_bypass_count[eid] = 2
+        brain._thinking_bypass_time[eid] = time.time() - 400
+        brain._last_processed[eid] = time.time() - 120.0
+
+        await brain._scan_active_for_reconcile()
+
+        assert eid not in brain._thinking_bypass_count
+        assert eid not in brain._thinking_bypass_time
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("trailing,expect_kept", [("nudge", True), ("agent", False)])
+    async def test_process_event_reset_site_respects_nudge(self, trailing, expect_kept):
+        """The process_event reset (brain.py 'Clear thinking bypass count') keeps state across nudges only."""
+        from unittest.mock import MagicMock
+        eid = "evt-nudge-proc"
+        last = _nudge_turn(3) if trailing == "nudge" else ConversationTurn(
+            turn=3, actor="developer", action="execute", status=MessageStatus.DELIVERED, result="done",
+        )
+        turns = self._thoughts_then_nudge()[:2] + [last]
+        event = _make_event(eid, conversation=turns)
+        brain = _make_brain(event)
+        bb = brain.blackboard
+        bb.EVENT_PREFIX = "darwin:event:"
+        bb.get_event = AsyncMock(return_value=event)
+        bb.stamp_event = AsyncMock()
+        bb.record_event = AsyncMock()
+        brain._broadcast = AsyncMock()
+        brain._get_adapter = AsyncMock(side_effect=RuntimeError("stop here"))
+        brain._thinking_bypass_count[eid] = 2
+        brain._thinking_bypass_time[eid] = 123.0
+        event.processing_started_at = time.time() - 5
+
+        with pytest.raises(Exception):
+            await brain._process_event_inner(eid)
+
+        assert (eid in brain._thinking_bypass_count) is expect_kept
+        assert (eid in brain._thinking_bypass_time) is expect_kept
