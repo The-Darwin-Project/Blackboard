@@ -154,7 +154,11 @@ class QuotaTracker:
 
         Pops the active reservation if provided, and adds the delta.
         """
-        if reservation and reservation.id in self._active_reservations:
+        if reservation is not None:
+            if reservation.id not in self._active_reservations:
+                # Already rolled back or recorded; early-return to preserve symmetry
+                logger.debug(f"QuotaTracker: ignoring record() for finalized reservation {reservation.id}")
+                return
             del self._active_reservations[reservation.id]
 
         if actual_tokens == estimated_tokens:

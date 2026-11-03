@@ -165,3 +165,23 @@ class TestScanReconcileGuards:
 
         result = await brain._scan_active_for_reconcile()
         assert "evt-think-unread" in result
+
+    @pytest.mark.asyncio
+    async def test_thinking_loop_guard_escalates_to_human_after_three_bypasses(self):
+        """After 3 bypass attempts, thinking loop escalates to human oncall and does not re-enqueue."""
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan A"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan B"),
+        ]
+        event = _make_event("evt-think-esc", conversation=turns)
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+
+        # Set 3 prior bypass attempts and idle >= 1800s
+        brain._thinking_bypass_count["evt-think-esc"] = 3
+        brain._last_processed["evt-think-esc"] = time.time() - 1900.0
+
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-think-esc" not in result
+        brain._escalate_to_human.assert_called_once()
+        assert "evt-think-esc" in brain._escalated_thinking_events

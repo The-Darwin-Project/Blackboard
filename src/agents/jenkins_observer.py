@@ -573,7 +573,7 @@ class JenkinsObserver:
         return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
 
     async def _get_wip_headroom(self) -> int:
-        """Query current WIP usage and return available headroom. Fails closed (0 headroom) on errors."""
+        """Query current WIP usage and return available headroom."""
         if self._wip_counter is not None:
             try:
                 wip_used = await self._wip_counter(include_new=True)
@@ -587,8 +587,8 @@ class JenkinsObserver:
             wip_used = await self._local_count_wip()
             return max(0, self._wip_cap - wip_used)
         except Exception as e:
-            logger.error("Failed to query local WIP headroom in JenkinsObserver: %s (failing closed, headroom 0)", e)
-            return 0
+            logger.warning("Failed to query WIP headroom: %s (defaulting to 5)", e)
+            return 5
 
     async def _drain_once(self) -> None:
         """Single drain cycle: poll → stage → dwell → triage → create.

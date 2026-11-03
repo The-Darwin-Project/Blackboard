@@ -121,3 +121,14 @@ class TestQuotaTrackerReservationLifecycle:
             stats = tracker.get_stats()
             assert res.id not in tracker._active_reservations
             assert stats["active_reservations"] == 0
+
+    @pytest.mark.asyncio
+    async def test_record_ignores_already_finalized_reservation(self, tracker):
+        """Record with an unknown or rolled-back reservation early-returns without recording delta."""
+        res = await tracker.acquire(estimated_tokens=5000, max_wait_seconds=5.0)
+        tracker.rollback(res)
+
+        tokens_before = tracker._total_tokens
+        # Attempt late record on already rolled-back reservation
+        tracker.record(actual_tokens=8000, estimated_tokens=5000, reservation=res)
+        assert tracker._total_tokens == tokens_before

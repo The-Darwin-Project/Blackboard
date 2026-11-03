@@ -986,8 +986,10 @@ class Brain:
         # Error retry backoff and human escalation tracking
         self._last_error_retry: dict[str, float] = {}
         self._escalated_error_events: set[str] = set()
-        # Thinking loop pacing
+        # Thinking loop pacing and escalation
         self._thinking_bypass_time: dict[str, float] = {}
+        self._thinking_bypass_count: dict[str, int] = {}
+        self._escalated_thinking_events: set[str] = set()
         # Consecutive "Error:" dispatch results per event (codereview PR #192 HIGH
         # finding: unbounded error-retrigger loop). Reset on any non-error dispatch
         # result. Capped at MAX_AGENT_ERROR_STREAK -- see _run_agent_task.
@@ -1327,6 +1329,16 @@ class Brain:
         if event.conversation and event_id in self._orphan_requeue_count:
             self._orphan_requeue_count.pop(event_id, None)
             self._orphan_last_attempt.pop(event_id, None)
+
+        # Clear thinking bypass count if trailing turns are not thoughts
+        if event.conversation and event_id in self._thinking_bypass_count:
+            last_t = event.conversation[-1]
+            act = last_t.action if hasattr(last_t, "action") else (last_t.get("action") if isinstance(last_t, dict) else None)
+            actor = last_t.actor if hasattr(last_t, "actor") else (last_t.get("actor") if isinstance(last_t, dict) else None)
+            if not (actor == "brain" and act == "thoughts"):
+                self._thinking_bypass_count.pop(event_id, None)
+                self._thinking_bypass_time.pop(event_id, None)
+                self._escalated_thinking_events.discard(event_id)
 
         # Dedup: if this is a new event (no turns yet), check for existing active events.
         # Two passes per iteration (single loop):
@@ -5266,6 +5278,8 @@ class Brain:
         self._last_error_retry.pop(event_id, None)
         self._escalated_error_events.discard(event_id)
         self._thinking_bypass_time.pop(event_id, None)
+        self._thinking_bypass_count.pop(event_id, None)
+        self._escalated_thinking_events.discard(event_id)
         self._reasoning_by_event.pop(event_id, None)
         self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
@@ -6219,6 +6233,22 @@ class Brain:
                             break
 
                     if trailing_thoughts >= 2:
+                        bypass_count = self._thinking_bypass_count.get(eid, 0)
+                        if bypass_count >= 3:
+                            if eid not in self._escalated_thinking_events:
+                                try:
+                                    await self._escalate_to_human(
+                                        eid, event, trailing_thoughts, time_since
+                                    )
+                                    self._escalated_thinking_events.add(eid)
+                                    logger.warning(
+                                        "Escalated %s to human: %d consecutive thoughts after %d bypass attempts",
+                                        eid, trailing_thoughts, bypass_count,
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Failed to escalate thinking loop {eid} to human: {e}")
+                            continue
+
                         now = time.time()
                         last_bypass = self._thinking_bypass_time.get(eid, 0.0)
                         if time_since < 1800.0 or (now - last_bypass) < 300.0:
@@ -6229,9 +6259,18 @@ class Brain:
                             continue
                         # Bypassing thinking loop guard after 30m idle: pace next attempt for 300s
                         self._thinking_bypass_time[eid] = now
-                        logger.info(f"Thinking loop safety net bypass: re-processing event {eid} (idle {time_since:.0f}s >= 1800s)")
+                        self._thinking_bypass_count[eid] = bypass_count + 1
+                        logger.info(
+                            "Thinking loop safety net bypass: re-processing event %s (idle %.0fs >= 1800s, attempt %d/3)",
+                            eid, time_since, bypass_count + 1,
+                        )
                         to_enqueue.append(eid)
                         continue
+                    else:
+                        if eid in self._thinking_bypass_count:
+                            self._thinking_bypass_count.pop(eid, None)
+                            self._thinking_bypass_time.pop(eid, None)
+                            self._escalated_thinking_events.discard(eid)
 
                     logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since:.0f}s)")
                     to_enqueue.append(eid)

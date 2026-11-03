@@ -18,7 +18,7 @@ alwaysApply: false
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
 * **LLM:** Flash via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
-* **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` counts all non-closed events (new+active+deferred) against the global cap. Conservative (no `_waiting_for_user` subtraction). Backs off when system is at capacity.
+* **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` queries the global WIP count via injected `Brain.count_global_wip(include_new=True)` (or local fallback), which subtracts `_waiting_for_user` events to free capacity for incoming work. Backs off when system is at capacity.
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 

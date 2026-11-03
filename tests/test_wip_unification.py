@@ -94,7 +94,7 @@ class TestObserverWipGates:
         assert headroom == 8
 
     @pytest.mark.asyncio
-    async def test_aligner_headroom_gate_fails_closed_when_all_fail(self):
+    async def test_aligner_headroom_gate_fails_to_default_when_all_fail(self):
         bb = MagicMock()
         bb.get_active_events_with_status = AsyncMock(side_effect=RuntimeError("BlackBoard unavailable"))
         aligner = Aligner(bb)
@@ -102,7 +102,7 @@ class TestObserverWipGates:
         aligner.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
 
         headroom = await aligner._get_wip_headroom()
-        assert headroom == 0
+        assert headroom == 5
 
     @pytest.mark.asyncio
     async def test_headhunter_boolean_gate_with_injected_counter(self):
@@ -140,7 +140,7 @@ class TestObserverWipGates:
         assert headroom == 8
 
     @pytest.mark.asyncio
-    async def test_jenkins_observer_headroom_fails_closed_when_all_fail(self):
+    async def test_jenkins_observer_headroom_fails_to_default_when_all_fail(self):
         bb = MagicMock()
         bb.get_active_events_with_status = AsyncMock(side_effect=RuntimeError("BlackBoard unavailable"))
         jenkins = JenkinsObserver(bb)
@@ -148,7 +148,7 @@ class TestObserverWipGates:
         jenkins.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
 
         headroom = await jenkins._get_wip_headroom()
-        assert headroom == 0
+        assert headroom == 5
 
     @pytest.mark.asyncio
     async def test_headhunter_jira_flow_gate_with_injected_counter(self):
