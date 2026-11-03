@@ -9,7 +9,7 @@
 
 Covers:
 - T-1: Explorer always routes via ephemeral (Tier-0, never local)
-- T-2: Explorer model resolves to gemini-3.5-flash-lite
+- T-2: Explorer model resolves to claude-haiku-5-5
 - T-3: Explorer CLI resolves to claude
 - T-4: Explorer present in select_agent schema enum
 - T-5: Busy local sidecar + aligner event -> ephemeral overflow
@@ -180,9 +180,9 @@ class TestExplorerModelResolution:
     """Explorer resolves to a model in the role model map and flows through dispatch."""
 
     def test_role_model_map_has_explorer(self):
-        """T-2: _ROLE_MODEL_MAP has 'explorer' with a non-empty model string."""
+        """T-2: _ROLE_MODEL_MAP has 'explorer' resolving to claude-haiku-5-5."""
         assert "explorer" in _ROLE_MODEL_MAP
-        assert _ROLE_MODEL_MAP["explorer"]  # non-empty
+        assert _ROLE_MODEL_MAP["explorer"] == "claude-haiku-5-5"
 
     @pytest.mark.asyncio
     async def test_explorer_model_passed_to_ensure_agent(self, registry_and_bridge):
