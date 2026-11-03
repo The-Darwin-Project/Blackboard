@@ -9,6 +9,11 @@
 # 7. [Pattern]: Cart loop hydrates cluster links via extract_full_links from escalations_by_id before each iteration.
 # 8. [Pattern]: Cart loop routes write_incident (new) vs extend_incident (existing) per cluster.extends_issue_key.
 # 9. [Constraint]: extends_issue_key validation is fail-closed (search_succeeded flag). Invalid keys convert to new incidents.
+# 10. [Constraint]: _sweep drains the backlog in bounded batches (NIGHTWATCHER_BATCH_SIZE x NIGHTWATCHER_MAX_BATCHES).
+#     One ShiftReport per sweep: batches are merged cumulatively into the same date:window key.
+# 11. [Constraint]: On quota/generic failure, events already in ctx.created_incidents are COMMITTED (Jira write is not
+#     idempotent); only the uncommitted remainder is restaged. Never restage a member whose incident exists.
+# 12. [Constraint]: auto_reconcile is enabled ONLY on the final declare_clusters attempt (_run_clustering_agent).
 """
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
@@ -39,6 +44,38 @@ MAX_ANALYSIS_ROUNDS = 30
 MAX_DECLARE_RETRIES = 2
 MAX_CART_RETRIES = 2
 NIGHTWATCHER_SWEEP_CRON = os.getenv("NIGHTWATCHER_SWEEP_CRON", "0 6,18 * * *")
+DEFAULT_BATCH_SIZE = 25
+DEFAULT_MAX_BATCHES = 10
+DEFAULT_BATCH_COOLDOWN_S = 30.0
+SUMMARY_PROMPT_CHARS = 140
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read an int env var; fall back to default on garbage, clamp to minimum."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Nightwatcher: invalid %s=%r, using default %d", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("Nightwatcher: %s=%d below minimum, clamping to %d", name, value, minimum)
+        return minimum
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Nightwatcher: invalid %s=%r, using default %s", name, raw, default)
+        return default
+    return max(minimum, value)
 
 from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
 from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
@@ -69,6 +106,7 @@ class NightwatcherObserver:
         self._adapter = None
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._batch_ctx: Optional[NightwatcherContext] = None
 
     async def start(self) -> None:
         if self._running:
@@ -144,65 +182,182 @@ class NightwatcherObserver:
         except Exception:
             logger.warning("Field notes digest failed (non-fatal)", exc_info=True)
 
-        NIGHTWATCHER_BATCH_SIZE = int(os.getenv("NIGHTWATCHER_BATCH_SIZE", "25"))
-        escalations, json_members = await self.blackboard.lease_pending_escalations(
-            time.time(), limit=NIGHTWATCHER_BATCH_SIZE
-        )
-        pending_count = len(escalations)
-        logger.info("Nightwatcher sweep: %d pending escalations", pending_count)
-
-        min_pending = int(os.getenv("NIGHTWATCHER_MIN_PENDING", "1"))
-        if pending_count == 0 or pending_count < min_pending:
-            if json_members:
-                await self.blackboard.requeue_inflight()
-            report = ShiftReport(
-                shift_date=shift_date, window=window,
-                window_start=window_start, window_end=window_end,
-                status="empty", started_at=sweep_start, completed_at=time.time(),
-            )
-            await self.blackboard.persist_shift_report(report)
-            return
-
-        adapter = await self._get_adapter()
-        if not adapter:
-            logger.error("Nightwatcher: no LLM adapter, requeueing %d escalations", pending_count)
-            await self.blackboard.requeue_inflight()
-            return
-
-        system_prompt = build_system_prompt(escalations, window_start, window_end)
-        from ..agents.llm.quota_tracker import QuotaExhaustedError
-        try:
-            contents, ctx = await self._run_analysis_loop(
-                escalations, json_members, system_prompt,
-                window_start, window_end, shift_date, window,
-                sweep_start, pending_count,
-            )
-            await self._run_report_cart(
-                ctx, contents, json_members, escalations, system_prompt,
-                shift_date, window, window_start, window_end,
-                sweep_start, pending_count,
-            )
-        except QuotaExhaustedError as qe:
+        batch_size = _env_int("NIGHTWATCHER_BATCH_SIZE", DEFAULT_BATCH_SIZE)
+        configured_min = _env_int("NIGHTWATCHER_MIN_PENDING", 1)
+        min_pending = min(configured_min, batch_size)
+        if min_pending != configured_min:
             logger.warning(
-                "Nightwatcher sweep paused due to quota exhaustion (cooling down 60s): %s", qe
+                "Nightwatcher: NIGHTWATCHER_MIN_PENDING=%d exceeds batch size %d, using %d",
+                configured_min, batch_size, min_pending,
             )
-            await self.blackboard.restage_orphans(json_members)
-            quota_report = ShiftReport(
-                shift_date=shift_date, window=window,
-                window_start=window_start, window_end=window_end,
-                status="quota_exhausted", started_at=sweep_start, completed_at=time.time(),
+        max_batches = _env_int("NIGHTWATCHER_MAX_BATCHES", DEFAULT_MAX_BATCHES)
+        cooldown_s = _env_float("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", DEFAULT_BATCH_COOLDOWN_S)
+
+        from ..agents.llm.quota_tracker import QuotaExhaustedError
+        cumulative: "Optional[ShiftReport]" = None
+
+        for batch_no in range(1, max_batches + 1):
+            escalations, json_members = await self.blackboard.lease_pending_escalations(
+                time.time(), limit=batch_size
             )
-            await self.blackboard.persist_shift_report(quota_report)
-            await asyncio.sleep(60.0)
+            pending_count = len(escalations)
+            logger.info("Nightwatcher sweep batch %d/%d: %d pending escalations",
+                        batch_no, max_batches, pending_count)
+
+            if pending_count == 0 or pending_count < min_pending:
+                if json_members:
+                    await self.blackboard.requeue_inflight()
+                if cumulative is None:
+                    report = ShiftReport(
+                        shift_date=shift_date, window=window,
+                        window_start=window_start, window_end=window_end,
+                        status="empty", started_at=sweep_start, completed_at=time.time(),
+                    )
+                    await self.blackboard.persist_shift_report(report)
+                return
+
+            adapter = await self._get_adapter()
+            if not adapter:
+                logger.error("Nightwatcher: no LLM adapter, requeueing %d escalations", pending_count)
+                await self.blackboard.requeue_inflight()
+                return
+
+            system_prompt = build_system_prompt(escalations, window_start, window_end)
+            self._batch_ctx = None
+            try:
+                contents, ctx = await self._run_analysis_loop(
+                    escalations, json_members, system_prompt,
+                    window_start, window_end, shift_date, window,
+                    sweep_start, pending_count,
+                )
+                cumulative = await self._run_report_cart(
+                    ctx, contents, json_members, escalations, system_prompt,
+                    shift_date, window, window_start, window_end,
+                    sweep_start, pending_count, prior_report=cumulative,
+                )
+            except QuotaExhaustedError as qe:
+                logger.warning("Nightwatcher sweep paused due to quota exhaustion on batch %d: %s", batch_no, qe)
+                await self._settle_failed_batch(
+                    "quota_exhausted", json_members, escalations, cumulative,
+                    shift_date, window, window_start, window_end, sweep_start, requeue_all=False,
+                )
+                return
+            except Exception:
+                logger.exception("Nightwatcher sweep failed, settling batch and persisting failed report")
+                await self._settle_failed_batch(
+                    "failed", json_members, escalations, cumulative,
+                    shift_date, window, window_start, window_end, sweep_start, requeue_all=True,
+                )
+                return
+
+            # Decide whether to drain another batch within this sweep.
+            ctx = self._batch_ctx
+            if not (ctx and ctx.created_incidents):
+                logger.warning("Nightwatcher: batch %d produced no incidents, stopping drain to avoid re-leasing the same items", batch_no)
+                return
+            if batch_no >= max_batches:
+                logger.info("Nightwatcher: reached NIGHTWATCHER_MAX_BATCHES=%d, remaining backlog drains next sweep", max_batches)
+                return
+            remaining = await self.blackboard.count_pending_escalations()
+            if not isinstance(remaining, int) or remaining < min_pending:
+                return
+            logger.info("Nightwatcher: %d escalations still pending, cooling down %.0fs before next batch",
+                        remaining, cooldown_s)
+            if cooldown_s > 0:
+                await asyncio.sleep(cooldown_s)
+
+    async def _commit_processed(self, ctx, json_members, escalations) -> set[str]:
+        """Commit events whose Jira incident already exists; clear their escalation flags.
+
+        Returns the set of committed event IDs. Safe to call repeatedly (SREM is idempotent).
+        """
+        done_ids = {eid for inc in ctx.created_incidents for eid in inc.affected_events} if ctx else set()
+        done_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in done_ids]
+        if done_jsons:
+            await self.blackboard.commit_inflight(done_jsons)
+
+        # Clear escalation flags for successfully committed services (best-effort:
+        # if clear fails, recovery or next escalation cycle will reset the flag)
+        for eid in done_ids:
+            esc = ctx.escalations_by_id.get(eid)
+            if esc and esc.service:
+                try:
+                    await self.blackboard.clear_escalation_flag(
+                        esc.service, scope=esc.scope or "health",
+                        expected_event_id=eid,
+                    )
+                except Exception:
+                    logger.warning(
+                        f"Failed to clear escalation flag for {esc.service} "
+                        f"(eid={eid}), best-effort — recovery or next escalation will reset"
+                    )
+        return done_ids
+
+    async def _settle_failed_batch(self, status, json_members, escalations, prior,
+                                   shift_date, window, window_start, window_end,
+                                   sweep_start, requeue_all: bool) -> None:
+        """Failure path: commit already-incidented events, restage only the remainder, persist report.
+
+        Jira writes are not idempotent, so a member whose incident exists must never go back to
+        pending (the next sweep would file a duplicate). Persisting the report is attempted even
+        if settling raised, so the Shifts UI always reflects the outage.
+        """
+        from ..models import ShiftReport
+        ctx = getattr(self, "_batch_ctx", None)
+        done_ids: set[str] = set()
+        try:
+            done_ids = await self._commit_processed(ctx, json_members, escalations)
+            rest = [jm for jm, e in zip(json_members, escalations) if e.event_id not in done_ids]
+            if rest:
+                if requeue_all and not done_ids:
+                    await self.blackboard.requeue_inflight()
+                else:
+                    await self.blackboard.restage_orphans(rest)
         except Exception:
-            logger.exception("Nightwatcher sweep failed, requeueing and persisting failed report")
-            await self.blackboard.requeue_inflight()
-            failed_report = ShiftReport(
-                shift_date=shift_date, window=window,
-                window_start=window_start, window_end=window_end,
-                status="failed", started_at=sweep_start, completed_at=time.time(),
-            )
-            await self.blackboard.persist_shift_report(failed_report)
+            logger.exception("Nightwatcher: failed to settle %s batch (inflight TTL will recover leftovers)", status)
+
+        created = list(ctx.created_incidents) if ctx else []
+        batch_report = ShiftReport(
+            shift_date=shift_date, window=window,
+            window_start=window_start, window_end=window_end,
+            status=status,
+            manifest=[e for e in escalations if e.event_id in done_ids],
+            incidents=created,
+            investigations=list(ctx.investigations) if ctx else [],
+            metrics={"escalation_count": len(done_ids), "incident_count": len(created),
+                     "investigation_count": len(ctx.investigations) if ctx else 0,
+                     "failed_cluster_count": 0},
+            started_at=sweep_start, completed_at=time.time(),
+        )
+        report = self._merge_reports(prior, batch_report, status=status)
+        await self.blackboard.persist_shift_report(report)
+
+    @staticmethod
+    def _merge_reports(prior, new, status: str | None = None):
+        """Merge a batch's report into the sweep's cumulative report (same date:window key)."""
+        if prior is None:
+            return new
+        metrics = dict(prior.metrics)
+        for key in ("escalation_count", "incident_count", "investigation_count", "failed_cluster_count"):
+            metrics[key] = (prior.metrics.get(key) or 0) + (new.metrics.get(key) or 0)
+        esc_total = metrics.get("escalation_count") or 0
+        metrics["noise_reduction_pct"] = (
+            round((1 - metrics["incident_count"] / esc_total) * 100, 1)
+            if metrics.get("incident_count") and esc_total else 0
+        )
+        started = prior.started_at or new.started_at
+        completed = new.completed_at
+        metrics["sweep_duration_s"] = round((completed or time.time()) - (started or time.time()), 1)
+        return prior.model_copy(update={
+            "status": status or new.status,
+            "manifest": prior.manifest + new.manifest,
+            "incidents": prior.incidents + new.incidents,
+            "investigations": prior.investigations + new.investigations,
+            "summary_text": "\n\n".join(t for t in (prior.summary_text, new.summary_text) if t),
+            "metrics": metrics,
+            "started_at": started,
+            "completed_at": completed,
+        })
 
     async def _run_analysis_loop(self, escalations, json_members, system_prompt,
                                  window_start, window_end, shift_date, window,
@@ -210,7 +365,7 @@ class NightwatcherObserver:
         """LLM-driven analysis loop: review + investigate phases."""
         adapter = await self._get_adapter()
         escalation_text = "\n".join(
-            f"- **{e.event_id}** | {e.service} | {e.platform} | {(e.summary or '')[:140]}"
+            f"- **{e.event_id}** | {e.service} | {e.platform} | {(e.summary or '')[:SUMMARY_PROMPT_CHARS]}"
             for e in escalations
         )
         contents = [{"role": "user", "parts": [{"text": escalation_text}]}]
@@ -229,6 +384,7 @@ class NightwatcherObserver:
             dispatch_count=0, dispatch_cap=dispatch_cap,
             created_incidents=[], investigations=[],
         )
+        self._batch_ctx = ctx  # lets _sweep's failure path see incidents created before an error
 
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
@@ -284,46 +440,60 @@ class NightwatcherObserver:
         logger.warning("Nightwatcher: MAX_ANALYSIS_ROUNDS exhausted, forcing transition to report phase")
         return contents, ctx
 
-    async def _run_report_cart(self, ctx, contents, json_members, escalations,
-                               system_prompt, shift_date, window, window_start,
-                               window_end, sweep_start, pending_count):
-        """Code-driven shopping cart: declare clusters, then N isolated report iterations."""
-        from ..models import ShiftReport
-        from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
-        adapter = await self._get_adapter()
-        temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
-        max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
-        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+    async def _run_clustering_agent(self, adapter, ctx, system_prompt, contents,
+                                    temperature, max_tokens, thinking) -> None:
+        """Step 1 of the cart: have the LLM declare clusters, with bounded retries.
 
-        # Step 1: Declare clusters
+        Validation errors are fed back to the model. auto_reconcile (code-built fallback
+        cluster for unassigned events) is enabled ONLY on the final attempt, so the model
+        always gets MAX_DECLARE_RETRIES chances to produce a complete plan itself.
+        Raises RuntimeError if no plan is accepted.
+        """
+        from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
+        from .nightwatcher_tools import _handle_declare_clusters
+        from src.agents.llm import record_token_usage
         for attempt in range(MAX_DECLARE_RETRIES + 1):
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
                 tools=NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA, temperature=temperature,
                 max_output_tokens=max_tokens, thinking_level=thinking,
             )
-            from src.agents.llm import record_token_usage
             record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
-                from .nightwatcher_tools import _handle_declare_clusters
-                is_last_attempt = (attempt == MAX_DECLARE_RETRIES)
                 result = await _handle_declare_clusters(
-                    response.function_call.args, ctx, auto_reconcile=is_last_attempt
+                    response.function_call.args, ctx,
+                    auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
                 )
-                if ctx.declared_clusters:
-                    logger.info("Nightwatcher: cluster plan accepted on attempt %d", attempt + 1)
-                    contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
-                    contents.append({"role": "user", "parts": [{"text": result}]})
-                    break
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": result}]})
+                if ctx.declared_clusters:
+                    logger.info("Nightwatcher: cluster plan accepted on attempt %d", attempt + 1)
+                    return
                 logger.warning("Nightwatcher: cluster plan rejected on attempt %d: %s", attempt + 1, result[:200])
             else:
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text":
                     "You must call declare_clusters with your cluster plan. Every manifest event must be assigned."}]})
-        else:
-            raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+        raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+
+    async def _run_report_cart(self, ctx, contents, json_members, escalations,
+                               system_prompt, shift_date, window, window_start,
+                               window_end, sweep_start, pending_count, prior_report=None):
+        """Code-driven shopping cart: declare clusters, then N isolated report iterations.
+
+        Returns the persisted ShiftReport (cumulative with prior_report when draining
+        multiple batches in one sweep).
+        """
+        from ..models import ShiftReport
+        adapter = await self._get_adapter()
+        temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+
+        # Step 1: Declare clusters
+        await self._run_clustering_agent(
+            adapter, ctx, system_prompt, contents, temperature, max_tokens, thinking,
+        )
 
         # Step 2: Validate extends_issue_key values against open incidents (fail-closed)
         open_keys: set[str] = set()
@@ -433,27 +603,8 @@ class NightwatcherObserver:
         else:
             logger.warning("Nightwatcher: summary LLM call did not produce post_shift_summary tool call")
 
-        # Step 5: Commit / restage
-        successful_event_ids = {eid for inc in ctx.created_incidents for eid in inc.affected_events}
-        successful_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in successful_event_ids]
-        if successful_jsons:
-            await self.blackboard.commit_inflight(successful_jsons)
-
-        # Clear escalation flags for successfully committed services (best-effort:
-        # if clear fails, recovery or next escalation cycle will reset the flag)
-        for eid in successful_event_ids:
-            esc = ctx.escalations_by_id.get(eid)
-            if esc and esc.service:
-                try:
-                    await self.blackboard.clear_escalation_flag(
-                        esc.service, scope=esc.scope or "health",
-                        expected_event_id=eid,
-                    )
-                except Exception:
-                    logger.warning(
-                        f"Failed to clear escalation flag for {esc.service} "
-                        f"(eid={eid}), best-effort — recovery or next escalation will reset"
-                    )
+        # Step 5: Commit processed events (restage of failed clusters already done in Step 3)
+        await self._commit_processed(ctx, json_members, escalations)
 
         report = ShiftReport(
             shift_date=shift_date, window=window,
@@ -464,6 +615,8 @@ class NightwatcherObserver:
             metrics=metrics,
             started_at=sweep_start, completed_at=time.time(),
         )
+        report = self._merge_reports(prior_report, report)
         await self.blackboard.persist_shift_report(report)
         logger.info("Nightwatcher sweep complete: %d escalations -> %d incidents (%.0f%% reduction, %.1fs)",
                      pending_count, len(ctx.created_incidents), noise_pct, time.time() - sweep_start)
+        return report

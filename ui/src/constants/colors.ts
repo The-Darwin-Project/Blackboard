@@ -113,4 +113,5 @@ export const SHIFT_STATUS_COLORS: Record<string, { bg: string; text: string; bor
   running:   { bg: '#6366f115', text: '#818cf8', border: '#6366f1', label: 'Running' },
   pending:   { bg: '#f59e0b15', text: '#fcd34d', border: '#f59e0b', label: 'Pending' },
   failed:    { bg: '#ef444415', text: '#f87171', border: '#ef4444', label: 'Failed' },
+  quota_exhausted: { bg: '#f9731615', text: '#fb923c', border: '#f97316', label: 'Quota exhausted' },
 };

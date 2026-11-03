@@ -2940,19 +2940,28 @@ return 1
         return await self.redis.zcard(self.NIGHTWATCHER_PENDING)
 
     async def restage_orphans(self, json_members: list[str]) -> int:
-        """Re-stage orphan escalations back to pending ZSET for next sweep and clear inflight."""
+        """Re-stage orphan escalations back to pending ZSET for next sweep and clear inflight.
+
+        Every member in json_members is removed from inflight (prevents zombie leaks).
+        Members that parse are re-ZADDed with their original staged_at (a missing/null
+        staged_at falls back to now; an explicit 0.0 is preserved). Corrupt members are
+        dropped and counted separately in the log. Returns the number restaged.
+        """
         import json as _json
+        if not json_members:
+            return 0
         valid_items: list[tuple[str, float]] = []
+        corrupt = 0
         now = time.time()
         for jm in json_members:
             try:
                 data = _json.loads(jm)
-                staged_at = float(data.get("staged_at") or now)
+                raw_ts = data.get("staged_at")
+                staged_at = float(raw_ts) if raw_ts is not None else now
                 valid_items.append((jm, staged_at))
             except Exception:
-                logger.warning("Nightwatcher: corrupt orphan skipped from restage: %s", jm[:100])
-        if not json_members:
-            return 0
+                corrupt += 1
+                logger.warning("Nightwatcher: corrupt orphan dropped from restage: %s", str(jm)[:100])
 
         async with self.redis.pipeline(transaction=True) as pipe:
             for jm, staged_at in valid_items:
@@ -2962,8 +2971,8 @@ return 1
             await pipe.execute()
 
         logger.warning(
-            "Nightwatcher: restaged %d orphan escalations and cleared %d from inflight",
-            len(valid_items), len(json_members)
+            "Nightwatcher: restaged %d orphan escalations, dropped %d corrupt, cleared %d from inflight",
+            len(valid_items), corrupt, len(json_members)
         )
         return len(valid_items)
 

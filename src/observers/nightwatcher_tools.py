@@ -2,7 +2,8 @@
 # @ai-rules:
 # 1. [Pattern]: Stateless tool handlers. All state lives in NightwatcherContext dataclass.
 # 2. [Constraint]: write_incident merges LLM judgment (args) + code-prefilled (cluster dict). Never mix.
-# 3. [Constraint]: validate_cluster_plan is a pure function -- no side effects, no async.
+# 3. [Constraint]: validate_cluster_plan and reconcile_cluster_plan are pure -- no side effects, no async, never mutate the caller's cluster list.
+# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent).
 # 4. [Pattern]: build_report_tool() and build_summary_tool() generate dynamic tool dicts per iteration.
 # 5. [Pattern]: get_phase_tools() filters static schemas. Dynamic tools are built separately by the cart loop.
 # 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
@@ -85,9 +86,15 @@ from ..agents.llm.types import VALID_PLATFORMS, VALID_STATUSES, VALID_PRIORITIES
 
 
 def validate_cluster_plan(
-    clusters: list[dict], manifest_ids: set[str], auto_reconcile: bool = True
+    clusters: list[dict], manifest_ids: set[str], auto_reconcile: bool = False
 ) -> tuple[bool, str]:
-    """Validate that clusters cover the full manifest with no overlaps or unknowns."""
+    """Validate that clusters cover the full manifest with no overlaps or unknowns.
+
+    Pure function: never mutates ``clusters``. With ``auto_reconcile=True``, manifest
+    events that no cluster claims are tolerated (the caller is then expected to run
+    ``reconcile_cluster_plan`` to materialise a fallback cluster for them).
+    Unknown and duplicate event IDs are ALWAYS rejected, regardless of the flag.
+    """
     if not clusters:
         return False, "No clusters declared. You must create at least one cluster."
     all_assigned: set[str] = set()
@@ -105,25 +112,75 @@ def validate_cluster_plan(
                 return False, f"Event {eid} is not in the manifest. Only manifest events can be assigned."
             all_assigned.add(eid)
     missing = manifest_ids - all_assigned
-    if missing:
-        if not auto_reconcile:
-            return False, f"Events not assigned to any cluster: {', '.join(sorted(missing))}"
-        default_platform = (
-            clusters[0].get("platform")
-            if (clusters and clusters[0].get("platform") in VALID_PLATFORMS)
-            else (next(iter(VALID_PLATFORMS)) if VALID_PLATFORMS else "general")
-        )
-        fallback_cluster = {
-            "title": "Unassigned Staged Escalations (Auto-Reconciled)",
-            "platform": default_platform,
-            "events": sorted(list(missing)),
-            "reasoning": "Automatically grouped by Railway Validator: unassigned during model clustering pass.",
-        }
-        clusters.append(fallback_cluster)
-        logger.warning(
-            "Railway Validator: auto-reconciled %d unassigned events into fallback cluster", len(missing)
-        )
+    if missing and not auto_reconcile:
+        return False, f"Events not assigned to any cluster: {', '.join(sorted(missing))}"
     return True, ""
+
+
+def _fallback_platform(
+    missing: set[str],
+    clusters: list[dict],
+    escalations_by_id: "dict[str, StagedEscalation] | None",
+) -> str:
+    """Deterministic platform for the fallback cluster.
+
+    Most common valid platform among the unassigned events themselves, then among the
+    declared clusters (ties broken alphabetically), then the first sorted valid platform.
+    """
+    def _most_common(platforms: list[str]) -> str | None:
+        valid = [p for p in platforms if p and (not VALID_PLATFORMS or p in VALID_PLATFORMS)]
+        if not valid:
+            return None
+        counts: dict[str, int] = {}
+        for p in valid:
+            counts[p] = counts.get(p, 0) + 1
+        return sorted(counts, key=lambda p: (-counts[p], p))[0]
+
+    by_id = escalations_by_id or {}
+    chosen = _most_common([by_id[e].platform for e in sorted(missing) if e in by_id])
+    if chosen is None:
+        chosen = _most_common([c.get("platform", "") for c in clusters])
+    if chosen is None:
+        chosen = sorted(VALID_PLATFORMS)[0] if VALID_PLATFORMS else "general"
+    return chosen
+
+
+def reconcile_cluster_plan(
+    clusters: list[dict],
+    manifest_ids: set[str],
+    escalations_by_id: "dict[str, StagedEscalation] | None" = None,
+) -> list[dict]:
+    """Return a NEW cluster list with a fallback cluster covering unassigned manifest events.
+
+    The caller's ``clusters`` list (and its dicts) are never mutated. When nothing is
+    missing, a shallow copy is returned. The fallback cluster is explicitly flagged
+    (``auto_reconciled=True``) and carries the schema-required ``root_cause``/``services``
+    so downstream report builders render it correctly. It is NOT a correlation claim:
+    the events share no established root cause and are only grouped to avoid dropping them.
+    """
+    result = [dict(c) for c in clusters]
+    assigned = {eid for c in clusters for eid in c.get("events", [])}
+    missing = manifest_ids - assigned
+    if not missing:
+        return result
+    by_id = escalations_by_id or {}
+    services = sorted({by_id[e].service for e in missing if e in by_id and by_id[e].service})
+    result.append({
+        "title": "Unassigned Staged Escalations (Auto-Reconciled)",
+        "root_cause": (
+            "Unclustered escalations (auto-reconciled after the model failed to assign "
+            "them). NOT a shared root cause -- triage each event individually."
+        ),
+        "platform": _fallback_platform(missing, clusters, escalations_by_id),
+        "services": services,
+        "events": sorted(missing),
+        "reasoning": "Grouped by code fallback: events were unassigned in the model's final cluster plan.",
+        "auto_reconciled": True,
+    })
+    logger.warning(
+        "Nightwatcher: auto-reconciled %d unassigned events into fallback cluster", len(missing)
+    )
+    return result
 
 
 _MAX_TOOL_DESC_CHARS = 4000
@@ -366,6 +423,8 @@ async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext, auto_re
     ok, error = validate_cluster_plan(clusters, ctx.manifest_ids, auto_reconcile=auto_reconcile)
     if not ok:
         return f"Cluster plan validation failed: {error}"
+    if auto_reconcile:
+        clusters = reconcile_cluster_plan(clusters, ctx.manifest_ids, ctx.escalations_by_id)
     ctx.declared_clusters = clusters
     cluster_summary = "; ".join(
         f"[{i+1}] {c.get('root_cause', '?')} ({len(c.get('events', []))} events)"

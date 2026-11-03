@@ -30,6 +30,16 @@ class QuotaExhaustedError(Exception):
     """Raised when acquire() times out waiting for quota capacity."""
 
 
+class RequestExceedsBurstError(QuotaExhaustedError):
+    """Raised when a single request is larger than the whole bucket.
+
+    Unlike plain QuotaExhaustedError this is PERMANENT for the given payload: no amount
+    of waiting frees enough capacity, so callers must not treat it as a transient
+    rate-limit (see Brain._is_transient). Subclasses QuotaExhaustedError so existing
+    handlers (e.g. Nightwatcher's sweep) still catch it.
+    """
+
+
 @dataclass(frozen=True)
 class Reservation:
     """Opaque handle for an active token reservation."""
@@ -85,12 +95,13 @@ class QuotaTracker:
         """Block until the bucket has capacity for estimated_tokens.
 
         Returns a Reservation handle on success.
-        Raises QuotaExhaustedError if max_wait_seconds is exceeded or if payload exceeds burst limit.
+        Raises QuotaExhaustedError if max_wait_seconds is exceeded, or RequestExceedsBurstError
+        (a QuotaExhaustedError subclass, non-transient) if the payload alone exceeds the burst limit.
         """
         if estimated_tokens > self._burst_limit:
-            raise QuotaExhaustedError(
-                f"Estimated tokens ({estimated_tokens}) exceed burst limit ({self._burst_limit}). "
-                "Reduce batch size before retrying."
+            raise RequestExceedsBurstError(
+                f"Request of {estimated_tokens} estimated tokens exceeds the burst limit "
+                f"({self._burst_limit}) and can never be admitted. Reduce the request size."
             )
 
         deadline = time.monotonic() + max_wait_seconds

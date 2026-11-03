@@ -200,6 +200,9 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `NIGHTWATCHER_SWEEP_CRON` | Cron schedule for sweeps | `0 6,18 * * *` |
 | `NIGHTWATCHER_MIN_PENDING` | Min pending escalations to trigger | `1` |
 | `NIGHTWATCHER_DISPATCH_CAP` | Max ephemeral investigations per sweep | `3` |
+| `NIGHTWATCHER_BATCH_SIZE` | Max escalations leased per batch (bounds the LLM prompt; <1 or non-numeric falls back to `25`) | `25` |
+| `NIGHTWATCHER_MAX_BATCHES` | Max batches drained per sweep (`BATCH_SIZE` x `MAX_BATCHES` per sweep) | `10` |
+| `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | Pause between batches within a sweep | `30` |
 | `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
 

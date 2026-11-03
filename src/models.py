@@ -674,7 +674,7 @@ class ShiftReport(BaseModel):
     window: Literal["morning", "evening"] = Field(..., description="Sweep window")
     window_start: str = Field(..., description="ISO timestamp of window start")
     window_end: str = Field(..., description="ISO timestamp of window end")
-    status: Literal["completed", "running", "failed", "empty"] = Field("running")
+    status: Literal["completed", "running", "failed", "empty", "quota_exhausted"] = Field("running")
     manifest: list[StagedEscalation] = Field(default_factory=list, description="All staged escalations input")
     incidents: list[ShiftIncident] = Field(default_factory=list, description="Consolidated incidents created")
     investigations: list[ShiftInvestigation] = Field(default_factory=list, description="On-call agent dispatches")

@@ -26,7 +26,7 @@ from .types import (
     LLMResponse,
     TokenUsage,
 )
-from .quota_tracker import QuotaExhaustedError, QuotaTracker
+from .quota_tracker import QuotaExhaustedError, QuotaTracker, RequestExceedsBurstError
 
 __all__ = [
     "create_adapter",
@@ -42,6 +42,7 @@ __all__ = [
     "NIGHTWATCHER_TOOL_SCHEMAS",
     "QuotaTracker",
     "QuotaExhaustedError",
+    "RequestExceedsBurstError",
 ]
 
 _quota_tracker: QuotaTracker | None = None

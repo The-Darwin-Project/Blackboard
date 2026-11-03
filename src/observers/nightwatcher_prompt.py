@@ -99,7 +99,7 @@ def build_manifest_table(escalations: list["StagedEscalation"]) -> str:
         links = extract_event_links(e)
         lines.append(
             f"| {i} | {e.event_id} | {e.service} | {e.platform or '?'} "
-            f"| {e.priority} | {hours_ago}h | {links} | {e.summary} |"
+            f"| {e.priority} | {hours_ago}h | {links} | {e.summary or ''} |"
         )
     return "\n".join(lines)
 

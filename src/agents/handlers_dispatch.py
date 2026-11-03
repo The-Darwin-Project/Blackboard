@@ -465,7 +465,7 @@ async def handle_report_incident(
             service=event_doc.service,
             source=event_doc.source,
             reason=event_doc.event.reason,
-            summary=args.get("summary", "")[:200],
+            summary=(args.get("summary") or "")[:200],
             scope=esc_scope,
             platform=args.get("platform", ""),
             priority=args.get("priority", "Normal"),

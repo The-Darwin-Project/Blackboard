@@ -486,7 +486,7 @@ export interface AppConfig {
 export interface ShiftReportSummary {
   shift_date: string;
   window: 'morning' | 'evening';
-  status: 'completed' | 'running' | 'empty' | 'failed';
+  status: 'completed' | 'running' | 'empty' | 'failed' | 'quota_exhausted';
   escalation_count: number;
   incident_count: number;
   noise_reduction_pct: number;
@@ -531,7 +531,7 @@ export interface ShiftReportFull {
   window: 'morning' | 'evening';
   window_start: string;
   window_end: string;
-  status: 'completed' | 'running' | 'empty' | 'failed';
+  status: 'completed' | 'running' | 'empty' | 'failed' | 'quota_exhausted';
   manifest: StagedEscalationDTO[];
   incidents: ShiftIncidentDTO[];
   investigations: ShiftInvestigationDTO[];
