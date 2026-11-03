@@ -1030,6 +1030,54 @@ class TestDeferredCleanupBranch:
         sc._app.client.chat_delete.assert_not_called()
         assert sc._progress_ts.get(eid) == "progress_ts_value"
 
+    @pytest.mark.asyncio
+    async def test_event_title_updated_syncs_dm_thread_title(self):
+        """event_title_updated broadcast invokes assistant_threads_setTitle for DMs."""
+        sc, _ = _make_channel()
+        eid = "evt-title-sync"
+        doc = _mock_event_doc(
+            event_id=eid,
+            slack_channel_id="D123456",
+            slack_thread_ts="1234567890.123456",
+        )
+        sc._blackboard.get_event.return_value = doc
+        sc._app.client.assistant_threads_setTitle = AsyncMock()
+
+        await sc.broadcast_handler({
+            "type": "event_title_updated",
+            "event_id": eid,
+            "title": "Investigate High CPU",
+            "title_source": "user",
+        })
+
+        sc._app.client.assistant_threads_setTitle.assert_awaited_once_with(
+            channel_id="D123456",
+            thread_ts="1234567890.123456",
+            title="Investigate High CPU",
+        )
+
+    @pytest.mark.asyncio
+    async def test_event_title_updated_ignores_non_dm_channel(self):
+        """event_title_updated broadcast does NOT call assistant_threads_setTitle for non-DM channels."""
+        sc, _ = _make_channel()
+        eid = "evt-title-public"
+        doc = _mock_event_doc(
+            event_id=eid,
+            slack_channel_id="C123456",
+            slack_thread_ts="1234567890.123456",
+        )
+        sc._blackboard.get_event.return_value = doc
+        sc._app.client.assistant_threads_setTitle = AsyncMock()
+
+        await sc.broadcast_handler({
+            "type": "event_title_updated",
+            "event_id": eid,
+            "title": "Investigate High CPU",
+            "title_source": "user",
+        })
+
+        sc._app.client.assistant_threads_setTitle.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Test: stop() shutdown behavior (HIGH #1 fix)

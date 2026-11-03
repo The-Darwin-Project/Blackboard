@@ -78,7 +78,7 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
           size={14}
         />
         <span className="text-xs font-mono font-medium truncate min-w-0 flex-1 text-text-primary">
-          {evt.service || evt.id.slice(4, 12)}
+          {evt.title || evt.service || evt.id.slice(4, 12)}
         </span>
         <CopyButton
           text={evt.id}

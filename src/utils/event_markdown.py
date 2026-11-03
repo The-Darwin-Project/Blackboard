@@ -81,6 +81,8 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
         f"- **Status:** {event.status.value}",
         f"- **Reason:** {event.event.reason}",
     ]
+    if getattr(event, "title", None):
+        lines.append(f"- **Title:** {_esc(event.title)}")
     if isinstance(evidence, EventEvidence):
         lines.append(f"- **Evidence:** {_esc(evidence.display_text)}")
         lines.append(f"- **Domain:** {evidence.brain_domain or evidence.domain}")

@@ -461,6 +461,9 @@ class EventDocument(BaseModel):
         None,
         description="Email of the user who created this event (stable identity for multi-tenant filtering)"
     )
+    # Human-readable title & origin
+    title: Optional[str] = Field(None, description="Concise human-readable event title")
+    title_source: Optional[Literal["fallback", "llm", "user"]] = Field(None, description="Origin of event title")
     # Approval metadata
     approved_by: Optional[str] = Field(None, description="Authenticated user who approved")
     approved_mr_id: Optional[str] = Field(None, description="Approved MR IID or PR number")

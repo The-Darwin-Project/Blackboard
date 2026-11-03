@@ -353,6 +353,44 @@ def can_approve_event(
     return has_approver_role
 
 
+def can_rename_event(
+    created_by_email: str | None,
+    user_email: str | None,
+    source: str,
+    roles: list[str],
+    auth_enabled: bool | None = None,
+) -> bool:
+    """Decide whether a caller may rename an event.
+
+    Pure boolean -- zero side effects, zero logging. Callers own audit logging.
+
+    Rules:
+    - Strict source restriction: only user-initiated events (source in ("chat", "slack"))
+      can be renamed via user API. Automated events return False.
+    - If auth_enabled is False: open to all for permitted sources (dev/local).
+    - If auth_enabled is True:
+        * Approver or Observation-admin roles can rename any permitted-source event.
+        * Otherwise, caller must be authenticated and match event owner:
+          created_by_email is not None and user_email == created_by_email.
+    """
+    if source not in ("chat", "slack"):
+        return False
+    if auth_enabled is None:
+        auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+    if not auth_enabled:
+        return True
+    user_roles_lower = {r.strip().lower() for r in (roles or [])}
+    approver_groups_lower = {g.strip().lower() for g in APPROVER_GROUPS}
+    obs_admin_groups_lower = {g.strip().lower() for g in OBS_ADMIN_GROUPS}
+    if user_roles_lower & (approver_groups_lower | obs_admin_groups_lower):
+        return True
+    norm_created = _normalize_email(created_by_email)
+    norm_user = _normalize_email(user_email)
+    if not norm_user or not norm_created:
+        return False
+    return norm_user == norm_created
+
+
 def resolve_approval_identity(
     email: str | None,
     label: str | None,

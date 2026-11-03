@@ -28,7 +28,9 @@ from ..auth import (
     can_append_message, can_approve_event, get_user_from_websocket, prompt_display_name,
     resolve_approval_identity,
 )
+from ..agents.event_namer import spawn_event_namer_task
 from ..models import ConversationTurn, EventEvidence
+from ..utils.prompt_sanitize import fallback_title
 from ..utils.vcs_approval import resolve_live_head_sha
 
 if TYPE_CHECKING:
@@ -132,7 +134,8 @@ class DashboardWSAdapter:
             logger.info("UI WebSocket disconnected (%d clients)", len(self._clients))
 
     async def _handle_chat(self, ws: WebSocket, data: dict, user) -> None:
-        message = data.get("message", "")
+        raw_msg = data.get("message")
+        message = raw_msg if isinstance(raw_msg, str) else str(raw_msg or "")
         service = data.get("service", "general")
         display_label = (
             user.label.split("@")[0]
@@ -153,6 +156,7 @@ class DashboardWSAdapter:
             image=image,
             user_name=prompt_display_name(user),
         )
+        fallback = fallback_title(message)
         event_id = await self._blackboard.create_event(
             source="chat",
             service=service,
@@ -166,7 +170,13 @@ class DashboardWSAdapter:
             ),
             created_by_email=user.email,
             initial_turns=[user_turn],
+            title=fallback,
+            title_source="fallback",
         )
+        try:
+            spawn_event_namer_task(self._blackboard, self._brain, event_id, message, "chat")
+        except Exception as e:
+            logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
         if image_rejected:
             await ws.send_json({
                 "type": "error", "kind": "invalid_payload",

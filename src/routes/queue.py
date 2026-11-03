@@ -59,19 +59,21 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
 from ..auth import (
     UserContext,
     can_approve_event,
     can_override_domain,
+    can_rename_event,
     require_auth,
     get_user_from_request,
     resolve_approval_identity,
 )
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
+from ..utils.prompt_sanitize import sanitize_title
 from ..utils.vcs_approval import resolve_live_head_sha
 
 
@@ -79,6 +81,21 @@ class RejectRequest(BaseModel):
     """Typed request body for plan rejection."""
     reason: str = Field("User rejected the plan.", description="Rejection reason")
     image: Optional[str] = Field(None, description="Base64 data URI of screenshot")
+
+
+class TitleUpdateRequest(BaseModel):
+    """Typed request body for event title updates."""
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        collapsed = sanitize_title(v)
+        if not collapsed:
+            raise ValueError("Title cannot be empty or whitespace only")
+        if len(collapsed) > 100:
+            raise ValueError("Title cannot exceed 100 characters")
+        return collapsed
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +186,8 @@ async def list_active_events(
             continue
         row = {
             "id": event.id,
+            "title": getattr(event, "title", None),
+            "title_source": getattr(event, "title_source", None),
             "source": event.source,
             "service": event.service,
             "subject_type": getattr(event, "subject_type", "service"),
@@ -205,6 +224,8 @@ async def list_waiting_approval_events(
             continue
         events.append({
             "id": event.id,
+            "title": getattr(event, "title", None),
+            "title_source": getattr(event, "title_source", None),
             "source": event.source,
             "service": event.service,
             "subject_type": getattr(event, "subject_type", "service"),
@@ -331,6 +352,64 @@ async def get_event_document(
         except Exception:
             pass
     return event
+
+
+@router.patch("/{event_id}/title")
+async def update_event_title(
+    request: Request,
+    event_id: str,
+    req: TitleUpdateRequest,
+    blackboard: BlackboardState = Depends(get_blackboard),
+    brain = Depends(get_brain),
+) -> dict:
+    """Rename an event.
+
+    Permitted for event creator or approver/admin on chat/slack events.
+    """
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+        raise HTTPException(status_code=409, detail="Cannot rename closed event")
+
+    user = get_user_from_request(request)
+    from .. import auth
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if auth_enabled and not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if not can_rename_event(
+        event.created_by_email,
+        user.email,
+        event.source,
+        user.roles,
+        auth_enabled=auth_enabled,
+    ):
+        logger.warning(
+            "[Audit] Denied title rename: user=%s event=%s source=%s",
+            user.email, event_id, event.source,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if req.title == getattr(event, "title", None):
+        if getattr(event, "title_source", None) != "user":
+            await blackboard.stamp_event(event_id, title=req.title, title_source="user")
+        return {
+            "id": event_id,
+            "title": req.title,
+            "title_source": "user",
+        }
+
+    await blackboard.stamp_event(event_id, title=req.title, title_source="user")
+    logger.info("[Audit] Event %s renamed by %s (len=%d)", event_id, user.email, len(req.title))
+    await brain.broadcast({
+        "type": "event_title_updated",
+        "event_id": event_id,
+        "title": req.title,
+        "title_source": "user",
+    })
+    return {"id": event_id, "title": req.title, "title_source": "user"}
 
 
 @router.get("/{event_id}/approval")
@@ -660,6 +739,8 @@ async def list_closed_events(
         if event:
             events.append({
                 "id": event.id,
+                "title": getattr(event, "title", None),
+                "title_source": getattr(event, "title_source", None),
                 "source": event.source,
                 "service": event.service,
                 "subject_type": getattr(event, "subject_type", "service"),

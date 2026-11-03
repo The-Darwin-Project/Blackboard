@@ -355,6 +355,8 @@ class EventRepository(Protocol):
         slack_thread_ts: Optional[str] = None,
         slack_user_id: Optional[str] = None,
         initial_turns: Optional[list[ConversationTurn]] = None,
+        title: Optional[str] = None,
+        title_source: Optional[str] = None,
     ) -> str: ...
 
     async def get_event(self, event_id: str) -> Optional[EventDocument]: ...
@@ -389,6 +391,10 @@ class EventRepository(Protocol):
     ) -> None: ...
 
     async def stamp_event(self, event_id: str, **fields: object) -> None: ...
+
+    async def update_event_title_if_not_user(
+        self, event_id: str, title: str, title_source: str = "llm",
+    ) -> bool: ...
 
     # --- Event queue ---
 

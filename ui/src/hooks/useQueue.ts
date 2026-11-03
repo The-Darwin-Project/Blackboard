@@ -125,6 +125,17 @@ export function useQueueInvalidation() {
           };
         });
       });
+      queryClient.setQueryData<EventDocument>(['eventDocument', eventId], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.title_source !== undefined ? { title_source: patch.title_source } : {}),
+          ...(patch.status !== undefined ? { status: patch.status as EventDocument['status'] } : {}),
+          ...(patch.defer_until !== undefined ? { defer_until: patch.defer_until } : {}),
+          ...(patch.defer_started_at !== undefined ? { defer_started_at: patch.defer_started_at } : {}),
+        };
+      });
     },
     optimisticUpdateTurnStatus: (eventId: string, status: MessageStatus, turns: number[] | 'all') => {
       queryClient.setQueryData(['eventDocument', eventId], (old: EventDocument | undefined) => {

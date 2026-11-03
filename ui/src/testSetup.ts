@@ -17,4 +17,12 @@ expect.extend({
       message: () => `expected element ${pass ? 'not ' : ''}to be in document`,
     };
   },
+  toHaveValue(received: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null | undefined, expected: unknown) {
+    const actual = received ? (received as HTMLInputElement).value : undefined;
+    const pass = String(actual) === String(expected);
+    return {
+      pass,
+      message: () => `expected element value to be ${expected}, got ${actual}`,
+    };
+  },
 });
