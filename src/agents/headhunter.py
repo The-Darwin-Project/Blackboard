@@ -59,6 +59,7 @@ from .headhunter_github import GitHubPlatform
 from .headhunter_gitlab import (
     ACTION_PRIORITY,
     GitLabPlatform,
+    V1_ACTIONABLE,
 )
 from .headhunter_jira import HeadhunterJira
 
