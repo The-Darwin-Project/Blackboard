@@ -25,10 +25,10 @@
 #     lose the call (emit it with usage so far); errors before the call still propagate. last_parts is frozen at the
 #     function-call chunk (later parts would displace the thought_signature carrier); later text is dropped and extra
 #     function calls are logged and dropped.
-# 15. [Constraint]: generate_stream closes the SDK stream in the outer finally on EVERY exit (clean end, drain abort,
-#     parse error, GeneratorExit, CancelledError) via _close_stream (bounded by ACLOSE_TIMEOUT_S, failures logged).
-#     _record_usage runs FIRST in that finally: it is synchronous, so a second cancel cannot skip it. The SDK nests
-#     ~6 async generators with bare `async for` (no aclosing), so nothing else closes the HTTP response deterministically.
+# 15. [Constraint]: generate_stream records usage inside try before the terminal yield on clean completion, or in the outer
+#     finally on error/early exit; closes the SDK stream in the outer finally on EVERY exit via _close_stream (bounded by
+#     ACLOSE_TIMEOUT_S, failures logged). The SDK nests ~6 async generators with bare `async for` (no aclosing), so nothing
+#     else closes the HTTP response deterministically.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 

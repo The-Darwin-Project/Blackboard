@@ -130,8 +130,8 @@ class TestScanReconcileGuards:
     async def test_t6_thinking_loop_guard_paces_re_enqueue_after_30m(self):
         """T-6: When trailing_thoughts >= 2 and idle >= 1800s, event re-enqueues once, paces for 300s, and next scan skips."""
         turns = [
-            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.DELIVERED, thoughts="Plan A"),
-            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.DELIVERED, thoughts="Plan B"),
+            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan A"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan B"),
         ]
         event = _make_event("evt-think-1", conversation=turns)
         brain = _make_brain(event)
@@ -150,3 +150,18 @@ class TestScanReconcileGuards:
         # Next scan before 300s bypass pacing elapsed -> skipped
         result_paced = await brain._scan_active_for_reconcile()
         assert "evt-think-1" not in result_paced
+
+    @pytest.mark.asyncio
+    async def test_thinking_loop_guard_bypassed_by_unread_turn(self):
+        """Unread delivered turn enqueues immediately even if trailing turns had consecutive thoughts."""
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan A"),
+            ConversationTurn(turn=2, actor="brain", action="thoughts", status=MessageStatus.EVALUATED, thoughts="Plan B"),
+            ConversationTurn(turn=3, actor="user", action="message", status=MessageStatus.DELIVERED, thoughts="Hello?"),
+        ]
+        event = _make_event("evt-think-unread", conversation=turns)
+        brain = _make_brain(event)
+        brain._last_processed["evt-think-unread"] = time.time() - 100.0
+
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-think-unread" in result

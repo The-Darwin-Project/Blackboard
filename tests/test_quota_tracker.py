@@ -13,7 +13,7 @@ from src.agents.llm.quota_tracker import QuotaTracker, Reservation
 @pytest.fixture
 def tracker():
     # 60,000 tokens/min cap
-    return QuotaTracker(tpm_cap=60000, rpm_cap=100)
+    return QuotaTracker(tpm_cap=60000)
 
 
 class TestQuotaTrackerReservationLifecycle:

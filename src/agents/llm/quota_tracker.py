@@ -46,13 +46,11 @@ class QuotaTracker:
         tpm_limit: int = 60000,
         burst_factor: float = 0.8,
         tpm_cap: int | None = None,
-        rpm_cap: int | None = None,
     ):
         limit = tpm_cap if tpm_cap is not None else tpm_limit
         self._tpm_limit = limit
         self._burst_limit = limit
         self._sustained_limit = int(limit * burst_factor)
-        self._rpm_cap = rpm_cap
         self._window: deque[tuple[float, int]] = deque()
         self._active_reservations: dict[str, Reservation] = {}
         self._total_requests = 0

@@ -1326,6 +1326,7 @@ class Brain:
         # Clear orphan re-queue count on successful recovery (event now has turns)
         if event.conversation and event_id in self._orphan_requeue_count:
             self._orphan_requeue_count.pop(event_id, None)
+            self._orphan_last_attempt.pop(event_id, None)
 
         # Dedup: if this is a new event (no turns yet), check for existing active events.
         # Two passes per iteration (single loop):
@@ -6175,32 +6176,6 @@ class Brain:
                     continue
                 self._last_error_retry[eid] = now
 
-            # Thinking loop guard: if trailing 2+ turns are brain.thoughts
-            trailing_thoughts = 0
-            for t in reversed(event.conversation):
-                act = t.action if hasattr(t, "action") else (t.get("action") if isinstance(t, dict) else None)
-                actor = t.actor if hasattr(t, "actor") else (t.get("actor") if isinstance(t, dict) else None)
-                if actor == "brain" and act == "thoughts":
-                    trailing_thoughts += 1
-                else:
-                    break
-
-            if trailing_thoughts >= 2:
-                time_since = time.time() - self._last_processed.get(eid, 0.0)
-                now = time.time()
-                last_bypass = self._thinking_bypass_time.get(eid, 0.0)
-                if time_since < 1800.0 or (now - last_bypass) < 300.0:
-                    logger.warning(
-                        "Thinking loop guard active for %s: %d consecutive brain.thoughts turns (idle %.1fs < 1800s or pacing %.1fs < 300s)",
-                        eid, trailing_thoughts, time_since, now - last_bypass,
-                    )
-                    continue
-                # Bypassing thinking loop guard after 30m idle: pace next attempt for 300s
-                self._thinking_bypass_time[eid] = now
-                logger.info(f"Thinking loop safety net bypass: re-processing event {eid} (idle {time_since:.0f}s >= 1800s)")
-                to_enqueue.append(eid)
-                continue
-
             # Standard enqueue decision
             has_unread = any(t.status.value == "delivered" for t in event.conversation)
             is_waiting = eid in self._waiting_for_user
@@ -6233,6 +6208,31 @@ class Brain:
             elif not has_unread and not is_locked:
                 time_since = time.time() - self._last_processed.get(eid, 0)
                 if not is_waiting and time_since > 60:
+                    # Thinking loop guard: if trailing 2+ turns are brain.thoughts
+                    trailing_thoughts = 0
+                    for t in reversed(event.conversation):
+                        act = t.action if hasattr(t, "action") else (t.get("action") if isinstance(t, dict) else None)
+                        actor = t.actor if hasattr(t, "actor") else (t.get("actor") if isinstance(t, dict) else None)
+                        if actor == "brain" and act == "thoughts":
+                            trailing_thoughts += 1
+                        else:
+                            break
+
+                    if trailing_thoughts >= 2:
+                        now = time.time()
+                        last_bypass = self._thinking_bypass_time.get(eid, 0.0)
+                        if time_since < 1800.0 or (now - last_bypass) < 300.0:
+                            logger.warning(
+                                "Thinking loop guard active for %s: %d consecutive brain.thoughts turns (idle %.1fs < 1800s or pacing %.1fs < 300s)",
+                                eid, trailing_thoughts, time_since, now - last_bypass,
+                            )
+                            continue
+                        # Bypassing thinking loop guard after 30m idle: pace next attempt for 300s
+                        self._thinking_bypass_time[eid] = now
+                        logger.info(f"Thinking loop safety net bypass: re-processing event {eid} (idle {time_since:.0f}s >= 1800s)")
+                        to_enqueue.append(eid)
+                        continue
+
                     logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since:.0f}s)")
                     to_enqueue.append(eid)
 

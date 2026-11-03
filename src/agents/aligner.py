@@ -346,18 +346,23 @@ class Aligner:
         """Query current WIP usage and return available headroom for new events.
 
         Uses injected Brain._count_global_wip(include_new=True) if wired,
-        or falls back to local status map.
+        or falls back to local status map. Fails closed (0 headroom) on errors.
         """
+        if self._wip_counter is not None:
+            try:
+                wip_used = await self._wip_counter(include_new=True)
+                return max(0, self._wip_cap - wip_used)
+            except Exception as e:
+                logger.warning(
+                    "Injected WIP counter failed in Aligner._get_wip_headroom, falling back to local: %s",
+                    e,
+                )
         try:
-            wip_used = (
-                await self._wip_counter(include_new=True)
-                if self._wip_counter is not None
-                else await self._local_count_wip()
-            )
+            wip_used = await self._local_count_wip()
             return max(0, self._wip_cap - wip_used)
         except Exception as e:
-            logger.warning("Failed to query WIP headroom: %s (defaulting to 5)", e)
-            return 5
+            logger.error("Failed to query local WIP headroom in Aligner: %s (failing closed, headroom 0)", e)
+            return 0
 
     async def _create_consolidated_event(
         self, app: str, signals: list[tuple[str, dict]],

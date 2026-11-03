@@ -83,6 +83,28 @@ class TestObserverWipGates:
         assert headroom == 8
 
     @pytest.mark.asyncio
+    async def test_aligner_headroom_gate_exception_fallback_to_local(self):
+        bb = MagicMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={"evt-1": "active", "evt-2": "deferred"})
+        aligner = Aligner(bb)
+        aligner._wip_cap = 10
+        aligner.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
+
+        headroom = await aligner._get_wip_headroom()
+        assert headroom == 8
+
+    @pytest.mark.asyncio
+    async def test_aligner_headroom_gate_fails_closed_when_all_fail(self):
+        bb = MagicMock()
+        bb.get_active_events_with_status = AsyncMock(side_effect=RuntimeError("BlackBoard unavailable"))
+        aligner = Aligner(bb)
+        aligner._wip_cap = 10
+        aligner.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
+
+        headroom = await aligner._get_wip_headroom()
+        assert headroom == 0
+
+    @pytest.mark.asyncio
     async def test_headhunter_boolean_gate_with_injected_counter(self):
         bb = MagicMock()
         hh = Headhunter(bb)
@@ -105,6 +127,28 @@ class TestObserverWipGates:
         jenkins.set_wip_counter(AsyncMock(return_value=18))
         headroom = await jenkins._get_wip_headroom()
         assert headroom == 2
+
+    @pytest.mark.asyncio
+    async def test_jenkins_observer_headroom_exception_fallback(self):
+        bb = MagicMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={"evt-1": "active", "evt-2": "new"})
+        jenkins = JenkinsObserver(bb)
+        jenkins._wip_cap = 10
+        jenkins.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
+
+        headroom = await jenkins._get_wip_headroom()
+        assert headroom == 8
+
+    @pytest.mark.asyncio
+    async def test_jenkins_observer_headroom_fails_closed_when_all_fail(self):
+        bb = MagicMock()
+        bb.get_active_events_with_status = AsyncMock(side_effect=RuntimeError("BlackBoard unavailable"))
+        jenkins = JenkinsObserver(bb)
+        jenkins._wip_cap = 10
+        jenkins.set_wip_counter(AsyncMock(side_effect=RuntimeError("Redis timeout")))
+
+        headroom = await jenkins._get_wip_headroom()
+        assert headroom == 0
 
     @pytest.mark.asyncio
     async def test_headhunter_jira_flow_gate_with_injected_counter(self):
