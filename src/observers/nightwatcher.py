@@ -385,10 +385,20 @@ class NightwatcherObserver:
                             "Nightwatcher: requeue fallback failed -- %d members remain in inflight and are LOST when "
                             "INFLIGHT_TTL expires (the TTL deletes the set, it does not requeue) unless the pod restarts first",
                             len(rest))
+                        stranded_ids = [e.event_id for e in escalations if e.event_id not in done_ids]
+                        await self._notify_ops(
+                            f":rotating_light: *Nightwatcher double-fault*: requeue fallback failed during {status} settle. "
+                            f"{len(rest)} escalations stranded in inflight: {', '.join(stranded_ids[:10])}"
+                        )
                 else:
                     logger.error(
                         "Nightwatcher: commit AND restage failed -- NOT calling requeue_inflight() (would duplicate Jira "
                         "incidents for %d incidented events). Manual recovery required.", len(done_ids))
+                    stranded_ids = [e.event_id for e in escalations]
+                    await self._notify_ops(
+                        f":rotating_light: *Nightwatcher double-fault*: commit AND restage failed during {status} settle. "
+                        f"Manual recovery required for {len(stranded_ids)} escalations: {', '.join(stranded_ids[:10])}"
+                    )
 
         created = list(ctx.created_incidents) if ctx else []
         batch_report = ShiftReport(

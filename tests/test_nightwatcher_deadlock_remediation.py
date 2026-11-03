@@ -1237,6 +1237,22 @@ async def test_probe_high2_settle_double_fault_strands_inflight(board):
 
 
 @pytest.mark.asyncio
+async def test_settle_double_fault_triggers_ops_alert(board):
+    """Verify _notify_ops is invoked when settle encounters double fault."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM(boom={(1, "analysis"): QuotaExhaustedError("q")}))
+    obs._slack_notify = AsyncMock()
+    board.restage_orphans = AsyncMock(side_effect=ConnectionError("redis down"))
+    board.requeue_inflight = AsyncMock(side_effect=ConnectionError("requeue failed"))
+
+    await obs._sweep()
+    assert obs._slack_notify.called
+    msg = obs._slack_notify.call_args[0][0]
+    assert "Nightwatcher double-fault" in msg
+    assert "evt-001" in msg
+
+
+@pytest.mark.asyncio
 async def test_round2_commit_failure_does_not_block_restage(board):
     """HIGH #2: commit of incidented events fails, but the non-incidented remainder is still restaged."""
     await _stage_board(board, 2)
