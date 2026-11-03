@@ -5,6 +5,8 @@
 # 3. [Pattern]: QuotaTracker is a module-level singleton. Created lazily on first Gemini create_adapter() call.
 # 4. [Constraint]: Claude adapter skips QuotaTracker (separate Anthropic quota via Vertex AI).
 # 5. [Pattern]: TokenMeter is a lazy singleton via get_token_meter(). Unlike QuotaTracker, never returns None.
+# 6. [Pattern]: Exports QuotaExhaustedError (transient window timeout) AND RequestExceedsBurstError (its non-transient subclass:
+#    single request > whole bucket). Catch the subclass FIRST when the two need different handling.
 """
 LLM adapter factory and re-exports.
 

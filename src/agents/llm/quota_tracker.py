@@ -5,6 +5,9 @@
 # 3. [Gotcha]: Thinking tokens dominate cost (59/68 in probe). char/4 estimates are 5-10x low. 80% headroom is essential.
 # 4. [Pattern]: get_stats() is the PV observation point for the /telemetry/llm endpoint.
 # 5. [Architecture]: Reservation handles decouple acquire budget from TTFT; rollback applies negative delta.
+# 6. [Constraint]: A request larger than the whole bucket raises RequestExceedsBurstError (subclass of QuotaExhaustedError) IMMEDIATELY,
+#    before any reservation. It is PERMANENT for that payload: Brain._is_transient must treat it as non-retryable, and callers
+#    (Nightwatcher) must shrink the request rather than wait. Plain QuotaExhaustedError (window timeout) stays transient.
 """
 Token-bucket rate limiter for Vertex AI Gemini calls.
 

@@ -56,7 +56,11 @@ SUMMARY_PROMPT_CHARS = 140
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    """Read an int env var; fall back to default on garbage, clamp to minimum."""
+    """Read an int env var.
+
+    Unset/empty/non-numeric -> `default`. Numeric but below `minimum` -> clamped to `minimum`
+    (NOT to `default`). Docs (helm values, deployment.md, 13-nightwatcher.mdc) and test T-1 mirror this.
+    """
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
@@ -198,7 +202,7 @@ class NightwatcherObserver:
         max_batches = _env_int("NIGHTWATCHER_MAX_BATCHES", DEFAULT_MAX_BATCHES)
         cooldown_s = _env_float("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", DEFAULT_BATCH_COOLDOWN_S)
 
-        from ..agents.llm.quota_tracker import QuotaExhaustedError
+        from ..agents.llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
         cumulative: "Optional[ShiftReport]" = None
 
         for batch_no in range(1, max_batches + 1):
@@ -240,6 +244,24 @@ class NightwatcherObserver:
                     shift_date, window, window_start, window_end,
                     sweep_start, pending_count, prior_report=cumulative,
                 )
+            except RequestExceedsBurstError as be:
+                # PERMANENT for this batch: the prompt alone exceeds the whole TPM bucket, so every future sweep that
+                # leases the same oldest items fails identically. Surface it loudly instead of looking like a transient quota blip.
+                logger.error(
+                    "Nightwatcher batch %d prompt exceeds the TPM burst limit (batch_size=%d): %s -- "
+                    "lower NIGHTWATCHER_BATCH_SIZE; the batch is restaged and will fail again until then",
+                    batch_no, batch_size, be,
+                )
+                await self._notify_ops(
+                    f":rotating_light: Nightwatcher batch {batch_no} (batch_size={batch_size}) exceeds the LLM token burst "
+                    f"limit and cannot be processed. It was restaged and will fail every sweep until "
+                    f"NIGHTWATCHER_BATCH_SIZE is lowered. Detail: {be}"
+                )
+                await self._settle_failed_batch(
+                    "failed", json_members, escalations, cumulative,
+                    shift_date, window, window_start, window_end, sweep_start, requeue_all=False,
+                )
+                return
             except QuotaExhaustedError as qe:
                 logger.warning("Nightwatcher sweep paused due to quota exhaustion on batch %d: %s", batch_no, qe)
                 await self._settle_failed_batch(
@@ -275,6 +297,15 @@ class NightwatcherObserver:
     def _incidented_ids(ctx) -> set[str]:
         """Event IDs that already have a Jira incident/extension (pure, no I/O)."""
         return {eid for inc in ctx.created_incidents for eid in inc.affected_events} if ctx else set()
+
+    async def _notify_ops(self, text: str) -> None:
+        """Best-effort ops notification (never raises)."""
+        if not self._slack_notify:
+            return
+        try:
+            await self._slack_notify(text)
+        except Exception:
+            logger.warning("Nightwatcher: ops notification failed (non-fatal)", exc_info=True)
 
     async def _commit_processed(self, ctx, json_members, escalations) -> set[str]:
         """Commit events whose Jira incident already exists; clear their escalation flags.

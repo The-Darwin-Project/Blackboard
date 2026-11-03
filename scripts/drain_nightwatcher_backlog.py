@@ -148,11 +148,16 @@ def _open_backup(path: str):
     The payloads contain service names, summaries and descriptions, so the file must not be
     group/world readable regardless of umask (mode only applies on creation; fchmod covers reuse).
     """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # O_NOFOLLOW (where supported): refuse to write sensitive data through a pre-planted symlink.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     try:
         os.fchmod(fd, 0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning(
+            "Could not enforce 0o600 on backup file %s (%s); it may be readable by other users -- check its permissions.",
+            path, exc,
+        )
     return os.fdopen(fd, "a", encoding="utf-8")
 
 

@@ -499,7 +499,7 @@ export interface StagedEscalationDTO {
   source: string;
   platform: string;
   priority: string;
-  summary: string;
+  summary: string | null; // backend StagedEscalation.summary is `str | None`
   description: string;
   staged_at: number;
 }

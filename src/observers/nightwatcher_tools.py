@@ -19,6 +19,7 @@ Each handler is a thin wrapper around existing infrastructure
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import time
@@ -153,13 +154,13 @@ def reconcile_cluster_plan(
 ) -> list[dict]:
     """Return a NEW cluster list with a fallback cluster covering unassigned manifest events.
 
-    The caller's ``clusters`` list (and its dicts) are never mutated. When nothing is
+    The caller's ``clusters`` (list, dicts and nested lists) are never mutated or aliased. When nothing is
     missing, a shallow copy is returned. The fallback cluster is explicitly flagged
     (``auto_reconciled=True``) and carries the schema-required ``root_cause``/``services``
     so downstream report builders render it correctly. It is NOT a correlation claim:
     the events share no established root cause and are only grouped to avoid dropping them.
     """
-    result = [dict(c) for c in clusters]
+    result = copy.deepcopy(clusters)  # deep: nested "events" lists must not alias the caller's
     assigned = {eid for c in clusters for eid in c.get("events", [])}
     missing = manifest_ids - assigned
     if not missing:

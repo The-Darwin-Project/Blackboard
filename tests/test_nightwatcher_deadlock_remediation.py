@@ -1333,3 +1333,137 @@ async def test_probe_high3_report_incident_null_summary_both_branches(enabled):
 
 async def _stage_board(board, n):
     await e2e_stage(board, n)
+
+
+# ==============================================================================
+# Round 3
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_round3_none_summary_from_llm_write_incident_through_sweep(board):
+    """QE gap probe: write_incident(summary=None) end to end (nightwatcher_tools.py:443 and the
+    report_record built at nightwatcher.py:559) must complete the batch, not raise TypeError."""
+    await _stage_board(board, 2)
+    llm = ScriptedLLM()
+    orig = llm.generate
+
+    async def gen(**kw):
+        r = await orig(**kw)
+        if r.function_call and r.function_call.name == "write_incident":
+            r.function_call.args["summary"] = None
+        return r
+    llm.generate = gen
+    obs = e2e_observer(board, llm)
+    await obs._sweep()
+    assert await e2e_snapshot(board) == (set(), set())
+    rep = await e2e_latest_report(board)
+    assert rep.status == "completed" and len(rep.incidents) == 1
+    assert rep.incidents[0].summary == ""
+    assert obs._incident_adapter.create_incident.call_args[0][0]["summary"] == ""
+
+
+@pytest.mark.asyncio
+async def test_round3_none_summary_extend_incident_and_post_summary_do_not_raise():
+    from src.observers.nightwatcher_tools import _handle_extend_incident, _handle_post_shift_summary
+    esc = make_escalation("evt-1")
+    ctx = make_ctx([esc])
+    ctx.incident_adapter.add_comment = AsyncMock(return_value={"issue_url": "u"})
+    cluster = {"events": ["evt-1"], "platform": "Konflux", "extends_issue_key": "VMER-9", "root_cause": "r"}
+    result = await _handle_extend_incident({"summary": None, "comment": "c"}, ctx, cluster)
+    assert "TypeError" not in result and ctx.created_incidents  # extension recorded
+    assert ctx.created_incidents[0].summary == ""
+    out = await _handle_post_shift_summary({"summary": None}, ctx)
+    assert "empty" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_round3_request_exceeds_burst_is_permanent_failed_and_alerts_ops():
+    """ai-review MEDIUM: oversize-prompt is not a transient quota blip -> status failed, ERROR log, Slack alert,
+    batch still restaged (nothing lost, nothing committed)."""
+    escs = [make_escalation(f"evt-{i}") for i in range(3)]
+    obs, raw = _sweep_obs(escs, raise_in_analysis=RequestExceedsBurstError("Request of 9 tokens exceeds the burst limit (5)"))
+    await obs._sweep()
+    bb = obs.blackboard
+    report = bb.persist_shift_report.call_args[0][0]
+    assert report.status == "failed"
+    bb.restage_orphans.assert_awaited_once_with(raw)
+    bb.commit_inflight.assert_not_called()
+    obs._slack_notify.assert_awaited_once()
+    msg = obs._slack_notify.call_args[0][0]
+    assert "NIGHTWATCHER_BATCH_SIZE" in msg and "burst" in msg
+
+
+@pytest.mark.asyncio
+async def test_round3_plain_quota_exhaustion_does_not_alert_ops():
+    escs = [make_escalation("evt-1")]
+    obs, raw = _sweep_obs(escs, raise_in_analysis=QuotaExhaustedError("Quota exhausted"))
+    await obs._sweep()
+    obs._slack_notify.assert_not_called()
+    assert obs.blackboard.persist_shift_report.call_args[0][0].status == "quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_round3_ops_notification_failure_is_non_fatal():
+    escs = [make_escalation("evt-1")]
+    obs, raw = _sweep_obs(escs, raise_in_analysis=RequestExceedsBurstError("big"))
+    obs._slack_notify = AsyncMock(side_effect=RuntimeError("slack down"))
+    await obs._sweep()                                              # no exception
+    obs.blackboard.restage_orphans.assert_awaited_once_with(raw)
+    assert obs.blackboard.persist_shift_report.call_args[0][0].status == "failed"
+
+
+def test_round3_backup_fchmod_failure_is_logged_not_swallowed(tmp_path, caplog):
+    import logging
+    from scripts import drain_nightwatcher_backlog as drain
+    path = tmp_path / "b.jsonl"
+    with patch.object(drain.os, "fchmod", side_effect=PermissionError("nope")), \
+            caplog.at_level(logging.WARNING, logger="drain_nightwatcher_backlog"):
+        f = drain._open_backup(str(path))
+        f.close()
+    assert any("0o600" in r.getMessage() and "nope" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "O_NOFOLLOW"), reason="O_NOFOLLOW unsupported")
+def test_round3_backup_refuses_symlink(tmp_path):
+    from scripts import drain_nightwatcher_backlog as drain
+    target = tmp_path / "victim.txt"
+    target.write_text("keep")
+    link = tmp_path / "backup.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        drain._open_backup(str(link))
+    assert target.read_text() == "keep"
+
+
+def test_round3_reconcile_deep_copies_nested_lists():
+    from src.observers.nightwatcher_tools import reconcile_cluster_plan
+    clusters = [{"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": ["a"]}]
+    result = reconcile_cluster_plan(clusters, {"evt-1", "evt-2"})
+    assert result[0]["events"] is not clusters[0]["events"]
+    assert result[0]["services"] is not clusters[0]["services"]
+    result[0]["events"].append("evt-x")
+    result[0]["services"].append("zzz")
+    assert clusters[0]["events"] == ["evt-1"] and clusters[0]["services"] == ["a"]
+
+
+def test_round3_batch_size_docs_match_code_behavior():
+    """ai-review HIGH: docs/helm/rule must state what _env_int really does:
+    non-numeric -> 25, numeric < 1 -> clamped to 1 (NOT 25). Test T-1 pins the code side."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert _env_int("NIGHTWATCHER_BATCH_SIZE", 25) == 25  # unset
+    for rel, marker in [("docs/deployment.md", "| `NIGHTWATCHER_BATCH_SIZE`"),
+                        (".cursor/rules/13-nightwatcher.mdc", "| `NIGHTWATCHER_BATCH_SIZE`"),
+                        ("helm/values.yaml", "batchSize:")]:
+        line = next(l for l in (root / rel).read_text().splitlines() if marker in l)
+        assert "clamped to `1`" in line.replace("clamped to 1", "clamped to `1`"), (rel, line)
+        assert "25" in line and "non-numeric" in line.lower(), (rel, line)
+        assert "<1 or non-numeric falls back" not in line and "< 1 or non-numeric fall back" not in line
+
+
+def test_round3_ui_staged_escalation_summary_is_nullable():
+    import pathlib
+    ts = (pathlib.Path(__file__).resolve().parent.parent / "ui" / "src" / "api" / "types.ts").read_text()
+    block = ts[ts.index("export interface StagedEscalationDTO"):]
+    block = block[:block.index("}")]
+    assert "summary: string | null" in block

@@ -97,7 +97,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `NIGHTWATCHER_SWEEP_CRON` | `0 6,18 * * *` | Cron expression for sweep schedule (06:00 and 18:00 UTC) |
 | `NIGHTWATCHER_MIN_PENDING` | `1` | Minimum pending escalations to trigger a sweep |
 | `NIGHTWATCHER_DISPATCH_CAP` | `3` | Max ephemeral investigations per sweep |
-| `NIGHTWATCHER_BATCH_SIZE` | `25` | Max escalations leased per batch. `<1` or non-numeric falls back to / clamps to a safe value; `NIGHTWATCHER_MIN_PENDING` is clamped to it |
+| `NIGHTWATCHER_BATCH_SIZE` | `25` | Max escalations leased per batch. Non-numeric/empty falls back to `25`; a numeric `<1` is clamped to `1` (`_env_int`). `NIGHTWATCHER_MIN_PENDING` is clamped to it |
 | `NIGHTWATCHER_MAX_BATCHES` | `10` | Max batches drained per sweep |
 | `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | `30` | Pause between batches within a sweep |
 | `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
