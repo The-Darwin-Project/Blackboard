@@ -350,7 +350,8 @@ class TestGeminiGenerateStreamDrainHardening:
         chunks = self._collect(self._adapter(stream, tracker=tracker))
 
         assert chunks[-1].usage.total_tokens == 135
-        tracker.acquire.assert_awaited_once_with(50)
+        tracker.acquire.assert_awaited_once()
+        assert tracker.acquire.await_args.args[0] == 50
         tracker.record.assert_called_once_with(135, 50)
 
     def test_tracker_records_when_consumer_closes_early(self):
@@ -770,3 +771,102 @@ class TestGeminiGenerateStreamDrainHardening:
         assert "RuntimeError" in caplog.text
 
 
+
+
+class TestGeminiStreamReservationPaths:
+    """H1: both tracker contracts in generate_stream.
+
+    - Real QuotaTracker -> acquire() returns a Reservation -> record(..., reservation=) finalizes it.
+    - Legacy/mock tracker whose acquire() returns a non-Reservation -> record(actual, estimate) fallback, no rollback.
+    """
+
+    @staticmethod
+    def _adapter(stream_factory, tracker):
+        from unittest.mock import AsyncMock, MagicMock
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-argon"
+        adapter._tracker = tracker
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        client = MagicMock()
+        client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: stream_factory())
+        adapter._client = client
+        return adapter
+
+    @staticmethod
+    def _collect(adapter):
+        import asyncio
+
+        async def run():
+            return [c async for c in adapter.generate_stream("sys", "prompt")]
+
+        return asyncio.run(run())
+
+    def test_real_reservation_path_finalizes_via_reservation_kwarg(self):
+        from src.agents.llm.quota_tracker import QuotaTracker, Reservation
+
+        tracker = QuotaTracker(tpm_limit=100000)
+        recorded = []
+        orig = tracker.record
+
+        def spy(actual, estimated=0, reservation=None):
+            recorded.append((actual, estimated, reservation))
+            return orig(actual, estimated, reservation=reservation)
+
+        tracker.record = spy
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+            yield _chunk(usage=_usage(total=135))
+
+        chunks = self._collect(self._adapter(stream, tracker))
+
+        assert chunks[-1].usage.total_tokens == 135
+        assert len(recorded) == 1
+        actual, estimate, reservation = recorded[0]
+        assert (actual, estimate) == (135, 50)
+        assert isinstance(reservation, Reservation)
+        stats = tracker.get_stats()
+        assert stats["active_reservations"] == 0
+        assert stats["tokens_used_60s"] == 135
+
+    def test_real_reservation_without_usage_is_rolled_back_not_recorded(self):
+        from src.agents.llm.quota_tracker import QuotaTracker
+
+        tracker = QuotaTracker(tpm_limit=100000)
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+
+        chunks = self._collect(self._adapter(stream, tracker))
+
+        assert chunks[-1].usage is None
+        stats = tracker.get_stats()
+        assert stats["active_reservations"] == 0
+        assert stats["tokens_used_60s"] == 0
+
+    def test_legacy_non_reservation_fallback_records_without_reservation(self):
+        tracker = TestGeminiGenerateStreamDrainHardening._tracker()  # acquire() -> AsyncMock default, not a Reservation
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+            yield _chunk(usage=_usage(total=135))
+
+        self._collect(self._adapter(stream, tracker))
+
+        tracker.record.assert_called_once_with(135, 50)  # no reservation kwarg on the legacy path
+        tracker.rollback.assert_not_called()
+
+    def test_legacy_non_reservation_without_usage_does_not_rollback(self):
+        tracker = TestGeminiGenerateStreamDrainHardening._tracker()
+
+        async def stream():
+            yield _chunk(parts=[_part()], function_calls=[_fc()])
+
+        self._collect(self._adapter(stream, tracker))
+
+        tracker.record.assert_not_called()
+        tracker.rollback.assert_not_called()  # rollback is Reservation-only

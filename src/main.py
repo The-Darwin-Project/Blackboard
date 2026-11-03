@@ -159,6 +159,7 @@ async def lifespan(app: FastAPI):
         )
         set_brain(brain)
         app.state.brain = brain
+        aligner.set_wip_counter(brain.count_global_wip)
 
         # Dashboard WebSocket adapter (implements BroadcastPort)
         # kargo_observer may not exist yet; attached after Kargo init below
@@ -312,6 +313,7 @@ async def lifespan(app: FastAPI):
             if headhunter_close_signal is None:
                 raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
             headhunter = Headhunter(blackboard, close_signal=headhunter_close_signal)
+            headhunter.set_wip_counter(brain.count_global_wip)
             brain.agents["_headhunter"] = headhunter
             headhunter_task = asyncio.create_task(headhunter.run())
             platforms = []
@@ -481,6 +483,7 @@ async def lifespan(app: FastAPI):
                 blackboard=blackboard,
                 jenkins_adapter=jenkins_adapter,
             )
+            jenkins_observer.set_wip_counter(brain.count_global_wip)
             if not jenkins_adapter:
                 logger.warning("JenkinsObserver started WITHOUT adapter (missing JENKINS_URL/USER/TOKEN) — will no-op until config is complete")
             await jenkins_observer.start()

@@ -5,7 +5,8 @@
 # 3. [Constraint]: Brain-facing methods (refresh_mr_state, poll_gitlab_mr_status, etc.)
 #    remain on this class as thin delegates for backward compatibility.
 # 4. [Pattern]: HeadhunterJira secondary head mounted in main loop (own error boundary).
-# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count.
+# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Queries injected
+#    Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
 # 6. [Pattern]: Circuit breaker per-head: 3 consecutive failures -> latch disable that head.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
@@ -45,6 +46,7 @@ LLM analysis (Flash triage) and event lifecycle are platform-agnostic.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -110,6 +112,7 @@ class Headhunter:
         self._close_signal = close_signal
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        self._wip_counter: Callable[..., Awaitable[int]] | None = None
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.7-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
@@ -277,10 +280,43 @@ class Headhunter:
             + self._github_issue_queued
         )
 
+    def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
+        """Inject global WIP counter (e.g. Brain.count_global_wip)."""
+        self._wip_counter = counter
+        if getattr(self, "_jira", None) is not None:
+            self._jira.set_wip_counter(counter)
+
+    async def _local_count_wip(self) -> int:
+        status_map = await self.blackboard.get_active_events_with_status()
+        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""
-        status_map = await self.blackboard.get_active_events_with_status()
-        wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        if self._wip_counter is not None:
+            try:
+                wip_used = await self._wip_counter(include_new=True)
+            except Exception as e:
+                logger.warning(
+                    "Injected WIP counter failed in check_flow_gate, falling back to local: %s",
+                    e,
+                )
+                try:
+                    wip_used = await self._local_count_wip()
+                except Exception as local_err:
+                    logger.error(
+                        "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
+                        local_err,
+                    )
+                    return False
+        else:
+            try:
+                wip_used = await self._local_count_wip()
+            except Exception as local_err:
+                logger.error(
+                    "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
+                    local_err,
+                )
+                return False
         return wip_used < self._wip_cap
 
     # =========================================================================
