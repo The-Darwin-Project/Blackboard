@@ -30,6 +30,7 @@ from ..auth import (
     DEX_ENABLED, TRUSTED_PROXY_ENABLED, can_append_message, get_user_from_request,
     prompt_display_name,
 )
+from ..agents.event_namer import spawn_event_namer_task
 from ..dependencies import get_blackboard, get_brain
 from ..models import ConversationTurn, EventEvidence
 from ..state.blackboard import BlackboardState
@@ -128,6 +129,7 @@ async def create_chat_event(
             thoughts=request.message,
             user_name=prompt_display_name(user),
         )
+        fallback = request.message[:60].strip() or "Untitled Event"
         event_id = await blackboard.create_event(
             source="chat",
             service=request.service,
@@ -141,7 +143,14 @@ async def create_chat_event(
             ),
             created_by_email=user.email,
             initial_turns=[user_turn],
+            title=fallback,
+            title_source="fallback",
         )
+        try:
+            brain = await get_brain()
+            spawn_event_namer_task(blackboard, brain, event_id, request.message, "chat")
+        except Exception as e:
+            logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
         logger.info(f"Chat event created: {event_id} for service {request.service}")
         return ChatEventResponse(event_id=event_id)
     except HTTPException:

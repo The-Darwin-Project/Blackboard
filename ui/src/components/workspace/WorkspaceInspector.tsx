@@ -8,9 +8,10 @@
  * Hosts Plan execution, Diff viewer, Swarm topology, Live Logs tabs, and Session Telemetry.
  */
 import { useState, useMemo } from 'react';
-import { ListTodo, GitCompare, Users, Terminal, X, ChevronDown, ChevronRight, Zap } from 'lucide-react';
+import { ListTodo, GitCompare, Users, Terminal, X, ChevronDown, ChevronRight, Zap, Pencil } from 'lucide-react';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useEventDocument } from '../../hooks/useQueue';
+import { updateEventTitle } from '../../api/client';
 import PlanProgress, { usePlanState } from '../PlanProgress';
 import WorkspaceDiffViewer from './WorkspaceDiffViewer';
 import WorkspaceSwarmPanel from './WorkspaceSwarmPanel';
@@ -106,6 +107,45 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
   const statusColor = STATUS_COLORS[eventDoc?.status || 'active'] || { bg: '#1e293b', text: '#94a3b8' };
   const userTrigger = eventEvidence?.triggered_by || eventDoc?.created_by_email;
 
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [isSubmittingTitle, setIsSubmittingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
+
+  const startEditingTitle = () => {
+    setDraftTitle(eventDoc?.title || '');
+    setTitleError(null);
+    setIsEditingTitle(true);
+  };
+
+  const handleTitleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isSubmittingTitle) return;
+      const clean = draftTitle.trim().replace(/\s+/g, ' ');
+      if (clean && clean !== eventDoc?.title && eventDoc?.id) {
+        setIsSubmittingTitle(true);
+        setTitleError(null);
+        try {
+          await updateEventTitle(eventDoc.id, clean);
+          setIsEditingTitle(false);
+        } catch (err) {
+          console.error('Failed to update event title in inspector:', err);
+          setTitleError('Failed to rename');
+        } finally {
+          setIsSubmittingTitle(false);
+        }
+      } else {
+        setIsEditingTitle(false);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (isSubmittingTitle) return;
+      setTitleError(null);
+      setIsEditingTitle(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -173,7 +213,7 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
           >
             <div className="flex items-center gap-1.5 truncate">
               {isOverviewOpen ? <ChevronDown size={12} className="text-text-muted" /> : <ChevronRight size={12} className="text-text-muted" />}
-              <span className="truncate">{eventDoc.service || eventDoc.id || 'Session Overview'}</span>
+              <span className="truncate">{eventDoc.title || eventDoc.service || eventDoc.id || 'Session Overview'}</span>
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span
@@ -197,6 +237,54 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
                 <span className="truncate font-mono" title={eventDoc.id}>{eventDoc.id}</span>
                 <CopyButton text={eventDoc.id} label="Copy Event ID" iconSize={12} />
               </div>
+              {isEditingTitle ? (
+                <div className="flex items-center gap-1.5 bg-bg-tertiary/40 px-2 py-1 rounded border border-accent">
+                  <input
+                    type="text"
+                    aria-label="Edit Event Title"
+                    autoFocus
+                    disabled={isSubmittingTitle}
+                    value={draftTitle}
+                    onChange={(e) => setDraftTitle(e.target.value)}
+                    onKeyDown={handleTitleKeyDown}
+                    onBlur={() => {
+                      if (!isSubmittingTitle) {
+                        setTitleError(null);
+                        setIsEditingTitle(false);
+                      }
+                    }}
+                    className="text-[11px] font-mono bg-transparent text-text-primary outline-none flex-1 min-w-0"
+                  />
+                  {titleError && (
+                    <span className="text-[9px] text-red-400 font-sans" role="alert">{titleError}</span>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-1.5 bg-bg-tertiary/40 px-2 py-1 rounded border border-border/50">
+                  <span
+                    onClick={startEditingTitle}
+                    className="text-text-primary font-medium truncate text-[11px] cursor-pointer hover:underline"
+                    title={eventDoc.title ? `${eventDoc.title} (Click to rename)` : 'Click to add title'}
+                  >
+                    {eventDoc.title || 'Untitled Event'}
+                  </span>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {eventDoc.title_source && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] uppercase font-mono tracking-wider bg-bg-secondary text-text-muted border border-border/60">
+                        {eventDoc.title_source}
+                      </span>
+                    )}
+                    <button
+                      onClick={startEditingTitle}
+                      className="p-0.5 text-text-muted hover:text-text-secondary rounded hover:bg-bg-secondary transition-colors"
+                      aria-label="Rename Event"
+                      title="Rename Event"
+                    >
+                      <Pencil size={10} />
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-text-muted">
                 {eventDoc.source && (
                   <div className="flex items-center gap-1 truncate">

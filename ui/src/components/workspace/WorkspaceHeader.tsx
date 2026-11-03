@@ -8,10 +8,12 @@
  * Header for the Agent Workspace perspective.
  * Features PWA brand icon, active session title, swarm count, panel toggles, and Ops Center link.
  */
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { PanelLeft, PanelRight, Radio } from 'lucide-react';
+import { PanelLeft, PanelRight, Radio, Pencil } from 'lucide-react';
 import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useEventDocument } from '../../hooks/useQueue';
+import { updateEventTitle } from '../../api/client';
 import CopyButton from './CopyButton';
 import type { AgentRegistryEntry } from '../../api/types';
 
@@ -29,6 +31,10 @@ export default function WorkspaceHeader({
   const opsControl = useOpsControl();
   const effectiveEventId = selectedEventId !== undefined ? selectedEventId : opsControl.selectedEventId;
   const { data: eventDoc } = useEventDocument(effectiveEventId || '');
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const agents: AgentRegistryEntry[] = [...(opsControl.agents || opsControl.registeredAgents || []), ...(opsControl.ephemeralAgents || [])];
   // Dedup by agent_id || role; keyless agents are kept (unique per-index fallback key) rather than dropped.
   const activeAgentCount = effectiveEventId
@@ -39,6 +45,40 @@ export default function WorkspaceHeader({
       ).size
     : 0;
   const sessionLabel = eventDoc?.service || effectiveEventId || 'New Task';
+
+  const startEditing = () => {
+    setErrorMessage(null);
+    setDraftTitle(eventDoc?.title || '');
+    setIsEditing(true);
+  };
+
+  const handleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isSubmitting) return;
+      const clean = draftTitle.trim().replace(/\s+/g, ' ');
+      if (clean && clean !== eventDoc?.title && effectiveEventId) {
+        setIsSubmitting(true);
+        setErrorMessage(null);
+        try {
+          await updateEventTitle(effectiveEventId, clean);
+          setIsEditing(false);
+        } catch (err) {
+          console.error('Failed to update event title:', err);
+          setErrorMessage('Failed to rename event');
+        } finally {
+          setIsSubmitting(false);
+        }
+      } else {
+        setIsEditing(false);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (isSubmitting) return;
+      setErrorMessage(null);
+      setIsEditing(false);
+    }
+  };
 
   return (
     <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-4 py-2 flex items-center justify-between gap-4">
@@ -60,9 +100,49 @@ export default function WorkspaceHeader({
 
         <span className="text-text-muted text-xs">/</span>
 
-        <span className="text-xs font-mono text-text-secondary truncate max-w-[200px]">
-          {sessionLabel}
-        </span>
+        {isEditing ? (
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              aria-label="Event Title"
+              autoFocus
+              disabled={isSubmitting}
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onBlur={() => {
+                if (!isSubmitting) {
+                  setErrorMessage(null);
+                  setIsEditing(false);
+                }
+              }}
+              className="text-xs font-mono bg-bg-tertiary border border-accent rounded px-1.5 py-0.5 text-text-primary outline-none max-w-[220px] disabled:opacity-50"
+            />
+            {errorMessage && (
+              <span className="text-[10px] text-red-400 font-sans" role="alert">{errorMessage}</span>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              onClick={startEditing}
+              className="text-xs font-mono text-text-secondary truncate max-w-[200px] cursor-pointer hover:text-text-primary"
+              title={eventDoc?.title ? `${eventDoc.title} (Click to rename)` : undefined}
+            >
+              {eventDoc?.title || sessionLabel}
+            </span>
+            {effectiveEventId && (
+              <button
+                onClick={startEditing}
+                className="p-1 text-text-muted hover:text-text-secondary rounded hover:bg-bg-tertiary transition-colors"
+                aria-label="Rename Event"
+                title="Rename Event"
+              >
+                <Pencil size={11} />
+              </button>
+            )}
+          </div>
+        )}
 
         {effectiveEventId && (
           <CopyButton key={effectiveEventId} text={effectiveEventId} label="Copy Event ID" iconSize={12} className="flex-shrink-0" />

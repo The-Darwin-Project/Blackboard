@@ -214,6 +214,15 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();
+    } else if (msg.type === 'event_title_updated') {
+      if (typeof msg.event_id === 'string' && typeof msg.title === 'string') {
+        optimisticPatchEvent(msg.event_id, {
+          title: msg.title,
+          title_source: (msg.title_source as 'fallback' | 'llm' | 'user') ?? undefined,
+        });
+      }
+      invalidateActive();
+      if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'domain_updated') {
       if (typeof msg.event_id === 'string' && typeof msg.domain === 'string' && msg.domain) {
         optimisticPatchEvent(msg.event_id, { evidence: { brain_domain: msg.domain } });

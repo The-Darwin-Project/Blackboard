@@ -1151,6 +1151,8 @@ return 1
         slack_thread_ts: Optional[str] = None,
         slack_user_id: Optional[str] = None,
         initial_turns: Optional[list[ConversationTurn]] = None,
+        title: Optional[str] = None,
+        title_source: Optional[str] = None,
     ) -> str:
         """Create a new event and add to the queue for Brain triage.
 
@@ -1175,6 +1177,8 @@ return 1
             ),
             queued_at=time.time(),
             created_by_email=created_by_email,
+            title=title,
+            title_source=title_source,
             slack_channel_id=slack_channel_id,
             slack_thread_ts=slack_thread_ts,
             slack_user_id=slack_user_id,
@@ -1728,6 +1732,44 @@ return 1
                     break
                 except WatchError:
                     continue
+
+    async def update_event_title_if_not_user(
+        self,
+        event_id: str,
+        title: str,
+        title_source: str = "llm",
+        max_retries: int = 3,
+    ) -> bool:
+        """Atomically update event title only if not already set by a user (WATCH/MULTI).
+
+        Returns True if updated, False if skipped (event closed, title_source == 'user', or missing).
+        Note: Operates on raw JSON dict to preserve schema-divergent keys and prevent Pydantic overhead.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        for _ in range(max_retries):
+            try:
+                async with self.redis.pipeline(transaction=True) as pipe:
+                    await pipe.watch(key)
+                    raw = await pipe.get(key)
+                    if not raw:
+                        await pipe.unwatch()
+                        return False
+                    doc = json.loads(raw)
+                    if str(doc.get("status", "")).lower() in ("closed", "resolved") or doc.get("title_source") == "user":
+                        await pipe.unwatch()
+                        return False
+                    doc["title"] = title
+                    doc["title_source"] = title_source
+                    pipe.multi()
+                    pipe.set(key, json.dumps(doc))
+                    await pipe.execute()
+                    logger.debug(
+                        f"Updated title for event {event_id} to '{title}' (source={title_source})"
+                    )
+                    return True
+            except WatchError:
+                continue
+        return False
 
     MIN_DEFER_DELAY = 30  # seconds -- matches brain.py clamp floor
 

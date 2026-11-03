@@ -186,6 +186,20 @@ export async function closeEvent(eventId: string, reason?: string): Promise<unkn
   });
 }
 
+export async function updateEventTitle(
+  eventId: string,
+  title: string
+): Promise<{ id: string; title: string; title_source: string }> {
+  return fetchApi<{ id: string; title: string; title_source: string }>(
+    `/queue/${encodeURIComponent(eventId)}/title`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    }
+  );
+}
+
 export async function enforceCasualDomain(eventId: string, reason?: string): Promise<unknown> {
   return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/enforce-casual`, {
     method: 'POST',

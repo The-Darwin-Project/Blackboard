@@ -50,6 +50,7 @@ from .formatter import (
     get_agent_notification_text, extract_tables, table_block_to_code_block,
     truncate_text, MAX_SECTION_TEXT,
 )
+from ..agents.event_namer import spawn_event_namer_task
 from ..models import ConversationTurn, EventEvidence
 
 if TYPE_CHECKING:
@@ -229,6 +230,7 @@ class SlackChannel:
             thoughts=text, source="slack",
             user_name=display_name,
         )
+        fallback = text[:60].strip() or "Untitled Event"
         new_event_id = await self._blackboard.create_event(
             source="slack",
             service=event_doc.service,
@@ -244,7 +246,13 @@ class SlackChannel:
             slack_thread_ts=thread_ts,
             slack_user_id=user_id,
             initial_turns=[ctx_turn, user_turn],
+            title=fallback,
+            title_source="fallback",
         )
+        try:
+            spawn_event_namer_task(self._blackboard, self._brain, new_event_id, text, "slack")
+        except Exception as e:
+            logger.warning("Failed to spawn event namer task for %s: %s", new_event_id, e)
         await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
         return new_event_id
 
@@ -267,6 +275,7 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
+            fallback = text[:60].strip() or "Untitled Event"
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -283,7 +292,13 @@ class SlackChannel:
                     thoughts=text, source="slack",
                     user_name=display_name,
                 )],
+                title=fallback,
+                title_source="fallback",
             )
+            try:
+                spawn_event_namer_task(self._blackboard, self._brain, event_id, text, "slack")
+            except Exception as e:
+                logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
 
             # Post visible thread-parent message
             event_doc = await self._blackboard.get_event(event_id)
@@ -358,6 +373,7 @@ class SlackChannel:
                     return
 
             display_name = await self._resolve_display_name(client, user_id)
+            fallback = text[:60].strip() or "Untitled Event"
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -377,7 +393,13 @@ class SlackChannel:
                     thoughts=text, source="slack",
                     user_name=display_name,
                 )],
+                title=fallback,
+                title_source="fallback",
             )
+            try:
+                spawn_event_namer_task(self._blackboard, self._brain, event_id, text, "slack")
+            except Exception as e:
+                logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
 
             await self._blackboard.set_slack_mapping(channel, thread_ts, event_id)
 
@@ -435,6 +457,7 @@ class SlackChannel:
                 except Exception as e:
                     logger.debug(f"setStatus failed (non-fatal): {e}")
 
+                fallback = text[:60].strip() or "Untitled Event"
                 event_id = await self._blackboard.create_event(
                     source="slack",
                     service="general",
@@ -455,7 +478,13 @@ class SlackChannel:
                         thoughts=text, source="slack",
                         user_name=display_name,
                     )],
+                    title=fallback,
+                    title_source="fallback",
                 )
+                try:
+                    spawn_event_namer_task(self._blackboard, self._brain, event_id, text, "slack")
+                except Exception as e:
+                    logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
                 self._dm_context[event_id] = {
                     "channel": channel, "thread_ts": thread_ts,
                     "user_id": user, "team_id": team_id,
@@ -750,6 +779,7 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
+            fallback = text.strip()[:60].strip() or "Untitled Event"
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -766,7 +796,13 @@ class SlackChannel:
                     thoughts=text.strip(), source="slack",
                     user_name=display_name,
                 )],
+                title=fallback,
+                title_source="fallback",
             )
+            try:
+                spawn_event_namer_task(self._blackboard, self._brain, event_id, text.strip(), "slack")
+            except Exception as e:
+                logger.warning("Failed to spawn event namer task for %s: %s", event_id, e)
             event_doc = await self._blackboard.get_event(event_id)
             blocks = format_event_summary(event_doc) if event_doc else []
             result = await client.chat_postMessage(
@@ -894,6 +930,21 @@ class SlackChannel:
             if status == "deferred":
                 # Event deferred — clean up progress bubble (FRIDAY is waiting, not working)
                 await self._cleanup_progress_bubble(event_id, "deferred")
+
+        elif msg_type == "event_title_updated":
+            title = message.get("title")
+            if title and event_id:
+                event_doc = await self._blackboard.get_event(event_id)
+                if event_doc and event_doc.slack_channel_id and event_doc.slack_thread_ts:
+                    if event_doc.slack_channel_id.startswith("D") or is_dm:
+                        try:
+                            await self._app.client.assistant_threads_setTitle(
+                                channel_id=event_doc.slack_channel_id,
+                                thread_ts=event_doc.slack_thread_ts,
+                                title=title[:100],
+                            )
+                        except Exception as e:
+                            logger.debug("Slack title sync ignored: %s", e)
 
         elif msg_type == "event_closed":
             # Orphan progress message cleanup

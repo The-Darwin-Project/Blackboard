@@ -238,9 +238,12 @@ export interface EventEvidence {
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
 export type SubjectType = 'service' | 'kargo_stage' | 'system' | 'jira' | 'ci_gating' | 'github_issue';
+export type TitleSource = 'fallback' | 'llm' | 'user';
 
 export interface ActiveEvent {
   id: string;
+  title?: string | null;
+  title_source?: TitleSource | null;
   source: string;
   service: string;
   subject_type?: SubjectType;
@@ -307,6 +310,8 @@ export interface TokenUsageDict {
 
 export interface EventDocument {
   id: string;
+  title?: string | null;
+  title_source?: TitleSource | null;
   source: EventSource;
   status: EventStatus;
   brain_phase?: string;
