@@ -51,7 +51,7 @@ class QuotaTracker:
         self._tpm_limit = limit
         self._burst_limit = limit
         self._sustained_limit = int(limit * burst_factor)
-        self._window: deque[tuple[float, int]] = deque()
+        self._window: deque[tuple[float, int, str | None]] = deque()
         self._active_reservations: dict[str, Reservation] = {}
         self._total_requests = 0
         self._total_tokens = 0
@@ -62,13 +62,13 @@ class QuotaTracker:
         )
 
     def _prune(self) -> int:
-        """Remove entries older than 60s, evict stale reservations, return non-negative window total."""
+        """Remove entries older than 60s, evict stale reservations (>300s, exceeding 180s HTTP timeout), return window total."""
         now = time.monotonic()
         cutoff = now - 60.0
         while self._window and self._window[0][0] < cutoff:
             self._window.popleft()
 
-        stale_cutoff = now - 120.0
+        stale_cutoff = now - 300.0
         stale_ids = [
             res_id
             for res_id, res in self._active_reservations.items()
@@ -77,7 +77,7 @@ class QuotaTracker:
         for res_id in stale_ids:
             del self._active_reservations[res_id]
 
-        return max(0, sum(tokens for _, tokens in self._window))
+        return max(0, sum(tokens for _, tokens, *_ in self._window))
 
     async def acquire(self, estimated_tokens: int, max_wait_seconds: float = 120.0) -> Reservation:
         """Block until the bucket has capacity for estimated_tokens.
@@ -92,11 +92,10 @@ class QuotaTracker:
             current = self._prune()
             if current + estimated_tokens <= self._burst_limit:
                 now = time.monotonic()
-                self._window.append((now, estimated_tokens))
+                res = Reservation(id=str(uuid.uuid4()), tokens=estimated_tokens, timestamp=now)
+                self._window.append((now, estimated_tokens, res.id))
                 self._total_requests += 1
                 self._total_tokens += estimated_tokens
-
-                res = Reservation(id=str(uuid.uuid4()), tokens=estimated_tokens, timestamp=now)
                 self._active_reservations[res.id] = res
 
                 if current > self._sustained_limit:
@@ -132,13 +131,13 @@ class QuotaTracker:
         now = time.monotonic()
         elapsed = now - reservation.timestamp
         if elapsed < 60.0:
-            target = (reservation.timestamp, reservation.tokens)
-            try:
-                idx = self._window.index(target)
-                self._window.insert(idx + 1, (reservation.timestamp, -reservation.tokens))
-            except ValueError:
-                # Target already pruned from window; no positive tokens left to cancel
-                pass
+            idx = None
+            for i, entry in enumerate(self._window):
+                if len(entry) >= 3 and entry[2] == reservation.id:
+                    idx = i
+                    break
+            if idx is not None:
+                self._window.insert(idx + 1, (reservation.timestamp, -reservation.tokens, None))
 
         self._total_tokens = max(0, self._total_tokens - reservation.tokens)
         self._prune()
@@ -167,7 +166,7 @@ class QuotaTracker:
         delta = actual_tokens - estimated_tokens
         now = time.monotonic()
 
-        self._window.append((now, delta))
+        self._window.append((now, delta, None))
         self._total_tokens += delta
         logger.debug(
             f"QuotaTracker: recorded {actual_tokens} actual "

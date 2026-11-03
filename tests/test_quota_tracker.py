@@ -109,15 +109,15 @@ class TestQuotaTrackerReservationLifecycle:
             assert res.id not in tracker._active_reservations
 
     @pytest.mark.asyncio
-    async def test_prune_evicts_stale_active_reservations_after_120s(self, tracker):
-        """F-04: Stale active reservations older than 120s are evicted by _prune."""
+    async def test_prune_evicts_stale_active_reservations_after_300s(self, tracker):
+        """F-04: Stale active reservations older than 300s (exceeding 180s HTTP timeout) are evicted by _prune."""
         base_time = 1000.0
         with patch("time.monotonic", return_value=base_time):
             res = await tracker.acquire(estimated_tokens=5000, max_wait_seconds=5.0)
             assert res.id in tracker._active_reservations
 
-        # 125s later, prune runs
-        with patch("time.monotonic", return_value=base_time + 125.0):
+        # 305s later, prune runs
+        with patch("time.monotonic", return_value=base_time + 305.0):
             stats = tracker.get_stats()
             assert res.id not in tracker._active_reservations
             assert stats["active_reservations"] == 0

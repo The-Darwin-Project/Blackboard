@@ -94,7 +94,8 @@
 #     compat for old Redis events). New code MUST produce brain.thoughts or brain.response, not brain.think.
 # 25. [Pattern]: WIP cap (unified global, soft):
 #     WIW (new) -> WIP (active/deferred, capped) -> WIO (closed/resolved).
-#     _count_global_wip() counts ACTIVE+DEFERRED minus _waiting_for_user (pipeline-based, O(1)).
+#     _count_global_wip(include_new=False) counts ACTIVE+DEFERRED minus _waiting_for_user (pipeline-based, O(1)).
+#     When include_new=True, includes NEW events (used by pre-creation admission gates such as Headhunter).
 #     Gate: automated sources rejected at cap; _BYPASS_SOURCES (chat/slack/jarvis) always admitted.
 #     MAX_ACTIVE_EVENTS env var (default 20). Non-atomic (count+admit gap bounded by worker concurrency).
 #     Bypass events still count in wip_used, reducing room for automated events.
@@ -1339,6 +1340,15 @@ class Brain:
                 self._thinking_bypass_count.pop(event_id, None)
                 self._thinking_bypass_time.pop(event_id, None)
                 self._escalated_thinking_events.discard(event_id)
+
+        # Clear error escalation and backoff state if trailing turn is not brain.error
+        if event.conversation and (event_id in self._escalated_error_events or event_id in self._last_error_retry):
+            last_t = event.conversation[-1]
+            act = last_t.action if hasattr(last_t, "action") else (last_t.get("action") if isinstance(last_t, dict) else None)
+            actor = last_t.actor if hasattr(last_t, "actor") else (last_t.get("actor") if isinstance(last_t, dict) else None)
+            if not (actor == "brain" and act == "error"):
+                self._escalated_error_events.discard(event_id)
+                self._last_error_retry.pop(event_id, None)
 
         # Dedup: if this is a new event (no turns yet), check for existing active events.
         # Two passes per iteration (single loop):
@@ -6189,6 +6199,10 @@ class Brain:
                     )
                     continue
                 self._last_error_retry[eid] = now
+            else:
+                if eid in self._escalated_error_events:
+                    self._escalated_error_events.discard(eid)
+                    self._last_error_retry.pop(eid, None)
 
             # Standard enqueue decision
             has_unread = any(t.status.value == "delivered" for t in event.conversation)

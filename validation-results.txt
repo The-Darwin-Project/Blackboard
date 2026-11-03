@@ -4,14 +4,14 @@ rootdir: /home/thason/Git/GitHub/The-Darwin-Project/BlackBoard
 configfile: pytest.ini
 plugins: cov-7.0.0, asyncio-1.3.0, anyio-4.13.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 168 items
+collected 169 items
 
 tests/test_quota_tracker.py ........                                     [  4%]
 tests/test_gemini_client_quota.py ....                                   [  7%]
-tests/test_scan_reconcile_guards.py ......                               [ 10%]
+tests/test_scan_reconcile_guards.py .......                              [ 11%]
 tests/test_wip_unification.py ..............                             [ 19%]
 tests/test_brain_orphan.py .....................................         [ 41%]
-tests/test_scan_callback.py ..............................               [ 58%]
+tests/test_scan_callback.py ..............................               [ 59%]
 tests/test_adapter_token_extraction.py ................................. [ 78%]
 ..                                                                       [ 79%]
 tests/test_aligner_deterministic_escalation.py ..........                [ 85%]
@@ -33,4 +33,4 @@ tests/test_aligner_deterministic_escalation.py::test_sync_drift_creates_event_wh
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-======================= 168 passed, 6 warnings in 2.45s ========================
+======================= 169 passed, 6 warnings in 2.40s ========================

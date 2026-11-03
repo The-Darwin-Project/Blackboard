@@ -127,6 +127,48 @@ class TestScanReconcileGuards:
         brain._escalate_to_human.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_error_escalation_cleared_when_non_error_turn_breaks_streak(self):
+        """When a non-error turn breaks trailing errors streak, _escalated_error_events is cleared and future streak can escalate again."""
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="Err 1"),
+            ConversationTurn(turn=2, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="Err 2"),
+            ConversationTurn(turn=3, actor="brain", action="error", status=MessageStatus.SENT, thoughts="Err 3"),
+        ]
+        event = _make_event("evt-err-recovery", conversation=turns)
+        brain = _make_brain(event)
+        brain._escalate_to_human = AsyncMock()
+
+        # Step 1: 3 errors -> escalated
+        await brain._scan_active_for_reconcile()
+        assert "evt-err-recovery" in brain._escalated_error_events
+        assert brain._escalate_to_human.call_count == 1
+
+        # Step 2: Non-error turn (e.g. user reply or brain response) breaks the streak
+        event.conversation.append(
+            ConversationTurn(turn=4, actor="user", action="message", status=MessageStatus.DELIVERED, thoughts="Let's retry")
+        )
+        brain._last_processed["evt-err-recovery"] = time.time() - 100.0
+
+        # Scan should clear escalated status and enqueue event
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-err-recovery" in result
+        assert "evt-err-recovery" not in brain._escalated_error_events
+        assert "evt-err-recovery" not in brain._last_error_retry
+
+        # Step 3: Later, 3 fresh errors occur
+        event.conversation.extend([
+            ConversationTurn(turn=5, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="New Err 1"),
+            ConversationTurn(turn=6, actor="brain", action="error", status=MessageStatus.DELIVERED, thoughts="New Err 2"),
+            ConversationTurn(turn=7, actor="brain", action="error", status=MessageStatus.SENT, thoughts="New Err 3"),
+        ])
+        brain._escalate_to_human.reset_mock()
+        await brain._scan_active_for_reconcile()
+
+        # Should escalate again for the new streak
+        assert "evt-err-recovery" in brain._escalated_error_events
+        assert brain._escalate_to_human.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_t6_thinking_loop_guard_paces_re_enqueue_after_30m(self):
         """T-6: When trailing_thoughts >= 2 and idle >= 1800s, event re-enqueues once, paces for 300s, and next scan skips."""
         turns = [

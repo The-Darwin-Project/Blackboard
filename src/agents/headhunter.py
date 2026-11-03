@@ -5,7 +5,8 @@
 # 3. [Constraint]: Brain-facing methods (refresh_mr_state, poll_gitlab_mr_status, etc.)
 #    remain on this class as thin delegates for backward compatibility.
 # 4. [Pattern]: HeadhunterJira secondary head mounted in main loop (own error boundary).
-# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count.
+# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Queries injected
+#    Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
 # 6. [Pattern]: Circuit breaker per-head: 3 consecutive failures -> latch disable that head.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.

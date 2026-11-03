@@ -10,8 +10,8 @@
 # 8. [Constraint]: No hardcoded emails, URLs, or tokens -- all from env vars.
 # 9. [Pattern]: Label-driven skill selection: HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>.
 #    Labels on issue (beyond base "darwin") map to system prompts fetched from git. 5-min cache.
-# 10. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Counts new+active+deferred
-#     conservatively (no _waiting_for_user subtraction). Backs off when system full.
+# 10. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Queries injected
+#     Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
 #    Teams self-serve by updating rules in their own repo. Fallback: built-in BA prompt.
 # 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
 #     _get_issue_state/_set_issue_state are the canonical accessors.
