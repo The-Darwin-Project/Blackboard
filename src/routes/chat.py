@@ -34,6 +34,7 @@ from ..agents.event_namer import spawn_event_namer_task
 from ..dependencies import get_blackboard, get_brain
 from ..models import ConversationTurn, EventEvidence
 from ..state.blackboard import BlackboardState
+from ..utils.prompt_sanitize import fallback_title
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ async def create_chat_event(
             thoughts=request.message,
             user_name=prompt_display_name(user),
         )
-        fallback = request.message[:60].strip() or "Untitled Event"
+        fallback = fallback_title(request.message)
         event_id = await blackboard.create_event(
             source="chat",
             service=request.service,

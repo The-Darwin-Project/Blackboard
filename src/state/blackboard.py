@@ -1746,15 +1746,16 @@ return 1
         Note: Operates on raw JSON dict to preserve schema-divergent keys and prevent Pydantic overhead.
         """
         key = f"{self.EVENT_PREFIX}{event_id}"
-        for _ in range(max_retries):
-            try:
-                async with self.redis.pipeline(transaction=True) as pipe:
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for _ in range(max_retries):
+                try:
                     await pipe.watch(key)
                     raw = await pipe.get(key)
                     if not raw:
                         await pipe.unwatch()
                         return False
                     doc = json.loads(raw)
+                    # Re-check inside the WATCH window: a concurrent user rename must win.
                     if str(doc.get("status", "")).lower() in ("closed", "resolved") or doc.get("title_source") == "user":
                         await pipe.unwatch()
                         return False
@@ -1767,8 +1768,8 @@ return 1
                         f"Updated title for event {event_id} to '{title}' (source={title_source})"
                     )
                     return True
-            except WatchError:
-                continue
+                except WatchError:
+                    continue
         return False
 
     MIN_DEFER_DELAY = 30  # seconds -- matches brain.py clamp floor

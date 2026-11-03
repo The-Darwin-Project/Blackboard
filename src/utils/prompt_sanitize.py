@@ -11,6 +11,8 @@
 #    and a cap boundary cannot leave half of a stripped sequence behind.
 # 4. [Gotcha]: Patterns use explicit \u escapes on purpose -- literal invisible chars in source are
 #    unreviewable.
+# 5. [Pattern]: sanitize_title/fallback_title are the single title pipeline (PATCH validator, LLM namer,
+#    chat/slack fallbacks): line breaks -> space FIRST, then strip invisibles, then collapse \s+, cap LAST.
 """Sanitize untrusted scalars (display names, CI fields) embedded in Brain/FRIDAY prompts."""
 from __future__ import annotations
 
@@ -40,3 +42,23 @@ def sanitize_prompt_text(value: object, *, max_len: int) -> str:
     text = _LINE_BREAKERS.sub(" ", text)
     text = _STRIP_CHARS.sub("", text)
     return text[:max_len]
+
+
+UNTITLED_EVENT = "Untitled Event"
+FALLBACK_TITLE_MAX_LEN = 60
+
+
+def sanitize_title(value: object, *, max_len: int | None = None) -> str:
+    """Normalize an event title: breaks->space, strip invisibles, collapse whitespace, optional cap.
+
+    Returns "" when nothing visible remains (e.g. zero-width-only input) so callers can reject it.
+    """
+    text = "" if value is None else str(value)
+    text = _STRIP_CHARS.sub("", _LINE_BREAKERS.sub(" ", text))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if max_len is None else text[:max_len].strip()
+
+
+def fallback_title(value: object) -> str:
+    """Immediate (pre-LLM) event title derived from the first message text."""
+    return sanitize_title(value, max_len=FALLBACK_TITLE_MAX_LEN) or UNTITLED_EVENT

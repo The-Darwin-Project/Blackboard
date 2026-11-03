@@ -51,6 +51,7 @@ from .formatter import (
     truncate_text, MAX_SECTION_TEXT,
 )
 from ..agents.event_namer import spawn_event_namer_task
+from ..utils.prompt_sanitize import fallback_title
 from ..models import ConversationTurn, EventEvidence
 
 if TYPE_CHECKING:
@@ -230,7 +231,7 @@ class SlackChannel:
             thoughts=text, source="slack",
             user_name=display_name,
         )
-        fallback = text[:60].strip() or "Untitled Event"
+        fallback = fallback_title(text)
         new_event_id = await self._blackboard.create_event(
             source="slack",
             service=event_doc.service,
@@ -275,7 +276,7 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
-            fallback = text[:60].strip() or "Untitled Event"
+            fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -373,7 +374,7 @@ class SlackChannel:
                     return
 
             display_name = await self._resolve_display_name(client, user_id)
-            fallback = text[:60].strip() or "Untitled Event"
+            fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -457,7 +458,7 @@ class SlackChannel:
                 except Exception as e:
                     logger.debug(f"setStatus failed (non-fatal): {e}")
 
-                fallback = text[:60].strip() or "Untitled Event"
+                fallback = fallback_title(text)
                 event_id = await self._blackboard.create_event(
                     source="slack",
                     service="general",
@@ -779,7 +780,7 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
-            fallback = text.strip()[:60].strip() or "Untitled Event"
+            fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",

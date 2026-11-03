@@ -30,6 +30,7 @@ from ..auth import (
 )
 from ..agents.event_namer import spawn_event_namer_task
 from ..models import ConversationTurn, EventEvidence
+from ..utils.prompt_sanitize import fallback_title
 from ..utils.vcs_approval import resolve_live_head_sha
 
 if TYPE_CHECKING:
@@ -155,7 +156,7 @@ class DashboardWSAdapter:
             image=image,
             user_name=prompt_display_name(user),
         )
-        fallback = message[:60].strip() or "Untitled Event"
+        fallback = fallback_title(message)
         event_id = await self._blackboard.create_event(
             source="chat",
             service=service,

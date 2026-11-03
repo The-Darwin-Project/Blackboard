@@ -53,7 +53,6 @@ import asyncio
 import inspect
 import json
 import logging
-import re
 import time
 
 
@@ -74,6 +73,7 @@ from ..auth import (
 )
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
+from ..utils.prompt_sanitize import sanitize_title
 from ..utils.vcs_approval import resolve_live_head_sha
 
 
@@ -90,8 +90,7 @@ class TitleUpdateRequest(BaseModel):
     @field_validator("title")
     @classmethod
     def validate_title(cls, v: str) -> str:
-        cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", v)
-        collapsed = re.sub(r"\s+", " ", cleaned).strip()
+        collapsed = sanitize_title(v)
         if not collapsed:
             raise ValueError("Title cannot be empty or whitespace only")
         if len(collapsed) > 100:
@@ -371,7 +370,7 @@ async def update_event_title(
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if str(event.status).lower() in ("closed", "resolved") or event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
         raise HTTPException(status_code=409, detail="Cannot rename closed event")
 
     user = get_user_from_request(request)
