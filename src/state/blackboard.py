@@ -159,16 +159,28 @@ class BlackboardState:
     """
     
     _LUA_CLEAR_ESCALATION = """
-local field = ARGV[2] or 'escalation_flag'
-local val = redis.call('HGET', KEYS[1], field)
-if not val or val == '' then return 0 end
-local delim = string.find(val, '|')
-local prefix = delim and string.sub(val, 1, delim - 1) or val
-if prefix == ARGV[1] then
-    redis.call('HDEL', KEYS[1], field)
-    return 1
+-- KEYS[1] = darwin:service:{name}
+-- ARGV[1] = expected event id (exact prefix before the first '|')
+-- ARGV[2..n] = hash fields to compare-and-delete (scoped field, then legacy field).
+-- Returns the number of fields deleted.
+local deleted = 0
+local nfields = #ARGV
+if nfields < 2 then
+    nfields = 2
 end
-return 0
+for i = 2, nfields do
+    local field = ARGV[i] or 'escalation_flag'
+    local val = redis.call('HGET', KEYS[1], field)
+    if val and val ~= '' then
+        local delim = string.find(val, '|')
+        local prefix = delim and string.sub(val, 1, delim - 1) or val
+        if prefix == ARGV[1] then
+            redis.call('HDEL', KEYS[1], field)
+            deleted = deleted + 1
+        end
+    end
+end
+return deleted
 """
 
     _LUA_RENAME_OBS = """
@@ -840,18 +852,23 @@ return 1
         """Clear scoped escalation flag. Atomic compare-and-delete when expected_event_id given.
 
         Also clears the legacy unscoped `escalation_flag` field to prevent permanently sticky
-        flags from pre-migration data surviving indefinitely.
+        flags from pre-migration data surviving indefinitely. When expected_event_id is given
+        the legacy field is compare-and-deleted in the same Lua call, so a legacy flag that
+        belongs to a different event is left untouched.
+
+        Returns the number of hash fields deleted (scoped + legacy); 0 means nothing matched
+        (flag absent, or it now references a different event).
         """
         key = f"darwin:service:{service}"
         field = f"escalation_flag:{scope}"
         if expected_event_id:
             result = await self._clear_escalation_script(
-                keys=[key], args=[expected_event_id, field],
+                keys=[key], args=[expected_event_id, field, "escalation_flag"],
             )
         else:
-            result = await self.redis.hdel(key, field)
-        # Also clear legacy unscoped field (rolling deploy compat: prevents sticky pre-migration flags)
-        await self.redis.hdel(key, "escalation_flag")
+            # Unconditional clear (recovery paths): scoped field plus legacy unscoped field
+            # (rolling deploy compat: prevents sticky pre-migration flags).
+            result = await self.redis.hdel(key, field, "escalation_flag")
         logger.info(
             f"Escalation flag CLEAR for {service} scope={scope}: "
             f"expected={expected_event_id}, result={result}"
@@ -2896,6 +2913,25 @@ return 1
         await self.redis.delete(self.NIGHTWATCHER_INFLIGHT)
         logger.warning("Nightwatcher: requeued %d inflight items from prior crash", len(mapping))
         return len(mapping)
+
+    async def has_staged_escalation(self, event_id: str) -> bool:
+        """True if event_id has an escalation still pending or in flight for Nightwatcher.
+
+        Scans the pending ZSET and inflight SET (both bounded by the shift window / 1h
+        inflight TTL). Corrupt members are skipped. Raises on Redis errors so callers can
+        fail closed.
+        """
+        import json as _json
+        members = list(await self.redis.zrange(self.NIGHTWATCHER_PENDING, 0, -1))
+        members.extend(await self.redis.smembers(self.NIGHTWATCHER_INFLIGHT))
+        for m in members:
+            try:
+                raw = m if isinstance(m, str) else m.decode()
+                if _json.loads(raw).get("event_id") == event_id:
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def count_pending_escalations(self) -> int:
         """Count pending escalations waiting for next sweep."""

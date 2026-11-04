@@ -228,7 +228,8 @@ async def test_lua_atomic_no_clear_on_mismatch():
     result = await bb.clear_escalation_flag("svc-a", expected_event_id="evt-wrong")
     assert result == 0
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-a"], args=["evt-wrong", "escalation_flag:health"],
+        keys=["darwin:service:svc-a"],
+        args=["evt-wrong", "escalation_flag:health", "escalation_flag"],
     )
 
 
@@ -289,7 +290,8 @@ async def test_escalation_flag_lifecycle():
 
     await bb.clear_escalation_flag("svc-new", expected_event_id="evt-1")
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-new"], args=["evt-1", "escalation_flag:health"],
+        keys=["darwin:service:svc-new"],
+        args=["evt-1", "escalation_flag:health", "escalation_flag"],
     )
 
 
@@ -337,7 +339,8 @@ async def test_malformed_flag_no_delimiter():
 
     result = await bb.clear_escalation_flag("svc-a", expected_event_id="evt-nopipe")
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-a"], args=["evt-nopipe", "escalation_flag:health"],
+        keys=["darwin:service:svc-a"],
+        args=["evt-nopipe", "escalation_flag:health", "escalation_flag"],
     )
     assert result == 1
 

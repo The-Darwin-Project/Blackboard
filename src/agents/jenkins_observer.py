@@ -55,6 +55,13 @@
 #     instructions entirely (no request, no extra output tokens), and any analysis lives
 #     inside the existing triage try/except -- any failure logs and falls back to the terse
 #     (pre-Phase-1) evidence, never blocks event creation.
+# 19. [Pattern]: escalation_flag:jenkins lifecycle -- set by report_incident (handlers_dispatch)
+#     after the Brain escalates, cleared by Nightwatcher after the incident is filed, and by
+#     this observer on recovery (_service_key / _flood_service_key / _outage_service_key are
+#     the ONLY place flag keys are built -- writer and clearer must agree). The lazy prune in
+#     _is_duplicate_or_escalated() only drops a flag whose event is gone/closed AND that has
+#     no staged/in-flight Nightwatcher escalation (has_staged_escalation); otherwise the flag
+#     is still legitimately suppressing duplicate incidents. Never prune on event status alone.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -87,6 +94,26 @@ from ..utils.pii_redaction import redact_pii
 logger = logging.getLogger(__name__)
 
 _DEDUP_STATUSES = ("new", "active", "deferred", "waiting_approval")
+
+# Max read->evaluate->clear passes when lazily pruning escalation flags (scoped field, then
+# legacy unscoped field, plus headroom for a lost CAS). Exhausting it fails closed.
+_FLAG_PRUNE_MAX_PASSES = 4
+
+
+def _service_key(job_name: str, version: str = "") -> str:
+    """Per-job service key (escalation-flag HASH key suffix): '{job}|{version}', or '{job}'
+    when the version is empty. Single source of truth for writer, recovery and dedup."""
+    return f"{job_name}|{version}" if version else job_name
+
+
+def _flood_service_key(version: str) -> str:
+    """Service key for a consolidated flood event of one version."""
+    return f"ci-gating-flood|{version}"
+
+
+def _outage_service_key(view: str) -> str:
+    """Service key for a board-wide outage event on one view."""
+    return f"ci-gating-outage|{view}"
 
 # Sentinel keys for _view_unhealthy -- neither is a real Jenkins view name.
 # Both exist because view_unhealthy defaults to healthy (any() over an empty/
@@ -646,15 +673,21 @@ class JenkinsObserver:
             )
             self._view_unhealthy[_VIEWS_UNCONFIGURED_KEY] = True
             return
+        # (view, active, failing) for every view scanned OK this cycle; drives the
+        # flood/outage escalation-flag recovery at the end of the poll.
+        scanned: list[tuple[str, list, list]] = []
+        all_views_ok = True
         for view in self._views:
             scan = await self._adapter.scan_view(view)
 
             if scan.status_code == 404:
                 logger.error("JenkinsObserver: view %r returned 404 — marking unhealthy", view)
                 self._view_unhealthy[view] = True
+                all_views_ok = False
                 continue
             if scan.status_code is None and not scan.jobs:
                 self._view_unhealthy[view] = False
+                all_views_ok = False
                 continue
             self._view_unhealthy[view] = False
 
@@ -681,6 +714,7 @@ class JenkinsObserver:
             # and there are enough jobs for "board-wide" to be meaningful (>= 3)
             active = [j for j in post_recency if not (j.result is None and j.build_number is not None)]
             failing = [j for j in active if self._is_triggering_result(j.result)]
+            scanned.append((view, active, failing))
             if len(active) >= 3 and len(failing) / len(active) > 0.7:
                 key = f"view-outage:{view}"
                 metadata = {
@@ -718,6 +752,57 @@ class JenkinsObserver:
                         "staged_at": time.time(),
                     }
                     await self.blackboard.stage_jenkins_signal(key, metadata)
+
+        await self._clear_recovered_group_flags(scanned, all_views_ok)
+
+    async def _clear_flag_if_present(self, service_name: str, why: str) -> None:
+        """Best-effort unconditional clear of escalation_flag:jenkins (recovery paths).
+
+        Reads first so the steady state (no flag) costs two HGETs and no write/log noise.
+        Skipped in dry-run (dry-run must not mutate Redis).
+        """
+        if self._dry_run:
+            return
+        try:
+            if await self.blackboard.get_escalation_flag(service_name, scope="jenkins"):
+                await self.blackboard.clear_escalation_flag(service_name, scope="jenkins")
+                logger.info("JenkinsObserver: cleared escalation flag for %s (%s)", service_name, why)
+        except Exception:
+            logger.warning(
+                "JenkinsObserver: failed to clear escalation flag for %s (%s)",
+                service_name, why, exc_info=True,
+            )
+
+    async def _clear_recovered_group_flags(
+        self, scanned: list[tuple[str, list, list]], all_views_ok: bool,
+    ) -> None:
+        """Clear flood/outage escalation flags once their condition has ended.
+
+        Per-job flags are cleared in _recheck_and_filter; group flags have no per-job signal
+        to piggy-back on, so recovery is derived from the full scan:
+        - outage: a scanned view that is not board-wide-red anymore
+        - flood: a version with active jobs and none failing, across ALL views. Skipped when
+          any view could not be scanned (a version might still be failing there).
+        """
+        if not scanned:
+            return
+        for view, active, failing in scanned:
+            if not (len(active) >= 3 and len(failing) / len(active) > 0.7):
+                await self._clear_flag_if_present(_outage_service_key(view), "board recovered")
+        if not all_views_ok:
+            return
+        active_by_version: dict[str, int] = {}
+        failing_by_version: dict[str, int] = {}
+        for _view, active, failing in scanned:
+            for j in active:
+                v = self._extract_version_from_name(j.job_name)
+                active_by_version[v] = active_by_version.get(v, 0) + 1
+            for j in failing:
+                v = self._extract_version_from_name(j.job_name)
+                failing_by_version[v] = failing_by_version.get(v, 0) + 1
+        for version in active_by_version:
+            if not failing_by_version.get(version):
+                await self._clear_flag_if_present(_flood_service_key(version), "version recovered")
 
     @staticmethod
     def _extract_version_from_name(name: str) -> str:
@@ -774,15 +859,16 @@ class JenkinsObserver:
                     for j in recheck_cache[view]
                 )
                 if resolved:
-                    version = meta.get("version", "")
-                    service_name = f"{job_name}|{version}" if version else job_name
-                    try:
-                        await self.blackboard.clear_escalation_flag(service_name, scope="jenkins")
-                    except Exception:
-                        logger.warning(
-                            "JenkinsObserver: failed to clear escalation flag for %s on recovery",
-                            service_name,
-                        )
+                    service_name = _service_key(job_name, meta.get("version", ""))
+                    if not self._dry_run:
+                        try:
+                            await self.blackboard.clear_escalation_flag(service_name, scope="jenkins")
+                        except Exception:
+                            logger.warning(
+                                "JenkinsObserver: failed to clear escalation flag for %s on recovery",
+                                service_name,
+                                exc_info=True,
+                            )
                     await self.blackboard.commit_jenkins_signal(key)
                     continue
 
@@ -810,8 +896,12 @@ class JenkinsObserver:
     async def _is_duplicate_or_escalated(self, service_name: str) -> bool:
         """Active-event dedup (Layer 1) + escalation-gate (Layer 3) checks.
 
-        Evaluates active events and scoped escalation flags. If an escalation flag
-        references a terminal/closed event, lazily prunes the stale flag via CAS.
+        Evaluates active events and the scoped escalation flag. SIDE EFFECT: lazily prunes
+        a stale escalation flag via CAS (never in dry-run). A flag is stale only when its
+        event is missing/unreadable/not in a dedup status AND no escalation for that event is
+        still staged or in flight for Nightwatcher -- until Nightwatcher files the incident
+        (and clears the flag) or the job recovers, the flag legitimately suppresses duplicates
+        even though the event is closed.
         Raises on Redis/blackboard errors instead of fail-open -- the caller treats any
         exception as "unknown", restaging the signal for the next cycle rather than
         risking a duplicate event.
@@ -823,23 +913,63 @@ class JenkinsObserver:
                 if evt and evt.service == service_name:
                     return True
 
-        flag = await self.blackboard.get_escalation_flag(service_name, scope="jenkins")
-        if flag:
-            eid = flag.split("|")[0].strip()
-            if eid:
-                evt = await self.blackboard.get_event(eid)
-                if not evt or evt.status not in _DEDUP_STATUSES:
-                    logger.info(
-                        "JenkinsObserver: clearing stale escalation flag for %s (referenced %s in status %s)",
-                        service_name,
-                        eid,
-                        evt.status if evt else "missing",
-                    )
-                    await self.blackboard.clear_escalation_flag(
-                        service_name, scope="jenkins", expected_event_id=eid
-                    )
-                    flag = None
-        return bool(flag)
+        # Bounded loop: after pruning one field (scoped, then legacy) re-read so a different
+        # flag that replaced it (lost CAS) or a leftover legacy flag is evaluated afresh.
+        for _ in range(_FLAG_PRUNE_MAX_PASSES):
+            flag = await self.blackboard.get_escalation_flag(service_name, scope="jenkins")
+            if not flag:
+                return False
+            # Exact prefix (no strip): must match the Lua CAS, which compares the raw prefix.
+            eid = flag.split("|", 1)[0]
+            stale_reason = await self._stale_flag_reason(service_name, eid)
+            if stale_reason is None:
+                return True
+            if self._dry_run:
+                logger.info(
+                    "JenkinsObserver DRY-RUN: would clear stale escalation flag for %s (%s)",
+                    service_name, stale_reason,
+                )
+                return False
+            cleared = await self.blackboard.clear_escalation_flag(
+                service_name, scope="jenkins", expected_event_id=eid or None,
+            )
+            if cleared > 0:
+                logger.info(
+                    "JenkinsObserver: cleared stale escalation flag for %s (%s)",
+                    service_name, stale_reason,
+                )
+            # cleared == 0: a newer flag replaced it (or someone else cleared it) -- loop to
+            # re-read instead of assuming the flag is gone.
+        logger.warning(
+            "JenkinsObserver: escalation flag for %s still changing after %d prune passes, "
+            "treating as escalated", service_name, _FLAG_PRUNE_MAX_PASSES,
+        )
+        return True
+
+    async def _stale_flag_reason(self, service_name: str, eid: str) -> str | None:
+        """Why an escalation flag referencing `eid` is stale, or None if it still suppresses."""
+        if not eid:
+            return "malformed flag, empty event id"
+        try:
+            evt = await self.blackboard.get_event(eid)
+        except (ValueError, TypeError, KeyError) as e:  # JSONDecodeError/ValidationError are ValueErrors
+            logger.warning(
+                "JenkinsObserver: unreadable event %s referenced by escalation flag for %s: %s",
+                eid, service_name, e, exc_info=True,
+            )
+            return f"referenced event {eid} unreadable"
+        if evt is not None:
+            status = getattr(evt.status, "value", evt.status)
+            if status in _DEDUP_STATUSES:
+                return None
+            detail = f"referenced event {eid} in status {status}"
+        else:
+            detail = f"referenced event {eid} missing"
+        # Closed/missing event: the flag still suppresses while Nightwatcher holds a staged or
+        # in-flight escalation for it (it clears the flag after filing the incident).
+        if await self.blackboard.has_staged_escalation(eid):
+            return None
+        return f"{detail}, no staged escalation"
 
     async def _process_candidates(self, groups: list[list[tuple[str, dict]]]) -> None:
         """Phase 4: per-group dedup/escalation/WIP gating, triage, and event creation."""
@@ -847,14 +977,13 @@ class JenkinsObserver:
 
         for signals in groups:
             if len(signals) > 1:
-                service_name = f"ci-gating-flood|{signals[0][1].get('version', '')}"
+                service_name = _flood_service_key(signals[0][1].get("version", ""))
             else:
                 k, m = signals[0]
                 if m.get("result") == "BOARD_RED":
-                    service_name = f"ci-gating-outage|{m.get('view', '')}"
+                    service_name = _outage_service_key(m.get("view", ""))
                 else:
-                    version = m.get("version", "")
-                    service_name = f"{m.get('job_name', k)}|{version}" if version else m.get("job_name", k)
+                    service_name = _service_key(m.get("job_name", k), m.get("version", ""))
 
             try:
                 if await self._is_duplicate_or_escalated(service_name):

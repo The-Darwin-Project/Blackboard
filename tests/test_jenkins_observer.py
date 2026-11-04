@@ -74,6 +74,8 @@ def _mock_blackboard():
     bb.get_active_events_with_status.return_value = {}
     bb.get_event.return_value = None
     bb.get_escalation_flag.return_value = None
+    bb.clear_escalation_flag.return_value = 1
+    bb.has_staged_escalation.return_value = False
     bb.create_event.return_value = "evt-jenkins01"
     # Jenkins ZSET methods (VMER-1444 — not yet on BlackboardState)
     bb.stage_jenkins_signal = AsyncMock(return_value=None)
@@ -88,6 +90,36 @@ def _mock_blackboard():
     bb.redis.hget.return_value = None
     bb.redis.zadd.return_value = None
     return bb
+
+
+def _flag_only_for_jobs(flag):
+    """get_escalation_flag side_effect: `flag` for per-job keys, None for flood/outage keys."""
+    def _get(service, scope="health"):
+        return None if service.startswith("ci-gating-") else flag
+    return _get
+
+
+def _wire_flag_store(bb, flags):
+    """Back get/clear_escalation_flag with a dict {service: 'evt|reason'} (CAS-faithful clear).
+
+    Mirrors BlackboardState: a clear with expected_event_id only deletes on exact prefix match
+    and returns the number of deleted fields; an unconditional clear always deletes.
+    """
+    async def _get(service, scope="health"):
+        return flags.get(service)
+
+    async def _clear(service, scope="health", expected_event_id=None):
+        val = flags.get(service)
+        if val is None:
+            return 0
+        if expected_event_id is not None and val.split("|", 1)[0] != expected_event_id:
+            return 0
+        del flags[service]
+        return 1
+
+    bb.get_escalation_flag.side_effect = _get
+    bb.clear_escalation_flag.side_effect = _clear
+    return flags
 
 
 def _make_job_result(job_name="verify-cnv-4.23.z-build-tier1", build_number=100,
@@ -604,7 +636,7 @@ class TestT13ActiveEventDedup:
             )
 
             bb.get_active_events_with_status.return_value = {}
-            bb.get_escalation_flag.return_value = "evt-active|escalated to jira"
+            bb.get_escalation_flag.side_effect = _flag_only_for_jobs("evt-active|escalated to jira")
             active_event = MagicMock()
             active_event.status = "active"
             bb.get_event.return_value = active_event
@@ -619,7 +651,7 @@ class TestT13ActiveEventDedup:
         bb.clear_escalation_flag.assert_not_called()
 
     async def test_stale_escalation_flag_cleared_and_allows_creation(self):
-        """Stale escalation flag referencing a closed event is cleared, unblocking event creation."""
+        """Flag for a closed event with NO staged Nightwatcher escalation is stale: pruned, unblocking creation."""
         bb = _mock_blackboard()
 
         with patch.dict("os.environ", _env_vars()):
@@ -640,10 +672,12 @@ class TestT13ActiveEventDedup:
             )
 
             bb.get_active_events_with_status.return_value = {}
-            bb.get_escalation_flag.return_value = "evt-closed-123|escalated"
+            flags = {"verify-cnv-4.23.z-build-tier1|4.23": "evt-closed-123|escalated"}
+            _wire_flag_store(bb, flags)
             closed_event = MagicMock()
             closed_event.status = "closed"
             bb.get_event.return_value = closed_event
+            bb.has_staged_escalation.return_value = False
 
             obs._triage_and_build_evidence = AsyncMock(return_value=_make_triage_response())
             obs._get_wip_headroom = AsyncMock(return_value=5)
@@ -3954,3 +3988,452 @@ class TestEnvFlag:
             with patch.dict("os.environ", env):
                 obs = JenkinsObserver(blackboard=_mock_blackboard())
                 assert obs._analysis_enabled is True, f"{value!r} should enable analysis"
+
+
+# =========================================================================
+# Escalation-flag lifecycle (PR #306 remediation): lazy prune, CAS, recovery
+# =========================================================================
+
+_JOB = "verify-cnv-4.23.z-build-tier1"
+_JOB_KEY = f"{_JOB}|4.23"
+
+
+def _flag_observer(bb=None, dry_run=False):
+    """Observer wired to a CAS-faithful flag store; returns (obs, bb, flags)."""
+    bb = bb or _mock_blackboard()
+    obs = _make_observer(bb, _make_adapter(), dry_run=dry_run)
+    flags: dict[str, str] = {}
+    _wire_flag_store(bb, flags)
+    return obs, bb, flags
+
+
+def _event(status, service=_JOB_KEY):
+    evt = MagicMock()
+    evt.status = status
+    evt.service = service
+    return evt
+
+
+class TestServiceKeyHelpers:
+    def test_service_key_with_and_without_version(self):
+        from src.agents.jenkins_observer import _service_key
+        assert _service_key("job-a", "4.23") == "job-a|4.23"
+        assert _service_key("job-a", "") == "job-a"
+        assert _service_key("job-a") == "job-a"
+
+    def test_group_keys(self):
+        from src.agents.jenkins_observer import _flood_service_key, _outage_service_key
+        assert _flood_service_key("4.23") == "ci-gating-flood|4.23"
+        assert _outage_service_key("Gating Wrappers") == "ci-gating-outage|Gating Wrappers"
+
+
+class TestLazyPruneEscalationFlag:
+    """_is_duplicate_or_escalated(): when is an escalation flag stale vs still suppressing?"""
+
+    async def test_no_flag_not_escalated(self):
+        obs, bb, _ = _flag_observer()
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+        bb.clear_escalation_flag.assert_not_called()
+
+    async def test_missing_event_without_staged_escalation_is_pruned(self):
+        """evt is None and nothing staged for Nightwatcher: stale -> CAS-pruned."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-gone|escalated"
+        bb.get_event.return_value = None
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id="evt-gone",
+        )
+        assert _JOB_KEY not in flags
+
+    async def test_missing_event_with_staged_escalation_keeps_suppressing(self):
+        """M1: event expired/evicted but Nightwatcher still holds its escalation -> keep flag."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-gone|escalated"
+        bb.get_event.return_value = None
+        bb.has_staged_escalation.return_value = True
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+
+        bb.has_staged_escalation.assert_awaited_once_with("evt-gone")
+        bb.clear_escalation_flag.assert_not_called()
+        assert flags[_JOB_KEY] == "evt-gone|escalated"
+
+    @pytest.mark.parametrize("status", ["closed", "resolved"])
+    async def test_closed_event_with_staged_escalation_keeps_suppressing(self, status):
+        """M1: closed event whose escalation is staged/in flight must NOT be pruned on next poll."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event(status)
+        bb.has_staged_escalation.return_value = True
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+
+        bb.clear_escalation_flag.assert_not_called()
+        assert _JOB_KEY in flags
+
+    @pytest.mark.parametrize("status", ["closed", "resolved"])
+    async def test_closed_event_without_staged_escalation_is_pruned(self, status):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event(status)
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id="evt-closed",
+        )
+
+    @pytest.mark.parametrize("status", ["new", "active", "deferred", "waiting_approval"])
+    async def test_open_event_keeps_suppressing_without_staging_lookup(self, status):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-open|escalated"
+        bb.get_event.return_value = _event(status)
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+
+        bb.has_staged_escalation.assert_not_called()
+        bb.clear_escalation_flag.assert_not_called()
+
+    async def test_enum_status_is_logged_by_value(self, caplog):
+        from src.models import EventStatus
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event(EventStatus.CLOSED)
+        bb.has_staged_escalation.return_value = False
+
+        with caplog.at_level(logging.INFO, logger="src.agents.jenkins_observer"):
+            await obs._is_duplicate_or_escalated(_JOB_KEY)
+
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert "status closed" in text
+        assert "EventStatus." not in text
+
+    async def test_cas_lost_to_newer_active_flag_keeps_suppressing(self):
+        """CAS returns 0 because a newer flag replaced the stale one: fail closed."""
+        obs, bb, _ = _flag_observer()
+        reads = iter(["evt-old|escalated", "evt-new|escalated", "evt-new|escalated"])
+        bb.get_escalation_flag.side_effect = lambda *a, **k: next(reads)
+        bb.clear_escalation_flag.side_effect = None
+        bb.clear_escalation_flag.return_value = 0
+
+        def _get_event(eid):
+            return _event("closed") if eid == "evt-old" else _event("active")
+        bb.get_event.side_effect = _get_event
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id="evt-old",
+        )
+
+    async def test_cas_zero_because_flag_already_cleared_allows_creation(self):
+        """CAS returns 0 because someone else (Nightwatcher) cleared it: re-read shows none."""
+        obs, bb, _ = _flag_observer()
+        reads = iter(["evt-old|escalated", None])
+        bb.get_escalation_flag.side_effect = lambda *a, **k: next(reads)
+        bb.clear_escalation_flag.side_effect = None
+        bb.clear_escalation_flag.return_value = 0
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+    async def test_cas_never_succeeding_fails_closed(self):
+        """A flag that keeps changing under us is treated as escalated, not as stale."""
+        from src.agents.jenkins_observer import _FLAG_PRUNE_MAX_PASSES
+        obs, bb, _ = _flag_observer()
+        bb.get_escalation_flag.side_effect = None
+        bb.get_escalation_flag.return_value = "evt-old|escalated"
+        bb.clear_escalation_flag.side_effect = None
+        bb.clear_escalation_flag.return_value = 0
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+        assert bb.clear_escalation_flag.await_count == _FLAG_PRUNE_MAX_PASSES
+
+    @pytest.mark.parametrize("exc", [
+        ValueError("bad doc"),
+        json.JSONDecodeError("Expecting value", "{", 0),
+    ])
+    async def test_unreadable_referent_event_is_treated_as_stale(self, exc):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-corrupt|escalated"
+        bb.get_event.side_effect = exc
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id="evt-corrupt",
+        )
+        bb.has_staged_escalation.assert_not_called()
+
+    async def test_schema_drifted_referent_event_is_treated_as_stale(self):
+        from pydantic import BaseModel, ValidationError
+
+        class _M(BaseModel):
+            x: int
+
+        try:
+            _M(x="not-an-int")
+        except ValidationError as ve:
+            err = ve
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-drift|escalated"
+        bb.get_event.side_effect = err
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+        assert _JOB_KEY not in flags
+
+    async def test_redis_error_on_staged_lookup_propagates_and_restages(self):
+        """has_staged_escalation raising must not fail open: signal is restaged."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.side_effect = ConnectionError("redis down")
+
+        with pytest.raises(ConnectionError):
+            await obs._is_duplicate_or_escalated(_JOB_KEY)
+
+        meta = _make_meta()
+        await obs._process_candidates([[(_JOB, meta)]])
+        bb.restage_jenkins_signal.assert_awaited_once_with(_JOB, meta)
+        bb.create_event.assert_not_called()
+
+    async def test_empty_event_id_prefix_is_stale_and_cleared_unconditionally(self):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "|no event id"
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.get_event.assert_not_called()
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id=None,
+        )
+        assert _JOB_KEY not in flags
+
+    async def test_whitespace_event_id_prefix_not_stripped_for_cas(self):
+        """Raw prefix goes to the CAS so it matches the Lua exact-prefix compare."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = " evt-ws |reason"
+        bb.get_event.return_value = None
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.get_event.assert_awaited_once_with(" evt-ws ")
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id=" evt-ws ",
+        )
+        assert _JOB_KEY not in flags
+
+    async def test_flag_without_delimiter_uses_whole_value_as_event_id(self):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-nopipe"
+        bb.get_event.return_value = _event("active")
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+        bb.get_event.assert_awaited_once_with("evt-nopipe")
+
+    async def test_dry_run_never_mutates_flag(self):
+        obs, bb, flags = _flag_observer(dry_run=True)
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is False
+
+        bb.clear_escalation_flag.assert_not_called()
+        assert _JOB_KEY in flags
+
+    async def test_dry_run_still_suppresses_when_flag_is_live(self):
+        obs, bb, flags = _flag_observer(dry_run=True)
+        flags[_JOB_KEY] = "evt-closed|escalated"
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.return_value = True
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+
+    async def test_stale_scoped_flag_then_leftover_legacy_flag_is_reevaluated(self):
+        """After pruning the scoped field, a leftover legacy flag (other event) is evaluated."""
+        obs, bb, _ = _flag_observer()
+        reads = iter(["evt-old|escalated", "evt-legacy|escalated", "evt-legacy|escalated"])
+        bb.get_escalation_flag.side_effect = lambda *a, **k: next(reads)
+        bb.clear_escalation_flag.side_effect = None
+        bb.clear_escalation_flag.return_value = 1
+        bb.get_event.side_effect = lambda eid: _event("closed" if eid == "evt-old" else "active")
+        bb.has_staged_escalation.return_value = False
+
+        assert await obs._is_duplicate_or_escalated(_JOB_KEY) is True
+        bb.clear_escalation_flag.assert_awaited_once_with(
+            _JOB_KEY, scope="jenkins", expected_event_id="evt-old",
+        )
+
+
+class TestEscalationSuppressionLifecycle:
+    """M1 end-to-end: still-failing job across polls while the escalation is in Nightwatcher."""
+
+    async def test_closed_escalated_event_suppresses_until_nightwatcher_clears_flag(self):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-esc|escalated to jira"
+        bb.get_event.return_value = _event("closed")
+        meta = _make_meta()
+
+        # Poll 1 & 2: event closed, escalation staged for Nightwatcher -> suppressed, no event.
+        bb.has_staged_escalation.return_value = True
+        for _ in range(2):
+            await obs._process_candidates([[(_JOB, meta)]])
+        bb.create_event.assert_not_called()
+        bb.commit_jenkins_signal.assert_awaited_with(_JOB)
+        assert flags[_JOB_KEY] == "evt-esc|escalated to jira"
+
+        # Nightwatcher files the incident and clears the flag (CAS) -> next poll creates.
+        await bb.clear_escalation_flag(_JOB_KEY, scope="jenkins", expected_event_id="evt-esc")
+        bb.has_staged_escalation.return_value = False
+        obs._triage_and_build_evidence = AsyncMock(return_value=_make_triage_response())
+        await obs._process_candidates([[(_JOB, meta)]])
+        bb.create_event.assert_awaited_once()
+
+    async def test_nightwatcher_gave_up_flag_is_eventually_pruned(self):
+        """Closed event, escalation no longer staged (NW failed to clear): genuinely stale."""
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-esc|escalated"
+        bb.get_event.return_value = _event("closed")
+        bb.has_staged_escalation.return_value = False
+        obs._triage_and_build_evidence = AsyncMock(return_value=_make_triage_response())
+
+        await obs._process_candidates([[(_JOB, _make_meta())]])
+
+        assert _JOB_KEY not in flags
+        bb.create_event.assert_awaited_once()
+
+
+class TestRecoveryEscalationFlagClear:
+    async def _recheck(self, obs, bb, meta, scan_jobs):
+        obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(scan_jobs))
+        bb.redis.hget.return_value = json.dumps(meta)
+        return await obs._recheck_and_filter([meta["job_name"]])
+
+    async def test_recovery_clears_per_job_key(self):
+        obs, bb, flags = _flag_observer()
+        flags[_JOB_KEY] = "evt-1|escalated"
+        meta = _make_meta()
+
+        out = await self._recheck(obs, bb, meta, [_make_job_result(_JOB, result="SUCCESS")])
+
+        assert out == []
+        assert _JOB_KEY not in flags
+        bb.commit_jenkins_signal.assert_awaited_once_with(_JOB)
+
+    async def test_recovery_versionless_key_is_bare_job_name(self):
+        obs, bb, flags = _flag_observer()
+        meta = _make_meta(job_name="plain-job", version="")
+
+        await self._recheck(obs, bb, meta, [_make_job_result("plain-job", result="SUCCESS")])
+
+        bb.clear_escalation_flag.assert_awaited_once_with("plain-job", scope="jenkins")
+
+    async def test_recovery_clear_failure_logs_traceback_and_still_commits(self, caplog):
+        obs, bb, _ = _flag_observer()
+        bb.clear_escalation_flag.side_effect = RuntimeError("Redis connection dropped")
+
+        with caplog.at_level(logging.WARNING, logger="src.agents.jenkins_observer"):
+            await self._recheck(obs, bb, _make_meta(), [_make_job_result(_JOB, result="SUCCESS")])
+
+        rec = [r for r in caplog.records if "failed to clear escalation flag" in r.getMessage()]
+        assert rec and rec[0].exc_info is not None
+        bb.commit_jenkins_signal.assert_awaited_once_with(_JOB)
+
+    async def test_recovery_dry_run_skips_clear_but_commits_signal(self):
+        obs, bb, flags = _flag_observer(dry_run=True)
+        flags[_JOB_KEY] = "evt-1|escalated"
+
+        await self._recheck(obs, bb, _make_meta(), [_make_job_result(_JOB, result="SUCCESS")])
+
+        bb.clear_escalation_flag.assert_not_called()
+        assert _JOB_KEY in flags
+        bb.commit_jenkins_signal.assert_awaited_once_with(_JOB)
+
+
+class TestGroupFlagRecovery:
+    """Flood (ci-gating-flood|{ver}) and outage (ci-gating-outage|{view}) flag recovery."""
+
+    VIEW = "Gating Wrappers"
+
+    def _jobs(self, *results, version="4.23"):
+        return [
+            _make_job_result(f"verify-cnv-{version}-lane{i}", build_number=10 + i,
+                             result=r, color="red" if r == "FAILURE" else "blue")
+            for i, r in enumerate(results)
+        ]
+
+    async def _poll(self, obs, scan_result):
+        obs._adapter.scan_view = AsyncMock(return_value=scan_result)
+        await obs._poll_and_stage()
+
+    async def test_flood_flag_cleared_when_version_recovers(self):
+        obs, bb, flags = _flag_observer()
+        flags["ci-gating-flood|4.23"] = "evt-flood|escalated"
+        await self._poll(obs, _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "SUCCESS")))
+        assert "ci-gating-flood|4.23" not in flags
+
+    async def test_flood_flag_kept_while_version_still_failing(self):
+        obs, bb, flags = _flag_observer()
+        flags["ci-gating-flood|4.23"] = "evt-flood|escalated"
+        await self._poll(obs, _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "FAILURE")))
+        assert flags["ci-gating-flood|4.23"] == "evt-flood|escalated"
+
+    async def test_flood_flag_kept_when_a_view_could_not_be_scanned(self):
+        obs, bb, flags = _flag_observer()
+        obs._views = [self.VIEW, "Other View"]
+        flags["ci-gating-flood|4.23"] = "evt-flood|escalated"
+        results = {
+            self.VIEW: _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "SUCCESS")),
+            "Other View": _make_view_scan_result([], status_code=404),
+        }
+        obs._adapter.scan_view = AsyncMock(side_effect=lambda v: results[v])
+        await obs._poll_and_stage()
+        assert "ci-gating-flood|4.23" in flags
+
+    async def test_outage_flag_cleared_when_board_no_longer_red(self):
+        obs, bb, flags = _flag_observer()
+        flags[f"ci-gating-outage|{self.VIEW}"] = "evt-out|escalated"
+        await self._poll(obs, _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "FAILURE")))
+        assert f"ci-gating-outage|{self.VIEW}" not in flags
+
+    async def test_outage_flag_kept_while_board_still_red(self):
+        obs, bb, flags = _flag_observer()
+        flags[f"ci-gating-outage|{self.VIEW}"] = "evt-out|escalated"
+        await self._poll(obs, _make_view_scan_result(self._jobs("FAILURE", "FAILURE", "FAILURE")))
+        assert flags[f"ci-gating-outage|{self.VIEW}"] == "evt-out|escalated"
+
+    async def test_group_recovery_is_noop_in_dry_run(self):
+        obs, bb, flags = _flag_observer(dry_run=True)
+        flags["ci-gating-flood|4.23"] = "evt-flood|escalated"
+        flags[f"ci-gating-outage|{self.VIEW}"] = "evt-out|escalated"
+        await self._poll(obs, _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "SUCCESS")))
+        bb.clear_escalation_flag.assert_not_called()
+        assert len(flags) == 2
+
+    async def test_group_recovery_clear_error_does_not_break_poll(self):
+        obs, bb, flags = _flag_observer()
+        flags["ci-gating-flood|4.23"] = "evt-flood|escalated"
+        bb.clear_escalation_flag.side_effect = RuntimeError("redis down")
+        await self._poll(obs, _make_view_scan_result(self._jobs("SUCCESS", "SUCCESS", "SUCCESS")))
+        bb.stage_jenkins_signal.assert_not_called()
+
+    async def test_group_names_used_for_dedup_match_recovery_keys(self):
+        """Writer/clearer agreement: _process_candidates builds the same keys recovery clears."""
+        obs, bb, flags = _flag_observer()
+        seen: list[str] = []
+        obs._is_duplicate_or_escalated = AsyncMock(side_effect=lambda s: seen.append(s) or True)
+        flood = [(f"j{i}", _make_meta(job_name=f"j{i}")) for i in range(2)]
+        outage = [("view-outage:V", {"result": "BOARD_RED", "view": "V", "job_name": "view-outage:V"})]
+        await obs._process_candidates([flood, outage])
+        assert seen == ["ci-gating-flood|4.23", "ci-gating-outage|V"]
