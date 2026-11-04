@@ -53,6 +53,7 @@ from .types import (
     LLMResponse,
     TokenUsage,
     PRIORITY_NORMAL,
+    process_stream_call_syntax_buffer,
     sanitize_call_syntax,
 )
 
@@ -436,7 +437,7 @@ class GeminiAdapter:
                 raw_parts=raw_parts,
                 usage=token_usage,
             )
-        return LLMResponse(text=clean_text or response.text, raw_parts=raw_parts, usage=token_usage)
+        return LLMResponse(text=clean_text, raw_parts=raw_parts, usage=token_usage)
 
     # -----------------------------------------------------------------
     # LLMPort: generate_stream (async iterator)
@@ -531,6 +532,7 @@ class GeminiAdapter:
             dropped_fcs = 0
             drain_deadline = 0.0
             accumulated_stream_text = ""
+            stream_text_buffer = ""
             stream_iter = stream.__aiter__()
             loop = asyncio.get_running_loop()
             while True:
@@ -596,14 +598,24 @@ class GeminiAdapter:
 
                 if chunk.text:
                     accumulated_stream_text += chunk.text
-                    clean_chunk_text = CALL_SYNTAX_RE.sub("", chunk.text)
-                    if clean_chunk_text:
-                        yield LLMChunk(text=clean_chunk_text)
+                    stream_text_buffer += chunk.text
+                    to_yield, stream_text_buffer = process_stream_call_syntax_buffer(stream_text_buffer)
+                    if to_yield:
+                        yield LLMChunk(text=to_yield)
 
                 if chunk_fcs:
                     pending_fc = chunk_fcs[0]
                     dropped_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + drain_timeout
+
+            if stream_text_buffer:
+                clean_tail = CALL_SYNTAX_RE.sub("", stream_text_buffer)
+                idx = clean_tail.find("[!call:")
+                if idx != -1:
+                    clean_tail = clean_tail[:idx]
+                if clean_tail:
+                    yield LLMChunk(text=clean_tail)
+                stream_text_buffer = ""
 
             if dropped_fcs:
                 logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")

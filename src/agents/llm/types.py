@@ -117,7 +117,7 @@ def derive_llm_priority(event) -> int:
 
 
 # Pattern matching hallucinated tool call syntax [!call:name:{json_args}!]
-CALL_SYNTAX_RE = re.compile(r"\[!call:([a-zA-Z0-9_]+):\s*(\{.*?\})\s*!\]", re.DOTALL)
+CALL_SYNTAX_RE = re.compile(r"\[!call:([a-zA-Z0-9_]+):\s*(.*?)\s*!\]", re.DOTALL)
 
 
 def sanitize_call_syntax(text: str | None) -> str | None:
@@ -126,6 +126,30 @@ def sanitize_call_syntax(text: str | None) -> str | None:
         return text
     cleaned = CALL_SYNTAX_RE.sub("", text).strip()
     return cleaned if cleaned else None
+
+
+def process_stream_call_syntax_buffer(buffer: str) -> tuple[str, str]:
+    """Strip completed [!call:...!] tags and hold back partial tags across stream chunks.
+
+    Returns (text_to_yield, remaining_buffer).
+    """
+    if not buffer:
+        return "", ""
+
+    buffer = CALL_SYNTAX_RE.sub("", buffer)
+    if not buffer:
+        return "", ""
+
+    idx = buffer.find("[!call:")
+    if idx != -1:
+        return buffer[:idx], buffer[idx:]
+
+    for length in range(min(len(buffer), len("[!call:") - 1), 0, -1):
+        suffix = buffer[-length:]
+        if "[!call:".startswith(suffix):
+            return buffer[:-length], suffix
+
+    return buffer, ""
 
 
 

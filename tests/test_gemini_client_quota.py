@@ -665,3 +665,136 @@ class TestGeminiCallSyntaxFallback:
         assert terminal.function_call.name == "close_event"
         assert terminal.function_call.args == {"summary": "All fixed"}
 
+    @pytest.mark.asyncio
+    async def test_generate_parses_nested_json_call_syntax(self):
+        """Exercises nested objects and arrays in call syntax (guards against non-greedy regex truncation)."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        mock_response.text = (
+            'Creating plan now: [!call:create_plan:{"title": "Deploy Service", '
+            '"steps": [{"id": 1, "cmd": "apply"}, {"id": 2, "cmd": "rollout"}], '
+            '"meta": {"author": "darwin"}}!] Please wait.'
+        )
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is not None
+        assert res.function_call.name == "create_plan"
+        assert res.function_call.args == {
+            "title": "Deploy Service",
+            "steps": [{"id": 1, "cmd": "apply"}, {"id": 2, "cmd": "rollout"}],
+            "meta": {"author": "darwin"},
+        }
+        assert res.text == "Creating plan now:  Please wait."
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_handles_split_tag_across_chunks(self):
+        """Verifies partial call syntax split across provider chunks is not leaked to live stream."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        chunk1 = MagicMock()
+        chunk1.text = "Wrapping up work now. [!call:set_"
+        chunk1.candidates = []
+        chunk1.function_calls = []
+        chunk1.usage_metadata = None
+
+        chunk2 = MagicMock()
+        chunk2.text = 'phase:{"phase": "close", "reasoning": "all tasks done"}!] Have a good day!'
+        chunk2.candidates = []
+        chunk2.function_calls = []
+        chunk2.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk1
+            yield chunk2
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        received_chunks = []
+        async for chunk in adapter.generate_stream(
+            system_prompt="sys",
+            contents="user prompt",
+        ):
+            received_chunks.append(chunk)
+
+        # Non-terminal text chunks must NEVER contain [!call: or tag fragments
+        text_chunks = [c.text for c in received_chunks if c.text]
+        assert "[!call:" not in "".join(text_chunks)
+        assert "phase:{" not in "".join(text_chunks)
+        assert "".join(text_chunks).strip() == "Wrapping up work now.  Have a good day!"
+
+        terminal = received_chunks[-1]
+        assert terminal.done is True
+        assert terminal.function_call is not None
+        assert terminal.function_call.name == "set_phase"
+        assert terminal.function_call.args == {"phase": "close", "reasoning": "all tasks done"}
+
+    @pytest.mark.asyncio
+    async def test_generate_unparseable_call_syntax_does_not_reemit_raw_syntax(self):
+        """When call syntax fails JSON decode, clean_text is None and raw syntax is never re-emitted."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        # Entire text is an invalid call block (not valid JSON args)
+        mock_response.text = '[!call:broken_tool:{not valid json}!] '
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is None
+        # Must NOT fall back to response.text containing the raw [!call:...] block
+        assert res.text is None
+
+    def test_process_stream_call_syntax_buffer_unit(self):
+        """Unit test for process_stream_call_syntax_buffer logic."""
+        from src.agents.llm.types import process_stream_call_syntax_buffer
+
+        # Normal text yields immediately
+        to_yield, buf = process_stream_call_syntax_buffer("Hello world!")
+        assert to_yield == "Hello world!"
+        assert buf == ""
+
+        # Trailing bracket held back
+        to_yield, buf = process_stream_call_syntax_buffer("Click here: [")
+        assert to_yield == "Click here: "
+        assert buf == "["
+
+        # Incomplete tag held back
+        to_yield, buf = process_stream_call_syntax_buffer("Closing now: [!call:set_phase:{")
+        assert to_yield == "Closing now: "
+        assert buf == "[!call:set_phase:{"
+
+        # Complete tag stripped
+        to_yield, buf = process_stream_call_syntax_buffer(buf + '"phase": "close"}!] Done.')
+        assert to_yield == " Done."
+        assert buf == ""
+

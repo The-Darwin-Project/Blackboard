@@ -2415,9 +2415,13 @@ class Brain:
                 # waiting for the user exactly like wait_for_user does, and that state must
                 # never auto-close regardless of duration (see @ai-rules #50).
                 self._waiting_for_user[event_id] = time.time()
+        elif accumulated_text:
+            logger.warning(
+                f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)}): {accumulated_text[:120]!r}"
+            )
 
         self._reasoning_by_event.pop(event_id, None)
-        if accumulated_text or accumulated_thoughts:
+        if clean_text or accumulated_thoughts:
             return False
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")
