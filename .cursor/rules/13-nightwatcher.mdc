@@ -58,10 +58,11 @@ pending  ->  inflight  ->  commit / requeue
 ```
 
 1. **Staging**: Brain's `report_incident` handler pushes to `darwin:nightwatcher:pending` when `NIGHTWATCHER_ENABLED=true`.
-2. **Lease**: `lease_pending_escalations()` atomically moves all pending items to `darwin:nightwatcher:inflight`.
-3. **Commit**: On success, `commit_inflight()` deletes the inflight set. On partial success, commit only successful events.
-4. **Requeue**: On crash or error, `requeue_inflight()` moves items back to pending (called on `start()` and on sweep failure).
-5. **Restage**: On partial failure, `restage_orphans()` returns failed cluster events to pending for the next sweep.
+2. **Lease**: `lease_pending_escalations(before_ts, limit)` atomically moves the OLDEST `limit` (`NIGHTWATCHER_BATCH_SIZE`, default 25) pending items to `darwin:nightwatcher:inflight`. It never leases the whole queue (an unbounded lease overflowed the TPM bucket -- VMER-2236).
+3. **Batch loop**: one sweep drains up to `NIGHTWATCHER_MAX_BATCHES` batches (pausing `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` between them) while pending >= `NIGHTWATCHER_MIN_PENDING`. It stops early on quota exhaustion, failure, or a batch that created no incidents. All batches merge into ONE `ShiftReport` for the `date:window` key.
+4. **Commit**: `commit_inflight()` removes events whose Jira incident exists. This also happens on failure paths.
+5. **Requeue**: On crash, `requeue_inflight()` moves inflight items back to pending (called on `start()`).
+6. **Restage**: `restage_orphans()` returns ONLY uncommitted members to pending (original `staged_at` preserved) and clears them from inflight. Members whose incident already exists are never restaged -- Jira writes are not idempotent.
 
 ## Tool Naming Convention
 
@@ -96,6 +97,10 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `NIGHTWATCHER_SWEEP_CRON` | `0 6,18 * * *` | Cron expression for sweep schedule (06:00 and 18:00 UTC) |
 | `NIGHTWATCHER_MIN_PENDING` | `1` | Minimum pending escalations to trigger a sweep |
 | `NIGHTWATCHER_DISPATCH_CAP` | `3` | Max ephemeral investigations per sweep |
+| `NIGHTWATCHER_BATCH_SIZE` | `25` | Max escalations leased per batch. Non-numeric/empty falls back to `25`; a numeric `<1` is clamped to `1` (`_env_int`). `NIGHTWATCHER_MIN_PENDING` is clamped to it |
+| `NIGHTWATCHER_MAX_BATCHES` | `10` | Max batches drained per sweep |
+| `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | `30` | Pause between batches within a sweep |
+| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | `1800` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) |
 | `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
 | `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` | Max output tokens per LLM turn |
@@ -110,7 +115,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 
 ## Safety Invariants
 
-1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` enforces this before any Jira writes.
+1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` (pure, `auto_reconcile=False` by default) enforces this before any Jira writes. Sole exception: on the FINAL declare retry only, unassigned events are grouped by `reconcile_cluster_plan()` into a clearly-flagged fallback cluster (`auto_reconciled=True`, not a correlation claim) instead of failing the sweep. Unknown/duplicate IDs are always rejected.
 2. `MAX_ANALYSIS_ROUNDS = 30` caps the analysis loop (review + investigate phases). Report phase is bounded by N declared clusters.
 3. `requeue_inflight()` on startup recovers from prior crashes -- no data loss.
 4. Phase transitions are forward-only and single-step. LLM cannot skip phases.

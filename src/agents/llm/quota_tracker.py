@@ -5,6 +5,9 @@
 # 3. [Gotcha]: Thinking tokens dominate cost (59/68 in probe). char/4 estimates are 5-10x low. 80% headroom is essential.
 # 4. [Pattern]: get_stats() is the PV observation point for the /telemetry/llm endpoint.
 # 5. [Architecture]: Reservation handles decouple acquire budget from TTFT; rollback applies negative delta.
+# 6. [Constraint]: A request larger than the whole bucket raises RequestExceedsBurstError (subclass of QuotaExhaustedError) IMMEDIATELY,
+#    before any reservation. It is PERMANENT for that payload: Brain._is_transient must treat it as non-retryable, and callers
+#    (Nightwatcher) must shrink the request rather than wait. Plain QuotaExhaustedError (window timeout) stays transient.
 """
 Token-bucket rate limiter for Vertex AI Gemini calls.
 
@@ -28,6 +31,16 @@ logger = logging.getLogger(__name__)
 
 class QuotaExhaustedError(Exception):
     """Raised when acquire() times out waiting for quota capacity."""
+
+
+class RequestExceedsBurstError(QuotaExhaustedError):
+    """Raised when a single request is larger than the whole bucket.
+
+    Unlike plain QuotaExhaustedError this is PERMANENT for the given payload: no amount
+    of waiting frees enough capacity, so callers must not treat it as a transient
+    rate-limit (see Brain._is_transient). Subclasses QuotaExhaustedError so existing
+    handlers (e.g. Nightwatcher's sweep) still catch it.
+    """
 
 
 @dataclass(frozen=True)
@@ -85,8 +98,15 @@ class QuotaTracker:
         """Block until the bucket has capacity for estimated_tokens.
 
         Returns a Reservation handle on success.
-        Raises QuotaExhaustedError if max_wait_seconds is exceeded.
+        Raises QuotaExhaustedError if max_wait_seconds is exceeded, or RequestExceedsBurstError
+        (a QuotaExhaustedError subclass, non-transient) if the payload alone exceeds the burst limit.
         """
+        if estimated_tokens > self._burst_limit:
+            raise RequestExceedsBurstError(
+                f"Request of {estimated_tokens} estimated tokens exceeds the burst limit "
+                f"({self._burst_limit}) and can never be admitted. Reduce the request size."
+            )
+
         deadline = time.monotonic() + max_wait_seconds
         throttled = False
 

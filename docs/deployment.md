@@ -200,8 +200,28 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `NIGHTWATCHER_SWEEP_CRON` | Cron schedule for sweeps | `0 6,18 * * *` |
 | `NIGHTWATCHER_MIN_PENDING` | Min pending escalations to trigger | `1` |
 | `NIGHTWATCHER_DISPATCH_CAP` | Max ephemeral investigations per sweep | `3` |
+| `NIGHTWATCHER_BATCH_SIZE` | Max escalations leased per batch (bounds the LLM prompt). Non-numeric/empty falls back to `25`; a numeric value `<1` is clamped to `1` (not `25`). `NIGHTWATCHER_MIN_PENDING` is clamped to it | `25` |
+| `NIGHTWATCHER_MAX_BATCHES` | Max batches drained per sweep (`BATCH_SIZE` x `MAX_BATCHES` per sweep) | `10` |
+| `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | Pause between batches within a sweep | `30` |
+| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) | `1800` |
 | `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
+
+#### Nightwatcher backlog runbook
+
+The sweep drains the pending queue itself: up to `NIGHTWATCHER_BATCH_SIZE` x `NIGHTWATCHER_MAX_BATCHES` escalations per cron fire. To discard stale entries (default: older than 7 days) before or during a large backlog, use `scripts/drain_nightwatcher_backlog.py`. It is an **age-off** tool only and does not process the live backlog.
+
+```bash
+# 1. Read-only report (default; --dry-run is implied without --execute)
+REDIS_HOST=<redis-host> REDIS_PORT=6379 REDIS_PASSWORD=... python scripts/drain_nightwatcher_backlog.py --age-off-days 7
+# 2. Remove stale items. Critical items are kept unless --include-critical.
+#    Every removed member is first appended (0600) to a JSONL backup, so deletion is reversible.
+python scripts/drain_nightwatcher_backlog.py --execute --age-off-days 7 --batch-size 25 --backup-file ./pruned.jsonl
+```
+
+The script logs the Redis target (`REDIS_URL`, or `REDIS_HOST`/`REDIS_PORT`) before doing anything. Reads are bounded (`ZRANGEBYSCORE ... LIMIT`), so it is safe to run against a live queue.
+
+If a Shift shows `quota_exhausted`, the batch was restaged and retried next sweep. If it shows `failed` with an "exceeds the TPM burst limit" log/Slack alert, lower `NIGHTWATCHER_BATCH_SIZE`.
 
 ### Authentication
 

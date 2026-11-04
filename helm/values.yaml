@@ -657,7 +657,11 @@ cortex:
 nightwatcher:
   enabled: false # Set to true to intercept Brain escalations for batch consolidation
   sweepCron: "0 6,18 * * *" # Twice daily: 06:00 UTC (morning) and 18:00 UTC (evening)
-  minPending: "1" # Minimum pending escalations to trigger a sweep
+  minPending: "1" # Minimum pending escalations to trigger a sweep (clamped to batchSize)
+  batchSize: "25" # Max escalations leased per batch. Bounds the LLM prompt (VMER-2236); non-numeric/empty falls back to 25; a numeric value < 1 is clamped to 1 (NOT 25), so never set it below 1.
+  maxBatches: "10" # Max batches drained per sweep (batchSize x maxBatches escalations/sweep). Remainder waits for the next cron fire.
+  batchCooldownSeconds: "30" # Pause between batches within one sweep (lets the shared TPM bucket refill)
+  batchTimeoutSeconds: "1800" # Per-batch circuit breaker timeout (seconds). Clamped to [60, 3300] to safely settle batch and restage before inflight TTL (3600s) expires.
   dispatchCap: "3" # Max investigation dispatches per sweep
 # =============================================================================
 # Dex OIDC Identity Provider (bundled, reverse-proxied via Brain at /dex/*)

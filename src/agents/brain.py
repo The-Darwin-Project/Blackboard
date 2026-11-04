@@ -2444,7 +2444,9 @@ class Brain:
     @staticmethod
     def _is_transient(e: Exception) -> bool:
         """Check if exception is a transient rate-limit or availability error."""
-        from .llm.quota_tracker import QuotaExhaustedError
+        from .llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
+        if isinstance(e, RequestExceedsBurstError):
+            return False  # Payload larger than the whole bucket: retrying can never succeed
         if isinstance(e, QuotaExhaustedError):
             return True
         err_str = str(e)

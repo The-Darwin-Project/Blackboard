@@ -2848,8 +2848,8 @@ return 1
         await self.redis.zadd(self.NIGHTWATCHER_PENDING, {payload: data.staged_at})
         logger.info("Nightwatcher: staged escalation %s (service=%s)", data.event_id, data.service)
 
-    async def lease_pending_escalations(self, before_ts: float) -> tuple[list, list[str]]:
-        """Atomically lease all pending escalations: move from pending ZSET to inflight SET.
+    async def lease_pending_escalations(self, before_ts: float, limit: int = 25) -> tuple[list, list[str]]:
+        """Atomically lease pending escalations up to limit: move from pending ZSET to inflight SET.
 
         Returns (parsed_escalations, raw_json_members) tuple. The raw JSON strings
         are needed for commit_inflight() and requeue -- the inflight SET stores
@@ -2862,7 +2862,9 @@ return 1
             try:
                 async with self.redis.pipeline(transaction=True) as pipe:
                     await pipe.watch(self.NIGHTWATCHER_PENDING)
-                    members = await pipe.zrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
+                    members = await pipe.zrangebyscore(
+                        self.NIGHTWATCHER_PENDING, "-inf", before_ts, start=0, num=limit
+                    )
                     if not members:
                         await pipe.reset()
                         return [], []
@@ -2881,6 +2883,15 @@ return 1
         escalations = [StagedEscalation.model_validate_json(jm) for jm in json_members]
         logger.info("Nightwatcher: leased %d escalations (inflight TTL=%ds)", len(escalations), self.INFLIGHT_TTL)
         return escalations, json_members
+
+    async def refresh_inflight_ttl(self) -> bool:
+        """Refresh the TTL on the inflight SET to prevent silent expiration during multi-batch sweeps.
+
+        Returns True if the timeout was set/extended, False if the key does not exist.
+        """
+        res = await self.redis.expire(self.NIGHTWATCHER_INFLIGHT, self.INFLIGHT_TTL)
+        logger.debug("Nightwatcher: refreshed inflight TTL=%ds (result=%s)", self.INFLIGHT_TTL, res)
+        return bool(res)
 
     async def commit_inflight(self, json_members: list[str]) -> None:
         """Remove committed items from inflight SET after successful persist."""
@@ -2938,19 +2949,41 @@ return 1
         return await self.redis.zcard(self.NIGHTWATCHER_PENDING)
 
     async def restage_orphans(self, json_members: list[str]) -> int:
-        """Re-stage orphan escalations back to pending ZSET for next sweep."""
+        """Re-stage orphan escalations back to pending ZSET for next sweep and clear inflight.
+
+        Every member in json_members is removed from inflight (prevents zombie leaks).
+        Members that parse are re-ZADDed with their original staged_at (a missing/null
+        staged_at falls back to now; an explicit 0.0 is preserved). Corrupt members are
+        dropped and counted separately in the log. Returns the number restaged.
+        """
         import json as _json
-        count = 0
+        if not json_members:
+            return 0
+        valid_items: list[tuple[str, float]] = []
+        corrupt = 0
+        now = time.time()
         for jm in json_members:
             try:
                 data = _json.loads(jm)
-                await self.redis.zadd(self.NIGHTWATCHER_PENDING, {jm: data.get("staged_at", 0.0)})
-                count += 1
+                raw_ts = data.get("staged_at")
+                staged_at = float(raw_ts) if raw_ts is not None else now
+                valid_items.append((jm, staged_at))
             except Exception:
-                logger.warning("Nightwatcher: corrupt orphan skipped: %s", jm[:100])
-        if count:
-            logger.warning("Nightwatcher: restaged %d orphan escalations", count)
-        return count
+                corrupt += 1
+                logger.warning("Nightwatcher: corrupt orphan dropped from restage: %s", str(jm)[:100])
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for jm, staged_at in valid_items:
+                pipe.zadd(self.NIGHTWATCHER_PENDING, {jm: staged_at})
+            # Always clear all leased members from inflight to prevent zombie leaks
+            pipe.srem(self.NIGHTWATCHER_INFLIGHT, *json_members)
+            await pipe.execute()
+
+        logger.warning(
+            "Nightwatcher: restaged %d orphan escalations, dropped %d corrupt, cleared %d from inflight",
+            len(valid_items), corrupt, len(json_members)
+        )
+        return len(valid_items)
 
     async def persist_shift_report(self, report) -> None:
         """Persist a ShiftReport for the Shifts UI. SET + ZADD index."""

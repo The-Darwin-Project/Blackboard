@@ -6,6 +6,7 @@
 """Unit tests for Nightwatcher tool execution and phase gating."""
 from __future__ import annotations
 
+import copy
 import os
 import pytest
 from unittest.mock import AsyncMock, patch
@@ -16,8 +17,10 @@ from src.observers.nightwatcher_tools import (
     execute_tool,
     get_phase_tools,
     validate_cluster_plan,
+    reconcile_cluster_plan,
     build_report_tool,
     build_summary_tool,
+    _handle_declare_clusters,
     _handle_write_incident,
     _PHASE_TOOLS,
 )
@@ -423,15 +426,119 @@ class TestValidateClusterPlan:
         assert ok is True
         assert error == ""
 
-    def test_missing_events(self):
-        """Returns specific error listing missing event IDs."""
+    def test_missing_events_without_auto_reconcile(self):
+        """Returns specific error listing missing event IDs when auto_reconcile=False."""
         clusters = [
             {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
         ]
-        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"}, auto_reconcile=False)
         assert ok is False
         assert "evt-2" in error
         assert "evt-3" in error
+
+    def test_auto_reconcile_defaults_to_false(self):
+        """M6: omitting auto_reconcile must reject unassigned events (no silent fabrication)."""
+        clusters = [
+            {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2"})
+        assert ok is False
+        assert "evt-2" in error
+
+    def test_validate_never_mutates_clusters_even_with_auto_reconcile(self):
+        """M6: validate_cluster_plan is pure -- the caller's list is untouched."""
+        clusters = [
+            {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        snapshot = copy.deepcopy(clusters)
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"}, auto_reconcile=True)
+        assert ok is True
+        assert error == ""
+        assert clusters == snapshot
+
+    def test_auto_reconcile_still_rejects_unknown_and_duplicate_ids(self):
+        """auto_reconcile only tolerates MISSING ids; unknown/duplicate stay fatal."""
+        unknown = [{"events": ["evt-1", "evt-x"], "root_cause": "r", "platform": "Konflux", "services": []}]
+        assert validate_cluster_plan(unknown, {"evt-1", "evt-2"}, auto_reconcile=True)[0] is False
+        dup = [
+            {"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": []},
+            {"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": []},
+        ]
+        assert validate_cluster_plan(dup, {"evt-1", "evt-2"}, auto_reconcile=True)[0] is False
+
+    def test_reconcile_returns_new_list_with_flagged_fallback(self):
+        """M6: fallback cluster has root_cause/services (so report builders don't render '?')."""
+        clusters = [
+            {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        snapshot = copy.deepcopy(clusters)
+        result = reconcile_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        assert clusters == snapshot, "caller's list must not be mutated"
+        assert result is not clusters
+        assert len(result) == 2
+        fallback = result[1]
+        assert set(fallback["events"]) == {"evt-2", "evt-3"}
+        assert fallback["events"] == sorted(fallback["events"])
+        assert fallback["auto_reconciled"] is True
+        assert fallback["root_cause"] and "NOT a shared root cause" in fallback["root_cause"]
+        assert isinstance(fallback["services"], list)
+        assert "platform" in fallback
+
+    def test_reconcile_noop_when_nothing_missing(self):
+        clusters = [{"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": []}]
+        result = reconcile_cluster_plan(clusters, {"evt-1"})
+        assert result == clusters
+        assert result is not clusters
+
+    def test_reconcile_platform_is_deterministic_from_missing_events(self):
+        """Platform comes from the unassigned events themselves (majority, alphabetical tie-break)."""
+        from src.agents.llm.types import VALID_PLATFORMS
+        from src.models import StagedEscalation
+        old = list(VALID_PLATFORMS)
+        VALID_PLATFORMS.clear()
+        VALID_PLATFORMS.extend(["Konflux", "Kargo", "General"])
+        try:
+            def esc(eid, platform, service="svc"):
+                return StagedEscalation(event_id=eid, service=service, source="aligner",
+                                        reason="r", summary="s", platform=platform)
+            by_id = {
+                "evt-1": esc("evt-1", "Konflux"),
+                "evt-2": esc("evt-2", "Kargo", "svc-b"),
+                "evt-3": esc("evt-3", "Kargo", "svc-a"),
+                "evt-4": esc("evt-4", "Bogus"),
+            }
+            clusters = [{"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": []}]
+            ids = set(by_id)
+            runs = [reconcile_cluster_plan(clusters, ids, by_id)[-1] for _ in range(5)]
+            assert {r["platform"] for r in runs} == {"Kargo"}  # majority of missing events
+            assert runs[0]["services"] == ["svc", "svc-a", "svc-b"]
+            # no usable per-event platform -> falls back to declared clusters
+            no_info = reconcile_cluster_plan(clusters, {"evt-1", "evt-9"}, None)[-1]
+            assert no_info["platform"] == "Konflux"
+            # nothing at all -> first SORTED valid platform, independent of list order
+            VALID_PLATFORMS[:] = ["Kargo", "General", "Konflux"]
+            empty_clusters = [{"events": ["evt-1"], "root_cause": "r", "platform": "", "services": []}]
+            assert reconcile_cluster_plan(empty_clusters, {"evt-1", "evt-2"}, None)[-1]["platform"] == "General"
+        finally:
+            VALID_PLATFORMS.clear()
+            VALID_PLATFORMS.extend(old)
+
+    @pytest.mark.asyncio
+    async def test_handle_declare_clusters_reconciles_without_mutating_args(self):
+        """The handler stores reconciled clusters on ctx but leaves the LLM args list intact."""
+        ctx = _make_ctx(manifest_ids={"evt-1", "evt-2"})
+        args = {"clusters": [{"events": ["evt-1"], "root_cause": "r", "platform": "Konflux", "services": []}]}
+        snapshot = copy.deepcopy(args)
+        result = await _handle_declare_clusters(args, ctx, auto_reconcile=True)
+        assert "accepted" in result
+        assert args == snapshot
+        assert len(ctx.declared_clusters) == 2
+        assert ctx.declared_clusters[1]["events"] == ["evt-2"]
+        # default (no reconcile) rejects and stores nothing
+        ctx2 = _make_ctx(manifest_ids={"evt-1", "evt-2"})
+        rejected = await _handle_declare_clusters(args, ctx2)
+        assert "validation failed" in rejected
+        assert ctx2.declared_clusters == []
 
     def test_duplicate_events(self):
         """Event in 2 clusters rejected."""

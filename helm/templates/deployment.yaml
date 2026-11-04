@@ -471,6 +471,14 @@ spec:
               value: "{{ .Values.nightwatcher.minPending }}"
             - name: NIGHTWATCHER_DISPATCH_CAP
               value: "{{ .Values.nightwatcher.dispatchCap }}"
+            - name: NIGHTWATCHER_BATCH_SIZE
+              value: "{{ .Values.nightwatcher.batchSize }}"
+            - name: NIGHTWATCHER_MAX_BATCHES
+              value: "{{ .Values.nightwatcher.maxBatches }}"
+            - name: NIGHTWATCHER_BATCH_COOLDOWN_SECONDS
+              value: "{{ .Values.nightwatcher.batchCooldownSeconds }}"
+            - name: NIGHTWATCHER_BATCH_TIMEOUT_SECONDS
+              value: '{{ .Values.nightwatcher.batchTimeoutSeconds | default "1800" }}'
             - name: LLM_MODEL_NIGHTWATCHER
               valueFrom:
                 configMapKeyRef:
