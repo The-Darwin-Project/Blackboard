@@ -2,6 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: Unit tests for GeminiAdapter quota acquisition budget (30s), _record_usage chokepoint, and stream rollback.
 # 2. [Pattern]: Validates T-1 and T-2 using mocks for LLM client and QuotaTracker.
+# 3. [Pattern]: TestBrainPriorityDerivation calls the production derive_llm_priority (llm/types.py, used by Brain._process_with_llm;
+#    PRIORITY_HIGH=0, PRIORITY_NORMAL=1). Never copy the heuristic into the test.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -9,7 +11,7 @@ import pytest
 
 from src.agents.llm.gemini_client import GeminiAdapter
 from src.agents.llm.quota_tracker import QuotaExhaustedError, QuotaTracker, Reservation
-from src.agents.llm.types import PRIORITY_NORMAL
+from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL, derive_llm_priority
 
 
 @pytest.fixture
@@ -520,89 +522,73 @@ class TestGeminiAndClaudePriorityForwarding:
 
 
 class TestBrainPriorityDerivation:
-    """Tests the exact priority calculation expression used in Brain._process_event_inner."""
+    """Tests derive_llm_priority, the production helper called by Brain._process_with_llm.
+
+    Brain computes priority once before its retry loop (PRIORITY_HIGH = 0, PRIORITY_NORMAL = 1). The tests call the
+    real helper rather than a copy of the heuristic so they cannot drift from production.
+    """
 
     @staticmethod
-    def _calculate_priority(event) -> int:
-        is_high_priority = (
-            event.source in ("chat", "slack", "jarvis")
-            or bool(getattr(event, "approved_by", None))
-            or any(
-                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject")
-                for turn in (event.conversation[-3:] if getattr(event, "conversation", None) else [])
-            )
-        )
-        return 0 if is_high_priority else 1
+    def _event(source="headhunter", approved_by=None, conversation=None):
+        return SimpleNamespace(source=source, approved_by=approved_by, conversation=conversation or [])
+
+    def test_constants_match_documented_values(self):
+        assert PRIORITY_HIGH == 0
+        assert PRIORITY_NORMAL == 1
 
     @pytest.mark.parametrize("source", ["chat", "slack", "jarvis"])
-    def test_interactive_sources_yield_priority_zero(self, source):
-        """source in ('chat', 'slack', 'jarvis') -> priority 0."""
-        event = SimpleNamespace(
-            source=source,
-            approved_by=None,
-            conversation=[],
-        )
-        assert self._calculate_priority(event) == 0
+    def test_interactive_sources_yield_priority_high(self, source):
+        assert derive_llm_priority(self._event(source=source)) == PRIORITY_HIGH
 
-    def test_approved_by_admin_yields_priority_zero(self):
-        """approved_by='admin' -> priority 0."""
-        event = SimpleNamespace(
-            source="headhunter",
-            approved_by="admin",
-            conversation=[],
-        )
-        assert self._calculate_priority(event) == 0
+    def test_approved_by_admin_yields_priority_high(self):
+        assert derive_llm_priority(self._event(approved_by="admin")) == PRIORITY_HIGH
 
-    @pytest.mark.parametrize("action", ["approve", "reject"])
-    def test_recent_user_approval_action_yields_priority_zero(self, action):
-        """conversation[-3:] has actor='user' and action='approve' or 'reject' -> priority 0."""
-        turn = SimpleNamespace(actor="user", action=action)
-        event = SimpleNamespace(
-            source="headhunter",
-            approved_by=None,
-            conversation=[turn],
-        )
-        assert self._calculate_priority(event) == 0
+    @pytest.mark.parametrize("action", ["approve", "reject", "message"])
+    def test_recent_user_action_yields_priority_high(self, action):
+        """user approve / reject / message in the last 3 turns -> HIGH (message included for non-chat events)."""
+        event = self._event(conversation=[SimpleNamespace(actor="user", action=action)])
+        assert derive_llm_priority(event) == PRIORITY_HIGH
 
-    @pytest.mark.parametrize("action", ["approve", "reject"])
-    def test_user_approval_in_last_three_turns_yields_priority_zero(self, action):
-        """User action within last 3 turns yields priority 0 even when preceded by other turns."""
+    @pytest.mark.parametrize("action", ["approve", "reject", "message"])
+    def test_user_action_in_last_three_turns_yields_priority_high(self, action):
         turns = [
             SimpleNamespace(actor="headhunter", action="evidence"),
             SimpleNamespace(actor="user", action=action),
             SimpleNamespace(actor="brain", action="reply"),
         ]
-        event = SimpleNamespace(
-            source="headhunter",
-            approved_by=None,
-            conversation=turns,
-        )
-        assert self._calculate_priority(event) == 0
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
 
-    def test_user_approval_older_than_three_turns_does_not_boost_priority(self):
-        """User approval at turn -4 (outside last 3) does not elevate background priority."""
+    def test_user_action_older_than_three_turns_does_not_boost_priority(self):
+        """User turn at index -4 (outside the [-3:] window) does not elevate background priority."""
         turns = [
             SimpleNamespace(actor="user", action="approve"),
             SimpleNamespace(actor="brain", action="think"),
             SimpleNamespace(actor="brain", action="triage"),
             SimpleNamespace(actor="brain", action="reply"),
         ]
-        event = SimpleNamespace(
-            source="headhunter",
-            approved_by=None,
-            conversation=turns,
-        )
-        assert self._calculate_priority(event) == 1
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_NORMAL
 
-    @pytest.mark.parametrize("source", ["headhunter", "aligner"])
-    def test_background_events_without_approval_yield_priority_one(self, source):
-        """background events (source='headhunter', 'aligner', no approved_by) -> priority 1."""
-        event = SimpleNamespace(
-            source=source,
-            approved_by=None,
-            conversation=[],
-        )
-        assert self._calculate_priority(event) == 1
+    def test_user_action_at_window_boundary_still_boosts(self):
+        """User turn at index -3 is the oldest turn inside the window."""
+        turns = [
+            SimpleNamespace(actor="user", action="reject"),
+            SimpleNamespace(actor="brain", action="think"),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
 
+    def test_dict_turns_are_supported(self):
+        turns = [{"actor": "user", "action": "message"}]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
 
+    @pytest.mark.parametrize("source", ["headhunter", "aligner", "timekeeper"])
+    def test_background_events_without_user_activity_yield_priority_normal(self, source):
+        assert derive_llm_priority(self._event(source=source)) == PRIORITY_NORMAL
+
+    def test_non_user_actor_does_not_boost(self):
+        turns = [SimpleNamespace(actor="brain", action="approve")]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_NORMAL
+
+    def test_missing_conversation_attribute_is_normal(self):
+        event = SimpleNamespace(source="headhunter", approved_by=None, conversation=None)
+        assert derive_llm_priority(event) == PRIORITY_NORMAL

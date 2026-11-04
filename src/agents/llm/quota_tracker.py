@@ -8,6 +8,11 @@
 # 6. [Constraint]: A request larger than the whole bucket raises RequestExceedsBurstError (subclass of QuotaExhaustedError) IMMEDIATELY,
 #    before any reservation. It is PERMANENT for that payload: Brain._is_transient must treat it as non-retryable, and callers
 #    (Nightwatcher) must shrink the request rather than wait. Plain QuotaExhaustedError (window timeout) stays transient.
+# 7. [Pattern]: Priority gating: acquire(priority=PRIORITY_HIGH) registers in _high_priority_waiters for its whole wait; while
+#    that counter is > 0, every non-HIGH caller is gated (strict priority, no aging) even if capacity exists. Only
+#    `== PRIORITY_HIGH` is special; any other value is low priority. Gated callers still honour max_wait_seconds.
+# 8. [Constraint]: _high_priority_waiters is incremented/decremented in a try/finally inside acquire(); the decrement MUST stay
+#    in `finally` (success, timeout, cancellation). An underflow is logged as an error -- it signals a counter-balance bug.
 """
 Token-bucket rate limiter for Vertex AI Gemini calls.
 
@@ -176,6 +181,11 @@ class QuotaTracker:
                 await asyncio.sleep(wait)
         finally:
             if is_high_prio:
+                if self._high_priority_waiters <= 0:
+                    logger.error(
+                        "QuotaTracker: _high_priority_waiters underflow "
+                        f"(was {self._high_priority_waiters}); counter imbalance, clamping to 0"
+                    )
                 self._high_priority_waiters = max(0, self._high_priority_waiters - 1)
 
     def rollback(self, reservation: Reservation | None) -> None:

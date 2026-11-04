@@ -7,6 +7,11 @@
 # 5. [Pattern]: NIGHTWATCHER write_incident.description includes link guidance (MR URLs, pipeline IDs, Slack threads).
 # 6. [Pattern]: TokenUsage is provider-agnostic. Adapters normalize SDK usage_metadata into this dataclass.
 #    LLMResponse and LLMChunk carry optional usage for caller attribution.
+# 7. [Pattern]: derive_llm_priority(event) is the SINGLE production source of truth for Brain LLM call priority
+#    (PRIORITY_HIGH=0 / PRIORITY_NORMAL=1). Tests MUST import it -- never re-implement the heuristic inline.
+#    Only `== PRIORITY_HIGH` is semantically special in QuotaTracker; any other value is gated as low priority.
+# 8. [Gotcha]: derive_llm_priority is sticky via event.approved_by (boosts every LLM call until approval is revoked);
+#    the user-turn boost only looks at the last _RECENT_USER_TURN_WINDOW turns and decays after that.
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -70,6 +75,44 @@ class LLMChunk:
 
 PRIORITY_HIGH: int = 0
 PRIORITY_NORMAL: int = 1
+
+# Event sources that are interactive (a human is waiting on the response).
+_HIGH_PRIORITY_SOURCES: frozenset[str] = frozenset({"chat", "slack", "jarvis"})
+# User turn actions that signal an event is resuming from human interaction.
+_HIGH_PRIORITY_USER_ACTIONS: frozenset[str] = frozenset({"approve", "reject", "message"})
+# Only the most recent N conversation turns are inspected for a user action.
+_RECENT_USER_TURN_WINDOW: int = 3
+
+
+def _turn_field(turn, name: str):
+    """Read a field from a conversation turn that may be a raw dict or a model object."""
+    if isinstance(turn, dict):
+        return turn.get(name)
+    return getattr(turn, name, None)
+
+
+def derive_llm_priority(event) -> int:
+    """Classify an event's LLM calls as PRIORITY_HIGH or PRIORITY_NORMAL.
+
+    PRIORITY_HIGH when any of:
+      - event.source is interactive ("chat", "slack", "jarvis")
+      - event.approved_by is set (human approved; sticky until revoked)
+      - a user turn with action approve/reject/message appears in the last
+        _RECENT_USER_TURN_WINDOW conversation turns
+    Otherwise PRIORITY_NORMAL. Pure function; never raises on missing attributes.
+    """
+    if getattr(event, "source", None) in _HIGH_PRIORITY_SOURCES:
+        return PRIORITY_HIGH
+    if getattr(event, "approved_by", None):
+        return PRIORITY_HIGH
+    conversation = getattr(event, "conversation", None) or []
+    for turn in conversation[-_RECENT_USER_TURN_WINDOW:]:
+        if (
+            _turn_field(turn, "actor") == "user"
+            and _turn_field(turn, "action") in _HIGH_PRIORITY_USER_ACTIONS
+        ):
+            return PRIORITY_HIGH
+    return PRIORITY_NORMAL
 
 
 # =============================================================================

@@ -11,6 +11,10 @@
 # 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
 #    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
 #    cached_tokens = cache_read + cache_creation. total = all_input + output.
+# 10. [Gotcha]: `priority` and `thinking_level` on generate()/generate_stream() are INTENTIONAL no-ops. They exist only for
+#    LLMPort protocol conformance (Brain passes them to whichever adapter is active). ClaudeAdapter has no QuotaTracker
+#    gating (priority-aware reservation is Gemini-only) and does not map thinking_level. Do not 'wire them up' without a design.
+#    Callers must pass tool_choice/priority/thinking_level by keyword; their positional order is not a stable contract.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 

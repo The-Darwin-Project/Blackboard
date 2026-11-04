@@ -1,8 +1,12 @@
 # tests/test_brain_admission.py
 # @ai-rules:
-# 1. [Constraint]: Pure admission deduplication unit test against Brain._process_event_inner.
-# 2. [Pattern]: Uses mocked Blackboard with EventDocument models; no live Redis or LLM network calls.
-# 3. [Purpose]: Pin T-3 of VMER-2216: Turn 0 admission dedup for events matching parked waiting_approval siblings.
+# 1. [Constraint]: Brain unit tests with mocked Blackboard and real EventDocument/ConversationTurn models; no live Redis or LLM calls.
+#    Two concerns: (a) VMER-2216 T-3 admission dedup via Brain._process_event_inner; (b) VMER-2246 LLM priority derivation.
+# 2. [Constraint]: Priority tests MUST call the production derive_llm_priority (src/agents/llm/types.py). NEVER re-implement
+#    the heuristic inline in a test -- a copy drifts from production and tests nothing (this happened once in PR #308).
+# 3. [Pattern]: Priority boundary cases: last-3-turn window edge (-3 in, -4 out), approved_by sticky, user.message/approve/reject,
+#    dict-or-object turns. Update these together with the helper.
+# 4. [Purpose]: Pin T-3 of VMER-2216: Turn 0 admission dedup for events matching parked waiting_approval siblings.
 from __future__ import annotations
 
 import time
@@ -11,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agents.brain import Brain
+from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL, derive_llm_priority
 from src.models import (
     ConversationTurn,
     EventDocument,
@@ -139,81 +144,81 @@ async def test_admission_dedup_waiting_approval_sibling():
 
 
 class TestBrainPriorityDerivation:
+    """Exercises the REAL production helper derive_llm_priority (never an inline copy of the heuristic)."""
+
+    def test_brain_uses_production_helper(self):
+        """Brain re-uses the same helper object (guards against a re-introduced inline heuristic)."""
+        import src.agents.brain as brain_module
+        from src.agents.llm.types import derive_llm_priority
+
+        assert brain_module.derive_llm_priority is derive_llm_priority
+
     @pytest.mark.parametrize("source", ["chat", "slack", "jarvis"])
     def test_user_facing_sources_yield_high_priority(self, source):
         """User-facing event sources always classify as PRIORITY_HIGH."""
-        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
-
         event = _make_event_doc("evt-prio-1", source=source)
-        is_high = (
-            event.source in ("chat", "slack", "jarvis")
-            or any(
-                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
-                for turn in (event.conversation[-10:] if event.conversation else [])
-            )
-        )
-        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
-        assert priority == PRIORITY_HIGH
+        assert derive_llm_priority(event) == PRIORITY_HIGH
 
     @pytest.mark.parametrize("source", ["headhunter", "aligner", "timekeeper"])
     def test_background_sources_without_user_turns_yield_normal_priority(self, source):
         """Background sources without user interaction classify as PRIORITY_NORMAL."""
-        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
-
         event = _make_event_doc("evt-prio-2", source=source)
-        is_high = (
-            event.source in ("chat", "slack", "jarvis")
-            or any(
-                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
-                for turn in (event.conversation[-10:] if event.conversation else [])
-            )
-        )
-        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
-        assert priority == PRIORITY_NORMAL
+        assert derive_llm_priority(event) == PRIORITY_NORMAL
 
     @pytest.mark.parametrize("action", ["approve", "reject", "message"])
     def test_background_event_with_recent_user_turn_yields_high_priority(self, action):
-        """Automated event resuming from user approval, rejection, or message classifies as PRIORITY_HIGH."""
-        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
-
+        """Automated event resuming from user approve / reject / message classifies as PRIORITY_HIGH."""
         turns = [
             ConversationTurn(turn=1, actor="headhunter", action="evidence", status="evaluated"),
             ConversationTurn(turn=2, actor="brain", action="request_user_approval", status="evaluated"),
             ConversationTurn(turn=3, actor="user", action=action, status="evaluated"),
         ]
         event = _make_event_doc("evt-prio-3", source="headhunter", conversation=turns)
-        is_high = (
-            event.source in ("chat", "slack", "jarvis")
-            or any(
-                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
-                for turn in (event.conversation[-10:] if event.conversation else [])
-            )
-        )
-        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
-        assert priority == PRIORITY_HIGH
+        assert derive_llm_priority(event) == PRIORITY_HIGH
+
+    def test_approved_by_is_sticky_high_priority(self):
+        """approved_by set -> PRIORITY_HIGH even with no user turns in the window."""
+        event = _make_event_doc("evt-prio-approved", source="headhunter")
+        event.approved_by = "admin"
+        assert derive_llm_priority(event) == PRIORITY_HIGH
+
+    def test_user_turn_at_window_edge_is_high(self):
+        """User action at conversation[-3] (oldest turn still in the window) boosts priority."""
+        turns = [
+            ConversationTurn(turn=1, actor="user", action="message", status="evaluated"),
+            ConversationTurn(turn=2, actor="brain", action="think", status="evaluated"),
+            ConversationTurn(turn=3, actor="brain", action="triage", status="evaluated"),
+        ]
+        event = _make_event_doc("evt-prio-edge-in", source="headhunter", conversation=turns)
+        assert derive_llm_priority(event) == PRIORITY_HIGH
+
+    def test_user_turn_just_outside_window_is_normal(self):
+        """User action at conversation[-4] (outside the 3-turn window) does not boost background events."""
+        turns = [
+            ConversationTurn(turn=1, actor="user", action="message", status="evaluated"),
+            ConversationTurn(turn=2, actor="brain", action="think", status="evaluated"),
+            ConversationTurn(turn=3, actor="brain", action="triage", status="evaluated"),
+            ConversationTurn(turn=4, actor="brain", action="route", status="evaluated"),
+        ]
+        event = _make_event_doc("evt-prio-edge-out", source="headhunter", conversation=turns)
+        assert derive_llm_priority(event) == PRIORITY_NORMAL
+
+    @pytest.mark.parametrize("actor,action", [("brain", "approve"), ("headhunter", "message"), ("user", "evidence")])
+    def test_non_matching_actor_or_action_is_normal(self, actor, action):
+        """Only actor='user' with approve/reject/message boosts; other combinations stay NORMAL."""
+        turns = [ConversationTurn(turn=1, actor=actor, action=action, status="evaluated")]
+        event = _make_event_doc("evt-prio-nomatch", source="headhunter", conversation=turns)
+        assert derive_llm_priority(event) == PRIORITY_NORMAL
 
     def test_dict_and_object_turns_handled_defensively(self):
         """Turn lists with raw dicts or ConversationTurn objects evaluate without AttributeError."""
-        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
-
-        raw_turns = [
+        event = _make_event_doc("evt-prio-4", source="headhunter")
+        event.conversation = [  # type: ignore[assignment]
             {"actor": "headhunter", "action": "evidence"},
             {"actor": "user", "action": "approve"},
         ]
-        event = _make_event_doc("evt-prio-4", source="headhunter")
-        event.conversation = raw_turns  # type: ignore[assignment]
+        assert derive_llm_priority(event) == PRIORITY_HIGH
 
-        is_high = (
-            event.source in ("chat", "slack", "jarvis")
-            or any(
-                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
-                for turn in (event.conversation[-10:] if event.conversation else [])
-            )
-        )
-        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
-        assert priority == PRIORITY_HIGH
-
+    def test_empty_conversation_is_normal(self):
+        event = _make_event_doc("evt-prio-5", source="headhunter", conversation=[])
+        assert derive_llm_priority(event) == PRIORITY_NORMAL

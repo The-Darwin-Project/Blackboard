@@ -18,6 +18,9 @@
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
 # 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
+# 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
+#     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
+#     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
 # 12b. [Pattern]: Per-chunk stream timeout: asyncio.wait_for(anext(it), timeout=LLM_STREAM_CHUNK_TIMEOUT_SEC).
 #     On timeout: retry once (dedicated timeout_retries counter, independent from transient retries). On
 #     exhaustion: clear all accumulators, write timeout-specific error turn. The stream is closed (bounded
@@ -279,7 +282,7 @@ from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
-from .llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
+from .llm.types import derive_llm_priority
 
 
 class ContextFlags(TypedDict, total=False):
@@ -1920,6 +1923,9 @@ class Brain:
         chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "120"))
         timeout_retries = 0
 
+        # Priority is stable for the whole call (including retries): derive once, outside the retry loop.
+        llm_priority = derive_llm_priority(event)
+
         try:
             for attempt in range(max_retries + 1):
                 accumulated_text = ""
@@ -1938,16 +1944,6 @@ class Brain:
                     stream = None
                     stream_exhausted = False
                     try:
-                        is_high_priority = (
-                            event.source in ("chat", "slack", "jarvis")
-                            or bool(getattr(event, "approved_by", None))
-                            or any(
-                                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
-                                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject")
-                                for turn in (event.conversation[-3:] if event.conversation else [])
-                            )
-                        )
-                        priority = PRIORITY_HIGH if is_high_priority else PRIORITY_NORMAL
                         stream = self._adapter.generate_stream(
                             system_prompt=system_prompt,
                             contents=prompt,
@@ -1955,7 +1951,7 @@ class Brain:
                             temperature=call_temp,
                             max_output_tokens=phase_max_tokens,
                             thinking_level=thinking_level,
-                            priority=priority,
+                            priority=llm_priority,
                         )
                         it = stream.__aiter__()
                         last_thinking_pulse_time = time.time()

@@ -2,6 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: Unit tests for QuotaTracker reservation lifecycle, rollback, and monotonic time domain.
 # 2. [Pattern]: Validates T-1, T-9, clamping, and window pruning without sleeping.
+# 3. [Pattern]: Priority-gating tests must DISCRIMINATE: size capacity so only one waiter fits and make the low-priority
+#    waiter wake first, otherwise they pass on sleep timing alone (see test_high_priority_acquires_first_when_capacity_frees).
 """Unit tests for QuotaTracker reservation lifecycle and monotonic time domain."""
 import asyncio
 import time
@@ -193,37 +195,75 @@ class TestQuotaTrackerPriorityReservation:
 
     @pytest.mark.asyncio
     async def test_high_priority_acquires_first_when_capacity_frees(self, tracker):
-        """When window drains, waiting high-priority request is admitted before waiting low-priority request."""
-        # Fill capacity to limit
-        fill_res = await tracker.acquire(estimated_tokens=60000, max_wait_seconds=5.0)
+        """Freed capacity fits only ONE of two 10k waiters; the high-priority one must win even though it
+        queued later and wakes later than the low-priority one.
 
-        order = []
-        high_prio_started = asyncio.Event()
-
-        async def high_prio_caller():
-            high_prio_started.set()
-            res = await tracker.acquire(estimated_tokens=10000, max_wait_seconds=2.0, priority=0)
-            order.append("high")
-            return res
+        Discriminating setup (fails if priority gating is removed):
+          - bucket is full: 10k (released later) + 50k (kept) = 60k
+          - after releasing the 10k, headroom is exactly 10k -> only one waiter fits
+          - the low-priority waiter enters first with a short deadline, so its poll wakes (t~0.2s) BEFORE the
+            high-priority waiter's poll (t~1.0s). Without gating the low waiter grabs the 10k first and the
+            high waiter times out. With gating the low waiter is held back (and times out) and high is admitted.
+        """
+        release_res = await tracker.acquire(estimated_tokens=10000, max_wait_seconds=5.0)
+        await tracker.acquire(estimated_tokens=50000, max_wait_seconds=5.0)
+        assert tracker.get_stats()["tokens_used_60s"] == 60000
 
         async def low_prio_caller():
-            await high_prio_started.wait()
-            await asyncio.sleep(0.01)
-            res = await tracker.acquire(estimated_tokens=10000, max_wait_seconds=2.0, priority=1)
-            order.append("low")
-            return res
+            return await tracker.acquire(estimated_tokens=10000, max_wait_seconds=0.2, priority=PRIORITY_NORMAL)
 
-        high_task = asyncio.create_task(high_prio_caller())
+        async def high_prio_caller():
+            return await tracker.acquire(estimated_tokens=10000, max_wait_seconds=1.0, priority=PRIORITY_HIGH)
+
         low_task = asyncio.create_task(low_prio_caller())
+        await asyncio.sleep(0.01)  # low enters acquire first (no high waiter yet -> merely capacity-blocked)
+        high_task = asyncio.create_task(high_prio_caller())
+        await asyncio.sleep(0.01)  # high registered as waiter
+        assert tracker.get_stats()["high_priority_waiters"] == 1
 
-        await high_prio_started.wait()
+        # Free exactly one 10k slot.
+        tracker.rollback(release_res)
+
+        results = await asyncio.gather(low_task, high_task, return_exceptions=True)
+        low_result, high_result = results
+
+        assert isinstance(high_result, Reservation), f"high-priority waiter must be admitted, got {high_result!r}"
+        assert isinstance(low_result, QuotaExhaustedError), f"low-priority waiter must stay gated/blocked, got {low_result!r}"
+        stats = tracker.get_stats()
+        assert stats["tokens_used_60s"] == 60000
+        assert stats["high_priority_waiters"] == 0
+
+    @pytest.mark.asyncio
+    async def test_high_priority_waiter_underflow_is_logged_and_clamped(self, tracker, caplog):
+        """L-4: a decrement below zero is logged as an error and clamped at 0 (counter-imbalance signal)."""
+        import logging
+
+        await tracker.acquire(estimated_tokens=60000, max_wait_seconds=5.0)
+
+        async def high_prio_caller():
+            return await tracker.acquire(estimated_tokens=10000, max_wait_seconds=0.3, priority=PRIORITY_HIGH)
+
+        task = asyncio.create_task(high_prio_caller())
         await asyncio.sleep(0.02)
+        assert tracker._high_priority_waiters == 1
 
-        # Free capacity by rolling back the filling reservation
-        tracker.rollback(fill_res)
+        # Simulate an external imbalance while the waiter is still registered.
+        tracker._high_priority_waiters = 0
+        with caplog.at_level(logging.ERROR, logger="src.agents.llm.quota_tracker"):
+            with pytest.raises(QuotaExhaustedError):
+                await task
 
-        await asyncio.gather(high_task, low_task)
-        assert order[0] == "high"
+        assert tracker._high_priority_waiters == 0
+        assert any("underflow" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_balanced_high_priority_acquire_does_not_log_underflow(self, tracker, caplog):
+        """Normal balanced increment/decrement never emits the underflow error."""
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="src.agents.llm.quota_tracker"):
+            await tracker.acquire(estimated_tokens=5000, max_wait_seconds=1.0, priority=PRIORITY_HIGH)
+        assert not any("underflow" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_high_priority_waiter_counter_cleaned_up_on_timeout(self, tracker):
