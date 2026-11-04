@@ -100,7 +100,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `NIGHTWATCHER_BATCH_SIZE` | `25` | Max escalations leased per batch. Non-numeric/empty falls back to `25`; a numeric `<1` is clamped to `1` (`_env_int`). `NIGHTWATCHER_MIN_PENDING` is clamped to it |
 | `NIGHTWATCHER_MAX_BATCHES` | `10` | Max batches drained per sweep |
 | `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | `30` | Pause between batches within a sweep |
-| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | `1800` | Per-batch circuit breaker timeout (seconds); settles and restages before inflight TTL (3600s) |
+| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | `1800` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) |
 | `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
 | `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` | Max output tokens per LLM turn |

@@ -442,7 +442,7 @@ async def _handle_write_incident(args: dict, ctx: NightwatcherContext, cluster: 
         return "Jira incident adapter not configured. Incident not created."
     platform = cluster.get("platform", "")
     affected_events = cluster.get("events", [])
-    summary = (args.get("summary") or "")[:200]
+    summary = str(args.get("summary") or "")[:200]
     status = args.get("status", "New")
     if VALID_STATUSES and status not in VALID_STATUSES:
         fallback_status = VALID_STATUSES[0] if VALID_STATUSES else "New"
@@ -500,7 +500,7 @@ async def _handle_extend_incident(args: dict, ctx: NightwatcherContext, cluster:
         return "No extends_issue_key provided. Cannot extend incident."
     platform = cluster.get("platform", "")
     affected_events = cluster.get("events", [])
-    summary = (args.get("summary") or "")[:200]
+    summary = str(args.get("summary") or "")[:200]
     comment_body = args.get("comment", "")
 
     from .nightwatcher_prompt import extract_full_links
@@ -572,7 +572,7 @@ def build_extend_tool(cluster: dict, index: int, total: int, completed_reports: 
 
 
 async def _handle_post_shift_summary(args: dict, ctx: NightwatcherContext) -> str:
-    summary = args.get("summary") or ""
+    summary = str(args.get("summary") or "")
     if not summary.strip():
         return "Error: summary is empty. Provide the shift report text including escalation count, incident count, and key findings."
     ctx._summary_text = summary

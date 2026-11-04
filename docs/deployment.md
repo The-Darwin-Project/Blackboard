@@ -203,7 +203,7 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `NIGHTWATCHER_BATCH_SIZE` | Max escalations leased per batch (bounds the LLM prompt). Non-numeric/empty falls back to `25`; a numeric value `<1` is clamped to `1` (not `25`). `NIGHTWATCHER_MIN_PENDING` is clamped to it | `25` |
 | `NIGHTWATCHER_MAX_BATCHES` | Max batches drained per sweep (`BATCH_SIZE` x `MAX_BATCHES` per sweep) | `10` |
 | `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | Pause between batches within a sweep | `30` |
-| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | Per-batch circuit breaker timeout (seconds); settles and restages before inflight TTL (3600s) | `1800` |
+| `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) | `1800` |
 | `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
 

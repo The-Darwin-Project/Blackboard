@@ -1433,9 +1433,9 @@ def test_round3_backup_fchmod_failure_is_logged_not_swallowed(tmp_path, caplog):
     from scripts import drain_nightwatcher_backlog as drain
     path = tmp_path / "b.jsonl"
     with patch.object(drain.os, "fchmod", side_effect=PermissionError("nope")), \
-            caplog.at_level(logging.WARNING, logger="drain_nightwatcher_backlog"):
-        f = drain._open_backup(str(path))
-        f.close()
+            caplog.at_level(logging.ERROR, logger="drain_nightwatcher_backlog"), \
+            pytest.raises(PermissionError):
+        drain._open_backup(str(path))
     assert any("0o600" in r.getMessage() and "nope" in r.getMessage() for r in caplog.records)
 
 
@@ -1598,3 +1598,88 @@ async def test_round4_settle_commit_processed_failure_alerts_ops(board):
     assert obs._slack_notify.called
     msg = obs._slack_notify.call_args[0][0]
     assert "failed to commit 1 incidented events" in msg
+
+
+# ==============================================================================
+# Round 5: TTL Clamp, Analysis TTL Refresh, and Resilient Backlog Count
+# ==============================================================================
+
+def test_round5_batch_timeout_clamped_to_max():
+    """HIGH: NIGHTWATCHER_BATCH_TIMEOUT_SECONDS is clamped to MAX_BATCH_TIMEOUT_S (3300s)."""
+    from src.observers.nightwatcher import _env_float, MIN_BATCH_TIMEOUT_S, MAX_BATCH_TIMEOUT_S
+    with patch.dict("os.environ", {"NIGHTWATCHER_BATCH_TIMEOUT_SECONDS": "7200"}):
+        val = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", 1800.0, minimum=MIN_BATCH_TIMEOUT_S, maximum=MAX_BATCH_TIMEOUT_S)
+        assert val == 3300.0
+
+    with patch.dict("os.environ", {"NIGHTWATCHER_BATCH_TIMEOUT_SECONDS": "10"}):
+        val = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", 1800.0, minimum=MIN_BATCH_TIMEOUT_S, maximum=MAX_BATCH_TIMEOUT_S)
+        assert val == 60.0
+
+    with patch.dict("os.environ", {"NIGHTWATCHER_BATCH_TIMEOUT_SECONDS": "1200"}):
+        val = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", 1800.0, minimum=MIN_BATCH_TIMEOUT_S, maximum=MAX_BATCH_TIMEOUT_S)
+        assert val == 1200.0
+
+
+@pytest.mark.asyncio
+async def test_round5_analysis_loop_refreshes_inflight_ttl(board):
+    """HIGH: Analysis loop refreshes inflight TTL on each analysis round."""
+    await _stage_board(board, 2)
+    refresh_mock = AsyncMock(return_value=True)
+    board.refresh_inflight_ttl = refresh_mock
+
+    llm = ScriptedLLM()
+    obs = e2e_observer(board, llm)
+
+    await obs._sweep()
+    # Called at batch boundary + analysis loop + cart boundary
+    assert refresh_mock.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_round5_count_pending_escalations_failure_alerts_ops(board):
+    """MEDIUM: Redis error in count_pending_escalations() alerts ops and stops sweep safely."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM())
+    obs._slack_notify = AsyncMock()
+
+    board.count_pending_escalations = AsyncMock(side_effect=ConnectionError("Redis connection lost"))
+
+    await obs._sweep()
+    assert obs._slack_notify.called
+    msg = obs._slack_notify.call_args[0][0]
+    assert "failed to check pending escalations" in msg
+
+
+def test_round5_drain_nightwatcher_backlog_open_backup_fail_closed(tmp_path):
+    """LOW: _open_backup fails closed if os.fchmod raises OSError."""
+    from scripts.drain_nightwatcher_backlog import _open_backup
+    backup_file = tmp_path / "test-backup.jsonl"
+    with patch("os.fchmod", side_effect=OSError("NFS does not support chmod")), pytest.raises(PermissionError) as exc_info:
+        _open_backup(str(backup_file))
+    assert "Cannot enforce 0o600" in str(exc_info.value)
+    # Ensure no lingering open file descriptors or corrupted files
+    assert not backup_file.exists() or backup_file.stat().st_size == 0
+
+
+@pytest.mark.asyncio
+async def test_round5_summary_type_safety():
+    """LOW: Non-string and None summary inputs do not raise TypeError."""
+    from src.observers.nightwatcher_tools import _handle_write_incident, _handle_post_shift_summary, NightwatcherContext
+    ctx = NightwatcherContext(
+        blackboard=AsyncMock(), archivist=AsyncMock(), registry=AsyncMock(), bridge=AsyncMock(),
+        provisioner=AsyncMock(), incident_adapter=AsyncMock(), slack_notify=AsyncMock(),
+        manifest_services=set(), manifest_ids=set(), escalations_by_id={},
+        dispatch_count=0, dispatch_cap=3, created_incidents=[], investigations=[],
+    )
+    ctx.incident_adapter.create_incident = AsyncMock(return_value={"issue_key": "TEST-1", "issue_url": "http://jira"})
+
+    cluster = {"platform": "aws", "events": ["evt-1"], "root_cause": "test"}
+    # Summary is a dict or int or None
+    res = await _handle_write_incident({"summary": {"unexpected": "dict"}}, ctx, cluster)
+    assert "Incident created" in res
+    assert ctx.created_incidents[0].summary.startswith("{")
+
+    res_none = await _handle_write_incident({"summary": None}, ctx, cluster)
+    assert "Incident created" in res_none
+    assert ctx.created_incidents[1].summary == ""
+

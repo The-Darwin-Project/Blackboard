@@ -794,7 +794,7 @@ async def handle_notify_gitlab_result(
         project_id = args.get("project_id", gl_ctx.get("project_id"))
         mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
         result_type = args.get("result", "success")
-        summary = args.get("summary", "")
+        summary = str(args.get("summary") or "")
         reassign = args.get("reassign_reviewer", False)
         result_text = (
             f"GitLab notification queued: {result_type} on !{mr_iid} (project {project_id}). "

@@ -54,6 +54,7 @@ DEFAULT_MAX_BATCHES = 10
 DEFAULT_BATCH_COOLDOWN_S = 30.0
 DEFAULT_BATCH_TIMEOUT_S = 1800.0
 MIN_BATCH_TIMEOUT_S = 60.0
+MAX_BATCH_TIMEOUT_S = 3300.0  # 55m (< 3600s inflight TTL safety net)
 SUMMARY_PROMPT_CHARS = 140
 
 
@@ -77,7 +78,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+def _env_float(name: str, default: float, minimum: float = 0.0, maximum: Optional[float] = None) -> float:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
@@ -89,6 +90,9 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
     if value < minimum:
         logger.warning("Nightwatcher: %s=%s below minimum, clamping to %s", name, value, minimum)
         return minimum
+    if maximum is not None and value > maximum:
+        logger.warning("Nightwatcher: %s=%s above maximum, clamping to %s", name, value, maximum)
+        return maximum
     return value
 
 from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
@@ -206,7 +210,12 @@ class NightwatcherObserver:
             )
         max_batches = _env_int("NIGHTWATCHER_MAX_BATCHES", DEFAULT_MAX_BATCHES)
         cooldown_s = _env_float("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", DEFAULT_BATCH_COOLDOWN_S)
-        batch_timeout_s = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", DEFAULT_BATCH_TIMEOUT_S, minimum=MIN_BATCH_TIMEOUT_S)
+        batch_timeout_s = _env_float(
+            "NIGHTWATCHER_BATCH_TIMEOUT_SECONDS",
+            DEFAULT_BATCH_TIMEOUT_S,
+            minimum=MIN_BATCH_TIMEOUT_S,
+            maximum=MAX_BATCH_TIMEOUT_S,
+        )
 
         from ..agents.llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
         cumulative: "Optional[ShiftReport]" = None
@@ -313,7 +322,14 @@ class NightwatcherObserver:
             if batch_no >= max_batches:
                 logger.info("Nightwatcher: reached NIGHTWATCHER_MAX_BATCHES=%d, remaining backlog drains next sweep", max_batches)
                 return
-            remaining = await self.blackboard.count_pending_escalations()
+            try:
+                remaining = await self.blackboard.count_pending_escalations()
+            except Exception:
+                logger.exception("Nightwatcher: failed to count pending escalations after batch %d", batch_no)
+                await self._notify_ops(
+                    f":warning: Nightwatcher: failed to check pending escalations after batch {batch_no}. Stopping sweep."
+                )
+                return
             if not isinstance(remaining, int) or remaining < min_pending:
                 return
             logger.info("Nightwatcher: %d escalations still pending, cooling down %.0fs before next batch",
@@ -512,6 +528,8 @@ class NightwatcherObserver:
         text_nudge_count = 0
 
         for _ in range(MAX_ANALYSIS_ROUNDS):
+            if hasattr(self.blackboard, "refresh_inflight_ttl"):
+                await self.blackboard.refresh_inflight_ttl()
             tools = get_phase_tools(current_phase)
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
@@ -675,7 +693,7 @@ class NightwatcherObserver:
                     report_record = {
                         "index": i,
                         "platform": cluster.get("platform", ""),
-                        "summary": (response.function_call.args.get("summary") or "")[:200],
+                        "summary": str(response.function_call.args.get("summary") or "")[:200],
                         "priority": response.function_call.args.get("priority", "Normal"),
                         "status": response.function_call.args.get("status", "New"),
                         "affected_events": cluster.get("events", []),

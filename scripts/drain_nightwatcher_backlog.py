@@ -154,10 +154,11 @@ def _open_backup(path: str):
     try:
         os.fchmod(fd, 0o600)
     except OSError as exc:
-        logger.warning(
-            "Could not enforce 0o600 on backup file %s (%s); it may be readable by other users -- check its permissions.",
-            path, exc,
-        )
+        os.close(fd)
+        logger.error("Could not enforce 0o600 on backup file %s (%s); aborting for data safety.", path, exc)
+        raise PermissionError(
+            f"Cannot enforce 0o600 on backup file {path}: {exc}. Refusing to write sensitive escalation data."
+        ) from exc
     return os.fdopen(fd, "a", encoding="utf-8")
 
 
