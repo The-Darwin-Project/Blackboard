@@ -25,8 +25,9 @@ bump, config change) that matches the current error signature:
    - **report_incident** (offline record for Nightwatcher/Jira): Include the
      proposed fix in the incident description under "Proposed Fix (from Deep Memory)."
      This is the batch tracking artifact -- NOT the authorization channel.
-3. After sending both notifications, call request_user_approval with the fix proposal as plan_summary -- do NOT close the event.
-   Closing would discard the investigation context. The event stays active so that when the maintainer replies in Slack, FRIDAY resumes
+3. Call `take_note(category="cross-event")` with a note summarizing the proposed fix and target MR/PR object identifier before parking.
+4. After sending notifications and recording the note, call `request_user_approval` with the fix proposal as plan_summary to park the event in `waiting_approval` -- do NOT close the event.
+   Closing would discard the investigation context. The event stays in `waiting_approval` so that when the maintainer replies in Slack, FRIDAY resumes
    with full investigation context and executes the authorized fix. If the maintainer
    does not respond, the normal idle nudge cascade will eventually escalate or close.
 
