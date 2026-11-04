@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
+from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +240,9 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
         # Normalize temperature: 0.0-2.0 -> 0.0-1.0. Drop top_p (Claude rejects both).
         claude_temp = min(temperature / 2.0, 1.0)
@@ -273,7 +275,9 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> AsyncIterator[LLMChunk]:
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)

@@ -65,6 +65,14 @@ class LLMChunk:
 
 
 # =============================================================================
+# Priority Constants
+# =============================================================================
+
+PRIORITY_HIGH: int = 0
+PRIORITY_NORMAL: int = 1
+
+
+# =============================================================================
 # Port Protocol
 # =============================================================================
 
@@ -81,6 +89,7 @@ class LLMPort(Protocol):
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse: ...
 
     async def generate_stream(
@@ -93,6 +102,7 @@ class LLMPort(Protocol):
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> AsyncIterator[LLMChunk]: ...
 
 

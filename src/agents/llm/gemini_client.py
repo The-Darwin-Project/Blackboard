@@ -45,7 +45,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .quota_tracker import Reservation
-from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
+from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
 
 logger = logging.getLogger(__name__)
 
@@ -344,13 +344,16 @@ class GeminiAdapter:
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
         reservation = None
         if self._tracker:
-            reservation = await self._tracker.acquire(estimate, max_wait_seconds=30.0)
+            reservation = await self._tracker.acquire(
+                estimate, max_wait_seconds=30.0, priority=priority
+            )
 
         reservation_recorded = False
         try:
@@ -443,13 +446,16 @@ class GeminiAdapter:
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> AsyncIterator[LLMChunk]:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
         reservation = None
         if self._tracker:
-            reservation = await self._tracker.acquire(estimate, max_wait_seconds=30.0)
+            reservation = await self._tracker.acquire(
+                estimate, max_wait_seconds=30.0, priority=priority
+            )
 
         stream_iter = None
         last_usage = None

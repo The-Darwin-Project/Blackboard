@@ -279,6 +279,7 @@ from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
+from .llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
 
 
 class ContextFlags(TypedDict, total=False):
@@ -1937,6 +1938,16 @@ class Brain:
                     stream = None
                     stream_exhausted = False
                     try:
+                        is_high_priority = (
+                            event.source in ("chat", "slack", "jarvis")
+                            or bool(getattr(event, "approved_by", None))
+                            or any(
+                                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject")
+                                for turn in (event.conversation[-3:] if event.conversation else [])
+                            )
+                        )
+                        priority = PRIORITY_HIGH if is_high_priority else PRIORITY_NORMAL
                         stream = self._adapter.generate_stream(
                             system_prompt=system_prompt,
                             contents=prompt,
@@ -1944,6 +1955,7 @@ class Brain:
                             temperature=call_temp,
                             max_output_tokens=phase_max_tokens,
                             thinking_level=thinking_level,
+                            priority=priority,
                         )
                         it = stream.__aiter__()
                         last_thinking_pulse_time = time.time()

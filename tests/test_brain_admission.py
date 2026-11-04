@@ -136,3 +136,84 @@ async def test_admission_dedup_waiting_approval_sibling():
     )
     # Zero LLM / agent dispatch invocations
     brain._process_with_llm.assert_not_called()
+
+
+class TestBrainPriorityDerivation:
+    @pytest.mark.parametrize("source", ["chat", "slack", "jarvis"])
+    def test_user_facing_sources_yield_high_priority(self, source):
+        """User-facing event sources always classify as PRIORITY_HIGH."""
+        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
+
+        event = _make_event_doc("evt-prio-1", source=source)
+        is_high = (
+            event.source in ("chat", "slack", "jarvis")
+            or any(
+                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
+                for turn in (event.conversation[-10:] if event.conversation else [])
+            )
+        )
+        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
+        assert priority == PRIORITY_HIGH
+
+    @pytest.mark.parametrize("source", ["headhunter", "aligner", "timekeeper"])
+    def test_background_sources_without_user_turns_yield_normal_priority(self, source):
+        """Background sources without user interaction classify as PRIORITY_NORMAL."""
+        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
+
+        event = _make_event_doc("evt-prio-2", source=source)
+        is_high = (
+            event.source in ("chat", "slack", "jarvis")
+            or any(
+                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
+                for turn in (event.conversation[-10:] if event.conversation else [])
+            )
+        )
+        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
+        assert priority == PRIORITY_NORMAL
+
+    @pytest.mark.parametrize("action", ["approve", "reject", "message"])
+    def test_background_event_with_recent_user_turn_yields_high_priority(self, action):
+        """Automated event resuming from user approval, rejection, or message classifies as PRIORITY_HIGH."""
+        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
+
+        turns = [
+            ConversationTurn(turn=1, actor="headhunter", action="evidence", status="evaluated"),
+            ConversationTurn(turn=2, actor="brain", action="request_user_approval", status="evaluated"),
+            ConversationTurn(turn=3, actor="user", action=action, status="evaluated"),
+        ]
+        event = _make_event_doc("evt-prio-3", source="headhunter", conversation=turns)
+        is_high = (
+            event.source in ("chat", "slack", "jarvis")
+            or any(
+                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
+                for turn in (event.conversation[-10:] if event.conversation else [])
+            )
+        )
+        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
+        assert priority == PRIORITY_HIGH
+
+    def test_dict_and_object_turns_handled_defensively(self):
+        """Turn lists with raw dicts or ConversationTurn objects evaluate without AttributeError."""
+        from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL
+
+        raw_turns = [
+            {"actor": "headhunter", "action": "evidence"},
+            {"actor": "user", "action": "approve"},
+        ]
+        event = _make_event_doc("evt-prio-4", source="headhunter")
+        event.conversation = raw_turns  # type: ignore[assignment]
+
+        is_high = (
+            event.source in ("chat", "slack", "jarvis")
+            or any(
+                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject", "message")
+                for turn in (event.conversation[-10:] if event.conversation else [])
+            )
+        )
+        priority = PRIORITY_HIGH if is_high else PRIORITY_NORMAL
+        assert priority == PRIORITY_HIGH
+

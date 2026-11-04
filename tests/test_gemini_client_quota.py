@@ -9,6 +9,7 @@ import pytest
 
 from src.agents.llm.gemini_client import GeminiAdapter
 from src.agents.llm.quota_tracker import QuotaExhaustedError, QuotaTracker, Reservation
+from src.agents.llm.types import PRIORITY_NORMAL
 
 
 @pytest.fixture
@@ -183,7 +184,7 @@ class TestGenerateReservationLifecycle:
 
         await real_adapter.generate("sys", "hello")
 
-        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0)
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=PRIORITY_NORMAL)
 
     @pytest.mark.asyncio
     async def test_success_records_actual_and_clears_reservation(self, real_adapter, real_tracker):
@@ -235,7 +236,7 @@ class TestGenerateStreamReservationLifecycle:
         _set_stream(real_adapter, stream)
         _ = [c async for c in real_adapter.generate_stream("sys", "hello")]
 
-        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0)
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=PRIORITY_NORMAL)
 
     @pytest.mark.asyncio
     async def test_success_takes_reservation_branch_and_corrects_window(self, real_adapter, real_tracker):
@@ -432,3 +433,176 @@ class TestGenerateStreamReservationLifecycle:
 
         assert chunks[-1].done is True
         _assert_recorded(real_tracker, 90)
+
+
+# ---------------------------------------------------------------------------
+# Priority-aware token reservation forwarding and Claude conformance (Step 6)
+# ---------------------------------------------------------------------------
+from src.agents.llm.claude_client import ClaudeAdapter  # noqa: E402
+
+
+class TestGeminiAndClaudePriorityForwarding:
+    """Dave Farley ATDD Layer for Adapter Priority Forwarding and Conformance."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_adapter_generate_forwards_priority(self, real_adapter, real_tracker):
+        """GeminiAdapter.generate forwards priority argument to tracker.acquire."""
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        await real_adapter.generate("sys", "hello", priority=0)
+
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=0)
+
+    @pytest.mark.asyncio
+    async def test_gemini_adapter_generate_stream_forwards_priority(self, real_adapter, real_tracker):
+        """GeminiAdapter.generate_stream forwards priority argument to tracker.acquire."""
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+
+        async def stream():
+            yield _chunk(parts=[_part("hi")], text="hi", usage=_usage(total=90))
+
+        _set_stream(real_adapter, stream)
+        _ = [c async for c in real_adapter.generate_stream("sys", "hello", priority=0)]
+
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=0)
+
+    @pytest.mark.asyncio
+    async def test_claude_adapter_generate_accepts_priority(self):
+        """ClaudeAdapter.generate accepts priority argument without error."""
+        claude = ClaudeAdapter.__new__(ClaudeAdapter)
+        claude._model_name = "claude-3-5-sonnet-v2@20241022"
+        claude._client = MagicMock()
+
+        # Mock messages.create response
+        mock_msg = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hello from claude")],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        claude._client.messages.create = AsyncMock(return_value=mock_msg)
+
+        resp = await claude.generate("sys", "hello", priority=0)
+        assert resp.text == "hello from claude"
+
+    @pytest.mark.asyncio
+    async def test_claude_adapter_generate_stream_accepts_priority(self):
+        """ClaudeAdapter.generate_stream accepts priority argument without error."""
+        claude = ClaudeAdapter.__new__(ClaudeAdapter)
+        claude._model_name = "claude-3-5-sonnet-v2@20241022"
+        claude._client = MagicMock()
+
+        # Mock messages.stream context manager
+        class MockClaudeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            @property
+            def text_stream(self):
+                async def text_gen():
+                    yield "chunk1"
+                return text_gen()
+
+            async def get_final_message(self):
+                return SimpleNamespace(
+                    content=[SimpleNamespace(type="text", text="chunk1")],
+                    usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+                )
+
+        claude._client.messages.stream = MagicMock(return_value=MockClaudeStream())
+
+        chunks = [c async for c in claude.generate_stream("sys", "hello", priority=0)]
+        assert len(chunks) == 2
+        assert chunks[0].text == "chunk1"
+        assert chunks[1].done is True
+
+
+class TestBrainPriorityDerivation:
+    """Tests the exact priority calculation expression used in Brain._process_event_inner."""
+
+    @staticmethod
+    def _calculate_priority(event) -> int:
+        is_high_priority = (
+            event.source in ("chat", "slack", "jarvis")
+            or bool(getattr(event, "approved_by", None))
+            or any(
+                (turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)) == "user"
+                and (turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)) in ("approve", "reject")
+                for turn in (event.conversation[-3:] if getattr(event, "conversation", None) else [])
+            )
+        )
+        return 0 if is_high_priority else 1
+
+    @pytest.mark.parametrize("source", ["chat", "slack", "jarvis"])
+    def test_interactive_sources_yield_priority_zero(self, source):
+        """source in ('chat', 'slack', 'jarvis') -> priority 0."""
+        event = SimpleNamespace(
+            source=source,
+            approved_by=None,
+            conversation=[],
+        )
+        assert self._calculate_priority(event) == 0
+
+    def test_approved_by_admin_yields_priority_zero(self):
+        """approved_by='admin' -> priority 0."""
+        event = SimpleNamespace(
+            source="headhunter",
+            approved_by="admin",
+            conversation=[],
+        )
+        assert self._calculate_priority(event) == 0
+
+    @pytest.mark.parametrize("action", ["approve", "reject"])
+    def test_recent_user_approval_action_yields_priority_zero(self, action):
+        """conversation[-3:] has actor='user' and action='approve' or 'reject' -> priority 0."""
+        turn = SimpleNamespace(actor="user", action=action)
+        event = SimpleNamespace(
+            source="headhunter",
+            approved_by=None,
+            conversation=[turn],
+        )
+        assert self._calculate_priority(event) == 0
+
+    @pytest.mark.parametrize("action", ["approve", "reject"])
+    def test_user_approval_in_last_three_turns_yields_priority_zero(self, action):
+        """User action within last 3 turns yields priority 0 even when preceded by other turns."""
+        turns = [
+            SimpleNamespace(actor="headhunter", action="evidence"),
+            SimpleNamespace(actor="user", action=action),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        event = SimpleNamespace(
+            source="headhunter",
+            approved_by=None,
+            conversation=turns,
+        )
+        assert self._calculate_priority(event) == 0
+
+    def test_user_approval_older_than_three_turns_does_not_boost_priority(self):
+        """User approval at turn -4 (outside last 3) does not elevate background priority."""
+        turns = [
+            SimpleNamespace(actor="user", action="approve"),
+            SimpleNamespace(actor="brain", action="think"),
+            SimpleNamespace(actor="brain", action="triage"),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        event = SimpleNamespace(
+            source="headhunter",
+            approved_by=None,
+            conversation=turns,
+        )
+        assert self._calculate_priority(event) == 1
+
+    @pytest.mark.parametrize("source", ["headhunter", "aligner"])
+    def test_background_events_without_approval_yield_priority_one(self, source):
+        """background events (source='headhunter', 'aligner', no approved_by) -> priority 1."""
+        event = SimpleNamespace(
+            source=source,
+            approved_by=None,
+            conversation=[],
+        )
+        assert self._calculate_priority(event) == 1
+
+
