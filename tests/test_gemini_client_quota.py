@@ -592,3 +592,76 @@ class TestBrainPriorityDerivation:
     def test_missing_conversation_attribute_is_normal(self):
         event = SimpleNamespace(source="headhunter", approved_by=None, conversation=None)
         assert derive_llm_priority(event) == PRIORITY_NORMAL
+
+
+class TestGeminiCallSyntaxFallback:
+    """Tests regex fallback parsing for hallucinated [!call:name:{args}!] tool calls."""
+
+    @pytest.mark.asyncio
+    async def test_generate_parses_call_syntax_and_cleans_text(self):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        mock_response.text = 'Closing now! [!call:set_phase:{"phase": "close", "reasoning": "done"}!]'
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is not None
+        assert res.function_call.name == "set_phase"
+        assert res.function_call.args == {"phase": "close", "reasoning": "done"}
+        assert res.text == "Closing now!"
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_parses_call_syntax_and_strips_chunks(self):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        chunk1 = MagicMock()
+        chunk1.text = "All resolved. "
+        chunk1.candidates = []
+        chunk1.function_calls = []
+        chunk1.usage_metadata = None
+
+        chunk2 = MagicMock()
+        chunk2.text = '[!call:close_event:{"summary": "All fixed"}!]'
+        chunk2.candidates = []
+        chunk2.function_calls = []
+        chunk2.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk1
+            yield chunk2
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        received_chunks = []
+        async for chunk in adapter.generate_stream(
+            system_prompt="sys",
+            contents="user prompt",
+        ):
+            received_chunks.append(chunk)
+
+        assert received_chunks[0].text == "All resolved. "
+        terminal = received_chunks[-1]
+        assert terminal.done is True
+        assert terminal.function_call is not None
+        assert terminal.function_call.name == "close_event"
+        assert terminal.function_call.args == {"summary": "All fixed"}
+

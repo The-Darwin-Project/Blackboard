@@ -38,6 +38,7 @@ generate_content / generate_content_stream.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -45,9 +46,52 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .quota_tracker import Reservation
-from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
+from .types import (
+    CALL_SYNTAX_RE,
+    FunctionCall,
+    LLMChunk,
+    LLMResponse,
+    TokenUsage,
+    PRIORITY_NORMAL,
+    sanitize_call_syntax,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_call_syntax(text: str | None) -> tuple[FunctionCall | None, str | None]:
+    """Parse fallback [!call:name:{args}!] syntax emitted as text by the model.
+
+    Returns (FunctionCall | None, cleaned_text).
+    """
+    if not text:
+        return None, text
+    match = CALL_SYNTAX_RE.search(text)
+    if not match:
+        return None, text
+    fn_name = match.group(1)
+    raw_args = match.group(2)
+    cleaned_text = CALL_SYNTAX_RE.sub("", text).strip()
+    try:
+        parsed_args = json.loads(raw_args)
+        if isinstance(parsed_args, dict):
+            logger.warning(
+                "Gemini wire adapter: parsed fallback [!call:%s:...] from text",
+                fn_name,
+            )
+            return FunctionCall(name=fn_name, args=parsed_args), (cleaned_text or None)
+        logger.warning(
+            "Gemini wire adapter: fallback [!call:%s:...] args not a JSON object: %r",
+            fn_name,
+            raw_args,
+        )
+    except Exception as e:
+        logger.warning(
+            "Gemini wire adapter: failed to parse fallback [!call:%s:...]: %s",
+            fn_name,
+            e,
+        )
+    return None, (cleaned_text or None)
 
 
 def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
@@ -376,13 +420,23 @@ class GeminiAdapter:
 
         if response.function_calls:
             fc = response.function_calls[0]
+            clean_text = sanitize_call_syntax(response.text) if response.text else response.text
             return LLMResponse(
                 function_call=FunctionCall(name=fc.name, args=fc.args or {}),
-                text=response.text,
+                text=clean_text or None,
                 raw_parts=raw_parts,
                 usage=token_usage,
             )
-        return LLMResponse(text=response.text, raw_parts=raw_parts, usage=token_usage)
+
+        fallback_fc, clean_text = _extract_call_syntax(response.text)
+        if fallback_fc:
+            return LLMResponse(
+                function_call=fallback_fc,
+                text=clean_text,
+                raw_parts=raw_parts,
+                usage=token_usage,
+            )
+        return LLMResponse(text=clean_text or response.text, raw_parts=raw_parts, usage=token_usage)
 
     # -----------------------------------------------------------------
     # LLMPort: generate_stream (async iterator)
@@ -476,6 +530,7 @@ class GeminiAdapter:
             pending_fc = None
             dropped_fcs = 0
             drain_deadline = 0.0
+            accumulated_stream_text = ""
             stream_iter = stream.__aiter__()
             loop = asyncio.get_running_loop()
             while True:
@@ -540,7 +595,10 @@ class GeminiAdapter:
                     continue
 
                 if chunk.text:
-                    yield LLMChunk(text=chunk.text)
+                    accumulated_stream_text += chunk.text
+                    clean_chunk_text = CALL_SYNTAX_RE.sub("", chunk.text)
+                    if clean_chunk_text:
+                        yield LLMChunk(text=clean_chunk_text)
 
                 if chunk_fcs:
                     pending_fc = chunk_fcs[0]
@@ -554,11 +612,23 @@ class GeminiAdapter:
             output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
             all_parts = thought_parts + output_parts
 
+            if pending_fc is None and accumulated_stream_text:
+                fallback_fc, _ = _extract_call_syntax(accumulated_stream_text)
+                if fallback_fc:
+                    pending_fc = fallback_fc
+
             token_usage = self._record_usage(last_usage, estimate, reservation=reservation)
             reservation_recorded = True
 
+            fc_obj = None
+            if pending_fc:
+                if isinstance(pending_fc, FunctionCall):
+                    fc_obj = pending_fc
+                else:
+                    fc_obj = FunctionCall(name=pending_fc.name, args=pending_fc.args or {})
+
             yield LLMChunk(
-                function_call=FunctionCall(name=pending_fc.name, args=pending_fc.args or {}) if pending_fc else None,
+                function_call=fc_obj,
                 done=True,
                 raw_parts=all_parts,
                 grounding_metadata=last_grounding,

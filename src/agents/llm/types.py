@@ -20,6 +20,7 @@ from this module and never touch SDK-specific types directly.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
@@ -113,6 +114,19 @@ def derive_llm_priority(event) -> int:
         ):
             return PRIORITY_HIGH
     return PRIORITY_NORMAL
+
+
+# Pattern matching hallucinated tool call syntax [!call:name:{json_args}!]
+CALL_SYNTAX_RE = re.compile(r"\[!call:([a-zA-Z0-9_]+):\s*(\{.*?\})\s*!\]", re.DOTALL)
+
+
+def sanitize_call_syntax(text: str | None) -> str | None:
+    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text."""
+    if not text:
+        return text
+    cleaned = CALL_SYNTAX_RE.sub("", text).strip()
+    return cleaned if cleaned else None
+
 
 
 # =============================================================================

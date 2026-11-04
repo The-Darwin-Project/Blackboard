@@ -282,7 +282,7 @@ from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
-from .llm.types import derive_llm_priority
+from .llm.types import derive_llm_priority, sanitize_call_syntax
 
 
 class ContextFlags(TypedDict, total=False):
@@ -2105,13 +2105,14 @@ class Brain:
         ]
         if _THOUGHT_SIG_V2 and len(function_calls) > 1:
             # Flush text before batch
-            if accumulated_text and not response_emitted:
+            clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
+            if clean_accumulated and not response_emitted:
                 if is_terminal:
                     response_turn = ConversationTurn(
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="response",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                         evidence=grounding_evidence if grounding_evidence else None,
                         response_parts=None,
                     )
@@ -2124,7 +2125,7 @@ class Brain:
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="thoughts",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
 
@@ -2269,13 +2270,14 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
-            if accumulated_text and not response_emitted:
+            clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
+            if clean_accumulated and not response_emitted:
                 if is_terminal:
                     response_turn = ConversationTurn(
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="response",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                         evidence=grounding_evidence if grounding_evidence else None,
                         response_parts=None,
                     )
@@ -2288,7 +2290,7 @@ class Brain:
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="thoughts",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
 
@@ -2389,14 +2391,15 @@ class Brain:
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
             self._last_processed[event_id] = time.time()
 
-        if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
+        clean_text = sanitize_call_syntax(accumulated_text)
+        if clean_text:  # Text-only response is always terminal -- no tool, loop ends
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="response",
-                thoughts=accumulated_text,
+                thoughts=clean_text,
                 evidence=grounding_evidence if grounding_evidence else None,
                 response_parts=captured_parts,
                 # waitingFor="user" marks this persisted turn as a wait_for_user-equivalent
