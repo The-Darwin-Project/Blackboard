@@ -53,6 +53,7 @@ DEFAULT_BATCH_SIZE = 25
 DEFAULT_MAX_BATCHES = 10
 DEFAULT_BATCH_COOLDOWN_S = 30.0
 DEFAULT_BATCH_TIMEOUT_S = 1800.0
+MIN_BATCH_TIMEOUT_S = 60.0
 SUMMARY_PROMPT_CHARS = 140
 
 
@@ -85,7 +86,10 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
     except ValueError:
         logger.warning("Nightwatcher: invalid %s=%r, using default %s", name, raw, default)
         return default
-    return max(minimum, value)
+    if value < minimum:
+        logger.warning("Nightwatcher: %s=%s below minimum, clamping to %s", name, value, minimum)
+        return minimum
+    return value
 
 from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
 from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
@@ -202,7 +206,7 @@ class NightwatcherObserver:
             )
         max_batches = _env_int("NIGHTWATCHER_MAX_BATCHES", DEFAULT_MAX_BATCHES)
         cooldown_s = _env_float("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", DEFAULT_BATCH_COOLDOWN_S)
-        batch_timeout_s = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", DEFAULT_BATCH_TIMEOUT_S, minimum=0.01)
+        batch_timeout_s = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", DEFAULT_BATCH_TIMEOUT_S, minimum=MIN_BATCH_TIMEOUT_S)
 
         from ..agents.llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
         cumulative: "Optional[ShiftReport]" = None
@@ -235,9 +239,9 @@ class NightwatcherObserver:
                 await self.blackboard.requeue_inflight()
                 return
 
-            system_prompt = build_system_prompt(escalations, window_start, window_end)
             self._batch_ctx = None
             try:
+                system_prompt = build_system_prompt(escalations, window_start, window_end)
                 # Refresh inflight TTL at the start of each batch so multi-batch sweeps do not expire
                 if hasattr(self.blackboard, "refresh_inflight_ttl"):
                     await self.blackboard.refresh_inflight_ttl()
@@ -387,6 +391,11 @@ class NightwatcherObserver:
         except Exception:
             commit_ok = False
             logger.exception("Nightwatcher: failed to commit %d incidented events during %s settle", len(done_ids), status)
+            if done_ids:
+                await self._notify_ops(
+                    f":warning: Nightwatcher failed to commit {len(done_ids)} incidented events during {status} settle. "
+                    f"Incidented event IDs: {', '.join(sorted(done_ids)[:10])}"
+                )
 
         # Step B: give every NON-incidented member back to pending.
         rest = [jm for jm, e in zip(json_members, escalations) if e.event_id not in done_ids]

@@ -1541,7 +1541,7 @@ async def test_round4_batch_timeout_settles_and_restages(board):
 
     obs._run_analysis_loop = hanging_analysis
 
-    with patch.dict("os.environ", {
+    with patch("src.observers.nightwatcher.MIN_BATCH_TIMEOUT_S", 0.05), patch.dict("os.environ", {
         "NIGHTWATCHER_BATCH_TIMEOUT_SECONDS": "0.1",
     }):
         await obs._sweep()
@@ -1554,3 +1554,47 @@ async def test_round4_batch_timeout_settles_and_restages(board):
     assert obs._slack_notify.called
     msg = obs._slack_notify.call_args[0][0]
     assert "timed out" in msg
+
+
+@pytest.mark.asyncio
+async def test_round4_build_system_prompt_failure_settles_and_restages(board):
+    """HIGH: Exception in build_system_prompt() is caught, settling batch and restaging items."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM())
+
+    with patch("src.observers.nightwatcher.build_system_prompt", side_effect=ValueError("bad prompt template")):
+        await obs._sweep()
+
+    report = await e2e_latest_report(board)
+    assert report.status == "failed"
+    # Verify restage occurred - all items should be back in pending
+    assert await board.count_pending_escalations() == 2
+
+
+@pytest.mark.asyncio
+async def test_round4_settle_commit_processed_failure_alerts_ops(board):
+    """MEDIUM: Failure in _commit_processed during settle alerts ops via Slack."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM(boom={(1, "analysis"): QuotaExhaustedError("q")}))
+    obs._slack_notify = AsyncMock()
+    board.commit_inflight = AsyncMock(side_effect=ConnectionError("redis timeout"))
+
+    # Mock ctx to pretend 1 event was already incidented
+    async def mock_analysis(*args, **kwargs):
+        ctx = NightwatcherContext(
+            blackboard=board, archivist=AsyncMock(), registry=AsyncMock(), bridge=AsyncMock(),
+            provisioner=AsyncMock(), incident_adapter=AsyncMock(), slack_notify=obs._slack_notify,
+            manifest_services={"svc-1"}, manifest_ids={"evt-001"},
+            escalations_by_id={"evt-001": make_escalation("evt-001")},
+            dispatch_count=0, dispatch_cap=3,
+            created_incidents=[incident("evt-001", key="VMER-100")], investigations=[],
+        )
+        obs._batch_ctx = ctx
+        raise QuotaExhaustedError("q")
+
+    obs._run_analysis_loop = mock_analysis
+
+    await obs._sweep()
+    assert obs._slack_notify.called
+    msg = obs._slack_notify.call_args[0][0]
+    assert "failed to commit 1 incidented events" in msg
