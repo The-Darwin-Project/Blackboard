@@ -8,6 +8,11 @@
 # 6. [Constraint]: A request larger than the whole bucket raises RequestExceedsBurstError (subclass of QuotaExhaustedError) IMMEDIATELY,
 #    before any reservation. It is PERMANENT for that payload: Brain._is_transient must treat it as non-retryable, and callers
 #    (Nightwatcher) must shrink the request rather than wait. Plain QuotaExhaustedError (window timeout) stays transient.
+# 7. [Pattern]: Priority gating: acquire(priority=PRIORITY_HIGH) registers in _high_priority_waiters for its whole wait; while
+#    that counter is > 0, every non-HIGH caller is gated (strict priority, no aging) even if capacity exists. Only
+#    `== PRIORITY_HIGH` is special; any other value is low priority. Gated callers still honour max_wait_seconds.
+# 8. [Constraint]: _high_priority_waiters is incremented/decremented in a try/finally inside acquire(); the decrement MUST stay
+#    in `finally` (success, timeout, cancellation). An underflow is logged as an error -- it signals a counter-balance bug.
 """
 Token-bucket rate limiter for Vertex AI Gemini calls.
 
@@ -26,7 +31,18 @@ import time
 from collections import deque
 import uuid
 
+from .types import PRIORITY_HIGH, PRIORITY_NORMAL
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "PRIORITY_HIGH",
+    "PRIORITY_NORMAL",
+    "QuotaExhaustedError",
+    "RequestExceedsBurstError",
+    "Reservation",
+    "QuotaTracker",
+]
 
 
 class QuotaExhaustedError(Exception):
@@ -69,6 +85,7 @@ class QuotaTracker:
         self._total_requests = 0
         self._total_tokens = 0
         self._throttle_events = 0
+        self._high_priority_waiters: int = 0
         logger.info(
             f"QuotaTracker initialized: tpm={limit}, "
             f"sustained={self._sustained_limit} (burst={burst_factor})"
@@ -94,13 +111,21 @@ class QuotaTracker:
 
         return max(0, sum(tokens for _, tokens, *_ in self._window))
 
-    async def acquire(self, estimated_tokens: int, max_wait_seconds: float = 120.0) -> Reservation:
+    async def acquire(
+        self,
+        estimated_tokens: int,
+        max_wait_seconds: float = 120.0,
+        priority: int = PRIORITY_NORMAL,
+    ) -> Reservation:
         """Block until the bucket has capacity for estimated_tokens.
 
         Returns a Reservation handle on success.
         Raises QuotaExhaustedError if max_wait_seconds is exceeded, or RequestExceedsBurstError
         (a QuotaExhaustedError subclass, non-transient) if the payload alone exceeds the burst limit.
         """
+        if isinstance(estimated_tokens, bool) or not isinstance(estimated_tokens, int) or estimated_tokens <= 0:
+            raise ValueError(f"estimated_tokens must be a positive integer, got {estimated_tokens!r}")
+
         if estimated_tokens > self._burst_limit:
             raise RequestExceedsBurstError(
                 f"Request of {estimated_tokens} estimated tokens exceeds the burst limit "
@@ -110,39 +135,58 @@ class QuotaTracker:
         deadline = time.monotonic() + max_wait_seconds
         throttled = False
 
-        while True:
-            current = self._prune()
-            if current + estimated_tokens <= self._burst_limit:
-                now = time.monotonic()
-                res = Reservation(id=str(uuid.uuid4()), tokens=estimated_tokens, timestamp=now)
-                self._window.append((now, estimated_tokens, res.id))
-                self._total_requests += 1
-                self._total_tokens += estimated_tokens
-                self._active_reservations[res.id] = res
+        is_high_prio = (priority == PRIORITY_HIGH)
+        try:
+            if is_high_prio:
+                self._high_priority_waiters += 1
+            while True:
+                current = self._prune()
+                is_gated = (not is_high_prio and self._high_priority_waiters > 0)
+                if not is_gated and (current + estimated_tokens <= self._burst_limit):
+                    now = time.monotonic()
+                    res = Reservation(id=str(uuid.uuid4()), tokens=estimated_tokens, timestamp=now)
+                    self._window.append((now, estimated_tokens, res.id))
+                    self._total_requests += 1
+                    self._total_tokens += estimated_tokens
+                    self._active_reservations[res.id] = res
 
-                if current > self._sustained_limit:
-                    logger.debug(
-                        f"QuotaTracker: above sustained limit "
-                        f"({current}/{self._sustained_limit}), allowing burst"
+                    if current > self._sustained_limit:
+                        logger.debug(
+                            f"QuotaTracker: above sustained limit "
+                            f"({current}/{self._sustained_limit}), allowing burst"
+                        )
+                    return res
+
+                if not throttled:
+                    self._throttle_events += 1
+                    throttled = True
+
+                if time.monotonic() >= deadline:
+                    raise QuotaExhaustedError(
+                        f"Quota exhausted: {current}/{self._tpm_limit} tokens used in last 60s. "
+                        f"Waited {max_wait_seconds:.1f}s for {estimated_tokens} tokens without capacity."
                     )
-                return res
 
-            if not throttled:
-                self._throttle_events += 1
-                throttled = True
-
-            if time.monotonic() >= deadline:
-                raise QuotaExhaustedError(
-                    f"Quota exhausted: {current}/{self._tpm_limit} tokens in window, "
-                    f"waited {max_wait_seconds}s"
-                )
-
-            wait = min(2.0, deadline - time.monotonic())
-            logger.warning(
-                f"QuotaTracker: throttling ({current}/{self._sustained_limit} tokens). "
-                f"Waiting {wait:.1f}s..."
-            )
-            await asyncio.sleep(wait)
+                wait = max(0.01, min(2.0, deadline - time.monotonic()))
+                if is_gated:
+                    logger.info(
+                        f"QuotaTracker: gated by {self._high_priority_waiters} high-priority waiter(s). "
+                        f"Waiting {wait:.1f}s..."
+                    )
+                else:
+                    logger.warning(
+                        f"QuotaTracker: throttling ({current}/{self._sustained_limit} tokens). "
+                        f"Waiting {wait:.1f}s..."
+                    )
+                await asyncio.sleep(wait)
+        finally:
+            if is_high_prio:
+                if self._high_priority_waiters <= 0:
+                    logger.error(
+                        "QuotaTracker: _high_priority_waiters underflow "
+                        f"(was {self._high_priority_waiters}); counter imbalance, clamping to 0"
+                    )
+                self._high_priority_waiters = max(0, self._high_priority_waiters - 1)
 
     def rollback(self, reservation: Reservation | None) -> None:
         """Rollback an active reservation on timeout, exception, or empty response."""
@@ -207,4 +251,5 @@ class QuotaTracker:
             "total_tokens": self._total_tokens,
             "throttle_events": self._throttle_events,
             "active_reservations": len(self._active_reservations),
+            "high_priority_waiters": self._high_priority_waiters,
         }

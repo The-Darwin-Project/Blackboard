@@ -18,6 +18,9 @@
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
 # 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
+# 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
+#     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
+#     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
 # 12b. [Pattern]: Per-chunk stream timeout: asyncio.wait_for(anext(it), timeout=LLM_STREAM_CHUNK_TIMEOUT_SEC).
 #     On timeout: retry once (dedicated timeout_retries counter, independent from transient retries). On
 #     exhaustion: clear all accumulators, write timeout-specific error turn. The stream is closed (bounded
@@ -279,6 +282,7 @@ from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
+from .llm.types import derive_llm_priority, sanitize_call_syntax
 
 
 class ContextFlags(TypedDict, total=False):
@@ -1919,6 +1923,9 @@ class Brain:
         chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "120"))
         timeout_retries = 0
 
+        # Priority is stable for the whole call (including retries): derive once, outside the retry loop.
+        llm_priority = derive_llm_priority(event)
+
         try:
             for attempt in range(max_retries + 1):
                 accumulated_text = ""
@@ -1944,6 +1951,7 @@ class Brain:
                             temperature=call_temp,
                             max_output_tokens=phase_max_tokens,
                             thinking_level=thinking_level,
+                            priority=llm_priority,
                         )
                         it = stream.__aiter__()
                         last_thinking_pulse_time = time.time()
@@ -2097,13 +2105,14 @@ class Brain:
         ]
         if _THOUGHT_SIG_V2 and len(function_calls) > 1:
             # Flush text before batch
-            if accumulated_text and not response_emitted:
+            clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
+            if clean_accumulated and not response_emitted:
                 if is_terminal:
                     response_turn = ConversationTurn(
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="response",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                         evidence=grounding_evidence if grounding_evidence else None,
                         response_parts=None,
                     )
@@ -2116,7 +2125,7 @@ class Brain:
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="thoughts",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
 
@@ -2261,13 +2270,14 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
-            if accumulated_text and not response_emitted:
+            clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
+            if clean_accumulated and not response_emitted:
                 if is_terminal:
                     response_turn = ConversationTurn(
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="response",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                         evidence=grounding_evidence if grounding_evidence else None,
                         response_parts=None,
                     )
@@ -2280,7 +2290,7 @@ class Brain:
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain",
                         action="thoughts",
-                        thoughts=accumulated_text,
+                        thoughts=clean_accumulated,
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
 
@@ -2381,14 +2391,15 @@ class Brain:
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
             self._last_processed[event_id] = time.time()
 
-        if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
+        clean_text = sanitize_call_syntax(accumulated_text)
+        if clean_text:  # Text-only response is always terminal -- no tool, loop ends
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="response",
-                thoughts=accumulated_text,
+                thoughts=clean_text,
                 evidence=grounding_evidence if grounding_evidence else None,
                 response_parts=captured_parts,
                 # waitingFor="user" marks this persisted turn as a wait_for_user-equivalent
@@ -2404,9 +2415,13 @@ class Brain:
                 # waiting for the user exactly like wait_for_user does, and that state must
                 # never auto-close regardless of duration (see @ai-rules #50).
                 self._waiting_for_user[event_id] = time.time()
+        elif accumulated_text:
+            logger.warning(
+                f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)}): {accumulated_text[:120]!r}"
+            )
 
         self._reasoning_by_event.pop(event_id, None)
-        if accumulated_text or accumulated_thoughts:
+        if clean_text or accumulated_thoughts:
             return False
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")

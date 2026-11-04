@@ -2,6 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: Unit tests for GeminiAdapter quota acquisition budget (30s), _record_usage chokepoint, and stream rollback.
 # 2. [Pattern]: Validates T-1 and T-2 using mocks for LLM client and QuotaTracker.
+# 3. [Pattern]: TestBrainPriorityDerivation calls the production derive_llm_priority (llm/types.py, used by Brain._process_with_llm;
+#    PRIORITY_HIGH=0, PRIORITY_NORMAL=1). Never copy the heuristic into the test.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -9,6 +11,7 @@ import pytest
 
 from src.agents.llm.gemini_client import GeminiAdapter
 from src.agents.llm.quota_tracker import QuotaExhaustedError, QuotaTracker, Reservation
+from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL, derive_llm_priority
 
 
 @pytest.fixture
@@ -183,7 +186,7 @@ class TestGenerateReservationLifecycle:
 
         await real_adapter.generate("sys", "hello")
 
-        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0)
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=PRIORITY_NORMAL)
 
     @pytest.mark.asyncio
     async def test_success_records_actual_and_clears_reservation(self, real_adapter, real_tracker):
@@ -235,7 +238,7 @@ class TestGenerateStreamReservationLifecycle:
         _set_stream(real_adapter, stream)
         _ = [c async for c in real_adapter.generate_stream("sys", "hello")]
 
-        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0)
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=PRIORITY_NORMAL)
 
     @pytest.mark.asyncio
     async def test_success_takes_reservation_branch_and_corrects_window(self, real_adapter, real_tracker):
@@ -432,3 +435,366 @@ class TestGenerateStreamReservationLifecycle:
 
         assert chunks[-1].done is True
         _assert_recorded(real_tracker, 90)
+
+
+# ---------------------------------------------------------------------------
+# Priority-aware token reservation forwarding and Claude conformance (Step 6)
+# ---------------------------------------------------------------------------
+from src.agents.llm.claude_client import ClaudeAdapter  # noqa: E402
+
+
+class TestGeminiAndClaudePriorityForwarding:
+    """Dave Farley ATDD Layer for Adapter Priority Forwarding and Conformance."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_adapter_generate_forwards_priority(self, real_adapter, real_tracker):
+        """GeminiAdapter.generate forwards priority argument to tracker.acquire."""
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        await real_adapter.generate("sys", "hello", priority=0)
+
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=0)
+
+    @pytest.mark.asyncio
+    async def test_gemini_adapter_generate_stream_forwards_priority(self, real_adapter, real_tracker):
+        """GeminiAdapter.generate_stream forwards priority argument to tracker.acquire."""
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+
+        async def stream():
+            yield _chunk(parts=[_part("hi")], text="hi", usage=_usage(total=90))
+
+        _set_stream(real_adapter, stream)
+        _ = [c async for c in real_adapter.generate_stream("sys", "hello", priority=0)]
+
+        real_tracker.acquire.assert_awaited_once_with(ESTIMATE, max_wait_seconds=30.0, priority=0)
+
+    @pytest.mark.asyncio
+    async def test_claude_adapter_generate_accepts_priority(self):
+        """ClaudeAdapter.generate accepts priority argument without error."""
+        claude = ClaudeAdapter.__new__(ClaudeAdapter)
+        claude._model_name = "claude-3-5-sonnet-v2@20241022"
+        claude._client = MagicMock()
+
+        # Mock messages.create response
+        mock_msg = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hello from claude")],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        claude._client.messages.create = AsyncMock(return_value=mock_msg)
+
+        resp = await claude.generate("sys", "hello", priority=0)
+        assert resp.text == "hello from claude"
+
+    @pytest.mark.asyncio
+    async def test_claude_adapter_generate_stream_accepts_priority(self):
+        """ClaudeAdapter.generate_stream accepts priority argument without error."""
+        claude = ClaudeAdapter.__new__(ClaudeAdapter)
+        claude._model_name = "claude-3-5-sonnet-v2@20241022"
+        claude._client = MagicMock()
+
+        # Mock messages.stream context manager
+        class MockClaudeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            @property
+            def text_stream(self):
+                async def text_gen():
+                    yield "chunk1"
+                return text_gen()
+
+            async def get_final_message(self):
+                return SimpleNamespace(
+                    content=[SimpleNamespace(type="text", text="chunk1")],
+                    usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+                )
+
+        claude._client.messages.stream = MagicMock(return_value=MockClaudeStream())
+
+        chunks = [c async for c in claude.generate_stream("sys", "hello", priority=0)]
+        assert len(chunks) == 2
+        assert chunks[0].text == "chunk1"
+        assert chunks[1].done is True
+
+
+class TestBrainPriorityDerivation:
+    """Tests derive_llm_priority, the production helper called by Brain._process_with_llm.
+
+    Brain computes priority once before its retry loop (PRIORITY_HIGH = 0, PRIORITY_NORMAL = 1). The tests call the
+    real helper rather than a copy of the heuristic so they cannot drift from production.
+    """
+
+    @staticmethod
+    def _event(source="headhunter", approved_by=None, conversation=None):
+        return SimpleNamespace(source=source, approved_by=approved_by, conversation=conversation or [])
+
+    def test_constants_match_documented_values(self):
+        assert PRIORITY_HIGH == 0
+        assert PRIORITY_NORMAL == 1
+
+    @pytest.mark.parametrize("source", ["chat", "slack", "jarvis"])
+    def test_interactive_sources_yield_priority_high(self, source):
+        assert derive_llm_priority(self._event(source=source)) == PRIORITY_HIGH
+
+    def test_approved_by_admin_yields_priority_high(self):
+        assert derive_llm_priority(self._event(approved_by="admin")) == PRIORITY_HIGH
+
+    @pytest.mark.parametrize("action", ["approve", "reject", "message"])
+    def test_recent_user_action_yields_priority_high(self, action):
+        """user approve / reject / message in the last 3 turns -> HIGH (message included for non-chat events)."""
+        event = self._event(conversation=[SimpleNamespace(actor="user", action=action)])
+        assert derive_llm_priority(event) == PRIORITY_HIGH
+
+    @pytest.mark.parametrize("action", ["approve", "reject", "message"])
+    def test_user_action_in_last_three_turns_yields_priority_high(self, action):
+        turns = [
+            SimpleNamespace(actor="headhunter", action="evidence"),
+            SimpleNamespace(actor="user", action=action),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
+
+    def test_user_action_older_than_three_turns_does_not_boost_priority(self):
+        """User turn at index -4 (outside the [-3:] window) does not elevate background priority."""
+        turns = [
+            SimpleNamespace(actor="user", action="approve"),
+            SimpleNamespace(actor="brain", action="think"),
+            SimpleNamespace(actor="brain", action="triage"),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_NORMAL
+
+    def test_user_action_at_window_boundary_still_boosts(self):
+        """User turn at index -3 is the oldest turn inside the window."""
+        turns = [
+            SimpleNamespace(actor="user", action="reject"),
+            SimpleNamespace(actor="brain", action="think"),
+            SimpleNamespace(actor="brain", action="reply"),
+        ]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
+
+    def test_dict_turns_are_supported(self):
+        turns = [{"actor": "user", "action": "message"}]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_HIGH
+
+    @pytest.mark.parametrize("source", ["headhunter", "aligner", "timekeeper"])
+    def test_background_events_without_user_activity_yield_priority_normal(self, source):
+        assert derive_llm_priority(self._event(source=source)) == PRIORITY_NORMAL
+
+    def test_non_user_actor_does_not_boost(self):
+        turns = [SimpleNamespace(actor="brain", action="approve")]
+        assert derive_llm_priority(self._event(conversation=turns)) == PRIORITY_NORMAL
+
+    def test_missing_conversation_attribute_is_normal(self):
+        event = SimpleNamespace(source="headhunter", approved_by=None, conversation=None)
+        assert derive_llm_priority(event) == PRIORITY_NORMAL
+
+
+class TestGeminiCallSyntaxFallback:
+    """Tests regex fallback parsing for hallucinated [!call:name:{args}!] tool calls."""
+
+    @pytest.mark.asyncio
+    async def test_generate_parses_call_syntax_and_cleans_text(self):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        mock_response.text = 'Closing now! [!call:set_phase:{"phase": "close", "reasoning": "done"}!]'
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is not None
+        assert res.function_call.name == "set_phase"
+        assert res.function_call.args == {"phase": "close", "reasoning": "done"}
+        assert res.text == "Closing now!"
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_parses_call_syntax_and_strips_chunks(self):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        chunk1 = MagicMock()
+        chunk1.text = "All resolved. "
+        chunk1.candidates = []
+        chunk1.function_calls = []
+        chunk1.usage_metadata = None
+
+        chunk2 = MagicMock()
+        chunk2.text = '[!call:close_event:{"summary": "All fixed"}!]'
+        chunk2.candidates = []
+        chunk2.function_calls = []
+        chunk2.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk1
+            yield chunk2
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        received_chunks = []
+        async for chunk in adapter.generate_stream(
+            system_prompt="sys",
+            contents="user prompt",
+        ):
+            received_chunks.append(chunk)
+
+        assert received_chunks[0].text == "All resolved. "
+        terminal = received_chunks[-1]
+        assert terminal.done is True
+        assert terminal.function_call is not None
+        assert terminal.function_call.name == "close_event"
+        assert terminal.function_call.args == {"summary": "All fixed"}
+
+    @pytest.mark.asyncio
+    async def test_generate_parses_nested_json_call_syntax(self):
+        """Exercises nested objects and arrays in call syntax (guards against non-greedy regex truncation)."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        mock_response.text = (
+            'Creating plan now: [!call:create_plan:{"title": "Deploy Service", '
+            '"steps": [{"id": 1, "cmd": "apply"}, {"id": 2, "cmd": "rollout"}], '
+            '"meta": {"author": "darwin"}}!] Please wait.'
+        )
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is not None
+        assert res.function_call.name == "create_plan"
+        assert res.function_call.args == {
+            "title": "Deploy Service",
+            "steps": [{"id": 1, "cmd": "apply"}, {"id": 2, "cmd": "rollout"}],
+            "meta": {"author": "darwin"},
+        }
+        assert res.text == "Creating plan now:  Please wait."
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_handles_split_tag_across_chunks(self):
+        """Verifies partial call syntax split across provider chunks is not leaked to live stream."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        chunk1 = MagicMock()
+        chunk1.text = "Wrapping up work now. [!call:set_"
+        chunk1.candidates = []
+        chunk1.function_calls = []
+        chunk1.usage_metadata = None
+
+        chunk2 = MagicMock()
+        chunk2.text = 'phase:{"phase": "close", "reasoning": "all tasks done"}!] Have a good day!'
+        chunk2.candidates = []
+        chunk2.function_calls = []
+        chunk2.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk1
+            yield chunk2
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        received_chunks = []
+        async for chunk in adapter.generate_stream(
+            system_prompt="sys",
+            contents="user prompt",
+        ):
+            received_chunks.append(chunk)
+
+        # Non-terminal text chunks must NEVER contain [!call: or tag fragments
+        text_chunks = [c.text for c in received_chunks if c.text]
+        assert "[!call:" not in "".join(text_chunks)
+        assert "phase:{" not in "".join(text_chunks)
+        assert "".join(text_chunks).strip() == "Wrapping up work now.  Have a good day!"
+
+        terminal = received_chunks[-1]
+        assert terminal.done is True
+        assert terminal.function_call is not None
+        assert terminal.function_call.name == "set_phase"
+        assert terminal.function_call.args == {"phase": "close", "reasoning": "all tasks done"}
+
+    @pytest.mark.asyncio
+    async def test_generate_unparseable_call_syntax_does_not_reemit_raw_syntax(self):
+        """When call syntax fails JSON decode, clean_text is None and raw syntax is never re-emitted."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        # Entire text is an invalid call block (not valid JSON args)
+        mock_response.text = '[!call:broken_tool:{not valid json}!] '
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(
+            system_prompt="sys",
+            contents="user prompt",
+        )
+
+        assert res.function_call is None
+        # Must NOT fall back to response.text containing the raw [!call:...] block
+        assert res.text is None
+
+    def test_process_stream_call_syntax_buffer_unit(self):
+        """Unit test for process_stream_call_syntax_buffer logic."""
+        from src.agents.llm.types import process_stream_call_syntax_buffer
+
+        # Normal text yields immediately
+        to_yield, buf = process_stream_call_syntax_buffer("Hello world!")
+        assert to_yield == "Hello world!"
+        assert buf == ""
+
+        # Trailing bracket held back
+        to_yield, buf = process_stream_call_syntax_buffer("Click here: [")
+        assert to_yield == "Click here: "
+        assert buf == "["
+
+        # Incomplete tag held back
+        to_yield, buf = process_stream_call_syntax_buffer("Closing now: [!call:set_phase:{")
+        assert to_yield == "Closing now: "
+        assert buf == "[!call:set_phase:{"
+
+        # Complete tag stripped
+        to_yield, buf = process_stream_call_syntax_buffer(buf + '"phase": "close"}!] Done.')
+        assert to_yield == " Done."
+        assert buf == ""
+

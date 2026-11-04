@@ -1006,3 +1006,28 @@ class TestTrailingFCRecordedResultBounds:
         result = await self._fr_result(self._conversation_with(thoughts="x" * (cap + 500)))
         recorded = result.split("\n[recorded result", 1)[0]
         assert recorded == "x" * cap
+
+
+@pytest.mark.asyncio
+async def test_call_syntax_stripped_to_empty_logs_warning_and_skips_turn():
+    """When accumulated text consists entirely of hallucinated call syntax, sanitize strips it.
+
+    Brain must log warning and not emit a blank response turn.
+    """
+    chunks = [
+        _Chunk(text='[!call:broken:args!]'),
+        _Chunk(done=True),
+    ]
+    brain = _make_brain(lambda **kw: MockStream(chunks))
+    event = _make_event("evt-stripped-test")
+    brain.blackboard.get_event = AsyncMock(return_value=event)
+
+    with patch("src.agents.brain.logger.warning") as mock_warn:
+        more = await brain._process_with_llm(event.id, event, response_emitted=False)
+        assert more is False
+        warn_messages = [call.args[0] for call in mock_warn.call_args_list if call.args]
+        assert any("produced no valid content after call syntax sanitization" in msg for msg in warn_messages)
+        assert any("returned empty response" in msg for msg in warn_messages)
+
+    # No response turn appended
+    assert brain._append_and_broadcast.call_count == 0

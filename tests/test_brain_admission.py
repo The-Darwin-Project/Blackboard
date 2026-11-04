@@ -1,8 +1,12 @@
 # tests/test_brain_admission.py
 # @ai-rules:
-# 1. [Constraint]: Pure admission deduplication unit test against Brain._process_event_inner.
-# 2. [Pattern]: Uses mocked Blackboard with EventDocument models; no live Redis or LLM network calls.
-# 3. [Purpose]: Pin T-3 of VMER-2216: Turn 0 admission dedup for events matching parked waiting_approval siblings.
+# 1. [Constraint]: Brain unit tests with mocked Blackboard and real EventDocument/ConversationTurn models; no live Redis or LLM calls.
+#    Two concerns: (a) VMER-2216 T-3 admission dedup via Brain._process_event_inner; (b) VMER-2246 LLM priority derivation.
+# 2. [Constraint]: Priority tests MUST call the production derive_llm_priority (src/agents/llm/types.py). NEVER re-implement
+#    the heuristic inline in a test -- a copy drifts from production and tests nothing (this happened once in PR #308).
+# 3. [Pattern]: Priority boundary cases: last-3-turn window edge (-3 in, -4 out), approved_by sticky, user.message/approve/reject,
+#    dict-or-object turns. Update these together with the helper.
+# 4. [Purpose]: Pin T-3 of VMER-2216: Turn 0 admission dedup for events matching parked waiting_approval siblings.
 from __future__ import annotations
 
 import time
@@ -11,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agents.brain import Brain
+from src.agents.llm.types import PRIORITY_HIGH, PRIORITY_NORMAL, derive_llm_priority
 from src.models import (
     ConversationTurn,
     EventDocument,
@@ -136,3 +141,22 @@ async def test_admission_dedup_waiting_approval_sibling():
     )
     # Zero LLM / agent dispatch invocations
     brain._process_with_llm.assert_not_called()
+
+
+class TestBrainPriorityDerivation:
+    """Guards against Brain re-introducing an inline priority heuristic instead of derive_llm_priority."""
+
+    def test_brain_uses_production_helper(self):
+        """Brain re-uses the same helper object (guards against a re-introduced inline heuristic)."""
+        import src.agents.brain as brain_module
+        from src.agents.llm.types import derive_llm_priority
+
+        assert brain_module.derive_llm_priority is derive_llm_priority
+
+    def test_brain_derives_priority_for_event_documents(self):
+        """Smoketest derive_llm_priority against EventDocument models (full matrix in test_gemini_client_quota.py)."""
+        chat_event = _make_event_doc("evt-prio-chat", source="chat")
+        assert derive_llm_priority(chat_event) == PRIORITY_HIGH
+
+        hh_event = _make_event_doc("evt-prio-hh", source="headhunter")
+        assert derive_llm_priority(hh_event) == PRIORITY_NORMAL

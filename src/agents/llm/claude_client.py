@@ -11,6 +11,10 @@
 # 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
 #    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
 #    cached_tokens = cache_read + cache_creation. total = all_input + output.
+# 10. [Gotcha]: `priority` and `thinking_level` on generate()/generate_stream() are INTENTIONAL no-ops. They exist only for
+#    LLMPort protocol conformance (Brain passes them to whichever adapter is active). ClaudeAdapter has no QuotaTracker
+#    gating (priority-aware reservation is Gemini-only) and does not map thinking_level. Do not 'wire them up' without a design.
+#    Callers must pass tool_choice/priority/thinking_level by keyword; their positional order is not a stable contract.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
@@ -22,7 +26,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
+from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +244,9 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
         # Normalize temperature: 0.0-2.0 -> 0.0-1.0. Drop top_p (Claude rejects both).
         claude_temp = min(temperature / 2.0, 1.0)
@@ -273,7 +279,9 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
     ) -> AsyncIterator[LLMChunk]:
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
