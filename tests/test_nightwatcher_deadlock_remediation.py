@@ -1483,3 +1483,74 @@ def test_round3_ui_staged_escalation_summary_is_nullable():
     block = ts[ts.index("export interface StagedEscalationDTO"):]
     block = block[:block.index("}")]
     assert "summary: string | null" in block
+
+
+@pytest.mark.asyncio
+async def test_round4_sweep_level_dispatch_cap_enforced_across_batches(board):
+    """HIGH #1: Dispatch cap is enforced across the entire sweep, not reset per batch."""
+    # Stage 4 items, batch_size=2 -> 2 batches
+    await _stage_board(board, 4)
+    obs = e2e_observer(board, ScriptedLLM())
+    with patch.dict("os.environ", {
+        "NIGHTWATCHER_BATCH_SIZE": "2",
+        "NIGHTWATCHER_MAX_BATCHES": "2",
+        "NIGHTWATCHER_DISPATCH_CAP": "2",
+        "NIGHTWATCHER_BATCH_COOLDOWN_SECONDS": "0",
+    }):
+        captured_counts = []
+        captured_caps = []
+        original_run_analysis = obs._run_analysis_loop
+        async def mock_run_analysis(*args, **kwargs):
+            captured_counts.append(kwargs.get("dispatch_count"))
+            captured_caps.append(kwargs.get("dispatch_cap"))
+            contents, ctx = await original_run_analysis(*args, **kwargs)
+            ctx.dispatch_count += 2
+            return contents, ctx
+
+        obs._run_analysis_loop = mock_run_analysis
+        await obs._sweep()
+        assert len(captured_counts) >= 2
+        assert captured_counts[0] == 0
+        assert captured_counts[1] == 2
+        assert captured_caps[0] == 2
+        assert captured_caps[1] == 2
+
+
+@pytest.mark.asyncio
+async def test_round4_inflight_ttl_refreshed_during_sweep(board):
+    """HIGH #2: Inflight TTL is refreshed at batch boundaries."""
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM())
+    refresh_mock = AsyncMock(return_value=True)
+    board.refresh_inflight_ttl = refresh_mock
+
+    await obs._sweep()
+    assert refresh_mock.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_round4_batch_timeout_settles_and_restages(board):
+    """HIGH #2: Batch timeout triggers circuit breaker, settling batch and restaging."""
+    import asyncio as _asyncio
+    await _stage_board(board, 2)
+    obs = e2e_observer(board, ScriptedLLM())
+    obs._slack_notify = AsyncMock()
+
+    async def hanging_analysis(*args, **kwargs):
+        await _asyncio.sleep(5.0)
+
+    obs._run_analysis_loop = hanging_analysis
+
+    with patch.dict("os.environ", {
+        "NIGHTWATCHER_BATCH_TIMEOUT_SECONDS": "0.1",
+    }):
+        await obs._sweep()
+
+    report = await e2e_latest_report(board)
+    assert report.status == "failed"
+    # Verify restage occurred - all items should be back in pending
+    assert await board.count_pending_escalations() == 2
+    # Verify ops was alerted
+    assert obs._slack_notify.called
+    msg = obs._slack_notify.call_args[0][0]
+    assert "timed out" in msg

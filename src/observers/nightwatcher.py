@@ -52,6 +52,7 @@ NIGHTWATCHER_SWEEP_CRON = os.getenv("NIGHTWATCHER_SWEEP_CRON", "0 6,18 * * *")
 DEFAULT_BATCH_SIZE = 25
 DEFAULT_MAX_BATCHES = 10
 DEFAULT_BATCH_COOLDOWN_S = 30.0
+DEFAULT_BATCH_TIMEOUT_S = 1800.0
 SUMMARY_PROMPT_CHARS = 140
 
 
@@ -201,9 +202,12 @@ class NightwatcherObserver:
             )
         max_batches = _env_int("NIGHTWATCHER_MAX_BATCHES", DEFAULT_MAX_BATCHES)
         cooldown_s = _env_float("NIGHTWATCHER_BATCH_COOLDOWN_SECONDS", DEFAULT_BATCH_COOLDOWN_S)
+        batch_timeout_s = _env_float("NIGHTWATCHER_BATCH_TIMEOUT_SECONDS", DEFAULT_BATCH_TIMEOUT_S, minimum=0.01)
 
         from ..agents.llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
         cumulative: "Optional[ShiftReport]" = None
+        dispatch_cap = int(os.getenv("NIGHTWATCHER_DISPATCH_CAP", "3"))
+        sweep_dispatch_count = 0
 
         for batch_no in range(1, max_batches + 1):
             escalations, json_members = await self.blackboard.lease_pending_escalations(
@@ -234,16 +238,36 @@ class NightwatcherObserver:
             system_prompt = build_system_prompt(escalations, window_start, window_end)
             self._batch_ctx = None
             try:
-                contents, ctx = await self._run_analysis_loop(
-                    escalations, json_members, system_prompt,
-                    window_start, window_end, shift_date, window,
-                    sweep_start, pending_count,
+                # Refresh inflight TTL at the start of each batch so multi-batch sweeps do not expire
+                if hasattr(self.blackboard, "refresh_inflight_ttl"):
+                    await self.blackboard.refresh_inflight_ttl()
+
+                async with asyncio.timeout(batch_timeout_s):
+                    contents, ctx = await self._run_analysis_loop(
+                        escalations, json_members, system_prompt,
+                        window_start, window_end, shift_date, window,
+                        sweep_start, pending_count,
+                        dispatch_count=sweep_dispatch_count, dispatch_cap=dispatch_cap,
+                    )
+                    sweep_dispatch_count = ctx.dispatch_count
+                    if hasattr(self.blackboard, "refresh_inflight_ttl"):
+                        await self.blackboard.refresh_inflight_ttl()
+                    cumulative = await self._run_report_cart(
+                        ctx, contents, json_members, escalations, system_prompt,
+                        shift_date, window, window_start, window_end,
+                        sweep_start, pending_count, prior_report=cumulative,
+                    )
+            except TimeoutError:
+                logger.error("Nightwatcher batch %d timed out after %.1fs (circuit breaker triggered)", batch_no, batch_timeout_s)
+                await self._notify_ops(
+                    f":warning: Nightwatcher batch {batch_no} timed out after {batch_timeout_s:.0f}s. "
+                    f"Settling batch and restaging non-committed events before inflight TTL expiration."
                 )
-                cumulative = await self._run_report_cart(
-                    ctx, contents, json_members, escalations, system_prompt,
-                    shift_date, window, window_start, window_end,
-                    sweep_start, pending_count, prior_report=cumulative,
+                await self._settle_failed_batch(
+                    "failed", json_members, escalations, cumulative,
+                    shift_date, window, window_start, window_end, sweep_start, requeue_all=False,
                 )
+                return
             except RequestExceedsBurstError as be:
                 # PERMANENT for this batch: the prompt alone exceeds the whole TPM bucket, so every future sweep that
                 # leases the same oldest items fails identically. Surface it loudly instead of looking like a transient quota blip.
@@ -445,7 +469,8 @@ class NightwatcherObserver:
 
     async def _run_analysis_loop(self, escalations, json_members, system_prompt,
                                  window_start, window_end, shift_date, window,
-                                 sweep_start, pending_count):
+                                 sweep_start, pending_count,
+                                 dispatch_count: int = 0, dispatch_cap: int | None = None):
         """LLM-driven analysis loop: review + investigate phases."""
         adapter = await self._get_adapter()
         escalation_text = "\n".join(
@@ -454,7 +479,8 @@ class NightwatcherObserver:
         )
         contents = [{"role": "user", "parts": [{"text": escalation_text}]}]
         current_phase = "review"
-        dispatch_cap = int(os.getenv("NIGHTWATCHER_DISPATCH_CAP", "3"))
+        if dispatch_cap is None:
+            dispatch_cap = int(os.getenv("NIGHTWATCHER_DISPATCH_CAP", "3"))
 
         ctx = NightwatcherContext(
             blackboard=self.blackboard, archivist=self._archivist,
@@ -465,7 +491,7 @@ class NightwatcherObserver:
             manifest_services={e.service for e in escalations},
             manifest_ids={e.event_id for e in escalations},
             escalations_by_id={e.event_id: e for e in escalations},
-            dispatch_count=0, dispatch_cap=dispatch_cap,
+            dispatch_count=dispatch_count, dispatch_cap=dispatch_cap,
             created_incidents=[], investigations=[],
         )
         self._batch_ctx = ctx  # lets _sweep's failure path see incidents created before an error

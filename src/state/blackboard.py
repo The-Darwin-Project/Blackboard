@@ -2884,6 +2884,15 @@ return 1
         logger.info("Nightwatcher: leased %d escalations (inflight TTL=%ds)", len(escalations), self.INFLIGHT_TTL)
         return escalations, json_members
 
+    async def refresh_inflight_ttl(self) -> bool:
+        """Refresh the TTL on the inflight SET to prevent silent expiration during multi-batch sweeps.
+
+        Returns True if the timeout was set/extended, False if the key does not exist.
+        """
+        res = await self.redis.expire(self.NIGHTWATCHER_INFLIGHT, self.INFLIGHT_TTL)
+        logger.debug("Nightwatcher: refreshed inflight TTL=%ds (result=%s)", self.INFLIGHT_TTL, res)
+        return bool(res)
+
     async def commit_inflight(self, json_members: list[str]) -> None:
         """Remove committed items from inflight SET after successful persist."""
         if not json_members:

@@ -477,6 +477,8 @@ spec:
               value: "{{ .Values.nightwatcher.maxBatches }}"
             - name: NIGHTWATCHER_BATCH_COOLDOWN_SECONDS
               value: "{{ .Values.nightwatcher.batchCooldownSeconds }}"
+            - name: NIGHTWATCHER_BATCH_TIMEOUT_SECONDS
+              value: '{{ .Values.nightwatcher.batchTimeoutSeconds | default "1800" }}'
             - name: LLM_MODEL_NIGHTWATCHER
               valueFrom:
                 configMapKeyRef:
