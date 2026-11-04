@@ -374,7 +374,7 @@ async def test_lua_clear_escalation_flag_for_review_scope():
     # Verify keys and args passed to _clear_escalation_script: ARGV[1]=expected_event_id, ARGV[2]=field
     mock_lua.assert_called_once_with(
         keys=["darwin:service:my-service"],
-        args=["evt-123", "escalation_flag:review"],
+        args=["evt-123", "escalation_flag:review", "escalation_flag"],
     )
 
     # 2. Lua logic verification on multi-scoped Redis hash
