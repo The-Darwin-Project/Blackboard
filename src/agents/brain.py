@@ -1369,24 +1369,26 @@ class Brain:
                 self._escalated_error_events.discard(event_id)
                 self._last_error_retry.pop(event_id, None)
 
-        # Dedup: if this is a new event (no turns yet), check for existing active events.
+        # Dedup: if this is a new event (no turns yet), check for existing active or waiting_approval events.
         # Two passes per iteration (single loop):
         #   Pass 1: service-name match (same-source duplicates, existing behavior)
         #   Pass 2: MR URL cross-match (cross-source duplicates, new -- kargo <-> headhunter)
         # Skip for user-initiated sources (chat/slack) -- "general" is a catch-all.
         if not event.conversation and event.source not in ("chat", "slack"):
             active_ids = await self.blackboard.get_active_events()
+            waiting_ids = await self.blackboard.get_waiting_approval_events()
+            all_ids = list(dict.fromkeys(active_ids + waiting_ids))
             new_ctx = (getattr(event.event.evidence, "gitlab_context", None) or {}) if (event.event and event.event.evidence) else {}
             new_mr = new_ctx.get("mr_iid")
             new_project = new_ctx.get("project_id")
             new_mr_url = self._extract_mr_url(event)
-            for eid in active_ids:
+            for eid in all_ids:
                 if eid == event_id:
                     continue
                 existing = await self.blackboard.get_event(eid)
                 if not (existing
                         and existing.conversation
-                        and existing.status.value in ("active", "new", "deferred")):
+                        and existing.status.value in ("active", "new", "deferred", "waiting_approval")):
                     continue
 
                 # Pass 1: service-name match — same service, check if same work item

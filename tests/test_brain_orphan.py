@@ -56,6 +56,7 @@ def _make_brain() -> Brain:
     bb.stamp_event = AsyncMock()
     bb.update_event_phase = AsyncMock()
     bb.get_active_events = AsyncMock(return_value=[])
+    bb.get_waiting_approval_events = AsyncMock(return_value=[])
     bb.get_recent_closed_for_service = AsyncMock(return_value=[])
     bb.generate_mermaid = AsyncMock(return_value="")
     brain = Brain(blackboard=bb, agents={})

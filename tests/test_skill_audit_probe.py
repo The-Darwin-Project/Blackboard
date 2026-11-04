@@ -376,3 +376,49 @@ def test_agent_dispatch_defer_rules_alignment(loader):
     ctx = _load_brain_context()
     assert len(ctx) > 0
     assert "Agent Progress vs Completed Work" in ctx
+
+
+class TestWaitingApprovalDedupRepollProbe:
+    """VMER-2216: Content contract and modularity probes for waiting_approval dedup re-poll.
+
+    T-1: deep-memory-fixes.md pre-parking note protocol.
+    T-2: 05-cynefin.md cross-issue correlation superseded re-poll protocol.
+    T-4: Modularity ceiling (<= 100 lines) for both modified skill files.
+    """
+
+    DEEP_FIXES = "dispatch/deep-memory-fixes.md"
+    CYNEFIN = "always/05-cynefin.md"
+
+    def test_t1_deep_memory_fixes_instructs_note_before_parking(self, loader):
+        """T-1: Section # Deep Memory Fix Proposals (Propose and Prompt) in deep-memory-fixes.md
+
+        Asserts exact heading contains 'take_note', 'cross-event', and 'waiting_approval'.
+        """
+        sec = _section(
+            _skill(loader, self.DEEP_FIXES),
+            "# Deep Memory Fix Proposals (Propose and Prompt)",
+        )
+        assert "take_note" in sec
+        assert "cross-event" in sec
+        assert "waiting_approval" in sec
+
+    def test_t2_cynefin_cross_issue_correlation_waiting_approval_closure(self, loader):
+        """T-2: Section ## Cross-Issue Correlation (before classifying) in 05-cynefin.md
+
+        Asserts exact heading contains 'waiting_approval', 'superseded re-poll', and 'set_phase'.
+        """
+        sec = _section(
+            _skill(loader, self.CYNEFIN),
+            "## Cross-Issue Correlation (before classifying)",
+        )
+        assert "waiting_approval" in sec
+        assert "superseded re-poll" in sec
+        assert "set_phase" in sec
+
+    def test_t4_modularity_file_line_limits(self):
+        """T-4: Modularity check ensuring deep-memory-fixes.md and 05-cynefin.md <= 100 lines."""
+        for path in (self.DEEP_FIXES, self.CYNEFIN):
+            full_path = SKILLS_DIR / path
+            lines = full_path.read_text().splitlines()
+            assert len(lines) <= 100, f"{path} exceeded modularity ceiling: {len(lines)} lines"
+
