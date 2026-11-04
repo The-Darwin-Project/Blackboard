@@ -774,6 +774,15 @@ class JenkinsObserver:
                     for j in recheck_cache[view]
                 )
                 if resolved:
+                    version = meta.get("version", "")
+                    service_name = f"{job_name}|{version}" if version else job_name
+                    try:
+                        await self.blackboard.clear_escalation_flag(service_name, scope="jenkins")
+                    except Exception:
+                        logger.warning(
+                            "JenkinsObserver: failed to clear escalation flag for %s on recovery",
+                            service_name,
+                        )
                     await self.blackboard.commit_jenkins_signal(key)
                     continue
 
@@ -801,6 +810,8 @@ class JenkinsObserver:
     async def _is_duplicate_or_escalated(self, service_name: str) -> bool:
         """Active-event dedup (Layer 1) + escalation-gate (Layer 3) checks.
 
+        Evaluates active events and scoped escalation flags. If an escalation flag
+        references a terminal/closed event, lazily prunes the stale flag via CAS.
         Raises on Redis/blackboard errors instead of fail-open -- the caller treats any
         exception as "unknown", restaging the signal for the next cycle rather than
         risking a duplicate event.
@@ -813,6 +824,21 @@ class JenkinsObserver:
                     return True
 
         flag = await self.blackboard.get_escalation_flag(service_name, scope="jenkins")
+        if flag:
+            eid = flag.split("|")[0].strip()
+            if eid:
+                evt = await self.blackboard.get_event(eid)
+                if not evt or evt.status not in _DEDUP_STATUSES:
+                    logger.info(
+                        "JenkinsObserver: clearing stale escalation flag for %s (referenced %s in status %s)",
+                        service_name,
+                        eid,
+                        evt.status if evt else "missing",
+                    )
+                    await self.blackboard.clear_escalation_flag(
+                        service_name, scope="jenkins", expected_event_id=eid
+                    )
+                    flag = None
         return bool(flag)
 
     async def _process_candidates(self, groups: list[list[tuple[str, dict]]]) -> None:

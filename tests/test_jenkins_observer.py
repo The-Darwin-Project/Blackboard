@@ -582,6 +582,139 @@ class TestT13ActiveEventDedup:
 
         bb.create_event.assert_not_called()
 
+    async def test_active_escalation_flag_prevents_creation(self):
+        """Active escalation flag referencing an open event suppresses event creation."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(
+                    jobs=[_make_job_result(result="FAILURE", color="red")]
+                )
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+
+            bb.drain_jenkins_pending.return_value = ["verify-cnv-4.23.z-build-tier1"]
+            bb.redis.hget.return_value = json.dumps(
+                _make_meta(result="FAILURE", view="Gating Wrappers")
+            )
+
+            bb.get_active_events_with_status.return_value = {}
+            bb.get_escalation_flag.return_value = "evt-active|escalated to jira"
+            active_event = MagicMock()
+            active_event.status = "active"
+            bb.get_event.return_value = active_event
+
+            obs._triage_and_build_evidence = AsyncMock(return_value=_make_triage_response())
+            obs._get_wip_headroom = AsyncMock(return_value=5)
+            obs._skills_si = "test skills"
+
+            await obs._drain_once()
+
+        bb.create_event.assert_not_called()
+        bb.clear_escalation_flag.assert_not_called()
+
+    async def test_stale_escalation_flag_cleared_and_allows_creation(self):
+        """Stale escalation flag referencing a closed event is cleared, unblocking event creation."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(
+                    jobs=[_make_job_result(result="FAILURE", color="red")]
+                )
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+
+            bb.drain_jenkins_pending.return_value = ["verify-cnv-4.23.z-build-tier1"]
+            bb.redis.hget.return_value = json.dumps(
+                _make_meta(result="FAILURE", view="Gating Wrappers")
+            )
+
+            bb.get_active_events_with_status.return_value = {}
+            bb.get_escalation_flag.return_value = "evt-closed-123|escalated"
+            closed_event = MagicMock()
+            closed_event.status = "closed"
+            bb.get_event.return_value = closed_event
+
+            obs._triage_and_build_evidence = AsyncMock(return_value=_make_triage_response())
+            obs._get_wip_headroom = AsyncMock(return_value=5)
+            obs._skills_si = "test skills"
+
+            await obs._drain_once()
+
+        bb.clear_escalation_flag.assert_called_once_with(
+            "verify-cnv-4.23.z-build-tier1|4.23",
+            scope="jenkins",
+            expected_event_id="evt-closed-123",
+        )
+        bb.create_event.assert_called_once()
+
+    async def test_recheck_success_clears_escalation_flag(self):
+        """When recheck discovers a job is now SUCCESS, clears escalation flag and commits signal."""
+        bb = _mock_blackboard()
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(
+                    jobs=[_make_job_result(job_name="verify-cnv-4.23.z-build-tier1", result="SUCCESS", color="blue")]
+                )
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+
+            bb.drain_jenkins_pending.return_value = ["verify-cnv-4.23.z-build-tier1"]
+            bb.redis.hget.return_value = json.dumps(
+                _make_meta(job_name="verify-cnv-4.23.z-build-tier1", result="FAILURE", view="Gating Wrappers", version="4.23")
+            )
+
+            await obs._drain_once()
+
+        bb.clear_escalation_flag.assert_called_once_with(
+            "verify-cnv-4.23.z-build-tier1|4.23",
+            scope="jenkins",
+        )
+        bb.commit_jenkins_signal.assert_called_once_with("verify-cnv-4.23.z-build-tier1")
+        bb.create_event.assert_not_called()
+
+    async def test_recheck_success_clear_flag_failure_is_resilient(self):
+        """When clear_escalation_flag raises on recovery, signal commitment still succeeds."""
+        bb = _mock_blackboard()
+        bb.clear_escalation_flag.side_effect = RuntimeError("Redis connection dropped")
+
+        with patch.dict("os.environ", _env_vars()):
+            from src.agents.jenkins_observer import JenkinsObserver
+
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = AsyncMock()
+            obs._adapter.scan_view = AsyncMock(
+                return_value=_make_view_scan_result(
+                    jobs=[_make_job_result(job_name="verify-cnv-4.23.z-build-tier1", result="SUCCESS", color="blue")]
+                )
+            )
+            obs._adapter.enabled = MagicMock(return_value=True)
+
+            bb.drain_jenkins_pending.return_value = ["verify-cnv-4.23.z-build-tier1"]
+            bb.redis.hget.return_value = json.dumps(
+                _make_meta(job_name="verify-cnv-4.23.z-build-tier1", result="FAILURE", view="Gating Wrappers", version="4.23")
+            )
+
+            await obs._drain_once()
+
+        bb.commit_jenkins_signal.assert_called_once_with("verify-cnv-4.23.z-build-tier1")
+        bb.create_event.assert_not_called()
+
 
 # =========================================================================
 # T-14: Retry-first skill content present
