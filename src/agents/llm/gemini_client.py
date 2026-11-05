@@ -429,35 +429,7 @@ class GeminiAdapter:
                 converted.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
             converted.append(types.Content(role="user", parts=[types.Part.from_text(text="Proceed.")]))
 
-        # Final pass: normalize converted to guarantee strict wire protocol role alternation
-        normalized: list[types.Content] = []
-        for content in converted:
-            if not normalized:
-                normalized.append(content)
-                continue
-            if normalized[-1].role == content.role:
-                if content.role == "model":
-                    normalized[-1].parts.extend(content.parts)
-                else:
-                    last_fr = any(
-                        (isinstance(p, dict) and ("functionResponse" in p or "function_response" in p))
-                        or (hasattr(p, "function_response") and p.function_response)
-                        for p in normalized[-1].parts
-                    )
-                    curr_fr = any(
-                        (isinstance(p, dict) and ("functionResponse" in p or "function_response" in p))
-                        or (hasattr(p, "function_response") and p.function_response)
-                        for p in content.parts
-                    )
-                    if last_fr == curr_fr:
-                        normalized[-1].parts.extend(content.parts)
-                    else:
-                        normalized.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
-                        normalized.append(content)
-            else:
-                normalized.append(content)
-
-        return normalized
+        return converted
 
     # -----------------------------------------------------------------
     # LLMPort: generate (blocking)

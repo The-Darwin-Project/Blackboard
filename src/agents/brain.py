@@ -3597,8 +3597,6 @@ class Brain:
                     last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
                 contents[-1]["parts"].extend(parts)
             else:
-                if contents and contents[-1]["role"] == "user" and role == "user":
-                    contents.append({"role": "model", "parts": [{"text": "Acknowledged."}]})
                 if turn.actor not in _NON_PARTICIPANT_ACTORS:
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
@@ -3632,8 +3630,6 @@ class Brain:
         if contents[-1]["role"] == "user" and not any(p.get("functionResponse") for p in contents[-1]["parts"]):
             contents[-1]["parts"].append(action_prompt)
         else:
-            if contents[-1]["role"] == "user":
-                contents.append({"role": "model", "parts": [{"text": "Acknowledged."}]})
             contents.append({"role": "user", "parts": [action_prompt]})
 
         return self._compress_contents(contents)

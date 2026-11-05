@@ -2143,7 +2143,7 @@ class TestParallelFunctionCallExecution:
                 caplog.at_level("WARNING", logger="darwin.brain"):
             contents = await Brain._build_contents(brain, event)
 
-        fr_turn = contents[-3]
+        fr_turn = contents[-2]
         assert fr_turn["role"] == "user"
         fr_parts = [p for p in fr_turn["parts"] if "functionResponse" in p]
         assert len(fr_parts) == 1
@@ -2151,11 +2151,6 @@ class TestParallelFunctionCallExecution:
         result = fr_parts[0]["functionResponse"]["response"]["result"]
         assert "Do NOT re-issue" in result and "in_flight" not in result
         assert not any("text" in p for p in fr_turn["parts"])
-
-        # Model bridge between synthetic FR and action prompt enforces Gemini wire protocol alternation
-        bridge_turn = contents[-2]
-        assert bridge_turn["role"] == "model"
-        assert any(p.get("text") == "Acknowledged." for p in bridge_turn["parts"])
 
         # Final turn is the terminal action prompt — separate user turn, never mixed with FR
         last_turn = contents[-1]
@@ -2385,9 +2380,15 @@ class TestParallelFunctionCallExecution:
         assert len(res_fr_fr[1].parts) == 2
 
     @pytest.mark.asyncio
-    async def test_build_contents_strict_role_alternation_invariant(self):
-        """Brain._build_contents guarantees strict role alternation between user and model:
-        no adjacent user turns and no adjacent model turns anywhere in the payload."""
+    async def test_build_contents_cross_adapter_boundary_gemini_and_claude(self):
+        """Brain._build_contents remains provider-agnostic, while adapters handle wire protocols:
+        - Brain emits raw contents where user:FR and user:action_prompt remain separate user turns.
+        - GeminiAdapter converts and bridges them into alternating user-model-user turns with 'Acknowledged.'.
+        - ClaudeAdapter converts and merges them into a single user message with NO fabricated assistant turns.
+        """
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from src.agents.llm.claude_client import ClaudeAdapter
+
         fc = {"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}}
         conversation = [
             _make_turn(turn=1, actor="user", action="message", thoughts="do work"),
@@ -2400,15 +2401,47 @@ class TestParallelFunctionCallExecution:
         with patch("src.agents.brain._THOUGHT_SIG_V2", True):
             contents = await Brain._build_contents(brain, event)
 
-        # Strict alternation check: no adjacent user turns and no adjacent model turns
-        for i in range(len(contents) - 1):
-            curr_role = contents[i]["role"]
-            next_role = contents[i + 1]["role"]
-            assert curr_role != next_role, (
-                f"Consecutive turns with role '{curr_role}' found at indices {i} and {i + 1}: {contents}"
-            )
-        assert contents[0]["role"] == "user"
+        # Brain level: raw domain representation has user:FR followed by user:action_prompt
+        assert contents[-2]["role"] == "user"
+        assert any("functionResponse" in p for p in contents[-2]["parts"])
         assert contents[-1]["role"] == "user"
+        assert any("text" in p for p in contents[-1]["parts"])
+        # Provider-agnostic check: Brain does NOT inject Gemini-specific bridge turns
+        assert not any(
+            t["role"] == "model" and any(p.get("text") == "Acknowledged." for p in t.get("parts", []))
+            for t in contents
+        )
+
+        # GeminiAdapter wire conversion: strictly enforces role alternation via model bridge
+        gemini_adapter = GeminiAdapter.__new__(GeminiAdapter)
+        gemini_converted = gemini_adapter._convert_structured(contents)
+        for i in range(len(gemini_converted) - 1):
+            assert gemini_converted[i].role != gemini_converted[i + 1].role, (
+                f"Gemini wire violation: consecutive turns with role '{gemini_converted[i].role}' at {i}, {i + 1}"
+            )
+        assert gemini_converted[-1].role == "user"
+        assert any(
+            p.text == "Acknowledged." for p in gemini_converted[-2].parts
+            if hasattr(p, "text")
+        )
+
+        # ClaudeAdapter wire conversion: merges consecutive user turns, NO fake assistant turns
+        claude_messages = ClaudeAdapter._convert_structured(contents)
+        for i in range(len(claude_messages) - 1):
+            assert claude_messages[i]["role"] != claude_messages[i + 1]["role"], (
+                f"Claude wire violation: consecutive messages with role '{claude_messages[i]['role']}' at {i}, {i + 1}"
+            )
+        # Verify no fabricated assistant "Acknowledged." turns leaked into Claude
+        for msg in claude_messages:
+            if msg["role"] == "assistant":
+                for b in msg["content"]:
+                    if b.get("type") == "text":
+                        assert b.get("text") != "Acknowledged."
+        # Final Claude message is merged user turn containing both tool_result and text
+        assert claude_messages[-1]["role"] == "user"
+        claude_block_types = [b["type"] for b in claude_messages[-1]["content"]]
+        assert "tool_result" in claude_block_types
+        assert "text" in claude_block_types
 
     def test_claude_adapter_merges_consecutive_user_turns(self):
         """ClaudeAdapter._convert_structured merges consecutive user turns to prevent 400 from Anthropic API."""
