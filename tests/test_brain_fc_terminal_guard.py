@@ -1031,3 +1031,24 @@ async def test_call_syntax_stripped_to_empty_logs_warning_and_skips_turn():
 
     # No response turn appended
     assert brain._append_and_broadcast.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_no_valid_content_warning_logs_raw_length_but_not_raw_text():
+    """Redaction: the empty-after-sanitize warning reports raw length only, never the model text."""
+    secret = "TOPSECRET_PAYLOAD"
+    raw = f'[!call:broken:{secret}!]'
+    chunks = [_Chunk(text=raw), _Chunk(done=True)]
+    brain = _make_brain(lambda **kw: MockStream(chunks))
+    event = _make_event("evt-redaction-test")
+    brain.blackboard.get_event = AsyncMock(return_value=event)
+
+    with patch("src.agents.brain.logger.warning") as mock_warn:
+        await brain._process_with_llm(event.id, event, response_emitted=False)
+        msgs = [str(call.args[0]) for call in mock_warn.call_args_list if call.args]
+
+    matching = [m for m in msgs if "produced no valid content after call syntax sanitization" in m]
+    assert len(matching) == 1
+    assert f"raw length {len(raw)}" in matching[0]
+    assert secret not in matching[0]
+    assert "[!call:" not in matching[0]

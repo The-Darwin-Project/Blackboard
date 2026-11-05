@@ -4,6 +4,8 @@
 # 2. [Pattern]: Validates T-1 and T-2 using mocks for LLM client and QuotaTracker.
 # 3. [Pattern]: TestBrainPriorityDerivation calls the production derive_llm_priority (llm/types.py, used by Brain._process_with_llm;
 #    PRIORITY_HIGH=0, PRIORITY_NORMAL=1). Never copy the heuristic into the test.
+# 4. [Pattern]: TestCallSyntaxLinearTime / TestHoldbackOverflowNeverLeaks / TestFallbackAllowlist / TestCallSyntaxLogHygiene guard PR #309:
+#    linear-time [!call: scanning, discard-not-flush on holdback overflow, fail-closed tool allowlist, no raw model text in logs.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -798,3 +800,370 @@ class TestGeminiCallSyntaxFallback:
         assert to_yield == " Done."
         assert buf == ""
 
+    def test_sanitize_call_syntax_strips_unterminated_fragment(self):
+        """Unclosed [!call: tag at end of string (e.g. truncated response) is stripped."""
+        from src.agents.llm.types import sanitize_call_syntax
+
+        # Completed tag stripped
+        assert sanitize_call_syntax('Clean text [!call:tool:{"a": 1}!]') == "Clean text"
+
+        # Trailing unterminated tag stripped
+        assert sanitize_call_syntax('Output before truncated [!call:set_phase:{"phase":') == "Output before truncated"
+        assert sanitize_call_syntax('[!call:set_phase:') is None
+        assert sanitize_call_syntax('[!call:') is None
+
+    def test_extract_call_syntax_validates_tools_whitelist(self):
+        """_extract_call_syntax rejects tool calls not present in declared tools."""
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        declared_tools = [
+            {"name": "set_phase", "description": "Set phase", "input_schema": {}},
+            {"name": "close_event", "description": "Close", "input_schema": {}},
+        ]
+
+        # Valid tool name in whitelist is parsed
+        fc, text = _extract_call_syntax(
+            'Closing: [!call:set_phase:{"phase": "close"}!]',
+            tools=declared_tools,
+        )
+        assert fc is not None
+        assert fc.name == "set_phase"
+        assert text == "Closing:"
+
+        # Unknown tool name is rejected
+        fc_unknown, text_unknown = _extract_call_syntax(
+            'Injected: [!call:evil_tool:{"cmd": "rm"}!]',
+            tools=declared_tools,
+        )
+        assert fc_unknown is None
+        assert text_unknown == "Injected:"
+
+        # Unterminated tag in text is cleanly stripped even when no valid call exists
+        fc_trunc, text_trunc = _extract_call_syntax(
+            'Truncated response [!call:set_phase:{"phase":',
+            tools=declared_tools,
+        )
+        assert fc_trunc is None
+        assert text_trunc == "Truncated response"
+
+
+# =============================================================================
+# PR #309 remediation: ReDoS, holdback overflow, fail-closed allowlist, log hygiene
+# =============================================================================
+
+_DECLARED_TOOLS = [
+    {"name": "set_phase", "description": "Set phase", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "close_event", "description": "Close", "input_schema": {"type": "object", "properties": {}}},
+]
+
+
+def _text_chunk(text):
+    c = MagicMock()
+    c.text = text
+    c.candidates = []
+    c.function_calls = []
+    c.usage_metadata = None
+    return c
+
+
+def _stream_adapter(texts):
+    ad = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+    async def fake_stream():
+        for t in texts:
+            yield _text_chunk(t)
+
+    stream_mock = MagicMock()
+    stream_mock.__aiter__ = lambda self: fake_stream()
+    ad._client = MagicMock()
+    ad._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+    return ad
+
+
+async def _drain(ad, **kwargs):
+    return [c async for c in ad.generate_stream(system_prompt="sys", contents="user prompt", **kwargs)]
+
+
+def _generate_adapter(text):
+    ad = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+    resp = MagicMock()
+    resp.function_calls = []
+    resp.text = text
+    resp.candidates = []
+    resp.usage_metadata = None
+    ad._client = MagicMock()
+    ad._client.aio.models.generate_content = AsyncMock(return_value=resp)
+    return ad
+
+
+class TestCallSyntaxLinearTime:
+    """HIGH #1: unterminated [!call: input must be stripped in linear time (no regex backtracking)."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "[!call:a:" + " " * 50000,
+            "[!call:a:" + " \n\t" * 20000,
+            "[!call:a:" + "!" * 50000,
+            "[!call:a:" * 6000,
+            "[!call:" * 8000,
+            "ok [!call:abc" + "d" * 50000,
+        ],
+    )
+    def test_unterminated_input_is_linear(self, payload):
+        import time
+        from src.agents.llm.gemini_client import _extract_call_syntax
+        from src.agents.llm.types import (
+            process_stream_call_syntax_buffer,
+            sanitize_call_syntax,
+            scan_call_syntax,
+        )
+
+        start = time.perf_counter()
+        cleaned = sanitize_call_syntax(payload)
+        fc, text = _extract_call_syntax(payload, tools=_DECLARED_TOOLS)
+        process_stream_call_syntax_buffer(payload)
+        scan_call_syntax(payload)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.5, f"call-syntax handling took {elapsed:.2f}s (superlinear?)"
+        assert fc is None
+        for out in (cleaned, text):
+            assert out is None or "[!call:" not in out
+
+    def test_many_complete_tags_are_linear(self):
+        import time
+        from src.agents.llm.types import sanitize_call_syntax
+
+        payload = "x[!call:a:{}!]" * 20000
+        start = time.perf_counter()
+        out = sanitize_call_syntax(payload)
+        assert time.perf_counter() - start < 0.5
+        assert out == "x" * 20000
+
+    def test_scan_matches_previous_regex_semantics_for_wellformed_tags(self):
+        from src.agents.llm.types import scan_call_syntax
+
+        clean, calls, tail = scan_call_syntax('A [!call:set_phase:  {"p": 1}  !] B [!call:x_1:!] C')
+        assert clean == "A  B  C"
+        assert calls == [("set_phase", '{"p": 1}'), ("x_1", "")]
+        assert tail == ""
+
+        # Newlines inside args (DOTALL) and "!" inside JSON that is not "!]"
+        clean, calls, _ = scan_call_syntax('[!call:t:{"a": "wow!\nok"}!]')
+        assert clean == "" and calls == [("t", '{"a": "wow!\nok"}')]
+
+    @pytest.mark.parametrize("frag", ["[!call:", "[!call:ab", "[!call:a b:{}!] tail", "[!call:!] tail", "[!call:a:{"])
+    def test_malformed_or_unterminated_fragment_is_never_in_clean_text(self, frag):
+        from src.agents.llm.types import sanitize_call_syntax
+
+        assert sanitize_call_syntax("before " + frag) == "before"
+
+
+class TestHoldbackOverflowNeverLeaks:
+    """HIGH #2: an over-cap unterminated tail is discarded, never flushed to the stream."""
+
+    @pytest.mark.parametrize("tail_len", [16383, 16384, 16385])
+    def test_boundary_never_emits_raw_call_syntax(self, tail_len):
+        from src.agents.llm.types import (
+            MAX_STREAM_CALL_SYNTAX_BUFFER,
+            process_stream_call_syntax_buffer,
+            split_stream_call_syntax,
+        )
+
+        assert MAX_STREAM_CALL_SYNTAX_BUFFER == 16384
+        tail = "[!call:" + "x" * (tail_len - len("[!call:"))
+        assert len(tail) == tail_len
+        buffer = "Safe prefix. " + tail
+
+        safe_output, held, overflowed = split_stream_call_syntax(buffer)
+        assert safe_output == "Safe prefix. "
+        assert "[!call:" not in safe_output
+        if tail_len <= MAX_STREAM_CALL_SYNTAX_BUFFER:
+            assert (held, overflowed) == (tail, False)
+        else:
+            assert (held, overflowed) == ("", True)
+
+        # back-compat wrapper agrees and also never leaks
+        to_yield, remaining = process_stream_call_syntax_buffer(buffer)
+        assert to_yield == "Safe prefix. "
+        assert "[!call:" not in to_yield
+        assert remaining == (tail if tail_len <= MAX_STREAM_CALL_SYNTAX_BUFFER else "")
+
+    def test_long_safe_text_does_not_trigger_overflow(self):
+        from src.agents.llm.types import split_stream_call_syntax
+
+        safe, held, overflowed = split_stream_call_syntax("y" * 100000)
+        assert (len(safe), held, overflowed) == (100000, "", False)
+
+    @pytest.mark.asyncio
+    async def test_stream_overflow_discards_fragment_and_does_not_execute_call(self):
+        """The oversized tag would be a valid declared call once closed; it must neither stream nor run."""
+        pad = "x" * 20000
+        texts = [
+            "Visible before. [!call:set_phase:",
+            '{"phase": "close", "pad": "' + pad[:10000],
+            pad[10000:],
+            '"}!] visible after closing',
+            " and more text",
+        ]
+        chunks = await _drain(_stream_adapter(texts), tools=_DECLARED_TOOLS)
+
+        streamed = "".join(c.text for c in chunks if c.text and not c.is_thought)
+        assert streamed.strip() == "Visible before."
+        assert "[!call:" not in streamed and "xxxx" not in streamed and "phase" not in streamed
+        terminal = chunks[-1]
+        assert terminal.done is True
+        assert terminal.function_call is None
+
+    @pytest.mark.asyncio
+    async def test_stream_overflow_in_many_small_chunks(self):
+        texts = ["Hi [!call:set_phase:"] + ["y" * 100 for _ in range(200)] + ["tail"]
+        chunks = await _drain(_stream_adapter(texts), tools=_DECLARED_TOOLS)
+        streamed = "".join(c.text for c in chunks if c.text and not c.is_thought)
+        assert streamed == "Hi "
+        assert chunks[-1].function_call is None
+
+    @pytest.mark.asyncio
+    async def test_stream_below_cap_still_executes_valid_split_call(self):
+        texts = ['Go [!call:set_phase:{"phase": "', "x" * 5000 + '"}!] done']
+        chunks = await _drain(_stream_adapter(texts), tools=_DECLARED_TOOLS)
+        streamed = "".join(c.text for c in chunks if c.text and not c.is_thought)
+        assert streamed == "Go  done"
+        assert chunks[-1].function_call is not None
+        assert chunks[-1].function_call.name == "set_phase"
+
+
+class TestFallbackAllowlist:
+    """MEDIUM #4: allowlist is fail-closed when tools is not None; every tag is considered."""
+
+    def test_empty_tools_list_fails_closed(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        fc, text = _extract_call_syntax('Hi [!call:set_phase:{"phase": "x"}!]', tools=[])
+        assert fc is None
+        assert text == "Hi"
+
+    def test_tools_without_usable_names_fail_closed(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        fc, text = _extract_call_syntax('[!call:set_phase:{"a": 1}!]', tools=[{"description": "no name"}, {}])
+        assert fc is None and text is None
+
+    def test_tools_none_applies_no_allowlist(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        fc, _ = _extract_call_syntax('[!call:anything:{"a": 1}!]', tools=None)
+        assert fc is not None and fc.name == "anything"
+
+    def test_undeclared_first_tag_does_not_mask_declared_second(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        text = 'A [!call:evil_tool:{"cmd": "rm"}!] B [!call:close_event:{"summary": "ok"}!] C'
+        fc, cleaned = _extract_call_syntax(text, tools=_DECLARED_TOOLS)
+        assert fc is not None
+        assert (fc.name, fc.args) == ("close_event", {"summary": "ok"})
+        assert cleaned == "A  B  C"
+
+    def test_invalid_json_first_tag_does_not_mask_valid_second(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        text = '[!call:set_phase:{not json}!] [!call:set_phase:["list"]!] [!call:set_phase:{"phase": "p"}!]'
+        fc, cleaned = _extract_call_syntax(text, tools=_DECLARED_TOOLS)
+        assert fc is not None and fc.args == {"phase": "p"}
+        assert cleaned is None
+
+    def test_all_tags_rejected_returns_sanitized_text(self):
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        fc, cleaned = _extract_call_syntax('x [!call:a:{}!] y [!call:b:{}!] z [!call:set_phase:{', tools=_DECLARED_TOOLS)
+        assert fc is None
+        assert cleaned == "x  y  z"
+
+    @pytest.mark.asyncio
+    async def test_generate_passes_tools_to_allowlist(self):
+        text = 'Ok [!call:evil_tool:{"x": 1}!] [!call:set_phase:{"phase": "p"}!]'
+        res = await _generate_adapter(text).generate(system_prompt="sys", contents="c", tools=_DECLARED_TOOLS)
+        assert res.function_call is not None and res.function_call.name == "set_phase"
+        assert res.text == "Ok"
+
+        res = await _generate_adapter('[!call:evil_tool:{"x": 1}!]').generate(
+            system_prompt="sys", contents="c", tools=_DECLARED_TOOLS
+        )
+        assert res.function_call is None and res.text is None
+
+    @pytest.mark.asyncio
+    async def test_generate_empty_tools_fails_closed(self):
+        res = await _generate_adapter('Hi [!call:set_phase:{"phase": "p"}!]').generate(
+            system_prompt="sys", contents="c", tools=[]
+        )
+        assert res.function_call is None
+        assert res.text == "Hi"
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_passes_tools_to_allowlist(self):
+        texts = ['Ok [!call:evil_tool:{"x": 1}!] ', '[!call:close_event:{"summary": "s"}!]']
+        chunks = await _drain(_stream_adapter(texts), tools=_DECLARED_TOOLS)
+        assert chunks[-1].function_call is not None and chunks[-1].function_call.name == "close_event"
+        assert "".join(c.text for c in chunks if c.text).strip() == "Ok"
+
+        chunks = await _drain(_stream_adapter(['[!call:evil_tool:{"x": 1}!]']), tools=_DECLARED_TOOLS)
+        assert chunks[-1].function_call is None
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_empty_tools_fails_closed(self):
+        chunks = await _drain(_stream_adapter(['Hi [!call:set_phase:{"phase": "p"}!]']), tools=[])
+        assert chunks[-1].function_call is None
+        assert "".join(c.text for c in chunks if c.text).strip() == "Hi"
+
+
+class TestCallSyntaxLogHygiene:
+    """MEDIUM #3/#8: one warning per stripped fragment, and no raw model text in logs."""
+
+    @staticmethod
+    def _unterminated_warnings(caplog):
+        return [r for r in caplog.records if "unterminated" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_stream_tail_strip_warns_once_without_raw_text(self, caplog):
+        import logging
+
+        secret = "SECRET_ARGS_123"
+        texts = ["Hello [!call:set_phase:", '{"phase": "' + secret]
+        with caplog.at_level(logging.WARNING):
+            chunks = await _drain(_stream_adapter(texts), tools=_DECLARED_TOOLS)
+
+        assert "".join(c.text for c in chunks if c.text) == "Hello "
+        assert chunks[-1].function_call is None
+        warnings = self._unterminated_warnings(caplog)
+        assert len(warnings) == 1
+        assert "stream end" in warnings[0].getMessage()
+        assert secret not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_generate_unterminated_warns_once(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            res = await _generate_adapter('Truncated [!call:set_phase:{"phase":').generate(
+                system_prompt="sys", contents="c", tools=_DECLARED_TOOLS
+            )
+        assert res.text == "Truncated"
+        assert len(self._unterminated_warnings(caplog)) == 1
+
+    def test_sanitize_warn_flag_suppresses_duplicate(self, caplog):
+        import logging
+        from src.agents.llm.types import sanitize_call_syntax
+
+        with caplog.at_level(logging.WARNING):
+            sanitize_call_syntax("a [!call:x:{")
+            sanitize_call_syntax("a [!call:x:{", warn=False)
+        assert len(self._unterminated_warnings(caplog)) == 1
+
+    def test_non_object_args_log_does_not_include_raw_args(self, caplog):
+        import logging
+        from src.agents.llm.gemini_client import _extract_call_syntax
+
+        with caplog.at_level(logging.WARNING):
+            _extract_call_syntax('[!call:set_phase:["TOPSECRET"]!]', tools=_DECLARED_TOOLS)
+        assert "TOPSECRET" not in caplog.text

@@ -12,6 +12,10 @@
 #    Only `== PRIORITY_HIGH` is semantically special in QuotaTracker; any other value is gated as low priority.
 # 8. [Gotcha]: derive_llm_priority is sticky via event.approved_by (boosts every LLM call until approval is revoked);
 #    the user-turn boost only looks at the last _RECENT_USER_TURN_WINDOW turns and decays after that.
+# 9. [Constraint]: [!call:...!] fallback syntax is parsed ONLY via scan_call_syntax (single linear pass). Never
+#    reintroduce a lazy `(.*?)` + `\s*` regex over model text -- it backtracks super-linearly on unterminated input.
+# 10. [Gotcha]: Holdback overflow (> MAX_STREAM_CALL_SYNTAX_BUFFER unterminated tail) DISCARDS the fragment; it must
+#    never be flushed to the stream. Streaming callers use split_stream_call_syntax and stop accumulating on overflow.
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -20,10 +24,13 @@ from this module and never touch SDK-specific types directly.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -116,41 +123,102 @@ def derive_llm_priority(event) -> int:
     return PRIORITY_NORMAL
 
 
-# Pattern matching hallucinated tool call syntax [!call:name:{json_args}!]
-CALL_SYNTAX_RE = re.compile(r"\[!call:([a-zA-Z0-9_]+):\s*(.*?)\s*!\]", re.DOTALL)
+# Hallucinated tool-call syntax: [!call:name:{json_args}!]
+#
+# Parsed with a single-pass linear scanner (str.find + one anchored name match), NOT a
+# lazy-dotall regex: `(.*?)` plus adjacent `\s*` backtracks super-linearly on unterminated
+# input such as "[!call:a:" + " " * 50000 (ReDoS). The scanner never rescans text it has
+# already consumed, so every public helper below is O(n) in the input length.
+_CALL_OPEN = "[!call:"
+_CALL_CLOSE = "!]"
+_CALL_NAME_RE = re.compile(r"[A-Za-z0-9_]+:")  # anchored via .match(); bounded by the name run
+MAX_STREAM_CALL_SYNTAX_BUFFER = 16384  # cap on a held-back unterminated [!call: tail (chars)
 
 
-def sanitize_call_syntax(text: str | None) -> str | None:
-    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text."""
+def scan_call_syntax(text: str) -> tuple[str, list[tuple[str, str]], str]:
+    """Split text into (clean_text, complete_calls, unterminated_tail) in one linear pass.
+
+    - clean_text: input with every complete ``[!call:name:args!]`` tag removed, truncated at
+      the first ``[!call:`` that is NOT a complete, well-formed tag.
+    - complete_calls: ``(name, args)`` per complete tag, in order. args is whitespace-stripped.
+    - unterminated_tail: raw text from the first incomplete/malformed ``[!call:`` to the end
+      ("" when there is none). Never emitted to users; callers drop or hold it.
+    Pure: no logging, no side effects.
+    """
+    parts: list[str] = []
+    calls: list[tuple[str, str]] = []
+    pos = 0
+    while True:
+        i = text.find(_CALL_OPEN, pos)
+        if i == -1:
+            parts.append(text[pos:])
+            return "".join(parts), calls, ""
+        parts.append(text[pos:i])
+        name_m = _CALL_NAME_RE.match(text, i + len(_CALL_OPEN))
+        if name_m:
+            end = text.find(_CALL_CLOSE, name_m.end())
+            if end != -1:
+                calls.append((name_m.group()[:-1], text[name_m.end():end].strip()))
+                pos = end + len(_CALL_CLOSE)
+                continue
+        return "".join(parts), calls, text[i:]
+
+
+def sanitize_call_syntax(text: str | None, *, warn: bool = True) -> str | None:
+    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text.
+
+    Also strips a trailing unterminated [!call:... fragment (e.g. truncated mid-tag).
+    Pass warn=False when the caller already logged the strip for this response.
+    """
     if not text:
         return text
-    cleaned = CALL_SYNTAX_RE.sub("", text).strip()
+    cleaned, _calls, tail = scan_call_syntax(text)
+    if tail and warn:
+        logger.warning(
+            "sanitize_call_syntax: stripped unterminated [!call: fragment (length %d)",
+            len(tail),
+        )
+    cleaned = cleaned.strip()
     return cleaned if cleaned else None
+
+
+def split_stream_call_syntax(buffer: str) -> tuple[str, str, bool]:
+    """Streaming holdback core. Returns (safe_to_yield, held_back, overflowed).
+
+    Completed tags are stripped. An unterminated ``[!call:`` tail (or a partial prefix of
+    the opener at the end of the buffer) is held back for the next chunk. If the held tail
+    exceeds MAX_STREAM_CALL_SYNTAX_BUFFER the fragment is DISCARDED (never flushed):
+    only the safe prefix is returned, held_back is "" and overflowed is True. The caller
+    must then stop emitting/accumulating text for the rest of the stream.
+    """
+    if not buffer:
+        return "", "", False
+    clean, _calls, tail = scan_call_syntax(buffer)
+    if tail:
+        if len(tail) > MAX_STREAM_CALL_SYNTAX_BUFFER:
+            return clean, "", True
+        return clean, tail, False
+    for length in range(min(len(clean), len(_CALL_OPEN) - 1), 0, -1):
+        suffix = clean[-length:]
+        if _CALL_OPEN.startswith(suffix):
+            return clean[:-length], suffix, False
+    return clean, "", False
 
 
 def process_stream_call_syntax_buffer(buffer: str) -> tuple[str, str]:
     """Strip completed [!call:...!] tags and hold back partial tags across stream chunks.
 
-    Returns (text_to_yield, remaining_buffer).
+    Returns (text_to_yield, remaining_buffer). Back-compat wrapper over
+    split_stream_call_syntax: on holdback overflow the oversized fragment is dropped
+    (logged) and never returned in text_to_yield.
     """
-    if not buffer:
-        return "", ""
-
-    buffer = CALL_SYNTAX_RE.sub("", buffer)
-    if not buffer:
-        return "", ""
-
-    idx = buffer.find("[!call:")
-    if idx != -1:
-        return buffer[:idx], buffer[idx:]
-
-    for length in range(min(len(buffer), len("[!call:") - 1), 0, -1):
-        suffix = buffer[-length:]
-        if "[!call:".startswith(suffix):
-            return buffer[:-length], suffix
-
-    return buffer, ""
-
+    safe, held, overflowed = split_stream_call_syntax(buffer)
+    if overflowed:
+        logger.warning(
+            "process_stream_call_syntax_buffer: unterminated [!call: tail exceeded %d chars; discarding fragment",
+            MAX_STREAM_CALL_SYNTAX_BUFFER,
+        )
+    return safe, held
 
 
 # =============================================================================
