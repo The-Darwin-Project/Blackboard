@@ -8,10 +8,11 @@
 # 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 7. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 8. [Pattern]: _convert_structured owns Gemini wire-protocol shaping; Brain._build_contents stays
-#    provider-agnostic. It splits mixed FR/text user turns, merges consecutive same-kind user/model
-#    turns (parts validated via types.Content so no raw dict leaks into Content.parts), inserts a
-#    synthetic model "Acknowledged." bridge between non-mergeable consecutive user turns, and
-#    closes a trailing model turn (synthetic FR + "Proceed." user turn).
+#    provider-agnostic. It sanitizes thought signatures on role: 'user' turns, splits mixed FR/text
+#    user turns, merges consecutive same-kind user/model turns (parts validated via types.Content
+#    so no raw dict leaks into Content.parts), inserts a synthetic model "Acknowledged." bridge
+#    between non-mergeable consecutive user turns, and closes a trailing model turn (synthetic
+#    FR + "Proceed." user turn).
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
 # 11. [Pattern]: Google Search grounding removed from adapter-level state. Web search is now a
@@ -46,6 +47,7 @@ generate_content / generate_content_stream.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -78,6 +80,47 @@ def _is_function_response_part(part: Any) -> bool:
     if isinstance(part, dict):
         return "function_response" in part or "functionResponse" in part
     return getattr(part, "function_response", None) is not None
+
+
+def _strip_user_thought_signature(part: Any) -> Any:
+    """Strip thought_signature and thoughtSignature from user-bound parts.
+
+    Under Gemini wire protocol, thought signatures are valid strictly on
+    role: 'model'. User turns carrying them trigger 400 INVALID_ARGUMENT.
+    Preserves the internal 'thought' boolean used for turn merge tracking.
+    """
+    from google.genai import types
+
+    if isinstance(part, dict):
+        cleaned = {
+            k: v
+            for k, v in part.items()
+            if k not in ("thought_signature", "thoughtSignature")
+        }
+        # If part only carried signature and has no functional keys left, drop it
+        if not cleaned:
+            return None
+        return cleaned
+
+    if isinstance(part, types.Part):
+        if hasattr(part, "model_copy"):
+            return part.model_copy(update={"thought_signature": None})
+        p_copy = copy.copy(part)
+        if hasattr(p_copy, "thought_signature"):
+            p_copy.thought_signature = None
+        return p_copy
+
+    if hasattr(part, "thought_signature") or hasattr(part, "thoughtSignature"):
+        p_copy = copy.copy(part)
+        for attr in ("thought_signature", "thoughtSignature"):
+            if hasattr(p_copy, attr):
+                try:
+                    setattr(p_copy, attr, None)
+                except (AttributeError, TypeError):
+                    pass
+        return p_copy
+
+    return part
 
 
 def _coerce_part(part: Any) -> Any:
@@ -434,19 +477,28 @@ class GeminiAdapter:
         converted: list[types.Content] = []
         for msg in contents:
             role = msg["role"]
-            parts = [_coerce_part(p) for p in (msg.get("parts") or [])]
+            raw_parts = msg.get("parts") or []
 
             # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts,
             # and consecutive user turns must alternate with model turns or merge cleanly.
+            # In addition, thought and thought_signature are strictly valid only on role: "model".
             if role == "user":
+                sanitized_parts = []
+                for p in raw_parts:
+                    cleaned = _strip_user_thought_signature(p)
+                    if cleaned is not None:
+                        sanitized_parts.append(cleaned)
+                parts = [_coerce_part(p) for p in sanitized_parts]
                 fr_parts = [p for p in parts if _is_function_response_part(p)]
                 non_fr_parts = [p for p in parts if not _is_function_response_part(p)]
                 _append_user_turn(converted, fr_parts, has_fr=True)
                 _append_user_turn(converted, non_fr_parts, has_fr=False)
-            elif role == "model" and converted and converted[-1].role == "model":
-                converted[-1].parts.extend(_validated_parts("model", parts))
-            elif parts:
-                converted.append(types.Content(role=role, parts=parts))
+            else:
+                parts = [_coerce_part(p) for p in raw_parts]
+                if role == "model" and converted and converted[-1].role == "model":
+                    converted[-1].parts.extend(_validated_parts("model", parts))
+                elif parts:
+                    converted.append(types.Content(role=role, parts=parts))
 
         # Protocol safety net: requests ending with a model turn are rejected by Gemini with 400.
         if converted and converted[-1].role == "model":

@@ -269,13 +269,7 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
     if turn.actor == "brain" and turn.action == "tool_result":
         tool_name = turn.waitingFor or "tool"
         text = f"[SYSTEM {tool_name}]: {turn.evidence or turn.thoughts or ''}"
-        parts: list[dict] = [{"text": text}]
-        if turn.response_parts:
-            for rp in turn.response_parts:
-                if rp.get("thought_signature"):
-                    parts[0]["thought_signature"] = rp["thought_signature"]
-                    break
-        return parts
+        return [{"text": text}]
 
     if (
         turn.actor == "brain"
