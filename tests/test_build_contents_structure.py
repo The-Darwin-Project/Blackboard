@@ -2378,6 +2378,12 @@ class TestParallelFunctionCallExecution:
         assert len(res_fr_fr) == 2
         assert [c.role for c in res_fr_fr] == ["model", "user"]
         assert len(res_fr_fr[1].parts) == 2
+        # Merged parts must be validated SDK Parts (a raw dict would serialize as {}).
+        from google.genai import types
+
+        assert all(isinstance(p, types.Part) for p in res_fr_fr[1].parts)
+        assert [p.function_response.name for p in res_fr_fr[1].parts] == ["tool_a", "tool_b"]
+        assert [p.function_response.response for p in res_fr_fr[1].parts] == [{"ok": 1}, {"ok": 2}]
 
     def test_gemini_adapter_coerces_parts_and_serializes_cleanly(self):
         """GeminiAdapter._convert_structured coerces camelCase functionResponse and snake_case
@@ -2616,4 +2622,307 @@ class TestResolveLlmParams:
         assert thinking == coord_meta.get("thinking_level")
         assert temp == coord_meta.get("temperature", 1.0)
         assert tokens >= 8192
+
+
+# ---------------------------------------------------------------------------
+# GeminiAdapter._convert_structured: wire-protocol shaping regressions (PR #310)
+# ---------------------------------------------------------------------------
+
+def _gemini_adapter():
+    from src.agents.llm.gemini_client import GeminiAdapter
+
+    return GeminiAdapter.__new__(GeminiAdapter)
+
+
+def _fc(name: str, **args) -> dict:
+    return {"functionCall": {"name": name, "args": args}}
+
+
+def _fr_camel(name: str, **response) -> dict:
+    return {"functionResponse": {"name": name, "response": response}}
+
+
+def _fr_snake(name: str, **response) -> dict:
+    return {"function_response": {"name": name, "response": response}}
+
+
+def _wire_parts(content) -> list[dict]:
+    """Serialize a Content the way the SDK wire layer does (JSON-ish, None fields dropped)."""
+    return content.model_dump(exclude_none=True, mode="json")["parts"]
+
+
+def _has_fr(content) -> bool:
+    return any(getattr(p, "function_response", None) is not None for p in content.parts)
+
+
+def _has_fc(content) -> bool:
+    return any(getattr(p, "function_call", None) is not None for p in content.parts)
+
+
+class TestGeminiWireProtocolShaping:
+    """Regression tests for strict role alternation, bridging and validated part merging."""
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [
+            (_fr_camel("tool_a", r=1), _fr_camel("tool_b", r=2)),
+            (_fr_snake("tool_a", r=1), _fr_snake("tool_b", r=2)),
+            (_fr_camel("tool_a", r=1), _fr_snake("tool_b", r=2)),
+            (_fr_snake("tool_a", r=1), _fr_camel("tool_b", r=2)),
+        ],
+        ids=["camel-camel", "snake-snake", "camel-snake", "snake-camel"],
+    )
+    def test_parallel_fr_merge_yields_validated_parts_and_clean_wire(self, first, second):
+        from google.genai import models, types
+
+        contents = [
+            {"role": "model", "parts": [_fc("tool_a"), _fc("tool_b")]},
+            {"role": "user", "parts": [first]},
+            {"role": "user", "parts": [second]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert [c.role for c in converted] == ["model", "user"]
+        merged = converted[-1].parts
+        assert all(isinstance(p, types.Part) for p in merged)
+        assert [p.function_response.name for p in merged] == ["tool_a", "tool_b"]
+        assert [p.function_response.response for p in merged] == [{"r": 1}, {"r": 2}]
+
+        for content in converted:
+            wire = _wire_parts(content)
+            assert all(part != {} for part in wire)
+        user_wire = _wire_parts(converted[-1])
+        assert [p["function_response"]["name"] for p in user_wire] == ["tool_a", "tool_b"]
+
+        mldev_parts = models._Content_to_mldev(converted[-1])["parts"]
+        assert len(mldev_parts) == 2
+        assert all(part.get("functionResponse") is not None for part in mldev_parts)
+
+    def test_make_batch_fr_dicts_from_context_parts_merge_cleanly(self):
+        """build_single_function_response (camelCase, as emitted in production) survives merge."""
+        from google.genai import types
+
+        from src.agents.context_parts import build_single_function_response
+
+        t1 = _make_turn(turn=1, actor="developer", action="tool_result", evidence="one")
+        t2 = _make_turn(turn=2, actor="qe", action="tool_result", evidence="two")
+        contents = [
+            {"role": "model", "parts": [_fc("tool_a"), _fc("tool_b")]},
+            {"role": "user", "parts": [build_single_function_response(t1, "tool_a")]},
+            {"role": "user", "parts": [build_single_function_response(t2, "tool_b")]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert len(converted) == 2
+        assert all(isinstance(p, types.Part) for p in converted[1].parts)
+        assert [p["function_response"]["response"] for p in _wire_parts(converted[1])] == [
+            {"result": "one"},
+            {"result": "two"},
+        ]
+
+    def test_consecutive_model_turns_merge_with_camel_function_call(self):
+        from google.genai import types
+
+        contents = [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [{"text": "thinking"}]},
+            {"role": "model", "parts": [_fc("tool_x", q="v")]},
+            {"role": "user", "parts": [_fr_camel("tool_x", ok=True)]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert [c.role for c in converted] == ["user", "model", "user"]
+        model_parts = converted[1].parts
+        assert len(model_parts) == 2
+        assert all(isinstance(p, types.Part) for p in model_parts)
+        assert model_parts[0].text == "thinking"
+        assert model_parts[1].function_call.name == "tool_x"
+        assert model_parts[1].function_call.args == {"q": "v"}
+        wire = _wire_parts(converted[1])
+        assert all(part != {} for part in wire)
+        assert wire[1]["function_call"]["name"] == "tool_x"
+
+    def test_consecutive_model_turns_merge_with_snake_function_call_and_signature(self):
+        from google.genai import types
+
+        contents = [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [{"text": "a"}]},
+            {"role": "model", "parts": [{"function_call": {"name": "t", "args": {}},
+                                         "thought_signature": "c2ln"}]},
+            {"role": "user", "parts": [_fr_camel("t", ok=1)]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        merged = converted[1].parts
+        assert all(isinstance(p, types.Part) for p in merged)
+        assert merged[1].function_call.name == "t"
+        assert merged[1].thought_signature == b"sig"
+
+    def test_consecutive_user_text_merge_validates_extra_key_dicts(self):
+        """A text dict with extra keys is not caught by _coerce_part; merge must still validate it."""
+        from google.genai import types
+
+        contents = [
+            {"role": "user", "parts": [{"text": "one"}]},
+            {"role": "user", "parts": [{"text": "two", "thought": True}]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert len(converted) == 1
+        assert all(isinstance(p, types.Part) for p in converted[0].parts)
+        assert converted[0].parts[1].text == "two"
+        assert converted[0].parts[1].thought is True
+
+    def test_parts_none_is_tolerated(self):
+        contents = [
+            {"role": "user", "parts": None},
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": None},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        # Empty/None-parts turns are dropped (no TypeError); the remaining payload is valid.
+        assert [c.role for c in converted] == ["user"]
+        assert [p.text for p in converted[0].parts] == ["hi"]
+
+    @pytest.mark.parametrize("snake_first", [True, False], ids=["snake-first", "camel-first"])
+    def test_snake_case_fr_in_existing_turn_merges_and_bridges(self, snake_first):
+        """last_has_fr must recognise a user turn that was built from snake_case function_response."""
+        first = _fr_snake("tool_a", r=1) if snake_first else _fr_camel("tool_a", r=1)
+        base = [
+            {"role": "model", "parts": [_fc("tool_a"), _fc("tool_b")]},
+            {"role": "user", "parts": [first]},
+        ]
+        adapter = _gemini_adapter()
+
+        merged = adapter._convert_structured(base + [{"role": "user", "parts": [_fr_snake("tool_b", r=2)]}])
+        assert [c.role for c in merged] == ["model", "user"]
+        assert [p.function_response.name for p in merged[1].parts] == ["tool_a", "tool_b"]
+
+        bridged = adapter._convert_structured(base + [{"role": "user", "parts": [{"text": "next"}]}])
+        assert [c.role for c in bridged] == ["model", "user", "model", "user"]
+        assert [p.function_response.name for p in bridged[1].parts] == ["tool_a"]
+        assert bridged[2].parts[0].text == "Acknowledged."
+        assert bridged[3].parts[0].text == "next"
+
+    def test_mixed_fr_text_turn_merges_fr_then_bridges_text(self):
+        """[FR_2, text] after an FR user turn: FR_2 merges, then bridge, then the text user turn."""
+        contents = [
+            {"role": "model", "parts": [_fc("tool_a"), _fc("tool_b")]},
+            {"role": "user", "parts": [_fr_camel("tool_a", r=1)]},
+            {"role": "user", "parts": [_fr_snake("tool_b", r=2), {"text": "context"}]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert [c.role for c in converted] == ["model", "user", "model", "user"]
+        assert len(converted[1].parts) == 2
+        assert [p.function_response.name for p in converted[1].parts] == ["tool_a", "tool_b"]
+        assert not any(getattr(p, "text", None) for p in converted[1].parts)
+        assert [p.text for p in converted[2].parts] == ["Acknowledged."]
+        assert [p.text for p in converted[3].parts] == ["context"]
+
+    def test_text_then_fr_user_turn_is_bridged(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "user", "parts": [_fr_camel("tool_a", r=1)]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert [c.role for c in converted] == ["user", "model", "user"]
+        assert converted[1].parts[0].text == "Acknowledged."
+        assert _has_fr(converted[2])
+
+    def test_bridge_insertion_is_logged_at_debug(self, caplog):
+        import logging
+
+        contents = [
+            {"role": "model", "parts": [_fc("tool_a")]},
+            {"role": "user", "parts": [_fr_camel("tool_a", r=1)]},
+            {"role": "user", "parts": [{"text": "next"}]},
+        ]
+        with caplog.at_level(logging.DEBUG, logger="src.agents.llm.gemini_client"):
+            _gemini_adapter()._convert_structured(contents)
+
+        assert any("synthetic model bridge" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            pytest.param(
+                [
+                    {"role": "user", "parts": [{"text": "a"}]},
+                    {"role": "model", "parts": [_fc("t1")]},
+                    {"role": "user", "parts": [_fr_camel("t1", r=1)]},
+                    {"role": "model", "parts": [{"text": "done"}]},
+                    {"role": "user", "parts": [{"text": "b"}]},
+                ],
+                id="single-fc-fr",
+            ),
+            pytest.param(
+                [
+                    {"role": "user", "parts": [{"text": "a"}]},
+                    {"role": "model", "parts": [_fc("t1"), _fc("t2")]},
+                    {"role": "user", "parts": [_fr_camel("t1", r=1)]},
+                    {"role": "user", "parts": [_fr_snake("t2", r=2)]},
+                    {"role": "user", "parts": [{"text": "more"}]},
+                    {"role": "model", "parts": [_fc("t3")]},
+                    {"role": "user", "parts": [_fr_camel("t3", r=3), {"text": "extra"}]},
+                ],
+                id="parallel-then-mixed",
+            ),
+            pytest.param(
+                [
+                    {"role": "user", "parts": [{"text": "a"}]},
+                    {"role": "model", "parts": [{"text": "x"}]},
+                    {"role": "model", "parts": [_fc("t1")]},
+                    {"role": "model", "parts": [_fc("t2")]},
+                    {"role": "user", "parts": [_fr_camel("t1", r=1), _fr_camel("t2", r=2)]},
+                    {"role": "user", "parts": [{"text": "n1"}]},
+                    {"role": "user", "parts": [{"text": "n2"}]},
+                ],
+                id="model-merge-then-text-merge",
+            ),
+            pytest.param(
+                [
+                    {"role": "user", "parts": [{"text": "a"}]},
+                    {"role": "model", "parts": [_fc("t1")]},
+                ],
+                id="trailing-unanswered-fc",
+            ),
+            pytest.param(
+                [
+                    {"role": "model", "parts": [_fc("t1")]},
+                    {"role": "user", "parts": [_fr_camel("t1", r=1)]},
+                    {"role": "user", "parts": [{"text": "n"}]},
+                    {"role": "user", "parts": [_fr_snake("t9", r=9)]},
+                ],
+                id="starts-with-model-fr-text-fr",
+            ),
+        ],
+    )
+    def test_strict_alternation_and_fc_fr_adjacency_invariant(self, contents):
+        from google.genai import types
+
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        assert converted, "payload must not be empty"
+        assert converted[-1].role == "user"
+        for prev, cur in zip(converted, converted[1:]):
+            assert prev.role != cur.role, f"adjacent {cur.role} turns on the wire"
+        for content in converted:
+            assert all(isinstance(p, types.Part) for p in content.parts)
+            assert all(part != {} for part in _wire_parts(content))
+            if _has_fr(content):
+                assert not any(getattr(p, "text", None) for p in content.parts), (
+                    "functionResponse turn must not contain text"
+                )
+        for idx, content in enumerate(converted):
+            if content.role == "model" and _has_fc(content):
+                assert idx + 1 < len(converted)
+                nxt = converted[idx + 1]
+                assert nxt.role == "user"
+                fc_names = [p.function_call.name for p in content.parts if p.function_call]
+                fr_names = [p.function_response.name for p in nxt.parts if p.function_response]
+                assert sorted(fr_names) == sorted(fc_names)
 
