@@ -2926,3 +2926,144 @@ class TestGeminiWireProtocolShaping:
                 fr_names = [p.function_response.name for p in nxt.parts if p.function_response]
                 assert sorted(fr_names) == sorted(fc_names)
 
+
+# ---------------------------------------------------------------------------
+# VMER-2260: Strip thought_signature from role:user turns (Two-Layer Defense)
+# ---------------------------------------------------------------------------
+
+
+class TestStripUserThoughtSignatures:
+    """ATDD Executable Specifications for VMER-2260 (T-1 through T-4).
+
+    Ensures thought_signature is never attached or leaked to role:user wire turns
+    while strictly preserving it on role:model turns.
+    """
+
+    def test_turn_to_parts_tool_result_never_attaches_thought_signature(self):
+        """T-1: Given a tool_result turn with response_parts carrying thought_signature,
+        when Brain._turn_to_parts(turn) is called,
+        then parts[0] has NO thought_signature key.
+        """
+        turn = _make_turn(
+            turn=2,
+            actor="brain",
+            action="tool_result",
+            waitingFor="classify_event",
+            evidence="classified clear",
+            response_parts=[
+                {
+                    "thought_signature": "c2lnX2RhdGE=",
+                    "functionCall": {"name": "classify_event", "args": {}},
+                }
+            ],
+        )
+        parts = Brain._turn_to_parts(turn)
+
+        assert len(parts) == 1
+        assert "thought_signature" not in parts[0], (
+            f"thought_signature must not be attached to tool_result parts: {parts[0]}"
+        )
+        assert parts[0]["text"] == "[SYSTEM classify_event]: classified clear"
+
+    def test_gemini_convert_structured_strips_thought_signature_from_user_turn(self):
+        """T-2: Given structured contents with role: 'user' containing thought_signature,
+        when GeminiAdapter._convert_structured(contents) is called,
+        then the user types.Content has no thought_signature on any part.
+        """
+        from google.genai import types
+
+        class CamelCasePart:
+            def __init__(self):
+                self.text = "duck-typed part"
+                self.thoughtSignature = "c2lnX2RhdGE="
+
+        contents = [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": "[SYSTEM tool]: output", "thought_signature": "c2lnX2RhdGE="},
+                    {"text": "another", "thoughtSignature": "c2lnX2RhdGE="},
+                    types.Part(text="part with sig", thought_signature=b"sig"),
+                    CamelCasePart(),
+                ],
+            }
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        user_contents = [c for c in converted if c.role == "user"]
+        assert len(user_contents) >= 1
+        for content in user_contents:
+            for p in content.parts:
+                assert getattr(p, "thought_signature", None) is None, (
+                    f"thought_signature leaked onto user types.Content Part: {p}"
+                )
+                assert getattr(p, "thoughtSignature", None) is None
+            wire = content.model_dump(exclude_none=True, mode="json")["parts"]
+            assert not any("thought_signature" in p or "thoughtSignature" in p for p in wire)
+
+    def test_gemini_convert_structured_preserves_thought_signature_on_model_turn(self):
+        """T-3: Given structured contents with role: 'model' containing thought_signature,
+        when GeminiAdapter._convert_structured(contents) is called,
+        then the model types.Content retains its decoded thought_signature.
+        """
+        contents = [
+            {"role": "user", "parts": [{"text": "hello"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {
+                        "text": "reasoning step",
+                        "thought": True,
+                        "thought_signature": "c2lnX2RhdGE=",
+                    },
+                ],
+            },
+            {"role": "user", "parts": [{"text": "next"}]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+
+        model_contents = [c for c in converted if c.role == "model"]
+        assert len(model_contents) >= 1
+        sig_parts = [
+            p for p in model_contents[0].parts
+            if getattr(p, "thought_signature", None) is not None
+        ]
+        assert len(sig_parts) >= 1
+        assert sig_parts[0].thought_signature == b"sig_data"
+
+    @pytest.mark.asyncio
+    async def test_build_contents_tool_result_text_fallback_strips_thought_signature(self):
+        """T-4: Given an event with a tool_result turn in text fallback mode (_THOUGHT_SIG_V2=False),
+        when Brain._build_contents(brain, event) is called,
+        then no role: 'user' content part carries thought_signature.
+        """
+        fc_part = {
+            "functionCall": {"name": "classify_event", "args": {"domain": "clear"}},
+            "thought_signature": "c2lnX2RhdGE=",
+        }
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="triage this"),
+            _make_turn(
+                turn=2,
+                actor="brain",
+                action="tool_result",
+                waitingFor="classify_event",
+                evidence="classified clear",
+                response_parts=[fc_part],
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", False):
+            contents = await Brain._build_contents(brain, event)
+
+        user_contents = [c for c in contents if c["role"] == "user"]
+        assert len(user_contents) >= 1
+        for content in user_contents:
+            for p in content.get("parts", []):
+                assert "thought_signature" not in p, (
+                    f"thought_signature leaked to user-role part in text fallback mode: {p}"
+                )
+
+
