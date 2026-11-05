@@ -7,7 +7,11 @@
 # 5. [Gotcha]: Temperature range 0.0-2.0 -- passthrough, no normalization needed.
 # 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 7. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
-# 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
+# 8. [Pattern]: _convert_structured owns Gemini wire-protocol shaping; Brain._build_contents stays
+#    provider-agnostic. It splits mixed FR/text user turns, merges consecutive same-kind user/model
+#    turns (parts validated via types.Content so no raw dict leaks into Content.parts), inserts a
+#    synthetic model "Acknowledged." bridge between non-mergeable consecutive user turns, and
+#    closes a trailing model turn (synthetic FR + "Proceed." user turn).
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
 # 11. [Pattern]: Google Search grounding removed from adapter-level state. Web search is now a
@@ -63,6 +67,88 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Synthetic turn texts used to keep the Gemini wire protocol valid (strict user/model alternation).
+_SYNTHETIC_BRIDGE_TEXT = "Acknowledged."
+_SYNTHETIC_PROCEED_TEXT = "Proceed."
+
+
+def _is_function_response_part(part: Any) -> bool:
+    """True for a functionResponse/function_response dict or an SDK Part carrying one."""
+    if isinstance(part, dict):
+        return "function_response" in part or "functionResponse" in part
+    return getattr(part, "function_response", None) is not None
+
+
+def _coerce_part(part: Any) -> Any:
+    """Normalize one structured part for the Gemini SDK.
+
+    Image dicts and tool-response dicts become SDK ``types.Part`` objects; ``thought_signature``
+    strings are base64-decoded. Anything else is returned unchanged (``_validated_parts`` is
+    responsible for the final dict -> ``types.Part`` validation).
+    """
+    from google.genai import types
+
+    if isinstance(part, types.Part) or not isinstance(part, dict):
+        return part
+    if "bytes" in part:
+        return types.Part.from_bytes(data=part["bytes"], mime_type=part["mime_type"])
+    for key in ("functionResponse", "function_response"):
+        if key in part:
+            fr = part[key]
+            return types.Part.from_function_response(
+                name=fr.get("name") or "tool",
+                response=fr.get("response") or {},
+            )
+    if "thought_signature" in part:
+        import base64
+
+        restored = dict(part)
+        sig = restored["thought_signature"]
+        try:
+            restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
+        except Exception:
+            pass
+        return restored
+    if "text" in part and len(part) == 1:
+        return types.Part.from_text(text=part["text"])
+    return part
+
+
+def _validated_parts(role: str, parts: list) -> list:
+    """Coerce ``parts`` to validated ``types.Part`` objects via ``types.Content``.
+
+    ``list.extend`` on an already-built ``Content.parts`` does not re-validate, so any raw dict
+    (e.g. camelCase ``functionCall``) would stay a dict and serialize as ``{}`` on the wire.
+    """
+    from google.genai import types
+
+    return types.Content(role=role, parts=parts).parts or []
+
+
+def _append_user_turn(converted: list, u_parts: list, has_fr: bool) -> None:
+    """Append user parts, merging with or bridging from the previous user turn.
+
+    A functionResponse-only user turn must not mix with text parts: same-kind consecutive
+    user turns merge; different-kind ones are separated by a synthetic model bridge turn.
+    """
+    from google.genai import types
+
+    if not u_parts:
+        return
+    if converted and converted[-1].role == "user":
+        last_has_fr = any(_is_function_response_part(p) for p in converted[-1].parts or [])
+        if last_has_fr == has_fr:
+            converted[-1].parts.extend(_validated_parts("user", u_parts))
+            return
+        logger.debug(
+            "Gemini wire adapter: inserting synthetic model bridge between user turns "
+            "(previous has_fr=%s, next has_fr=%s)", last_has_fr, has_fr,
+        )
+        converted.append(
+            types.Content(role="model", parts=[types.Part.from_text(text=_SYNTHETIC_BRIDGE_TEXT)])
+        )
+    converted.append(types.Content(role="user", parts=u_parts))
 
 
 def _extract_call_syntax(
@@ -331,82 +417,66 @@ class GeminiAdapter:
     def _convert_structured(self, contents: list[dict]):
         """Convert structured [{role, parts}] to google-genai Content objects.
 
-        Text and thought_signature parts pass through as dicts (SDK accepts them).
-        Image parts ({"bytes": ...}) are converted to SDK Part objects.
+        This method owns Gemini wire-protocol shaping (``Brain._build_contents`` stays
+        provider-agnostic):
+
+        - Image dicts and functionResponse/function_response dicts become SDK ``types.Part``.
+        - User turns mixing functionResponse and text parts are split by kind.
+        - Consecutive same-kind user turns (all-FR or all-text) and consecutive model turns are
+          merged; merged parts are validated through ``types.Content`` so no raw dict leaks into
+          an existing ``Content.parts`` (which would serialize as ``{}``).
+        - Consecutive non-mergeable user turns (FR then text, or text then FR) are separated by a
+          synthetic model bridge turn ("Acknowledged.").
+        - A trailing model turn is closed with synthetic functionResponse / "Proceed." user turns.
         """
         from google.genai import types
-        converted = []
+
+        converted: list[types.Content] = []
         for msg in contents:
             role = msg["role"]
-            parts = []
-            for p in msg.get("parts", []):
-                if isinstance(p, dict) and "bytes" in p:
-                    parts.append(types.Part.from_bytes(
-                        data=p["bytes"], mime_type=p["mime_type"],
-                    ))
-                elif isinstance(p, dict):
-                    if "thought_signature" in p:
-                        import base64
-                        restored = dict(p)
-                        sig = restored["thought_signature"]
-                        try:
-                            restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
-                        except Exception:
-                            pass
-                        parts.append(restored)
-                    else:
-                        parts.append(p)
-                else:
-                    parts.append(p)
-            # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts.
+            parts = [_coerce_part(p) for p in (msg.get("parts") or [])]
+
+            # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts,
+            # and consecutive user turns must alternate with model turns or merge cleanly.
             if role == "user":
-                fr_parts = []
-                non_fr_parts = []
-                for p in parts:
-                    is_fr = False
-                    if isinstance(p, dict) and ("functionResponse" in p or "function_response" in p):
-                        is_fr = True
-                    elif hasattr(p, "function_response") and p.function_response:
-                        is_fr = True
-
-                    if is_fr:
-                        fr_parts.append(p)
-                    else:
-                        non_fr_parts.append(p)
-
-                if fr_parts and non_fr_parts:
-                    converted.append(types.Content(role="user", parts=fr_parts))
-                    converted.append(types.Content(role="user", parts=non_fr_parts))
-                elif parts:
-                    converted.append(types.Content(role="user", parts=parts))
+                fr_parts = [p for p in parts if _is_function_response_part(p)]
+                non_fr_parts = [p for p in parts if not _is_function_response_part(p)]
+                _append_user_turn(converted, fr_parts, has_fr=True)
+                _append_user_turn(converted, non_fr_parts, has_fr=False)
             elif role == "model" and converted and converted[-1].role == "model":
-                converted[-1].parts.extend(parts)
+                converted[-1].parts.extend(_validated_parts("model", parts))
             elif parts:
                 converted.append(types.Content(role=role, parts=parts))
 
         # Protocol safety net: requests ending with a model turn are rejected by Gemini with 400.
         if converted and converted[-1].role == "model":
             logger.warning(
-                "Gemini wire adapter: trailing model turn detected in payload; synthesizing user completion."
+                "Gemini wire adapter: trailing model turn detected in payload; "
+                "synthesizing user completion."
             )
-            unanswered = []
-            for p in converted[-1].parts:
-                if isinstance(p, dict) and "functionCall" in p:
-                    unanswered.append(p["functionCall"])
-                elif isinstance(p, dict) and "function_call" in p:
-                    unanswered.append(p["function_call"])
-                elif hasattr(p, "function_call") and p.function_call:
-                    unanswered.append({"name": p.function_call.name})
+            unanswered = [
+                p.function_call.name
+                for p in converted[-1].parts or []
+                if getattr(p, "function_call", None) is not None
+            ]
             if unanswered:
                 frs = [
                     types.Part.from_function_response(
-                        name=(fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)) or "tool",
+                        name=name or "tool",
                         response={"result": "unknown -- synthetic completion"},
                     )
-                    for fc in unanswered
+                    for name in unanswered
                 ]
                 converted.append(types.Content(role="user", parts=frs))
-            converted.append(types.Content(role="user", parts=[types.Part.from_text(text="Proceed.")]))
+                converted.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=_SYNTHETIC_BRIDGE_TEXT)],
+                    )
+                )
+            converted.append(
+                types.Content(role="user", parts=[types.Part.from_text(text=_SYNTHETIC_PROCEED_TEXT)])
+            )
 
         return converted
 
