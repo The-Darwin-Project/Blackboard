@@ -2379,6 +2379,44 @@ class TestParallelFunctionCallExecution:
         assert [c.role for c in res_fr_fr] == ["model", "user"]
         assert len(res_fr_fr[1].parts) == 2
 
+    def test_gemini_adapter_coerces_parts_and_serializes_cleanly(self):
+        """GeminiAdapter._convert_structured coerces camelCase functionResponse and snake_case
+        function_response parts into types.Part objects, ensuring wire serialization (model_dump)
+        emits proper function_response payloads with no raw dicts or serialization warnings.
+        """
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        contents = [
+            {"role": "model", "parts": [{"functionCall": {"name": "tool_a", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "tool_a", "response": {"res": "ok_camel"}}}]},
+            {"role": "user", "parts": [{"function_response": {"name": "tool_b", "response": {"res": "ok_snake"}}}]},
+            {"role": "user", "parts": [{"text": "Continue"}]},
+        ]
+        converted = adapter._convert_structured(contents)
+
+        # Ensure all parts in converted turns are SDK types.Part instances
+        for content in converted:
+            for part in content.parts:
+                assert isinstance(part, types.Part)
+
+        # Wire serialization check: verify model_dump succeeds cleanly
+        dumped = [c.model_dump() for c in converted]
+        assert len(dumped) == 4
+        assert dumped[0]["role"] == "model"
+        assert dumped[1]["role"] == "user"
+        assert dumped[2]["role"] == "model"
+        assert dumped[3]["role"] == "user"
+
+        # Merged user turn contains both tool responses properly serialized
+        user_fr_parts = dumped[1]["parts"]
+        assert len(user_fr_parts) == 2
+        assert user_fr_parts[0]["function_response"]["name"] == "tool_a"
+        assert user_fr_parts[0]["function_response"]["response"] == {"res": "ok_camel"}
+        assert user_fr_parts[1]["function_response"]["name"] == "tool_b"
+        assert user_fr_parts[1]["function_response"]["response"] == {"res": "ok_snake"}
+
     @pytest.mark.asyncio
     async def test_build_contents_cross_adapter_boundary_gemini_and_claude(self):
         """Brain._build_contents remains provider-agnostic, while adapters handle wire protocols:

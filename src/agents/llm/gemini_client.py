@@ -7,7 +7,9 @@
 # 5. [Gotcha]: Temperature range 0.0-2.0 -- passthrough, no normalization needed.
 # 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 7. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
-# 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
+# 8. [Pattern]: Structured contents converted to SDK Content/Part objects with strict role alternation
+#    (consecutive user turns bridged with 'Acknowledged.' model turns when mixing tool results and text).
+#    Parts are coerced to SDK types.Part prior to append/extend to prevent raw-dict serialization loss.
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
 # 11. [Pattern]: Google Search grounding removed from adapter-level state. Web search is now a
@@ -332,32 +334,65 @@ class GeminiAdapter:
         """Convert structured [{role, parts}] to google-genai Content objects.
 
         Text and thought_signature parts pass through as dicts (SDK accepts them).
-        Image parts ({"bytes": ...}) are converted to SDK Part objects.
+        Image parts ({"bytes": ...}) and tool response dicts are converted to SDK Part objects.
         """
         from google.genai import types
-        converted = []
+
+        def _coerce_part(p: Any) -> types.Part | dict:
+            if isinstance(p, types.Part):
+                return p
+            if isinstance(p, dict):
+                if "bytes" in p:
+                    return types.Part.from_bytes(
+                        data=p["bytes"], mime_type=p["mime_type"],
+                    )
+                if "functionResponse" in p:
+                    fr = p["functionResponse"]
+                    return types.Part.from_function_response(
+                        name=fr.get("name") or "tool",
+                        response=fr.get("response") or {},
+                    )
+                if "function_response" in p:
+                    fr = p["function_response"]
+                    return types.Part.from_function_response(
+                        name=fr.get("name") or "tool",
+                        response=fr.get("response") or {},
+                    )
+                if "thought_signature" in p:
+                    import base64
+                    restored = dict(p)
+                    sig = restored["thought_signature"]
+                    try:
+                        restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
+                    except Exception:
+                        pass
+                    return restored
+                if "text" in p and len(p) == 1:
+                    return types.Part.from_text(text=p["text"])
+            return p
+
+        def _append_user_parts(target_list: list[types.Content], u_parts: list, has_fr: bool) -> None:
+            if not u_parts:
+                return
+            if target_list and target_list[-1].role == "user":
+                last_has_fr = any(
+                    (isinstance(lp, dict) and ("functionResponse" in lp or "function_response" in lp))
+                    or (hasattr(lp, "function_response") and lp.function_response)
+                    for lp in target_list[-1].parts
+                )
+                if last_has_fr == has_fr:
+                    target_list[-1].parts.extend(u_parts)
+                else:
+                    target_list.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
+                    target_list.append(types.Content(role="user", parts=u_parts))
+            else:
+                target_list.append(types.Content(role="user", parts=u_parts))
+
+        converted: list[types.Content] = []
         for msg in contents:
             role = msg["role"]
-            parts = []
-            for p in msg.get("parts", []):
-                if isinstance(p, dict) and "bytes" in p:
-                    parts.append(types.Part.from_bytes(
-                        data=p["bytes"], mime_type=p["mime_type"],
-                    ))
-                elif isinstance(p, dict):
-                    if "thought_signature" in p:
-                        import base64
-                        restored = dict(p)
-                        sig = restored["thought_signature"]
-                        try:
-                            restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
-                        except Exception:
-                            pass
-                        parts.append(restored)
-                    else:
-                        parts.append(p)
-                else:
-                    parts.append(p)
+            parts = [_coerce_part(p) for p in msg.get("parts", [])]
+
             # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts,
             # and consecutive user turns must alternate with model turns or merge cleanly.
             if role == "user":
@@ -375,30 +410,13 @@ class GeminiAdapter:
                     else:
                         non_fr_parts.append(p)
 
-                def _append_user_parts(u_parts: list, has_fr: bool) -> None:
-                    if not u_parts:
-                        return
-                    if converted and converted[-1].role == "user":
-                        last_has_fr = any(
-                            (isinstance(lp, dict) and ("functionResponse" in lp or "function_response" in lp))
-                            or (hasattr(lp, "function_response") and lp.function_response)
-                            for lp in converted[-1].parts
-                        )
-                        if last_has_fr == has_fr:
-                            converted[-1].parts.extend(u_parts)
-                        else:
-                            converted.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
-                            converted.append(types.Content(role="user", parts=u_parts))
-                    else:
-                        converted.append(types.Content(role="user", parts=u_parts))
-
                 if fr_parts and non_fr_parts:
-                    _append_user_parts(fr_parts, has_fr=True)
-                    _append_user_parts(non_fr_parts, has_fr=False)
+                    _append_user_parts(converted, fr_parts, has_fr=True)
+                    _append_user_parts(converted, non_fr_parts, has_fr=False)
                 elif fr_parts:
-                    _append_user_parts(fr_parts, has_fr=True)
+                    _append_user_parts(converted, fr_parts, has_fr=True)
                 elif non_fr_parts:
-                    _append_user_parts(non_fr_parts, has_fr=False)
+                    _append_user_parts(converted, non_fr_parts, has_fr=False)
             elif role == "model" and converted and converted[-1].role == "model":
                 converted[-1].parts.extend(parts)
             elif parts:
