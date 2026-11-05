@@ -358,7 +358,8 @@ class GeminiAdapter:
                         parts.append(p)
                 else:
                     parts.append(p)
-            # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts.
+            # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts,
+            # and consecutive user turns must alternate with model turns or merge cleanly.
             if role == "user":
                 fr_parts = []
                 non_fr_parts = []
@@ -374,11 +375,30 @@ class GeminiAdapter:
                     else:
                         non_fr_parts.append(p)
 
+                def _append_user_parts(u_parts: list, has_fr: bool) -> None:
+                    if not u_parts:
+                        return
+                    if converted and converted[-1].role == "user":
+                        last_has_fr = any(
+                            (isinstance(lp, dict) and ("functionResponse" in lp or "function_response" in lp))
+                            or (hasattr(lp, "function_response") and lp.function_response)
+                            for lp in converted[-1].parts
+                        )
+                        if last_has_fr == has_fr:
+                            converted[-1].parts.extend(u_parts)
+                        else:
+                            converted.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
+                            converted.append(types.Content(role="user", parts=u_parts))
+                    else:
+                        converted.append(types.Content(role="user", parts=u_parts))
+
                 if fr_parts and non_fr_parts:
-                    converted.append(types.Content(role="user", parts=fr_parts))
-                    converted.append(types.Content(role="user", parts=non_fr_parts))
-                elif parts:
-                    converted.append(types.Content(role="user", parts=parts))
+                    _append_user_parts(fr_parts, has_fr=True)
+                    _append_user_parts(non_fr_parts, has_fr=False)
+                elif fr_parts:
+                    _append_user_parts(fr_parts, has_fr=True)
+                elif non_fr_parts:
+                    _append_user_parts(non_fr_parts, has_fr=False)
             elif role == "model" and converted and converted[-1].role == "model":
                 converted[-1].parts.extend(parts)
             elif parts:
@@ -406,9 +426,38 @@ class GeminiAdapter:
                     for fc in unanswered
                 ]
                 converted.append(types.Content(role="user", parts=frs))
+                converted.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
             converted.append(types.Content(role="user", parts=[types.Part.from_text(text="Proceed.")]))
 
-        return converted
+        # Final pass: normalize converted to guarantee strict wire protocol role alternation
+        normalized: list[types.Content] = []
+        for content in converted:
+            if not normalized:
+                normalized.append(content)
+                continue
+            if normalized[-1].role == content.role:
+                if content.role == "model":
+                    normalized[-1].parts.extend(content.parts)
+                else:
+                    last_fr = any(
+                        (isinstance(p, dict) and ("functionResponse" in p or "function_response" in p))
+                        or (hasattr(p, "function_response") and p.function_response)
+                        for p in normalized[-1].parts
+                    )
+                    curr_fr = any(
+                        (isinstance(p, dict) and ("functionResponse" in p or "function_response" in p))
+                        or (hasattr(p, "function_response") and p.function_response)
+                        for p in content.parts
+                    )
+                    if last_fr == curr_fr:
+                        normalized[-1].parts.extend(content.parts)
+                    else:
+                        normalized.append(types.Content(role="model", parts=[types.Part.from_text(text="Acknowledged.")]))
+                        normalized.append(content)
+            else:
+                normalized.append(content)
+
+        return normalized
 
     # -----------------------------------------------------------------
     # LLMPort: generate (blocking)

@@ -780,7 +780,8 @@ class TestAdapterIntegration:
         # Verify conversion doesn't crash — live probe confirms API acceptance
 
     def test_gemini_adapter_splits_mixed_user_turn(self):
-        """Gemini wire protocol requires that user turns with functionResponse do not contain text parts."""
+        """Gemini wire protocol requires that user turns with functionResponse do not contain text parts,
+        and that split user turns are bridged with a synthetic model turn for strict role alternation."""
         from src.agents.llm.gemini_client import GeminiAdapter
 
         contents = [
@@ -792,9 +793,10 @@ class TestAdapterIntegration:
         adapter = GeminiAdapter.__new__(GeminiAdapter)
         converted = adapter._convert_structured(contents)
 
-        assert len(converted) == 2
+        assert len(converted) == 3
         assert converted[0].role == "user"
-        assert converted[1].role == "user"
+        assert converted[1].role == "model"
+        assert converted[2].role == "user"
         # First turn has FR only
         assert any(
             (isinstance(p, dict) and "functionResponse" in p) or (hasattr(p, "function_response") and p.function_response)
@@ -804,14 +806,19 @@ class TestAdapterIntegration:
             (isinstance(p, dict) and "text" in p) or (hasattr(p, "text") and p.text)
             for p in converted[0].parts
         )
-        # Second turn has text only
+        # Middle turn is model bridge
+        assert any(
+            (isinstance(p, dict) and p.get("text") == "Acknowledged.") or (hasattr(p, "text") and p.text == "Acknowledged.")
+            for p in converted[1].parts
+        )
+        # Third turn has text only
         assert any(
             (isinstance(p, dict) and "text" in p) or (hasattr(p, "text") and p.text)
-            for p in converted[1].parts
+            for p in converted[2].parts
         )
 
     def test_gemini_adapter_guards_trailing_model_turn(self):
-        """Requests ending with a model turn are rejected with 400; adapter must synthesize completion."""
+        """Requests ending with a model turn are rejected with 400; adapter must synthesize completion with bridge."""
         from src.agents.llm.gemini_client import GeminiAdapter
 
         contents = [
@@ -822,8 +829,8 @@ class TestAdapterIntegration:
         converted = adapter._convert_structured(contents)
 
         assert converted[-1].role == "user"
-        # Check that synthetic FR turn was created for unclosed functionCall
-        assert len(converted) == 4
+        # Check that synthetic FR turn was created for unclosed functionCall followed by model bridge and user action
+        assert len(converted) == 5
         assert converted[0].role == "user"
         assert converted[1].role == "model"
         assert converted[2].role == "user"
@@ -831,10 +838,15 @@ class TestAdapterIntegration:
             (hasattr(p, "function_response") and p.function_response and p.function_response.name == "set_phase")
             for p in converted[2].parts
         )
-        assert converted[3].role == "user"
+        assert converted[3].role == "model"
+        assert any(
+            (hasattr(p, "text") and p.text == "Acknowledged.")
+            for p in converted[3].parts
+        )
+        assert converted[4].role == "user"
         assert any(
             (hasattr(p, "text") and p.text == "Proceed.")
-            for p in converted[3].parts
+            for p in converted[4].parts
         )
 
     def test_t23_claude_adapter_fc_fr_conversion(self):
@@ -2131,7 +2143,7 @@ class TestParallelFunctionCallExecution:
                 caplog.at_level("WARNING", logger="darwin.brain"):
             contents = await Brain._build_contents(brain, event)
 
-        fr_turn = contents[-2]
+        fr_turn = contents[-3]
         assert fr_turn["role"] == "user"
         fr_parts = [p for p in fr_turn["parts"] if "functionResponse" in p]
         assert len(fr_parts) == 1
@@ -2139,6 +2151,11 @@ class TestParallelFunctionCallExecution:
         result = fr_parts[0]["functionResponse"]["response"]["result"]
         assert "Do NOT re-issue" in result and "in_flight" not in result
         assert not any("text" in p for p in fr_turn["parts"])
+
+        # Model bridge between synthetic FR and action prompt enforces Gemini wire protocol alternation
+        bridge_turn = contents[-2]
+        assert bridge_turn["role"] == "model"
+        assert any(p.get("text") == "Acknowledged." for p in bridge_turn["parts"])
 
         # Final turn is the terminal action prompt — separate user turn, never mixed with FR
         last_turn = contents[-1]
@@ -2316,6 +2333,82 @@ class TestParallelFunctionCallExecution:
             (hasattr(p, "text") and p.text == "Proceed.") or (isinstance(p, dict) and p.get("text") == "Proceed.")
             for p in converted[2].parts
         )
+
+    def test_gemini_adapter_alternates_consecutive_user_turns_with_fr(self):
+        """GeminiAdapter._convert_structured enforces strict wire protocol role alternation:
+        - Two consecutive text user turns merge into one.
+        - User turn with FR followed by user turn with text gets a model bridge.
+        - Two user turns with FR merge into one (e.g. parallel tool execution).
+        - No adjacent turns share the same role without bridging/merging.
+        """
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+
+        # 1. Plain text user turns merge
+        c_text = [
+            {"role": "user", "parts": [{"text": "Part 1"}]},
+            {"role": "user", "parts": [{"text": "Part 2"}]},
+        ]
+        res_text = adapter._convert_structured(c_text)
+        assert len(res_text) == 1
+        assert res_text[0].role == "user"
+        assert len(res_text[0].parts) == 2
+
+        # 2. User FR followed by user text gets model bridge
+        c_fr_text = [
+            {"role": "model", "parts": [{"functionCall": {"name": "tool_a", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "tool_a", "response": {"status": "ok"}}}]},
+            {"role": "user", "parts": [{"text": "Continue"}]},
+        ]
+        res_fr_text = adapter._convert_structured(c_fr_text)
+        assert len(res_fr_text) == 4
+        roles = [c.role for c in res_fr_text]
+        assert roles == ["model", "user", "model", "user"]
+        assert any(
+            (hasattr(p, "text") and p.text == "Acknowledged.") or (isinstance(p, dict) and p.get("text") == "Acknowledged.")
+            for p in res_fr_text[2].parts
+        )
+
+        # 3. Two user turns with FR merge into one
+        c_fr_fr = [
+            {"role": "model", "parts": [
+                {"functionCall": {"name": "tool_a", "args": {}}},
+                {"functionCall": {"name": "tool_b", "args": {}}},
+            ]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "tool_a", "response": {"ok": 1}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "tool_b", "response": {"ok": 2}}}]},
+        ]
+        res_fr_fr = adapter._convert_structured(c_fr_fr)
+        assert len(res_fr_fr) == 2
+        assert [c.role for c in res_fr_fr] == ["model", "user"]
+        assert len(res_fr_fr[1].parts) == 2
+
+    @pytest.mark.asyncio
+    async def test_build_contents_strict_role_alternation_invariant(self):
+        """Brain._build_contents guarantees strict role alternation between user and model:
+        no adjacent user turns and no adjacent model turns anywhere in the payload."""
+        fc = {"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}}
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="do work"),
+            _make_turn(turn=2, actor="brain", action="phase", waitingFor="set_phase", response_parts=[fc]),
+            _make_turn(turn=3, actor="user", action="message", thoughts="user followup during unclosed FC"),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        # Strict alternation check: no adjacent user turns and no adjacent model turns
+        for i in range(len(contents) - 1):
+            curr_role = contents[i]["role"]
+            next_role = contents[i + 1]["role"]
+            assert curr_role != next_role, (
+                f"Consecutive turns with role '{curr_role}' found at indices {i} and {i + 1}: {contents}"
+            )
+        assert contents[0]["role"] == "user"
+        assert contents[-1]["role"] == "user"
 
     def test_claude_adapter_merges_consecutive_user_turns(self):
         """ClaudeAdapter._convert_structured merges consecutive user turns to prevent 400 from Anthropic API."""
