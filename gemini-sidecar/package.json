@@ -10,9 +10,9 @@
     "update-agy": "bash scripts/update-agy.sh"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "jsonwebtoken": "^9.0.2",
-    "ws": "^8.0.0"
+    "ws": "^8.22.1"
   },
   "engines": {
     "node": ">=20.0.0"

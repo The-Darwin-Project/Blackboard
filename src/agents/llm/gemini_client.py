@@ -60,19 +60,36 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
-def _extract_call_syntax(text: str | None) -> tuple[FunctionCall | None, str | None]:
+def _extract_call_syntax(
+    text: str | None,
+    tools: list[dict] | None = None,
+) -> tuple[FunctionCall | None, str | None]:
     """Parse fallback [!call:name:{args}!] syntax emitted as text by the model.
 
+    Validates tool name against declared tools if provided.
     Returns (FunctionCall | None, cleaned_text).
     """
     if not text:
         return None, text
+    cleaned_text = sanitize_call_syntax(text)
     match = CALL_SYNTAX_RE.search(text)
     if not match:
-        return None, text
+        return None, cleaned_text
     fn_name = match.group(1)
     raw_args = match.group(2)
-    cleaned_text = CALL_SYNTAX_RE.sub("", text).strip()
+    if tools:
+        declared_names = {
+            s.get("name") if isinstance(s, dict) else getattr(s, "name", None)
+            for s in tools
+        }
+        declared_names.discard(None)
+        if declared_names and fn_name not in declared_names:
+            logger.warning(
+                "Gemini wire adapter: fallback [!call:%s:...] not in declared tools (%s), ignoring",
+                fn_name,
+                sorted(declared_names),
+            )
+            return None, cleaned_text
     try:
         parsed_args = json.loads(raw_args)
         if isinstance(parsed_args, dict):
@@ -80,7 +97,7 @@ def _extract_call_syntax(text: str | None) -> tuple[FunctionCall | None, str | N
                 "Gemini wire adapter: parsed fallback [!call:%s:...] from text",
                 fn_name,
             )
-            return FunctionCall(name=fn_name, args=parsed_args), (cleaned_text or None)
+            return FunctionCall(name=fn_name, args=parsed_args), cleaned_text
         logger.warning(
             "Gemini wire adapter: fallback [!call:%s:...] args not a JSON object: %r",
             fn_name,
@@ -92,7 +109,7 @@ def _extract_call_syntax(text: str | None) -> tuple[FunctionCall | None, str | N
             fn_name,
             e,
         )
-    return None, (cleaned_text or None)
+    return None, cleaned_text
 
 
 def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
@@ -429,7 +446,7 @@ class GeminiAdapter:
                 usage=token_usage,
             )
 
-        fallback_fc, clean_text = _extract_call_syntax(response.text)
+        fallback_fc, clean_text = _extract_call_syntax(response.text, tools=tools)
         if fallback_fc:
             return LLMResponse(
                 function_call=fallback_fc,
@@ -612,6 +629,10 @@ class GeminiAdapter:
                 clean_tail = CALL_SYNTAX_RE.sub("", stream_text_buffer)
                 idx = clean_tail.find("[!call:")
                 if idx != -1:
+                    logger.warning(
+                        "Gemini stream: stripped unterminated [!call: fragment at stream end (length %d)",
+                        len(clean_tail) - idx,
+                    )
                     clean_tail = clean_tail[:idx]
                 if clean_tail:
                     yield LLMChunk(text=clean_tail)
@@ -625,7 +646,7 @@ class GeminiAdapter:
             all_parts = thought_parts + output_parts
 
             if pending_fc is None and accumulated_stream_text:
-                fallback_fc, _ = _extract_call_syntax(accumulated_stream_text)
+                fallback_fc, _ = _extract_call_syntax(accumulated_stream_text, tools=tools)
                 if fallback_fc:
                     pending_fc = fallback_fc
 

@@ -20,10 +20,13 @@ from this module and never touch SDK-specific types directly.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -118,13 +121,25 @@ def derive_llm_priority(event) -> int:
 
 # Pattern matching hallucinated tool call syntax [!call:name:{json_args}!]
 CALL_SYNTAX_RE = re.compile(r"\[!call:([a-zA-Z0-9_]+):\s*(.*?)\s*!\]", re.DOTALL)
+MAX_STREAM_CALL_SYNTAX_BUFFER = 16384  # 16 KB safety cap for streaming holdback buffer
 
 
 def sanitize_call_syntax(text: str | None) -> str | None:
-    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text."""
+    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text.
+
+    Also strips trailing unclosed [!call:... fragments (e.g. when response is truncated mid-tag).
+    """
     if not text:
         return text
-    cleaned = CALL_SYNTAX_RE.sub("", text).strip()
+    cleaned = CALL_SYNTAX_RE.sub("", text)
+    idx = cleaned.find("[!call:")
+    if idx != -1:
+        logger.warning(
+            "sanitize_call_syntax: stripped unterminated [!call: fragment (length %d)",
+            len(cleaned) - idx,
+        )
+        cleaned = cleaned[:idx]
+    cleaned = cleaned.strip()
     return cleaned if cleaned else None
 
 
@@ -139,6 +154,13 @@ def process_stream_call_syntax_buffer(buffer: str) -> tuple[str, str]:
     buffer = CALL_SYNTAX_RE.sub("", buffer)
     if not buffer:
         return "", ""
+
+    if len(buffer) > MAX_STREAM_CALL_SYNTAX_BUFFER:
+        logger.warning(
+            "process_stream_call_syntax_buffer: buffer exceeded %d bytes safety cap; flushing buffer",
+            MAX_STREAM_CALL_SYNTAX_BUFFER,
+        )
+        return buffer, ""
 
     idx = buffer.find("[!call:")
     if idx != -1:

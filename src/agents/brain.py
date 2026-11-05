@@ -2417,7 +2417,7 @@ class Brain:
                 self._waiting_for_user[event_id] = time.time()
         elif accumulated_text:
             logger.warning(
-                f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)}): {accumulated_text[:120]!r}"
+                f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)})"
             )
 
         self._reasoning_by_event.pop(event_id, None)
