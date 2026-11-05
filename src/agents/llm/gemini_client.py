@@ -29,6 +29,10 @@
 #     finally on error/early exit; closes the SDK stream in the outer finally on EVERY exit via _close_stream (bounded by
 #     ACLOSE_TIMEOUT_S, failures logged). The SDK nests ~6 async generators with bare `async for` (no aclosing), so nothing
 #     else closes the HTTP response deterministically.
+# 16. [Constraint]: Fallback [!call:...!] text is parsed only via types.scan_call_syntax (linear, no regex backtracking).
+#     _extract_call_syntax enforces the tool allowlist fail-closed whenever tools is not None (tools=[] allows nothing),
+#     walks every tag (first declared + JSON-object wins) and never lets raw syntax into returned text. On streaming
+#     holdback overflow the fragment is discarded, later text is suppressed, and the fallback call is NOT executed.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -47,14 +51,15 @@ from typing import Any
 
 from .quota_tracker import Reservation
 from .types import (
-    CALL_SYNTAX_RE,
     FunctionCall,
     LLMChunk,
     LLMResponse,
     TokenUsage,
     PRIORITY_NORMAL,
-    process_stream_call_syntax_buffer,
+    MAX_STREAM_CALL_SYNTAX_BUFFER,
     sanitize_call_syntax,
+    scan_call_syntax,
+    split_stream_call_syntax,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,35 +68,54 @@ logger = logging.getLogger(__name__)
 def _extract_call_syntax(
     text: str | None,
     tools: list[dict] | None = None,
+    *,
+    warn_unterminated: bool = True,
 ) -> tuple[FunctionCall | None, str | None]:
     """Parse fallback [!call:name:{args}!] syntax emitted as text by the model.
 
-    Validates tool name against declared tools if provided.
-    Returns (FunctionCall | None, cleaned_text).
+    Walks EVERY complete tag in order and returns the first one that is both declared and
+    carries a JSON-object argument, so an undeclared/invalid earlier tag cannot mask a later
+    valid call. When ``tools`` is not None the allowlist is enforced fail-closed (an empty
+    list or entries without a name allow nothing); ``tools=None`` means no tool config was
+    sent to the model and no allowlist is applied. Returns (FunctionCall | None, cleaned_text);
+    cleaned_text never contains any [!call: syntax. Set warn_unterminated=False when the
+    caller already logged the unterminated-fragment strip for this response.
     """
     if not text:
         return None, text
-    cleaned_text = sanitize_call_syntax(text)
-    match = CALL_SYNTAX_RE.search(text)
-    if not match:
-        return None, cleaned_text
-    fn_name = match.group(1)
-    raw_args = match.group(2)
-    if tools:
+    cleaned, calls, tail = scan_call_syntax(text)
+    if tail and warn_unterminated:
+        logger.warning(
+            "Gemini wire adapter: stripped unterminated [!call: fragment (length %d)",
+            len(tail),
+        )
+    cleaned_text = cleaned.strip() or None
+
+    declared_names: set[str] | None = None
+    if tools is not None:
         declared_names = {
             s.get("name") if isinstance(s, dict) else getattr(s, "name", None)
             for s in tools
         }
         declared_names.discard(None)
-        if declared_names and fn_name not in declared_names:
+
+    for fn_name, raw_args in calls:
+        if declared_names is not None and fn_name not in declared_names:
             logger.warning(
                 "Gemini wire adapter: fallback [!call:%s:...] not in declared tools (%s), ignoring",
                 fn_name,
                 sorted(declared_names),
             )
-            return None, cleaned_text
-    try:
-        parsed_args = json.loads(raw_args)
+            continue
+        try:
+            parsed_args = json.loads(raw_args)
+        except Exception as e:
+            logger.warning(
+                "Gemini wire adapter: failed to parse fallback [!call:%s:...]: %s",
+                fn_name,
+                e,
+            )
+            continue
         if isinstance(parsed_args, dict):
             logger.warning(
                 "Gemini wire adapter: parsed fallback [!call:%s:...] from text",
@@ -99,15 +123,9 @@ def _extract_call_syntax(
             )
             return FunctionCall(name=fn_name, args=parsed_args), cleaned_text
         logger.warning(
-            "Gemini wire adapter: fallback [!call:%s:...] args not a JSON object: %r",
+            "Gemini wire adapter: fallback [!call:%s:...] args not a JSON object (length %d)",
             fn_name,
-            raw_args,
-        )
-    except Exception as e:
-        logger.warning(
-            "Gemini wire adapter: failed to parse fallback [!call:%s:...]: %s",
-            fn_name,
-            e,
+            len(raw_args),
         )
     return None, cleaned_text
 
@@ -550,6 +568,7 @@ class GeminiAdapter:
             drain_deadline = 0.0
             accumulated_stream_text = ""
             stream_text_buffer = ""
+            call_syntax_overflowed = False
             stream_iter = stream.__aiter__()
             loop = asyncio.get_running_loop()
             while True:
@@ -613,10 +632,21 @@ class GeminiAdapter:
                     dropped_fcs += len(chunk_fcs)
                     continue
 
-                if chunk.text:
+                if chunk.text and not call_syntax_overflowed:
                     accumulated_stream_text += chunk.text
                     stream_text_buffer += chunk.text
-                    to_yield, stream_text_buffer = process_stream_call_syntax_buffer(stream_text_buffer)
+                    to_yield, stream_text_buffer, overflowed = split_stream_call_syntax(stream_text_buffer)
+                    if overflowed:
+                        # Oversized unterminated [!call: tail: drop it (never stream it, never execute it)
+                        # and ignore all further text for this response (@ai-rules 16).
+                        call_syntax_overflowed = True
+                        _, _, discarded = scan_call_syntax(accumulated_stream_text)
+                        accumulated_stream_text = accumulated_stream_text[: len(accumulated_stream_text) - len(discarded)]
+                        logger.warning(
+                            "Gemini stream: unterminated [!call: fragment exceeded %d chars; discarded it and "
+                            "suppressed the rest of the text stream",
+                            MAX_STREAM_CALL_SYNTAX_BUFFER,
+                        )
                     if to_yield:
                         yield LLMChunk(text=to_yield)
 
@@ -625,15 +655,15 @@ class GeminiAdapter:
                     dropped_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + drain_timeout
 
+            unterminated_logged = call_syntax_overflowed
             if stream_text_buffer:
-                clean_tail = CALL_SYNTAX_RE.sub("", stream_text_buffer)
-                idx = clean_tail.find("[!call:")
-                if idx != -1:
+                clean_tail, _, held_fragment = scan_call_syntax(stream_text_buffer)
+                if held_fragment:
+                    unterminated_logged = True
                     logger.warning(
                         "Gemini stream: stripped unterminated [!call: fragment at stream end (length %d)",
-                        len(clean_tail) - idx,
+                        len(held_fragment),
                     )
-                    clean_tail = clean_tail[:idx]
                 if clean_tail:
                     yield LLMChunk(text=clean_tail)
                 stream_text_buffer = ""
@@ -645,8 +675,10 @@ class GeminiAdapter:
             output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
             all_parts = thought_parts + output_parts
 
-            if pending_fc is None and accumulated_stream_text:
-                fallback_fc, _ = _extract_call_syntax(accumulated_stream_text, tools=tools)
+            if pending_fc is None and accumulated_stream_text and not call_syntax_overflowed:
+                fallback_fc, _ = _extract_call_syntax(
+                    accumulated_stream_text, tools=tools, warn_unterminated=not unterminated_logged
+                )
                 if fallback_fc:
                     pending_fc = fallback_fc
 
