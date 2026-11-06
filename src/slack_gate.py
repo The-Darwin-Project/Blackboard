@@ -76,6 +76,12 @@ class SlackAccessGate:
             except asyncio.CancelledError:
                 pass
 
+    def is_maintainer(self, email: str | None) -> bool:
+        """True if email (case/whitespace-insensitive) is a configured maintainer."""
+        if not email:
+            return False
+        return email.strip().lower() in self._maintainer_emails
+
     def check(self, email: str) -> bool:
         if not email:
             logger.info("slack_access_gate: user=<empty> result=deny reason=no_email")

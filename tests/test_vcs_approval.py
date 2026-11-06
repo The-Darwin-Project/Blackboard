@@ -200,6 +200,33 @@ class TestResolveGithubHead:
         assert "Authorization" not in call_kwargs.get("headers", {})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("env_name", ["REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"])
+    async def test_live_sha_client_uses_ca_bundle_verify(self, monkeypatch, env_name):
+        """GitHub live-SHA call passes the configured CA bundle as verify= and never False."""
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv(env_name, "/etc/pki/tls/certs/ca-bundle.crt")
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+            _, sha = await _resolve_github_head(gh_ctx)
+        assert sha == "live-sha-xyz"
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["verify"] == "/etc/pki/tls/certs/ca-bundle.crt"
+        assert kwargs["verify"] is not False
+
+    @pytest.mark.asyncio
+    async def test_live_sha_client_defaults_to_system_trust_when_no_bundle(self, monkeypatch):
+        """No CA env configured: verify=True (system trust store), never disabled."""
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+            await _resolve_github_head(gh_ctx)
+        assert mock_client_cls.call_args.kwargs["verify"] is True
+
+    @pytest.mark.asyncio
     async def test_missing_pr_number_skips_network_call(self):
         gh_ctx = {"owner": "o", "repo": "r", "head_sha": "stale-sha"}
         mock_client_cls = _mock_client(get_return=_resp(200, {}))

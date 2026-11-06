@@ -18,6 +18,10 @@
 #    tool_result is handled separately: _USER_VISIBLE_TOOL_RESULTS whitelist + slack_thread_ts gate.
 # 9. [Pattern]: SlackAccessGate (OCP Group-based) gates 8 entry points via _gate_check helper.
 #    Intentionally ungated: handle_feedback (feedback on rejection messages).
+#    Approve/reject share _authorize_plan_decision (gate -> closed-event -> identity -> can_approve_event).
+#    Maintainers (SlackAccessGate.is_maintainer) get APPROVER_GROUPS/OBS_ADMIN_GROUPS roles only when
+#    configured; unset groups yield no roles (fail-closed, never a synthesized "admin").
+#    users_info returns AsyncSlackResponse (not a dict): read via .get(), never isinstance(dict).
 #    Home tab forks to access-denied view for unauthorized users.
 # 10. [Gotcha]: chat.postMessage(channel=user_id) returns the real DM channel_id in result["channel"].
 #    Always use result["channel"] for mappings, never user_id.
@@ -39,7 +43,7 @@ import logging
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
@@ -112,6 +116,15 @@ _TOOL_PROGRESS_PHRASES: dict[str, str] = {
 }
 
 
+class _PlanDecision(NamedTuple):
+    """Result of a passed approve/reject authorization check."""
+    event_doc: Any
+    display_name: str
+    email: str
+    clean_ident: str
+    clean_name: str
+
+
 class SlackChannel:
     """Adapter wrapping Slack Bolt AsyncApp with Socket Mode."""
 
@@ -150,20 +163,25 @@ class SlackChannel:
         self._register_handlers()
 
     async def _resolve_display_name(self, client: Any, user_id: str) -> str:
-        """Resolve Slack user_id to display name with TTL cache."""
+        """Resolve Slack user_id to display name with TTL cache.
+
+        ``users_info`` returns ``AsyncSlackResponse`` in production (not a ``dict``
+        subclass), so the payload is read via ``.get()`` rather than ``isinstance(dict)``.
+        Failed lookups or a missing ``user`` object are NOT cached: caching an empty
+        email would make SlackAccessGate deny the user (``no_email``) until restart.
+        """
         cached = self._user_name_cache.get(user_id)
         if cached and (time.time() - cached[1]) < self._USER_CACHE_TTL:
             return cached[0]
         try:
             info = await client.users_info(user=user_id)
-            if isinstance(info, dict):
-                user_obj = info.get("user", {})
-                profile = user_obj.get("profile", {})
-                name = profile.get("display_name") or user_obj.get("real_name") or user_id
-                email = profile.get("email", "")
-            else:
-                name = user_id
-                email = ""
+            user_obj = info.get("user") if hasattr(info, "get") else None
+            if not user_obj or not hasattr(user_obj, "get"):
+                logger.warning(f"users_info for {user_id} returned no user object; not caching")
+                return user_id
+            profile = user_obj.get("profile") or {}
+            name = profile.get("display_name") or user_obj.get("real_name") or user_id
+            email = profile.get("email", "")
             name = str(name) if isinstance(name, str) else user_id
             email = str(email) if isinstance(email, str) else ""
             self._user_name_cache[user_id] = (name, time.time())
@@ -193,6 +211,103 @@ class SlackChannel:
             await self._resolve_display_name(client, user_id)
             email = self._get_cached_email(user_id) or ""
         return self._access_gate.check(email)
+
+    def _maintainer_roles(self, email: str) -> list[str]:
+        """Map a verified Slack maintainer email onto the configured approver groups.
+
+        Maintainer status is established by SlackAccessGate (static maintainer emails).
+        It grants approve/reject rights only when APPROVER_GROUPS (or, failing that,
+        OBS_ADMIN_GROUPS) is configured: the maintainer is given those group names as
+        roles so can_approve_event's role check applies unchanged. When both are unset
+        this returns [] -- no placeholder role is synthesized -- so unowned events stay
+        fail-closed (can_approve_event denies when auth is enabled).
+        """
+        from ..auth import APPROVER_GROUPS, OBS_ADMIN_GROUPS
+
+        if not (self._access_gate and email and self._access_gate.is_maintainer(email)):
+            return []
+        return list(APPROVER_GROUPS or OBS_ADMIN_GROUPS)
+
+    async def _authorize_plan_decision(
+        self,
+        client: Any,
+        *,
+        event_id: str,
+        user: str,
+        channel: str,
+        thread_ts: str,
+        verb: str,
+    ) -> "_PlanDecision | None":
+        """Shared gate + closed-event + identity + RBAC checks for approve/reject buttons.
+
+        Returns a _PlanDecision when the user may act, or None after the denial (or
+        closed/missing event) has been handled. ``verb`` is "approve" or "reject".
+        """
+        from ..auth import (
+            get_user_from_slack, can_approve_event, resolve_approval_identity,
+            DEX_ENABLED, TRUSTED_PROXY_ENABLED,
+        )
+        from ..slack_gate import _mask_email
+
+        async def _deny(text: str, log_label: str) -> None:
+            if not (channel and user):
+                return
+            try:
+                await asyncio.wait_for(
+                    client.chat_postEphemeral(
+                        channel=channel, user=user, thread_ts=thread_ts, text=text,
+                    ),
+                    timeout=_SLACK_API_TIMEOUT,
+                )
+            except Exception as e:
+                logger.warning(f"Slack {verb} {log_label} ephemeral failed: {e}")
+
+        if not await self._gate_check(client, user):
+            await _deny(
+                ":lock: Access denied. Contact the app maintainer to be added to the authorized group.",
+                "gate",
+            )
+            return None
+
+        event_doc = await self._blackboard.get_event(event_id)
+        if not event_doc or getattr(event_doc, "status", None) == "closed":
+            return None
+
+        display_name = await self._resolve_display_name(client, user)
+        email = self._get_cached_email(user)
+        email_str = email if isinstance(email, str) else ""
+        clean_ident, clean_name = resolve_approval_identity(email_str, display_name, fallback=user)
+        clean_name_str = clean_name if isinstance(clean_name, str) else user
+        clean_ident_str = clean_ident if isinstance(clean_ident, str) else user
+
+        user_ctx = get_user_from_slack(
+            user, display_name, email_str, roles=self._maintainer_roles(email_str),
+        )
+        # auth_enabled passed explicitly (matching queue.py/dashboard_ws.py) rather than
+        # relying on can_approve_event's bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED) default --
+        # Slack identity is always named regardless of Dex, but the APPROVER_GROUPS RBAC
+        # gate this call enforces must still apply whenever either auth mode is on.
+        auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
+        if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
+            logger.warning(
+                f"Slack {verb} forbidden on {event_id} by {user} ({_mask_email(email_str)})"
+            )
+            noun = "approve" if verb == "approve" else "reject"
+            plural = "Approvals" if verb == "approve" else "Rejections"
+            await _deny(
+                f":lock: You are not authorized to {noun} this plan on event {event_id}. "
+                f"{plural} require ownership or approver permissions.",
+                "forbidden",
+            )
+            return None
+
+        return _PlanDecision(
+            event_doc=event_doc,
+            display_name=display_name,
+            email=email_str,
+            clean_ident=clean_ident_str,
+            clean_name=clean_name_str,
+        )
 
     @staticmethod
     def _build_prior_context(event_doc: Any) -> str:
@@ -620,70 +735,18 @@ class SlackChannel:
             msg = body.get("message", {})
             thread_ts = msg.get("thread_ts") or msg.get("ts", "")
 
-            if not await self._gate_check(client, user):
-                if channel and user:
-                    try:
-                        await asyncio.wait_for(
-                            client.chat_postEphemeral(
-                                channel=channel,
-                                user=user,
-                                thread_ts=thread_ts,
-                                text=":lock: Access denied. Contact the app maintainer to be added to the authorized group.",
-                            ),
-                            timeout=_SLACK_API_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Slack approve gate ephemeral failed: {e}")
-                return
-
-            from ..auth import (
-                get_user_from_slack, can_approve_event, resolve_approval_identity,
-                DEX_ENABLED, TRUSTED_PROXY_ENABLED, APPROVER_GROUPS, OBS_ADMIN_GROUPS,
-            )
             from ..utils.vcs_approval import resolve_live_head_sha
 
-            event_doc = await self._blackboard.get_event(event_id)
-            if not event_doc or getattr(event_doc, "status", None) == "closed":
+            decision = await self._authorize_plan_decision(
+                client, event_id=event_id, user=user, channel=channel,
+                thread_ts=thread_ts, verb="approve",
+            )
+            if decision is None:
                 return
-
-            display_name = await self._resolve_display_name(client, user)
-            email = self._get_cached_email(user)
-            email_str = email if isinstance(email, str) else ""
-            clean_ident, clean_name = resolve_approval_identity(email_str, display_name, fallback=user)
-            clean_name_str = clean_name if isinstance(clean_name, str) else user
-            clean_ident_str = clean_ident if isinstance(clean_ident, str) else user
-
-            roles: list[str] = []
-            if (
-                self._access_gate
-                and email_str
-                and hasattr(self._access_gate, "_maintainer_emails")
-                and email_str.lower() in self._access_gate._maintainer_emails
-            ):
-                roles = list(APPROVER_GROUPS or OBS_ADMIN_GROUPS or {"admin"})
-
-            user_ctx = get_user_from_slack(user, display_name, email_str, roles=roles)
-            # auth_enabled passed explicitly (matching queue.py/dashboard_ws.py) rather than
-            # relying on can_approve_event's bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED) default --
-            # Slack identity is always named regardless of Dex, but the APPROVER_GROUPS RBAC
-            # gate this call enforces must still apply whenever either auth mode is on.
-            auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
-            if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
-                logger.warning(f"Slack approve forbidden on {event_id} by {user} ({email_str})")
-                if channel and user:
-                    try:
-                        await asyncio.wait_for(
-                            client.chat_postEphemeral(
-                                channel=channel,
-                                user=user,
-                                thread_ts=thread_ts,
-                                text=f":lock: You are not authorized to approve this plan on event {event_id}. Approvals require ownership or approver permissions.",
-                            ),
-                            timeout=_SLACK_API_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Slack approve forbidden ephemeral failed: {e}")
-                return
+            event_doc = decision.event_doc
+            email_str = decision.email
+            clean_name_str = decision.clean_name
+            clean_ident_str = decision.clean_ident
 
             mr_id, mr_sha = await resolve_live_head_sha(event_doc)
 
@@ -731,63 +794,15 @@ class SlackChannel:
             msg = body.get("message", {})
             thread_ts = msg.get("thread_ts") or msg.get("ts", "")
 
-            if not await self._gate_check(client, user):
-                if channel and user:
-                    try:
-                        await asyncio.wait_for(
-                            client.chat_postEphemeral(
-                                channel=channel,
-                                user=user,
-                                thread_ts=thread_ts,
-                                text=":lock: Access denied. Contact the app maintainer to be added to the authorized group.",
-                            ),
-                            timeout=_SLACK_API_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Slack reject gate ephemeral failed: {e}")
-                return
-
-            from ..auth import (
-                get_user_from_slack, can_approve_event, resolve_approval_identity,
-                DEX_ENABLED, TRUSTED_PROXY_ENABLED, APPROVER_GROUPS, OBS_ADMIN_GROUPS,
+            decision = await self._authorize_plan_decision(
+                client, event_id=event_id, user=user, channel=channel,
+                thread_ts=thread_ts, verb="reject",
             )
-            event_doc = await self._blackboard.get_event(event_id)
-            if not event_doc or getattr(event_doc, "status", None) == "closed":
+            if decision is None:
                 return
-
-            display_name = await self._resolve_display_name(client, user)
-            email = self._get_cached_email(user)
-            email_str = email if isinstance(email, str) else ""
-            clean_ident, clean_name = resolve_approval_identity(email_str, display_name, fallback=user)
-            clean_name_str = clean_name if isinstance(clean_name, str) else user
-
-            roles: list[str] = []
-            if (
-                self._access_gate
-                and email_str
-                and hasattr(self._access_gate, "_maintainer_emails")
-                and email_str.lower() in self._access_gate._maintainer_emails
-            ):
-                roles = list(APPROVER_GROUPS or OBS_ADMIN_GROUPS or {"admin"})
-
-            user_ctx = get_user_from_slack(user, display_name, email_str, roles=roles)
-            auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
-            if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
-                logger.warning(f"Slack reject forbidden on {event_id} by {user} ({email_str})")
-                if channel and user:
-                    try:
-                        await asyncio.wait_for(
-                            client.chat_postEphemeral(
-                                channel=channel,
-                                user=user,
-                                thread_ts=thread_ts,
-                                text=f":lock: You are not authorized to reject this plan on event {event_id}. Rejections require ownership or approver permissions.",
-                            ),
-                            timeout=_SLACK_API_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Slack reject forbidden ephemeral failed: {e}")
-                return
+            event_doc = decision.event_doc
+            email_str = decision.email
+            clean_name_str = decision.clean_name
 
             # A rejection supersedes any prior approval stamp (see queue.py reject_event) --
             # otherwise GET /{event_id}/approval keeps reporting a stale approved_mr_sha.
@@ -1158,6 +1173,8 @@ class SlackChannel:
         ctx = self._dm_context.get(event_id)
         if not ctx:
             return
+        # Reset phrase dedup so the next tool progress phrase re-posts after a clear.
+        ctx.pop("_last_tool_phrase", None)
         try:
             await asyncio.wait_for(
                 self._app.client.assistant_threads_setStatus(
@@ -1272,7 +1289,12 @@ class SlackChannel:
                     )
                 except Exception as exc:
                     logger.debug("Failed to update channel thinking indicator for %s: %s", event_id, exc)
-                    self._thinking_msg.pop(event_id, None)
+                    # Keep the tracking entry on transient errors so the indicator can still
+                    # be deleted later; drop it only when Slack says the message is gone.
+                    if isinstance(exc, SlackApiError) and getattr(exc, "response", None) is not None:
+                        err = exc.response.get("error") if hasattr(exc.response, "get") else None
+                        if err in ("message_not_found", "channel_not_found"):
+                            self._thinking_msg.pop(event_id, None)
 
         # DM assistant status update
         if event_id in self._dm_context:
