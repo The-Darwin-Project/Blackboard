@@ -61,22 +61,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("darwin.slack")
 
-_INTERNAL_TURNS = frozenset({
-    ("brain", "triage"), ("brain", "phase"), ("brain", "respond_jarvis"),
-    ("brain", "hold_watch"), ("brain", "intermediate"),
-    ("brain", "hold_watch_wake"), ("brain", "think"),
-    ("system", "notification"),
-    ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
-    ("dispatcher", "acknowledge"), ("dispatcher", "connected"),
-    ("dispatcher", "paused"), ("dispatcher", "failed"),
-})
+_CANONICAL_WORKER_ROLES = (
+    "architect", "sysadmin", "developer", "qe",
+    "security_analyst", "code_reviewer", "explorer",
+)
+_WORKER_ACTIONS = (
+    "execute", "plan_step", "run_command", "cancel",
+    "error", "message", "huddle", "teammate",
+)
+
+_INTERNAL_TURNS = frozenset(
+    {
+        ("brain", "triage"), ("brain", "phase"), ("brain", "respond_jarvis"),
+        ("brain", "hold_watch"), ("brain", "intermediate"),
+        ("brain", "hold_watch_wake"), ("brain", "think"),
+        ("brain", "plan"),
+        ("system", "notification"),
+        ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
+        ("dispatcher", "acknowledge"), ("dispatcher", "connected"),
+        ("dispatcher", "paused"), ("dispatcher", "failed"),
+    }
+    | {
+        (role, action)
+        for role in _CANONICAL_WORKER_ROLES
+        for action in _WORKER_ACTIONS
+    }
+)
 
 # Tools whose tool_result turns contain user-relevant confirmations/data.
 # Maintenance: add new user-facing tools here when created.
 _USER_VISIBLE_TOOL_RESULTS = frozenset({
-    "take_note", "record_observation",
-    "search_open_incidents", "consult_deep_memory",
-    "review_notes", "list_observations",
+    "take_note",
 })
 
 _SLACK_API_TIMEOUT = 5.0
@@ -141,12 +156,18 @@ class SlackChannel:
             return cached[0]
         try:
             info = await client.users_info(user=user_id)
-            profile = info["user"]["profile"]
-            name = profile.get("display_name") or info["user"].get("real_name", user_id)
-            email = profile.get("email", "")
+            if isinstance(info, dict):
+                user_obj = info.get("user", {})
+                profile = user_obj.get("profile", {})
+                name = profile.get("display_name") or user_obj.get("real_name") or user_id
+                email = profile.get("email", "")
+            else:
+                name = user_id
+                email = ""
+            name = str(name) if isinstance(name, str) else user_id
+            email = str(email) if isinstance(email, str) else ""
             self._user_name_cache[user_id] = (name, time.time())
-            if email:
-                self._user_email_cache[user_id] = email
+            self._user_email_cache[user_id] = email
             return name
         except Exception as e:
             logger.warning(f"Failed to resolve display name for {user_id}: {e}")
@@ -231,6 +252,8 @@ class SlackChannel:
             thoughts=text, source="slack",
             user_name=display_name,
         )
+        email = self._get_cached_email(user_id) or ""
+        created_by_email = email or None
         fallback = fallback_title(text)
         new_event_id = await self._blackboard.create_event(
             source="slack",
@@ -246,10 +269,13 @@ class SlackChannel:
             slack_channel_id=channel,
             slack_thread_ts=thread_ts,
             slack_user_id=user_id,
+            created_by_email=created_by_email,
             initial_turns=[ctx_turn, user_turn],
             title=fallback,
             title_source="fallback",
         )
+        if getattr(event_doc, "id", None) in self._quiet_events:
+            self._quiet_events.add(new_event_id)
         try:
             spawn_event_namer_task(self._blackboard, self._brain, new_event_id, text, "slack")
         except Exception as e:
@@ -263,19 +289,22 @@ class SlackChannel:
         @self._app.command("/darwin")
         async def handle_darwin_command(ack: Any, body: dict, client: Any, respond: Any) -> None:
             await ack()
-            text = body.get("text", "").strip()
-            user_id = body["user_id"]
-            channel_id = body["channel_id"]
+            text = (body.get("text", "")).strip()
+            user_id = body.get("user_id", "")
+            channel_id = body.get("channel_id", "")
 
             if not text:
                 await respond(text="Usage: `/darwin <describe the issue or task>`")
                 return
 
             if not await self._gate_check(client, user_id):
-                await respond(text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
+                if respond:
+                    await respond(text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
+            email = self._get_cached_email(user_id) or ""
+            created_by_email = email or None
             fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
@@ -288,6 +317,7 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                created_by_email=created_by_email,
                 initial_turns=[ConversationTurn(
                     turn=1, actor="user", action="message",
                     thoughts=text, source="slack",
@@ -330,12 +360,15 @@ class SlackChannel:
 
             if not await self._gate_check(client, user_id):
                 try:
-                    await client.chat_postEphemeral(
-                        channel=channel, user=user_id,
-                        text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.",
+                    await asyncio.wait_for(
+                        client.chat_postEphemeral(
+                            channel=channel, user=user_id,
+                            text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.",
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Slack app_mention gate ephemeral failed: {e}")
                 return
 
             raw_text = event.get("text", "")
@@ -374,6 +407,8 @@ class SlackChannel:
                     return
 
             display_name = await self._resolve_display_name(client, user_id)
+            email = self._get_cached_email(user_id) or ""
+            created_by_email = email or None
             fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
@@ -386,6 +421,7 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                created_by_email=created_by_email,
                 slack_channel_id=channel,
                 slack_thread_ts=thread_ts,
                 slack_user_id=user_id,
@@ -577,39 +613,83 @@ class SlackChannel:
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            if not await self._gate_check(client, body["user"]["id"]):
-                return
-            event_id = body["actions"][0]["value"]
-            user = body["user"]["id"]
-            channel = body["channel"]["id"]
-            thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
+            actions = body.get("actions", [])
+            event_id = actions[0].get("value", "") if actions and isinstance(actions[0], dict) else ""
+            user = body.get("user", {}).get("id", "")
+            channel = body.get("channel", {}).get("id", "")
+            msg = body.get("message", {})
+            thread_ts = msg.get("thread_ts") or msg.get("ts", "")
 
-            from ..auth import get_user_from_slack, can_approve_event, resolve_approval_identity, DEX_ENABLED, TRUSTED_PROXY_ENABLED
+            if not await self._gate_check(client, user):
+                if channel and user:
+                    try:
+                        await asyncio.wait_for(
+                            client.chat_postEphemeral(
+                                channel=channel,
+                                user=user,
+                                thread_ts=thread_ts,
+                                text=":lock: Access denied. Contact the app maintainer to be added to the authorized group.",
+                            ),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Slack approve gate ephemeral failed: {e}")
+                return
+
+            from ..auth import (
+                get_user_from_slack, can_approve_event, resolve_approval_identity,
+                DEX_ENABLED, TRUSTED_PROXY_ENABLED, APPROVER_GROUPS, OBS_ADMIN_GROUPS,
+            )
             from ..utils.vcs_approval import resolve_live_head_sha
 
             event_doc = await self._blackboard.get_event(event_id)
-            if not event_doc:
+            if not event_doc or getattr(event_doc, "status", None) == "closed":
                 return
 
-            email = self._get_cached_email(user)
             display_name = await self._resolve_display_name(client, user)
-            user_ctx = get_user_from_slack(user, display_name, email or "")
+            email = self._get_cached_email(user)
+            email_str = email if isinstance(email, str) else ""
+            clean_ident, clean_name = resolve_approval_identity(email_str, display_name, fallback=user)
+            clean_name_str = clean_name if isinstance(clean_name, str) else user
+            clean_ident_str = clean_ident if isinstance(clean_ident, str) else user
+
+            roles: list[str] = []
+            if (
+                self._access_gate
+                and email_str
+                and hasattr(self._access_gate, "_maintainer_emails")
+                and email_str.lower() in self._access_gate._maintainer_emails
+            ):
+                roles = list(APPROVER_GROUPS or OBS_ADMIN_GROUPS or {"admin"})
+
+            user_ctx = get_user_from_slack(user, display_name, email_str, roles=roles)
             # auth_enabled passed explicitly (matching queue.py/dashboard_ws.py) rather than
             # relying on can_approve_event's bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED) default --
             # Slack identity is always named regardless of Dex, but the APPROVER_GROUPS RBAC
             # gate this call enforces must still apply whenever either auth mode is on.
             auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
             if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
-                logger.warning(f"Slack approve forbidden on {event_id} by {user} ({email})")
+                logger.warning(f"Slack approve forbidden on {event_id} by {user} ({email_str})")
+                if channel and user:
+                    try:
+                        await asyncio.wait_for(
+                            client.chat_postEphemeral(
+                                channel=channel,
+                                user=user,
+                                thread_ts=thread_ts,
+                                text=f":lock: You are not authorized to approve this plan on event {event_id}. Approvals require ownership or approver permissions.",
+                            ),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Slack approve forbidden ephemeral failed: {e}")
                 return
 
             mr_id, mr_sha = await resolve_live_head_sha(event_doc)
 
-            clean_ident, clean_name = resolve_approval_identity(email, display_name, fallback=user)
-
             stamp_res = self._blackboard.stamp_event(
                 event_id,
-                approved_by=clean_ident,
+                approved_by=clean_ident_str,
                 approved_mr_id=mr_id,
                 approved_mr_sha=mr_sha,
             )
@@ -620,14 +700,17 @@ class SlackChannel:
             if mr_id and mr_sha:
                 thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
 
+            conv_len = len(event_doc.conversation) if event_doc and event_doc.conversation else 0
             turn = ConversationTurn(
-                turn=len(event_doc.conversation) + 1,
+                turn=conv_len + 1,
                 actor="user",
                 action="approve",
                 thoughts=thought_msg,
                 source="slack",
-                user_name=clean_name,
-                approved_by=clean_ident,
+                user=clean_name_str,
+                user_name=clean_name_str,
+                user_email=email_str,
+                approved_by=clean_ident_str,
                 approved_mr_id=mr_id,
                 approved_mr_sha=mr_sha,
             )
@@ -641,24 +724,69 @@ class SlackChannel:
         @self._app.action("darwin_reject")
         async def handle_reject(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            if not await self._gate_check(client, body["user"]["id"]):
-                return
-            event_id = body["actions"][0]["value"]
-            user = body["user"]["id"]
-            channel = body["channel"]["id"]
-            thread_ts = body["message"].get("thread_ts", body["message"]["ts"])
+            actions = body.get("actions", [])
+            event_id = actions[0].get("value", "") if actions and isinstance(actions[0], dict) else ""
+            user = body.get("user", {}).get("id", "")
+            channel = body.get("channel", {}).get("id", "")
+            msg = body.get("message", {})
+            thread_ts = msg.get("thread_ts") or msg.get("ts", "")
 
-            from ..auth import get_user_from_slack, can_approve_event, DEX_ENABLED, TRUSTED_PROXY_ENABLED
+            if not await self._gate_check(client, user):
+                if channel and user:
+                    try:
+                        await asyncio.wait_for(
+                            client.chat_postEphemeral(
+                                channel=channel,
+                                user=user,
+                                thread_ts=thread_ts,
+                                text=":lock: Access denied. Contact the app maintainer to be added to the authorized group.",
+                            ),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Slack reject gate ephemeral failed: {e}")
+                return
+
+            from ..auth import (
+                get_user_from_slack, can_approve_event, resolve_approval_identity,
+                DEX_ENABLED, TRUSTED_PROXY_ENABLED, APPROVER_GROUPS, OBS_ADMIN_GROUPS,
+            )
             event_doc = await self._blackboard.get_event(event_id)
-            if not event_doc:
+            if not event_doc or getattr(event_doc, "status", None) == "closed":
                 return
 
-            email = self._get_cached_email(user)
             display_name = await self._resolve_display_name(client, user)
-            user_ctx = get_user_from_slack(user, display_name, email or "")
+            email = self._get_cached_email(user)
+            email_str = email if isinstance(email, str) else ""
+            clean_ident, clean_name = resolve_approval_identity(email_str, display_name, fallback=user)
+            clean_name_str = clean_name if isinstance(clean_name, str) else user
+
+            roles: list[str] = []
+            if (
+                self._access_gate
+                and email_str
+                and hasattr(self._access_gate, "_maintainer_emails")
+                and email_str.lower() in self._access_gate._maintainer_emails
+            ):
+                roles = list(APPROVER_GROUPS or OBS_ADMIN_GROUPS or {"admin"})
+
+            user_ctx = get_user_from_slack(user, display_name, email_str, roles=roles)
             auth_enabled = bool(DEX_ENABLED or TRUSTED_PROXY_ENABLED)
             if not can_approve_event(user_ctx, event_doc, auth_enabled=auth_enabled):
-                logger.warning(f"Slack reject forbidden on {event_id} by {user} ({email})")
+                logger.warning(f"Slack reject forbidden on {event_id} by {user} ({email_str})")
+                if channel and user:
+                    try:
+                        await asyncio.wait_for(
+                            client.chat_postEphemeral(
+                                channel=channel,
+                                user=user,
+                                thread_ts=thread_ts,
+                                text=f":lock: You are not authorized to reject this plan on event {event_id}. Rejections require ownership or approver permissions.",
+                            ),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Slack reject forbidden ephemeral failed: {e}")
                 return
 
             # A rejection supersedes any prior approval stamp (see queue.py reject_event) --
@@ -670,12 +798,16 @@ class SlackChannel:
                 if inspect.isawaitable(clear_res):
                     await clear_res
 
+            conv_len = len(event_doc.conversation) if event_doc and event_doc.conversation else 0
             turn = ConversationTurn(
-                turn=len(event_doc.conversation) + 1,
+                turn=conv_len + 1,
                 actor="user",
                 action="reject",
                 thoughts="User rejected the plan.",
                 source="slack",
+                user=clean_name_str,
+                user_name=clean_name_str,
+                user_email=email_str,
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
@@ -687,19 +819,29 @@ class SlackChannel:
         @self._app.action("darwin_feedback")
         async def handle_feedback(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            feedback = body["actions"][0]["value"]
-            user_id = body["user"]["id"]
-            msg_ts = body["message"]["ts"]
+            actions = body.get("actions", [])
+            feedback = actions[0].get("value") if actions and isinstance(actions[0], dict) else ""
+            user_id = (body.get("user") or {}).get("id", "")
+            channel_id = (body.get("channel") or {}).get("id", "")
+            msg = body.get("message") or {}
+            msg_ts = msg.get("ts", "")
             logger.info(f"Feedback: {feedback} from {user_id} on {msg_ts}")
             text = (
                 "Thanks for the feedback!"
                 if feedback == "positive"
                 else "Sorry about that. Your feedback helps Darwin improve."
             )
-            await client.chat_postEphemeral(
-                channel=body["channel"]["id"], user=user_id,
-                thread_ts=msg_ts, text=text,
-            )
+            if channel_id and user_id:
+                try:
+                    await asyncio.wait_for(
+                        client.chat_postEphemeral(
+                            channel=channel_id, user=user_id,
+                            thread_ts=msg_ts, text=text,
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.warning(f"Slack feedback ephemeral failed: {e}")
 
         @self._app.event("app_home_opened")
         async def handle_app_home_opened(event: dict, client: Any) -> None:
@@ -780,6 +922,8 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user_id)
+            email = self._get_cached_email(user_id) or ""
+            created_by_email = email or None
             fallback = fallback_title(text)
             event_id = await self._blackboard.create_event(
                 source="slack",
@@ -792,6 +936,7 @@ class SlackChannel:
                     domain="disorder",
                     severity="info",
                 ),
+                created_by_email=created_by_email,
                 initial_turns=[ConversationTurn(
                     turn=1, actor="user", action="message",
                     thoughts=text.strip(), source="slack",
@@ -951,6 +1096,19 @@ class SlackChannel:
             # Orphan progress message cleanup
             await self._cleanup_progress_bubble(event_id, "event_closed")
 
+            # Orphan thinking indicator message cleanup for channel threads (T-8)
+            thinking = self._thinking_msg.pop(event_id, None)
+            if thinking:
+                ch, ts = (thinking["channel"], thinking["ts"]) if isinstance(thinking, dict) else thinking
+                if ch and ts and not ch.startswith("D"):
+                    try:
+                        await asyncio.wait_for(
+                            self._app.client.chat_delete(channel=ch, ts=ts),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to delete thinking message on event_closed for %s: %s", event_id, exc)
+
             event_doc = await self._blackboard.get_event(event_id)
             if event_doc and event_doc.slack_thread_ts:
                 summary = message.get("summary", "Event closed.")
@@ -1090,37 +1248,57 @@ class SlackChannel:
         except Exception as e:
             logger.warning(f"Slack thinking indicator failed: {e}")
 
-    async def _handle_legacy_turn(self, event_id: str, message: dict) -> None:
-        """Post turn via Block Kit for all thread types (DM + legacy)."""
-        event_doc = await self._blackboard.get_event(event_id)
-        if not event_doc:
-            return
-        turn = ConversationTurn(**message["turn"])
-
-        if turn.actor == "brain" and turn.action == "response":
-            # Clean up progress message before posting the Block Kit response.
-            # Always proceeds to post regardless of chat_delete success/failure.
-            await self._cleanup_progress_bubble(event_id, "response")
-
-        if turn.actor == "brain" and turn.action == "thoughts":
+    async def _handle_tool_progress(self, turn: ConversationTurn, event_doc: Any) -> None:
+        """Update DM assistant status and channel thinking message with active tool progress."""
+        if not turn.waitingFor:
             return
 
-        if turn.actor == "brain" and turn.action == "tool_result":
+        event_id = getattr(event_doc, "id", "")
+        phrase = _TOOL_PROGRESS_PHRASES.get(turn.waitingFor, "FRIDAY is working...")
+
+        # Channel thinking indicator update (T-7)
+        if event_id in self._thinking_msg:
+            thinking = self._thinking_msg[event_id]
+            ch, ts = (thinking["channel"], thinking["ts"]) if isinstance(thinking, dict) else thinking
+            if ch and ts:
+                try:
+                    await asyncio.wait_for(
+                        self._app.client.chat_update(
+                            channel=ch,
+                            ts=ts,
+                            text=f":thinkingemoji: {phrase}",
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to update channel thinking indicator for %s: %s", event_id, exc)
+                    self._thinking_msg.pop(event_id, None)
+
+        # DM assistant status update
+        if event_id in self._dm_context:
+            ctx = self._dm_context[event_id]
+            if ctx.get("_last_tool_phrase") != phrase:
+                ctx["_last_tool_phrase"] = phrase
+                try:
+                    await asyncio.wait_for(
+                        self._app.client.assistant_threads_setStatus(
+                            channel_id=ctx["channel"],
+                            thread_ts=ctx["thread_ts"],
+                            status=phrase,
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.debug("assistant_threads_setStatus failed for %s: %s", event_id, e)
+
             # Progress message update (whitelist-independent, DM only) -- fires
-            # BEFORE the _USER_VISIBLE_TOOL_RESULTS gate below.
+            # BEFORE the _USER_VISIBLE_TOOL_RESULTS gate.
             if (
                 self._progress_enabled
-                and turn.waitingFor
-                and event_id in self._dm_context
                 and event_id not in self._progress_failed
             ):
-                phrase = _TOOL_PROGRESS_PHRASES.get(turn.waitingFor, "FRIDAY is working...")
-                # Lock held across the check-then-act + await so two concurrent
-                # tool_result turns for the same event_id can't both observe
-                # "no ts yet" and double-post (TOCTOU race).
                 async with self._get_progress_lock(event_id):
                     if self._progress_last_phrase.get(event_id) != phrase:
-                        ctx = self._dm_context[event_id]
                         try:
                             if event_id not in self._progress_ts:
                                 result = await asyncio.wait_for(
@@ -1142,11 +1320,25 @@ class SlackChannel:
                             self._progress_last_phrase[event_id] = phrase
                         except Exception as e:
                             logger.warning(f"Progress message failed for {event_id}: {e}")
-                            # Arm the breaker on ANY post/update failure -- a chat_update
-                            # failure (outage/rate-limit/deleted message/revoked scope)
-                            # must stop retrying every future turn, not just the initial post.
                             self._progress_failed.add(event_id)
 
+    async def _handle_legacy_turn(self, event_id: str, message: dict) -> None:
+        """Post turn via Block Kit for all thread types (DM + legacy)."""
+        event_doc = await self._blackboard.get_event(event_id)
+        if not event_doc:
+            return
+        turn = ConversationTurn(**message["turn"])
+
+        if turn.actor == "brain" and turn.action == "response":
+            # Clean up progress message before posting the Block Kit response.
+            # Always proceeds to post regardless of chat_delete success/failure.
+            await self._cleanup_progress_bubble(event_id, "response")
+
+        if turn.actor == "brain" and turn.action == "thoughts":
+            return
+
+        if turn.actor == "brain" and turn.action == "tool_result":
+            await self._handle_tool_progress(turn, event_doc)
             if not (event_doc.slack_thread_ts and turn.waitingFor in _USER_VISIBLE_TOOL_RESULTS):
                 return
 
@@ -1214,7 +1406,7 @@ class SlackChannel:
         )
 
     async def _update_turn_in_thread(
-        self, thinking: tuple[str, str], event_doc: Any, turn: Any,
+        self, thinking: tuple[str, str] | dict[str, str], event_doc: Any, turn: Any,
     ) -> None:
         """Replace the thinking indicator message with the formatted turn.
 
@@ -1227,7 +1419,10 @@ class SlackChannel:
 
         if table_blocks:
             try:
-                await self._app.client.chat_delete(channel=channel, ts=msg_ts)
+                await asyncio.wait_for(
+                    self._app.client.chat_delete(channel=channel, ts=msg_ts),
+                    timeout=_SLACK_API_TIMEOUT,
+                )
             except Exception:
                 pass
             await self._send_turn_to_thread(event_doc, turn)
@@ -1242,7 +1437,10 @@ class SlackChannel:
                 kwargs["attachments"] = [{"color": color, "blocks": blocks}]
             elif blocks:
                 kwargs["blocks"] = blocks
-            await self._app.client.chat_update(**kwargs)
+            await asyncio.wait_for(
+                self._app.client.chat_update(**kwargs),
+                timeout=_SLACK_API_TIMEOUT,
+            )
         except Exception as e:
             logger.warning(f"Slack thinking->turn update failed, falling back to new post: {e}")
             await self._send_turn_to_thread(event_doc, turn)

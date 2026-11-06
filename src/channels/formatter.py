@@ -248,6 +248,15 @@ def _section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": _truncate(text)}}
 
 
+def format_tool_result_blocks(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
+    """Format a user-visible tool result turn into Block Kit blocks."""
+    tool_name = turn.waitingFor or "tool"
+    text = turn.evidence or turn.thoughts or ""
+    if len(text) > 2500:
+        text = text[:2500] + "..."
+    return [_section(f":mag: *{tool_name}*\n{text}")]
+
+
 def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     """Convert a ConversationTurn to Slack Block Kit blocks.
 
@@ -328,11 +337,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
             blocks.append(_section(f":female-technologist: {raw}"))
 
     elif key == "brain.tool_result":
-        tool_name = turn.waitingFor or "tool"
-        text = turn.evidence or turn.thoughts or ""
-        if len(text) > 2500:
-            text = text[:2500] + "..."
-        blocks.append(_section(f":mag: *{tool_name}*\n{text}"))
+        blocks.extend(format_tool_result_blocks(turn, event_id))
 
     elif key == "brain.close":
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))

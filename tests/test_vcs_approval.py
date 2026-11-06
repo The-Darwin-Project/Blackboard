@@ -245,6 +245,32 @@ class TestResolveLiveHeadShaDispatcher:
         mock_gh.assert_awaited_once()
         assert result == ("265", "y")
 
+    @pytest.mark.asyncio
+    async def test_resolve_live_head_sha_tls_verify_ca_bundle(self, monkeypatch):
+        """T-11 / Step 5: resolve_live_head_sha passes CA bundle path and never verify=False."""
+        from src.utils.vcs_approval import _resolve_gitlab_head
+        monkeypatch.setenv("GITLAB_HOST", "gitlab.corp.redhat.com")
+        monkeypatch.setenv("GITLAB_TOKEN", "gl-token-123")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/pki/tls/certs/ca-bundle.crt")
+
+        gl_ctx = {"mr_iid": "42", "project_id": "100", "head_sha": "fallback_sha"}
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_resp = MagicMock()
+            mock_resp.is_success = True
+            mock_resp.json.return_value = {"sha": "live_sha_123"}
+            mock_client.get.return_value = mock_resp
+
+            mr_iid, sha = await _resolve_gitlab_head(gl_ctx)
+
+            assert mock_client_cls.called
+            kwargs = mock_client_cls.call_args.kwargs
+            assert kwargs.get("verify") == "/etc/pki/tls/certs/ca-bundle.crt"
+            assert kwargs.get("verify") is not False
+            assert sha == "live_sha_123"
+
+
 
 class TestVerifyMergeGuard:
     """verify_merge_guard() is the production Developer merge guard (see test_approval_binding.py

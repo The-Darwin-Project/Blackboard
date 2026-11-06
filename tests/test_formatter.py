@@ -446,3 +446,22 @@ class TestSlackTableFormatting:
         block = _md_table_to_block_kit([["h1"], ["c1"]])
         assert block is not None
         assert len(block["rows"][0]) == 1
+
+
+def test_format_tool_result_blocks_helper():
+    """Step 1 / T-2: format_tool_result_blocks extracts tool_result formatting into helper."""
+    from src.channels.formatter import format_tool_result_blocks
+
+    turn = _make_turn(
+        actor="brain",
+        action="tool_result",
+        waitingFor="take_note",
+        evidence="Note recorded successfully",
+    )
+    blocks = format_tool_result_blocks(turn, event_id="evt-1234")
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "section"
+    text = blocks[0]["text"]["text"]
+    assert ":mag: *take_note*" in text
+    assert "Note recorded successfully" in text
+

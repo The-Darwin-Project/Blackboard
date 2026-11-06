@@ -68,7 +68,8 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
 
     if host and token:
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            ca_bundle = os.getenv("REQUESTS_CA_BUNDLE") or os.getenv("SSL_CERT_FILE") or True
+            async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
                 resp = await client.get(
                     f"https://{host}/api/v4/projects/{project_id}/merge_requests/{mr_iid}",
                     headers={"PRIVATE-TOKEN": token},
@@ -104,7 +105,8 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        ca_bundle = os.getenv("REQUESTS_CA_BUNDLE") or os.getenv("SSL_CERT_FILE") or True
+        async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
             resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
                 headers=headers,
