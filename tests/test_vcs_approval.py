@@ -200,6 +200,33 @@ class TestResolveGithubHead:
         assert "Authorization" not in call_kwargs.get("headers", {})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("env_name", ["REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"])
+    async def test_live_sha_client_uses_ca_bundle_verify(self, monkeypatch, env_name):
+        """GitHub live-SHA call passes the configured CA bundle as verify= and never False."""
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv(env_name, "/etc/pki/tls/certs/ca-bundle.crt")
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+            _, sha = await _resolve_github_head(gh_ctx)
+        assert sha == "live-sha-xyz"
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["verify"] == "/etc/pki/tls/certs/ca-bundle.crt"
+        assert kwargs["verify"] is not False
+
+    @pytest.mark.asyncio
+    async def test_live_sha_client_defaults_to_system_trust_when_no_bundle(self, monkeypatch):
+        """No CA env configured: verify=True (system trust store), never disabled."""
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+            await _resolve_github_head(gh_ctx)
+        assert mock_client_cls.call_args.kwargs["verify"] is True
+
+    @pytest.mark.asyncio
     async def test_missing_pr_number_skips_network_call(self):
         gh_ctx = {"owner": "o", "repo": "r", "head_sha": "stale-sha"}
         mock_client_cls = _mock_client(get_return=_resp(200, {}))
@@ -244,6 +271,32 @@ class TestResolveLiveHeadShaDispatcher:
             result = await resolve_live_head_sha(event)
         mock_gh.assert_awaited_once()
         assert result == ("265", "y")
+
+    @pytest.mark.asyncio
+    async def test_resolve_live_head_sha_tls_verify_ca_bundle(self, monkeypatch):
+        """T-11 / Step 5: resolve_live_head_sha passes CA bundle path and never verify=False."""
+        from src.utils.vcs_approval import _resolve_gitlab_head
+        monkeypatch.setenv("GITLAB_HOST", "gitlab.corp.redhat.com")
+        monkeypatch.setenv("GITLAB_TOKEN", "gl-token-123")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/pki/tls/certs/ca-bundle.crt")
+
+        gl_ctx = {"mr_iid": "42", "project_id": "100", "head_sha": "fallback_sha"}
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_resp = MagicMock()
+            mock_resp.is_success = True
+            mock_resp.json.return_value = {"sha": "live_sha_123"}
+            mock_client.get.return_value = mock_resp
+
+            mr_iid, sha = await _resolve_gitlab_head(gl_ctx)
+
+            assert mock_client_cls.called
+            kwargs = mock_client_cls.call_args.kwargs
+            assert kwargs.get("verify") == "/etc/pki/tls/certs/ca-bundle.crt"
+            assert kwargs.get("verify") is not False
+            assert sha == "live_sha_123"
+
 
 
 class TestVerifyMergeGuard:

@@ -248,12 +248,19 @@ class TestSlackFilterRefactor:
         from src.channels.slack import _INTERNAL_TURNS, _USER_VISIBLE_TOOL_RESULTS
         assert ("brain", "tool_result") not in _INTERNAL_TURNS
         assert "take_note" in _USER_VISIBLE_TOOL_RESULTS
-        assert "record_observation" in _USER_VISIBLE_TOOL_RESULTS
-        assert "search_open_incidents" in _USER_VISIBLE_TOOL_RESULTS
-        assert "consult_deep_memory" in _USER_VISIBLE_TOOL_RESULTS
-        assert "review_notes" in _USER_VISIBLE_TOOL_RESULTS
-        assert "list_observations" in _USER_VISIBLE_TOOL_RESULTS
-        assert len(_USER_VISIBLE_TOOL_RESULTS) == 6
+        assert "record_observation" not in _USER_VISIBLE_TOOL_RESULTS
+        assert "search_open_incidents" not in _USER_VISIBLE_TOOL_RESULTS
+        assert "consult_deep_memory" not in _USER_VISIBLE_TOOL_RESULTS
+        assert "review_notes" not in _USER_VISIBLE_TOOL_RESULTS
+        assert "list_observations" not in _USER_VISIBLE_TOOL_RESULTS
+        assert len(_USER_VISIBLE_TOOL_RESULTS) == 1
+
+        # A-1 / Step 1: Subagent worker execution turns and brain.plan suppressed, brain.route preserved
+        assert ("brain", "plan") in _INTERNAL_TURNS
+        assert ("brain", "route") not in _INTERNAL_TURNS
+        for role in ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer", "explorer"]:
+            for action in ["execute", "plan_step", "run_command", "cancel", "error", "message", "huddle", "teammate"]:
+                assert (role, action) in _INTERNAL_TURNS
 
 
 class TestHeapqTieBreaking:

@@ -113,10 +113,7 @@ class TestSlackVisibilityFilter:
     def test_whitelist_contents(self):
         from src.channels.slack import _USER_VISIBLE_TOOL_RESULTS, _INTERNAL_TURNS
         assert ("brain", "tool_result") not in _INTERNAL_TURNS
-        expected = {
-            "take_note", "record_observation", "search_open_incidents",
-            "consult_deep_memory", "review_notes", "list_observations",
-        }
+        expected = {"take_note"}
         assert _USER_VISIBLE_TOOL_RESULTS == expected
 
     def test_whitelist_with_thread_passes(self):

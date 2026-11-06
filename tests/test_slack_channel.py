@@ -80,7 +80,7 @@ def _make_channel() -> tuple:
     sc._progress_last_phrase = {}
     sc._progress_failed = set()
     sc._progress_locks = {}  # event_id -> asyncio.Lock, serializes post/update/cleanup (TOCTOU fix)
-    sc._progress_enabled = True
+    sc._progress_enabled = False
 
     sc._register_handlers()
 
@@ -1561,3 +1561,701 @@ class TestTableRejectionFallback:
         assert att_blocks[1]["type"] == "section"
         assert "Col1" in att_blocks[1]["text"]["text"]
 
+
+# ---------------------------------------------------------------------------
+# Test: Slack Connector Remediation (VMER-2270 / Scenarios T-1 through T-10)
+# ---------------------------------------------------------------------------
+
+
+class TestSlackConnectorRemediation:
+    """Acceptance & unit tests for Slack connector noise suppression, thinking lifecycle, and RBAC approval."""
+
+    @pytest.mark.asyncio
+    async def test_t1_cognitive_tool_result_suppressed(self):
+        """T-1: consult_deep_memory tool_result is suppressed from human chat."""
+        sc, _ = _make_channel()
+        eid = "evt-c474dfe7"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {
+                "turn": 10,
+                "actor": "brain",
+                "action": "tool_result",
+                "waitingFor": "consult_deep_memory",
+                "evidence": '{"embeddings": [0.1, 0.2], "matches": []}',
+            },
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_t2_user_confirmation_tool_result_posted(self):
+        """T-2: take_note tool_result is user-visible and posted to thread."""
+        sc, _ = _make_channel()
+        eid = "evt-note-001"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {
+                "turn": 11,
+                "actor": "brain",
+                "action": "tool_result",
+                "waitingFor": "take_note",
+                "evidence": "Note has been saved to blackboard.",
+            },
+        })
+
+        sc._app.client.chat_postMessage.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_t3_subagent_worker_turns_suppressed(self):
+        """T-3: explorer.execute and subagent turns suppressed by _INTERNAL_TURNS."""
+        sc, _ = _make_channel()
+        eid = "evt-subagent-worker"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {
+                "turn": 25,
+                "actor": "explorer",
+                "action": "execute",
+                "result": "7KB terminal bash dump",
+            },
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_t4_approve_cold_cache_resolves_email_first(self):
+        """T-4: handle_approve resolves email BEFORE checking can_approve_event, stamps turn."""
+        from unittest.mock import patch
+        sc, captured = _make_channel()
+        handle_approve = captured["action:darwin_approve"]
+        eid = "evt-abb39748"
+        doc = _mock_event_doc(event_id=eid)
+        doc.created_by_email = "approver@redhat.com"
+        sc._blackboard.get_event.return_value = doc
+
+        client = AsyncMock()
+        client.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Approver User",
+                    "real_name": "Approver User",
+                    "email": "approver@redhat.com",
+                }
+            }
+        }
+
+        body = {
+            "user": {"id": "U_APPROVER"},
+            "channel": {"id": "C_CHAN"},
+            "message": {"ts": "1700000000.123", "thread_ts": "1700000000.100"},
+            "actions": [{"value": eid}],
+        }
+        ack = AsyncMock()
+
+        with patch("src.auth.DEX_ENABLED", True):
+            await handle_approve(ack, body, client)
+
+        ack.assert_awaited_once()
+        sc._blackboard.append_turn.assert_called_once()
+        turn_arg = sc._blackboard.append_turn.call_args.args[1]
+        assert turn_arg.action == "approve"
+        assert turn_arg.user == "Approver User"
+        assert turn_arg.user_email == "approver@redhat.com"
+
+    @pytest.mark.asyncio
+    async def test_t5_approve_unauthorized_sends_ephemeral_rejection(self):
+        """T-5: Unauthorized user approval receives chat_postEphemeral and appends no turn."""
+        from unittest.mock import patch
+        sc, captured = _make_channel()
+        handle_approve = captured["action:darwin_approve"]
+        eid = "evt-unauth-001"
+        doc = _mock_event_doc(event_id=eid)
+        doc.created_by_email = "owner@redhat.com"
+        sc._blackboard.get_event.return_value = doc
+
+        client = AsyncMock()
+        client.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Eve Attacker",
+                    "real_name": "Eve Attacker",
+                    "email": "eve@unauthorized.com",
+                }
+            }
+        }
+
+        body = {
+            "user": {"id": "U_EVE"},
+            "channel": {"id": "C_CHAN"},
+            "message": {"ts": "1700000000.123", "thread_ts": "1700000000.100"},
+            "actions": [{"value": eid}],
+        }
+        ack = AsyncMock()
+
+        with patch("src.auth.DEX_ENABLED", True):
+            await handle_approve(ack, body, client)
+
+        ack.assert_awaited_once()
+        sc._blackboard.append_turn.assert_not_called()
+        client.chat_postEphemeral.assert_called_once()
+        ephemeral_text = client.chat_postEphemeral.call_args.kwargs.get("text", "")
+        assert "not authorized to approve" in ephemeral_text
+
+    @pytest.mark.asyncio
+    async def test_t6_create_event_passes_created_by_email(self):
+        """T-6: Event creation sites resolve and pass created_by_email."""
+        from unittest.mock import patch
+        sc, captured = _make_channel()
+        handle_cmd = captured["command:/darwin"]
+
+        client = AsyncMock()
+        client.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Alice Bob",
+                    "real_name": "Alice Bob",
+                    "email": "alice@redhat.com",
+                }
+            }
+        }
+        cmd_body = {
+            "user_id": "U_ALICE",
+            "channel_id": "C_DEV",
+            "text": "investigate memory spike",
+            "trigger_id": "trig-123",
+        }
+        ack = AsyncMock()
+        respond = AsyncMock()
+
+        sc._blackboard.create_event.return_value = _mock_event_doc(event_id="evt-cmd-001")
+
+        await handle_cmd(ack, cmd_body, client, respond)
+
+        ack.assert_awaited_once()
+        sc._blackboard.create_event.assert_called_once()
+        call_kwargs = sc._blackboard.create_event.call_args.kwargs
+        assert call_kwargs.get("created_by_email") == "alice@redhat.com"
+
+    @pytest.mark.asyncio
+    async def test_t7_channel_thread_tool_progress_updates_thinking_msg(self):
+        """T-7: Channel thread tool progress updates thinking message in-place."""
+        sc, _ = _make_channel()
+        eid = "evt-channel-progress"
+        doc = _mock_event_doc(event_id=eid, slack_channel_id="C_TEAM", slack_thread_ts="1700.1")
+        sc._blackboard.get_event.return_value = doc
+        sc._thinking_msg[eid] = ("C_TEAM", "1700.2")
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {
+                "turn": 5,
+                "actor": "brain",
+                "action": "tool_result",
+                "waitingFor": "classify_event",
+                "evidence": "Analysis started",
+            },
+        })
+
+        sc._app.client.chat_update.assert_called_once()
+        call_kwargs = sc._app.client.chat_update.call_args.kwargs
+        assert call_kwargs.get("channel") == "C_TEAM"
+        assert call_kwargs.get("ts") == "1700.2"
+        assert "Assessing the situation" in call_kwargs.get("text", "")
+
+    @pytest.mark.asyncio
+    async def test_t8_event_closed_deletes_thinking_message(self):
+        """T-8: Event closed broadcast deletes any remaining thinking message."""
+        sc, _ = _make_channel()
+        eid = "evt-closed-cleanup"
+        sc._thinking_msg[eid] = ("C_TEAM", "1700.99")
+
+        await sc.broadcast_handler({
+            "type": "event_closed",
+            "event_id": eid,
+        })
+
+        sc._app.client.chat_delete.assert_called_once_with(
+            channel="C_TEAM",
+            ts="1700.99",
+        )
+        assert eid not in sc._thinking_msg
+
+    @pytest.mark.asyncio
+    async def test_t9_brain_route_turn_fires_open_infra_thread(self):
+        """T-9: brain.route turn triggers open_infra_thread and is not suppressed."""
+        from unittest.mock import patch
+        sc, _ = _make_channel()
+        eid = "evt-aligner-infra"
+        doc = _mock_event_doc(event_id=eid, source="aligner")
+        doc.slack_channel_id = None
+        doc.slack_thread_ts = None
+        sc._blackboard.get_event.return_value = doc
+
+        with patch.object(sc, "open_infra_thread", AsyncMock()) as mock_open:
+            await sc.broadcast_handler({
+                "type": "turn",
+                "event_id": eid,
+                "turn": {
+                    "turn": 2,
+                    "actor": "brain",
+                    "action": "route",
+                    "thoughts": "Dispatching to aligner agent",
+                },
+            })
+            mock_open.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_t10_ephemeral_failure_does_not_crash_action_handler(self):
+        """T-10: Ephemeral post timeout/failure does not crash handle_approve."""
+        from unittest.mock import patch
+        sc, captured = _make_channel()
+        handle_approve = captured["action:darwin_approve"]
+        eid = "evt-timeout-001"
+        doc = _mock_event_doc(event_id=eid)
+        doc.created_by_email = "owner@redhat.com"
+        sc._blackboard.get_event.return_value = doc
+
+        client = AsyncMock()
+        client.users_info.return_value = {
+            "ok": True,
+            "user": {
+                "profile": {
+                    "display_name": "Eve Attacker",
+                    "real_name": "Eve Attacker",
+                    "email": "eve@unauthorized.com",
+                }
+            }
+        }
+        client.chat_postEphemeral.side_effect = Exception("Slack API Timeout")
+
+        body = {
+            "user": {"id": "U_EVE"},
+            "channel": {"id": "C_CHAN"},
+            "message": {"ts": "1700000000.123", "thread_ts": "1700000000.100"},
+            "actions": [{"value": eid}],
+        }
+        ack = AsyncMock()
+
+        with patch("src.auth.DEX_ENABLED", True):
+            await handle_approve(ack, body, client)
+
+        ack.assert_awaited_once()
+        sc._blackboard.append_turn.assert_not_called()
+
+
+
+
+# ---------------------------------------------------------------------------
+# Test: realistic AsyncSlackResponse handling, RBAC via access gate, created_by_email
+# ---------------------------------------------------------------------------
+
+
+class _FakeAsyncSlackResponse:
+    """Mimics slack_sdk AsyncSlackResponse: NOT a dict subclass, but supports .get()/[]."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.data[key]
+
+
+def _fake_user_info(name: str = "Alice", email: str | None = "alice@redhat.com") -> _FakeAsyncSlackResponse:
+    profile: dict[str, Any] = {"display_name": name}
+    if email is not None:
+        profile["email"] = email
+    return _FakeAsyncSlackResponse({"ok": True, "user": {"profile": profile, "real_name": name}})
+
+
+class TestResolveDisplayNameAsyncSlackResponse:
+    """Regression: users_info returns a non-dict AsyncSlackResponse in production."""
+
+    @pytest.mark.asyncio
+    async def test_resolves_and_caches_name_and_email_from_non_dict_response(self):
+        sc, _ = _make_channel()
+        resp = _fake_user_info("Alice Real", "alice@redhat.com")
+        assert not isinstance(resp, dict)
+        client = AsyncMock()
+        client.users_info.return_value = resp
+
+        name = await sc._resolve_display_name(client, "U_ALICE")
+
+        assert name == "Alice Real"
+        assert sc._get_cached_email("U_ALICE") == "alice@redhat.com"
+        # Second call is served from cache -- no extra API round trip.
+        assert await sc._resolve_display_name(client, "U_ALICE") == "Alice Real"
+        client.users_info.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gate_check_allows_maintainer_via_non_dict_response(self):
+        """End-to-end of the prod bug: gate must see the email, not 'no_email'."""
+        from src.slack_gate import SlackAccessGate
+
+        sc, _ = _make_channel()
+        sc._access_gate = SlackAccessGate([], {"alice@redhat.com"})
+        client = AsyncMock()
+        client.users_info.return_value = _fake_user_info("Alice", "alice@redhat.com")
+
+        assert await sc._gate_check(client, "U_ALICE") is True
+
+    @pytest.mark.asyncio
+    async def test_lookup_exception_does_not_cache_empty_email(self):
+        sc, _ = _make_channel()
+        client = AsyncMock()
+        client.users_info.side_effect = Exception("ratelimited")
+
+        assert await sc._resolve_display_name(client, "U_X") == "U_X"
+        assert sc._get_cached_email("U_X") is None
+        assert "U_X" not in sc._user_name_cache
+
+        # Recovery: next call retries and caches the real email.
+        client.users_info.side_effect = None
+        client.users_info.return_value = _fake_user_info("Xavier", "x@redhat.com")
+        assert await sc._resolve_display_name(client, "U_X") == "Xavier"
+        assert sc._get_cached_email("U_X") == "x@redhat.com"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("payload", [
+        {"ok": False, "error": "user_not_found"},
+        {"ok": True, "user": None},
+        {"ok": True, "user": {}},
+    ])
+    async def test_missing_user_object_does_not_cache_empty_email(self, payload):
+        sc, _ = _make_channel()
+        client = AsyncMock()
+        client.users_info.return_value = _FakeAsyncSlackResponse(payload)
+
+        assert await sc._resolve_display_name(client, "U_Y") == "U_Y"
+        assert sc._get_cached_email("U_Y") is None
+        assert "U_Y" not in sc._user_name_cache
+
+    @pytest.mark.asyncio
+    async def test_profile_without_email_caches_empty_string(self):
+        """A resolved profile that genuinely has no email IS cached as '' (checked, none)."""
+        sc, _ = _make_channel()
+        client = AsyncMock()
+        client.users_info.return_value = _fake_user_info("Botty", None)
+
+        assert await sc._resolve_display_name(client, "U_B") == "Botty"
+        assert sc._get_cached_email("U_B") == ""
+
+
+class TestApproveRejectRBAC:
+    """RBAC for darwin_approve / darwin_reject (shared _authorize_plan_decision helper)."""
+
+    MAINT = "maint@redhat.com"
+    MEMBER = "member@redhat.com"
+    OWNER = "owner@redhat.com"
+
+    @staticmethod
+    def _gate(maintainers: set[str], members: set[str]):
+        from src.slack_gate import SlackAccessGate
+
+        gate = SlackAccessGate(["g"], maintainers)
+        gate._allowed_emails = frozenset(members)
+        gate._healthy = True
+        return gate
+
+    @staticmethod
+    def _body(eid: str, user: str = "U_USER") -> dict:
+        return {
+            "user": {"id": user},
+            "channel": {"id": "C_CHAN"},
+            "message": {"ts": "1700000000.123", "thread_ts": "1700000000.100"},
+            "actions": [{"value": eid}],
+        }
+
+    async def _run(
+        self,
+        verb: str,
+        *,
+        email: str,
+        created_by: str | None,
+        status: str = "active",
+        gate=None,
+        auth: bool = True,
+        approver_groups: frozenset = frozenset({"darwin-approvers"}),
+        obs_groups: frozenset = frozenset(),
+    ):
+        from unittest.mock import patch
+
+        sc, captured = _make_channel()
+        sc._access_gate = gate
+        eid = f"evt-rbac-{verb}"
+        doc = _mock_event_doc(event_id=eid, status=status)
+        doc.created_by_email = created_by
+        sc._blackboard.get_event.return_value = doc
+        client = AsyncMock()
+        client.users_info.return_value = _fake_user_info("Some User", email)
+        handler = captured[f"action:darwin_{verb}"]
+
+        with patch("src.auth.DEX_ENABLED", auth), \
+                patch("src.auth.TRUSTED_PROXY_ENABLED", False), \
+                patch("src.auth.APPROVER_GROUPS", approver_groups), \
+                patch("src.auth.OBS_ADMIN_GROUPS", obs_groups), \
+                patch("src.utils.vcs_approval.resolve_live_head_sha", AsyncMock(return_value=(None, None))):
+            await handler(AsyncMock(), self._body(eid), client)
+        return sc, client, eid
+
+    @staticmethod
+    def _assert_allowed(sc, eid):
+        sc._blackboard.append_turn.assert_called_once()
+        sc._brain.enqueue_for_processing.assert_called_once_with(eid)
+
+    @staticmethod
+    def _assert_denied(sc, client, verb):
+        sc._blackboard.append_turn.assert_not_called()
+        sc._brain.enqueue_for_processing.assert_not_called()
+        client.chat_postEphemeral.assert_called_once()
+        assert f"not authorized to {verb}" in client.chat_postEphemeral.call_args.kwargs["text"]
+
+    # -- gate / closed-event ------------------------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_gate_denied_user_gets_access_denied(self, verb):
+        gate = self._gate({self.MAINT}, set())
+        sc, client, _ = await self._run(
+            verb, email="stranger@redhat.com", created_by="stranger@redhat.com", gate=gate,
+        )
+        sc._blackboard.append_turn.assert_not_called()
+        sc._brain.enqueue_for_processing.assert_not_called()
+        sc._blackboard.get_event.assert_not_awaited()
+        client.chat_postEphemeral.assert_called_once()
+        assert "Access denied" in client.chat_postEphemeral.call_args.kwargs["text"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_closed_event_returns_early_silently(self, verb):
+        sc, client, _ = await self._run(
+            verb, email=self.OWNER, created_by=self.OWNER, status="closed",
+        )
+        sc._blackboard.append_turn.assert_not_called()
+        sc._brain.enqueue_for_processing.assert_not_called()
+        client.chat_postEphemeral.assert_not_called()
+
+    # -- can_approve_event (no access gate) ---------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_non_owner_denied_when_auth_enabled(self, verb):
+        sc, client, _ = await self._run(verb, email="eve@redhat.com", created_by=self.OWNER)
+        self._assert_denied(sc, client, verb)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_creator_allowed_when_auth_enabled(self, verb):
+        sc, client, eid = await self._run(verb, email=self.OWNER, created_by=self.OWNER)
+        self._assert_allowed(sc, eid)
+        client.chat_postEphemeral.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_creator_match_is_case_insensitive(self, verb):
+        sc, _, eid = await self._run(verb, email="Owner@RedHat.com", created_by=self.OWNER)
+        self._assert_allowed(sc, eid)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_auth_disabled_is_open(self, verb):
+        sc, _, eid = await self._run(verb, email="eve@redhat.com", created_by=self.OWNER, auth=False)
+        self._assert_allowed(sc, eid)
+
+    # -- access-gate maintainer -> roles path --------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_maintainer_allowed_on_unowned_event(self, verb):
+        gate = self._gate({self.MAINT}, {self.MEMBER})
+        sc, client, eid = await self._run(verb, email=self.MAINT, created_by=None, gate=gate)
+        self._assert_allowed(sc, eid)
+        client.chat_postEphemeral.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_maintainer_allowed_via_obs_admin_groups_fallback(self, verb):
+        gate = self._gate({self.MAINT}, set())
+        sc, _, eid = await self._run(
+            verb, email=self.MAINT, created_by=None, gate=gate,
+            approver_groups=frozenset(), obs_groups=frozenset({"obs-admins"}),
+        )
+        self._assert_allowed(sc, eid)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_non_maintainer_denied_on_unowned_event(self, verb):
+        gate = self._gate({self.MAINT}, {self.MEMBER})
+        sc, client, _ = await self._run(verb, email=self.MEMBER, created_by=None, gate=gate)
+        self._assert_denied(sc, client, verb)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_event_creator_allowed_through_gate(self, verb):
+        gate = self._gate({self.MAINT}, {self.MEMBER})
+        sc, _, eid = await self._run(verb, email=self.MEMBER, created_by=self.MEMBER, gate=gate)
+        self._assert_allowed(sc, eid)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_fail_closed_when_no_approver_groups_configured(self, verb):
+        """Both APPROVER_GROUPS and OBS_ADMIN_GROUPS unset: no synthesized role, maintainer denied."""
+        gate = self._gate({self.MAINT}, set())
+        sc, client, _ = await self._run(
+            verb, email=self.MAINT, created_by=None, gate=gate,
+            approver_groups=frozenset(), obs_groups=frozenset(),
+        )
+        self._assert_denied(sc, client, verb)
+
+    @pytest.mark.asyncio
+    async def test_maintainer_roles_empty_without_configured_groups(self):
+        from unittest.mock import patch
+
+        sc, _ = _make_channel()
+        sc._access_gate = self._gate({self.MAINT}, set())
+        with patch("src.auth.APPROVER_GROUPS", frozenset()), patch("src.auth.OBS_ADMIN_GROUPS", frozenset()):
+            assert sc._maintainer_roles(self.MAINT) == []
+        with patch("src.auth.APPROVER_GROUPS", frozenset({"darwin-approvers"})):
+            assert sc._maintainer_roles(self.MAINT) == ["darwin-approvers"]
+            assert sc._maintainer_roles(self.MEMBER) == []
+            assert sc._maintainer_roles("") == []
+
+    # -- log hygiene ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["approve", "reject"])
+    async def test_forbidden_log_masks_email(self, verb, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="darwin.slack"):
+            await self._run(verb, email="eve@redhat.com", created_by=self.OWNER)
+        text = caplog.text
+        assert "forbidden" in text
+        assert "eve@redhat.com" not in text
+        assert "e***@redhat.com" in text
+
+
+class TestCreatedByEmailPropagation:
+    """created_by_email reaches create_event on every Slack creation path (non-dict users_info)."""
+
+    @staticmethod
+    def _client(email: str | None = "alice@redhat.com"):
+        client = AsyncMock()
+        client.users_info.return_value = _fake_user_info("Alice", email)
+        client.chat_postMessage.return_value = {"ts": "1700000010.000001", "channel": "D_ALICE"}
+        return client
+
+    async def _fire(self, path: str, client) -> Any:
+        sc, captured = _make_channel()
+        sc._blackboard.get_event_by_slack_thread.return_value = None
+        sc._blackboard.create_event.return_value = "evt-new-x"
+
+        if path == "app_mention":
+            await captured["event:app_mention"](
+                {"channel": "C_INFRA", "user": "U_A", "text": "<@BOT> go", "ts": "1700000009.000001"},
+                client,
+            )
+        elif path == "app_mention_followup":
+            sc._blackboard.get_event_by_slack_thread.return_value = "evt-closed01"
+            sc._blackboard.get_event.return_value = _mock_event_doc(event_id="evt-closed01", status="closed")
+            await captured["event:app_mention"](
+                {
+                    "channel": "C_INFRA", "user": "U_A", "text": "<@BOT> more",
+                    "ts": "1700000002.000001", "thread_ts": "1700000001.000001",
+                },
+                client,
+            )
+        elif path == "slash_command":
+            await captured["command:/darwin"](
+                AsyncMock(), {"text": "do it", "user_id": "U_A", "channel_id": "C_INFRA"},
+                client, AsyncMock(),
+            )
+        elif path == "dm":
+            await captured["event:message"](_dm_event(user="U_A", thread_ts=None), client)
+        elif path == "home_modal":
+            view = {"state": {"values": {"event_description": {"description_input": {"value": "x"}}}}}
+            await captured["view:darwin_create_event_modal"](
+                AsyncMock(), {"user": {"id": "U_A"}}, client, view,
+            )
+        else:  # pragma: no cover
+            raise AssertionError(path)
+        return sc
+
+    PATHS = ["app_mention", "app_mention_followup", "slash_command", "dm", "home_modal"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", PATHS)
+    async def test_email_propagates(self, path):
+        sc = await self._fire(path, self._client("alice@redhat.com"))
+        sc._blackboard.create_event.assert_called_once()
+        assert sc._blackboard.create_event.call_args.kwargs["created_by_email"] == "alice@redhat.com"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", PATHS)
+    async def test_missing_email_yields_none_not_empty_string(self, path):
+        sc = await self._fire(path, self._client(None))
+        sc._blackboard.create_event.assert_called_once()
+        assert sc._blackboard.create_event.call_args.kwargs["created_by_email"] is None
+
+
+class TestThinkingIndicatorLifecycle:
+    @pytest.mark.asyncio
+    async def test_transient_chat_update_error_keeps_thinking_msg(self):
+        sc, _ = _make_channel()
+        eid = "evt-think-1"
+        sc._thinking_msg[eid] = ("C_TEAM", "1700.5")
+        sc._app.client.chat_update.side_effect = Exception("timeout")
+        turn = MagicMock()
+        turn.waitingFor = "some_tool"
+        doc = _mock_event_doc(event_id=eid)
+
+        await sc._handle_tool_progress(turn, doc)
+
+        assert sc._thinking_msg[eid] == ("C_TEAM", "1700.5")
+
+    @pytest.mark.asyncio
+    async def test_message_not_found_drops_thinking_msg(self):
+        from slack_sdk.errors import SlackApiError
+
+        sc, _ = _make_channel()
+        eid = "evt-think-2"
+        sc._thinking_msg[eid] = ("C_TEAM", "1700.5")
+        sc._app.client.chat_update.side_effect = SlackApiError(
+            "gone", {"ok": False, "error": "message_not_found"},
+        )
+        turn = MagicMock()
+        turn.waitingFor = "some_tool"
+
+        await sc._handle_tool_progress(turn, _mock_event_doc(event_id=eid))
+
+        assert eid not in sc._thinking_msg
+
+    @pytest.mark.asyncio
+    async def test_clear_thinking_status_resets_last_tool_phrase(self):
+        sc, _ = _make_channel()
+        eid = "evt-think-3"
+        sc._dm_context[eid] = {**_dm_ctx(), "_last_tool_phrase": "FRIDAY is working..."}
+
+        await sc._clear_thinking_status(eid)
+
+        assert "_last_tool_phrase" not in sc._dm_context[eid]
+        sc._app.client.assistant_threads_setStatus.assert_awaited_once()

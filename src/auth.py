@@ -203,9 +203,20 @@ def get_user_from_request(request) -> UserContext:
         return UserContext()
 
 
-def get_user_from_slack(user_id: str, display_name: str, email: str = "") -> UserContext:
+def get_user_from_slack(
+    user_id: str,
+    display_name: str,
+    email: str = "",
+    roles: list[str] | None = None,
+) -> UserContext:
     """Create UserContext from Slack user profile (always named, independent of dex setting)."""
-    return UserContext(user_id=user_id, display_name=display_name, email=email, source="slack")
+    return UserContext(
+        user_id=user_id,
+        display_name=display_name,
+        email=email,
+        roles=roles or [],
+        source="slack",
+    )
 
 
 async def require_auth(request: Request) -> UserContext:

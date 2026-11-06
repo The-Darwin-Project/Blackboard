@@ -33,6 +33,23 @@ def _mock_k8s_group(users: list[str]) -> dict:
 # =====================================================================
 
 
+class TestIsMaintainer:
+
+    def test_maintainer_case_and_whitespace_insensitive(self):
+        gate = _make_gate()
+        assert gate.is_maintainer("admin@example.com") is True
+        assert gate.is_maintainer("  Admin@Example.COM ") is True
+
+    def test_non_maintainer_group_member_is_not_maintainer(self):
+        gate = _make_gate()
+        gate._allowed_emails = frozenset({"member@example.com"})
+        assert gate.is_maintainer("member@example.com") is False
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_empty_or_none_is_not_maintainer(self, value):
+        assert _make_gate().is_maintainer(value) is False
+
+
 class TestGateCheck:
 
     def test_maintainer_bypasses_gate(self):
