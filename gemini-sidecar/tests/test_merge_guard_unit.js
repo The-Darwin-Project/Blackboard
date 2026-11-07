@@ -458,3 +458,63 @@ describe('classifyTool: un-prefixed cluster tool names with k8s nouns (OPERATION
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// ai-review round 3: readFirst must not exempt a cluster tool that also carries a mutating verb; symmetric positional scan
+// ---------------------------------------------------------------------------------------------
+describe('classifyTool: a read-looking first token (events) does not exempt a mutating cluster tool', () => {
+  const t = (n) => { const r = mg.classifyTool(n, {}); return { guard: r.guard, readok: r.readok, guardCategory: r.guardCategory }; };
+  it('events_create / events_delete on a cluster server are operational and not read-ok', () => {
+    assert.deepEqual(t('mcp__K8s_konflux__events_create'), { guard: true, readok: false, guardCategory: 'operational' });
+    assert.deepEqual(t('mcp__K8s_konflux__events_delete'), { guard: true, readok: false, guardCategory: 'operational' });
+    assert.deepEqual(t('mcp__k8s__events_create'), { guard: true, readok: false, guardCategory: 'operational' });
+    assert.deepEqual(t('mcp__K8s_konflux__pods_list_and_delete'), { guard: true, readok: false, guardCategory: 'operational' });
+  });
+  it('events_list / events_get and other cluster reads stay read-ok and unguarded', () => {
+    assert.deepEqual(t('mcp__K8s_konflux__events_list'), { guard: false, readok: true, guardCategory: null });
+    assert.deepEqual(t('mcp__k8s__events_get'), { guard: false, readok: true, guardCategory: null });
+    assert.deepEqual(t('mcp__K8s_konflux__pods_log'), { guard: false, readok: true, guardCategory: null });
+    assert.deepEqual(t('mcp__ArgoCD__get_application_workload_logs'), { guard: false, readok: true, guardCategory: null });
+    assert.deepEqual(t('mcp__KubeArchive_konflux__ka_get_log'), { guard: false, readok: true, guardCategory: null });
+  });
+  it('classify() carries the same verdict', () => {
+    const r = mg.classify({ tool_name: 'mcp__K8s_konflux__events_create', tool_input: {} }, { cwd: repo });
+    assert.equal(r.guard, true); assert.equal(r.guardCategory, 'operational'); assert.equal(r.readok, false);
+  });
+});
+
+describe('classifyTool: noun fallback applies to un-prefixed names only (prefixed names are gated by their server)', () => {
+  it('a non-cluster server sharing cluster vocabulary is not swept into the operational gate', () => {
+    for (const n of ['mcp__Acme__create_pod_label', 'mcp__SomeCRM__update_service_ticket', 'mcp__Other__delete_node_group']) {
+      assert.equal(mg.classifyTool(n, {}).guardCategory, null, n);
+    }
+  });
+  it('cluster servers and un-prefixed cluster tool names are still gated', () => {
+    assert.equal(mg.classifyTool('mcp__openshift__delete_pod', {}).guardCategory, 'operational');
+    assert.equal(mg.classifyTool('mcp__K8s_konflux__resources_create_or_update', {}).guardCategory, 'operational');
+    assert.equal(mg.classifyTool('delete_namespace', {}).guardCategory, 'operational');
+    assert.equal(mg.classifyTool('sync_application', {}).guardCategory, 'operational');
+  });
+});
+
+describe('operational classifier: argocd / kargo / tkn positional mutating-verb scan (symmetric with kubectl/helm)', () => {
+  it('a mutating verb past a read verb is guarded', () => {
+    for (const cmd of ['argocd app get sync myapp', 'argocd app list delete x', 'argocd app history rollback a', 'argocd proj get create p',
+      'kargo get promote --stage s', 'kargo get stage approve x', 'kargo describe delete stage x', 'kargo list verify x',
+      'tkn pipeline list delete x', 'tkn pipelinerun describe cancel x', 'tkn pipeline logs start x', 'tkn task list rerun x']) {
+      assert.deepEqual(verdict(cmd), OPERATIONAL, cmd);
+    }
+  });
+  it('the boolean-flag shift variants are guarded too', () => {
+    for (const cmd of ['argocd --plaintext app get sync myapp', 'kargo --insecure-skip-tls-verify get promote x', 'tkn --boolflag pipeline list delete x']) {
+      assert.deepEqual(verdict(cmd), OPERATIONAL, cmd);
+    }
+  });
+  it('genuine read commands stay unguarded', () => {
+    for (const cmd of ['argocd app get myapp', 'argocd app list', 'argocd app history myapp', 'argocd app actions list myapp', 'argocd version',
+      'kargo get stage dev', 'kargo get stages --project p', 'kargo describe promotion x', 'kargo version',
+      'tkn pipeline describe mypipe', 'tkn pipeline list', 'tkn pipelinerun logs x', 'tkn version', 'argocd help app sync']) {
+      assert.deepEqual(verdict(cmd), UNGUARDED, cmd);
+    }
+  });
+});

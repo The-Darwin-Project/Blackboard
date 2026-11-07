@@ -752,6 +752,11 @@ const KUBE_MUTATING = new Set(['delete', 'apply', 'create', 'patch', 'replace', 
 // Verbs that are ALSO common resource / release / subcommand names (rollout, certificate, tag, policy, proxy; helm test|repo|plugin|pull)
 // are left out so `kubectl get rollout x`, `kubectl get certificate`, `helm search repo x`, `helm get values test` stay read-only.
 const HELM_MUTATING = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push']);
+// Same defence in depth for argocd / kargo / tkn (checked past the verb, only for non-help invocations). Ambiguous words that are also
+// common resource names are left out.
+const ARGO_MUTATING = new Set(['sync', 'delete', 'rollback', 'create', 'patch', 'set', 'unset', 'terminate-op', 'edit', 'add', 'remove', 'update']);
+const KARGO_MUTATING = new Set(['promote', 'approve', 'delete', 'create', 'apply', 'update', 'refresh', 'abort', 'verify']);
+const TKN_MUTATING = new Set(['start', 'delete', 'cancel', 'create', 'rerun', 'approve', 'deny', 'remove', 'update']);
 const ARGO_READ_SUB = new Set(['get', 'list', 'ls', 'diff', 'history', 'manifests', 'logs', 'resources', 'wait', 'get-resource']);
 const ARGO_READ_TOP = new Set(['version', 'help', 'completion']);
 const KARGO_READ = new Set(['get', 'list', 'ls', 'describe', 'version', 'help', 'completion']);
@@ -818,16 +823,16 @@ function isOperationalMutation(bin, args) {
     return !KUBE_READ.has(pos[0]) || pos.slice(1).some((x) => KUBE_MUTATING.has(x));
   }
   if (b === 'helm') return !HELM_READ.has(pos[0]) || pos.slice(1).some((x) => HELM_MUTATING.has(x));
-  if (b === 'kargo') return !KARGO_READ.has(pos[0]);
+  if (b === 'kargo') return !KARGO_READ.has(pos[0]) || (pos[0] !== 'help' && pos.slice(1).some((x) => KARGO_MUTATING.has(x)));
   if (b === 'argocd') {
     if (ARGO_READ_TOP.has(pos[0])) return false;
     // `argocd app|appset|proj|repo|cluster|... <verb>`; `app actions list` is read, `app actions run` is not.
     if (pos[1] === 'actions') return pos[2] !== 'list';
-    return !ARGO_READ_SUB.has(pos[1]);
+    return !ARGO_READ_SUB.has(pos[1]) || pos.slice(2).some((x) => ARGO_MUTATING.has(x));
   }
   if (b === 'tkn') {
     if (TKN_READ_TOP.has(pos[0])) return false;
-    return !TKN_READ_SUB.has(pos[1]);
+    return !TKN_READ_SUB.has(pos[1]) || pos.slice(2).some((x) => TKN_MUTATING.has(x));
   }
   return true;
 }
@@ -1049,11 +1054,16 @@ function classifyTool(name, args) {
   if (guard) guardCategory = 'git_merge'; // VCS merge / default-branch write / merge-endpoint API call
   // Cluster / delivery MCP tools (k8s, OpenShift, ArgoCD, Helm, Kargo, Tekton): a MUTATING verb is operational. A VCS merge
   // verdict above always wins (git_merge is the stricter, SHA-bound rule).
-  if (!guard && !readFirst) {
-    const serverTokens = parts.length >= 3 && /^mcp$/i.test(parts[0]) ? nameTokens(parts[1]) : [];
-    const clusterServer = serverTokens.length > 0 && OPERATIONAL_SERVER_TOKENS.has(serverTokens[0]) && !serverTokens.includes('archive');
-    const clusterNoun = tokens.some((t) => OPERATIONAL_NOUNS.has(t));
-    const opWrite = tokens.some((t) => OPERATIONAL_WRITE.has(t));
+  // `readFirst` (verb = first non-prefix token, e.g. `events` in events_create) must NOT exempt a tool that also carries a mutating
+  // verb token: the read verb may just be the resource noun (K8s `events_create`, `pods_list_and_delete`).
+  const opWrite = tokens.some((t) => OPERATIONAL_WRITE.has(t));
+  if (!guard && (!readFirst || opWrite)) {
+    const prefixed = parts.length >= 3 && /^mcp$/i.test(parts[0]);
+    const serverTokens = prefixed ? nameTokens(parts[1]) : [];
+    const clusterServer = serverTokens.some((t) => OPERATIONAL_SERVER_TOKENS.has(t)) && !serverTokens.includes('archive');
+    // Noun fallback is for UN-prefixed tool names only. A prefixed mcp__<server>__<tool> name is gated by its SERVER, so an unrelated
+    // server's `create_pod_label`-style tool is not swept into the sysadmin gate just for sharing cluster vocabulary.
+    const clusterNoun = !prefixed && tokens.some((t) => OPERATIONAL_NOUNS.has(t));
     if ((clusterServer || clusterNoun) && opWrite && !FAMILY_TOKENS.has(verb)) { guard = true; guardCategory = 'operational'; }
   }
 

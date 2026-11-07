@@ -388,6 +388,10 @@ BLOCK_PATTERN+="|\\b(gh|glab)([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:]
 BLOCK_PATTERN+='|\bgit\s+.*(-c\s*(alias|credential|core\.hooksPath|core\.sshCommand|http\.proxy|uploadpack|receivepack)\b|--config-env\b)|\b(GIT_CONFIG_[A-Za-z0-9_]*|GIT_SSH_COMMAND)\b'
 # Config and hook file redirection/writes or copy/moves
 BLOCK_PATTERN+='|(>>?|[|;&][[:space:]]*tee([[:space:]]+-[a-zA-Z]+)*)[[:space:]]*[^[:space:]]*(\.git/config|\.gitconfig|\.git/hooks)|\b(cp|mv|install|ln)\b.*(\.git/config|\.gitconfig|\.git/hooks)'
+# K8s/OCP/Helm/ArgoCD/Tekton/Kargo mutations below are DEFENCE IN DEPTH, deliberately kept (not dead code): the primary gate is the
+# merge-guard.js read-allowlist classifier (NEEDS_GUARD=2, handled above), but if it is skipped or bypassed (classifier crash, a future
+# parsing gap) these regexes still deny the obvious verbs for read-only roles. They are a coarse subset of that classifier, not a second
+# source of truth; when a verb is added to the classifier, adding it here is optional.
 # K8s/OCP mutations (with flag-gap tolerance)
 BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create|run|exec|replace|rollout)\b)'
 # Helm mutations

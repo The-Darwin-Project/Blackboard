@@ -1029,6 +1029,17 @@ run_stub_test "T-21y6: sysadmin mcp__argocd__merge_application + null-SHA approv
 run_stub_test "T-21y7: sysadmin mcp__openshift__accept_merge_request + null-SHA approval => deny" sysadmin "$(mcp_input mcp__openshift__accept_merge_request)" "$APPROVED_OP" deny "Merge REFUSED"
 run_stub_test "T-21y8: sysadmin mcp__argocd__push_files + null-SHA approval => deny" sysadmin "$(mcp_input mcp__argocd__push_files)" "$APPROVED_OP" deny "Merge REFUSED"
 
+# Round 3: a read-looking first token (events) must not exempt a mutating cluster MCP tool; argocd/kargo/tkn positional scan.
+run_stub_test "T-21x1: sysadmin mcp__K8s_konflux__events_create + approved:false => deny (operational)" sysadmin "$(mcp_input mcp__K8s_konflux__events_create)" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x2: sysadmin mcp__K8s_konflux__events_create + operational approval => allow" sysadmin "$(mcp_input mcp__K8s_konflux__events_create)" "$APPROVED_OP" allow
+run_stub_test "T-21x3: developer mcp__K8s_konflux__events_create with proxy down => deny" developer "$(mcp_input mcp__K8s_konflux__events_create)" DOWN deny
+run_stub_test "T-21x4: developer mcp__K8s_konflux__events_list with proxy down => allow (read)" developer "$(mcp_input mcp__K8s_konflux__events_list)" DOWN allow
+run_stub_test "T-21x5: sysadmin argocd app get sync + approved:false => deny (operational)" sysadmin "$(sh_input 'argocd app get sync myapp')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x6: sysadmin kargo get promote + approved:false => deny (operational)" sysadmin "$(sh_input 'kargo get promote --stage s')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x7: sysadmin tkn pipeline list delete + approved:false => deny (operational)" sysadmin "$(sh_input 'tkn pipeline list delete x')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x8: sysadmin argocd app get myapp (read) with proxy down => allow" sysadmin "$(sh_input 'argocd app get myapp')" DOWN allow
+run_stub_test "T-21x9: sysadmin tkn pipeline describe mypipe (read) with proxy down => allow" sysadmin "$(sh_input 'tkn pipeline describe mypipe')" DOWN allow
+
 rm -f "$STUB_JS"
 
 echo ""
