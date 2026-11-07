@@ -125,11 +125,14 @@ async function claudeMergeGuard(payload, deps) {
   if (!result) return 'Malformed or unrecognized tool payload (failing closed).';
   if (result.isShell && !result.cmd) return 'Shell tool call with empty or unextractable command (failing closed).';
   if (!result.guard) return null;
+  if (result.guardCategory === 'operational' && role !== 'sysadmin') {
+    return `Role '${role}' is not authorized for operational mutations; sysadmin required.`;
+  }
 
   let approval = null;
   try { approval = await withTimeout(deps.fetchApproval(), APPROVAL_TIMEOUT_MS); } catch { approval = null; }
-  const sha = await gitHead(payload.cwd);
-  const verdict = mergeGuard.approvalVerdict(approval, sha);
+  const sha = result.guardCategory === 'operational' ? null : await gitHead(payload.cwd);
+  const verdict = mergeGuard.approvalVerdict(approval, sha, result.guardCategory || 'git_merge');
   return verdict.allow ? null : verdict.reason;
 }
 

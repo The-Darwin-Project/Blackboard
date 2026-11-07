@@ -84,3 +84,35 @@ describe('git-<sub> programs on PATH (external subcommands)', () => {
     }
   });
 });
+
+describe('operational mutations and dynamic binary classification', () => {
+  it('dynamic binary word fails closed unconditionally to git_merge', () => {
+    const res = mg.classify(sh('$CMD origin main'), { cwd: repo });
+    assert.equal(res.guard, true);
+    assert.equal(res.guardCategory, 'git_merge');
+  });
+
+  it('operational mutations with flags and verbs are classified as operational', () => {
+    const commands = [
+      'kubectl -l app=test delete pods',
+      'kubectl --kubeconfig /path/config delete pods',
+      'kubectl exec -it mypod -- sh',
+      'helm delete my-release',
+      'kargo stage promote --freight v1',
+      'tkn pipeline start mypipe',
+      'tkn pr create --from mypipe',
+    ];
+    for (const cmd of commands) {
+      const res = mg.classify(sh(cmd), { cwd: repo });
+      assert.equal(res.guard, true, `expected guard=true for: ${cmd}`);
+      assert.equal(res.guardCategory, 'operational', `expected guardCategory=operational for: ${cmd}`);
+    }
+  });
+
+  it('read-only rollout subcommands are NOT classified as operational mutations', () => {
+    for (const cmd of ['kubectl rollout status deploy/x', 'kubectl rollout history deploy/x', 'oc rollout status deploy/x']) {
+      const res = mg.classify(sh(cmd), { cwd: repo });
+      assert.equal(res.guard, false, `expected guard=false for read-only rollout: ${cmd}`);
+    }
+  });
+});

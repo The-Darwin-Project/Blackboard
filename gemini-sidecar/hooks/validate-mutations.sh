@@ -74,6 +74,11 @@ _REST="${_REST#*|||}"
 READ_OK="${_REST%%|||*}"
 COMMAND="${_REST#*|||}"
 
+if ! [[ "$NEEDS_GUARD" =~ ^[012]$ ]]; then
+    echo '{"decision":"deny","reason":"Security guard error: unparseable guard category from classifier."}'
+    exit 0
+fi
+
 # Exact (case-insensitive) membership test; avoids treating TOOL_NAME as a grep pattern.
 in_list() {
     local needle="${1,,}" item
@@ -97,7 +102,7 @@ fi
 # that cannot merge/write a default branch (guard=0) are allowed without a role lookup. This prevents
 # hook timeouts and sidecar degradation from impacting read-only tools. HOOK_EXTRA_ALLOWED_TOOLS
 # (space-separated, operator-set env) can add exact tool names to the read-only allowlist.
-if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" != 1 ]; then
+if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" = 0 ]; then
     if [ "$READ_OK" = 1 ] || in_list "$TOOL_NAME" "${HOOK_EXTRA_ALLOWED_TOOLS:-}"; then
         echo '{"decision":"allow"}'
         exit 0
@@ -119,7 +124,7 @@ if [ "$NEEDS_GUARD" = 1 ]; then
     t=$(tmo 1) || deny_budget
     LOCAL_SHA=$(timeout -k 1 "$t" git rev-parse HEAD 2>/dev/null)
     t=$(tmo 1) || deny_budget
-    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" "git_merge" 2>/dev/null)
     GUARD_RESULT="${GUARD_DECISION%%|||*}"
     GUARD_REASON="${GUARD_DECISION#*|||}"
     if [ "$GUARD_RESULT" != "ALLOW" ]; then
@@ -269,6 +274,26 @@ if [ "$WORK_STYLE" = "atdd_green" ] && [ "$ROLE" = "developer" ]; then
             curl -s --connect-timeout 0.5 --max-time "$t" -X POST "http://127.0.0.1:${SIDECAR_PORT:-9090}/proxy/tamper" >/dev/null 2>&1 || true
         fi
         node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Tampering Guard: Role developer cannot modify test or spec files under atdd_green work_style. Setpoint is immutable.' }));"
+        exit 0
+    fi
+fi
+
+# Operational mutation guard (applies to ALL roles; requires sysadmin role and out-of-band operational approval)
+if [ "$NEEDS_GUARD" = "2" ]; then
+    if [ "$ROLE" != "sysadmin" ]; then
+        echo "{\"decision\":\"deny\",\"reason\":\"Role '$ROLE' is not authorized for operational mutations; sysadmin required.\"}"
+        exit 0
+    fi
+    t=$(tmo 3) || deny_budget
+    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "" "operational" 2>/dev/null)
+    GUARD_RESULT="${GUARD_DECISION%%|||*}"
+    GUARD_REASON="${GUARD_DECISION#*|||}"
+    if [ "$GUARD_RESULT" != "ALLOW" ]; then
+        [ -z "$GUARD_REASON" ] && GUARD_REASON="Merge REFUSED: unable to verify out-of-band approval (guard check failed)."
+        GUARD_REASON="${GUARD_REASON//\\/\\\\}"; GUARD_REASON="${GUARD_REASON//\"/\\\"}"
+        echo "{\"decision\": \"deny\", \"reason\": \"$GUARD_REASON\"}"
         exit 0
     fi
 fi

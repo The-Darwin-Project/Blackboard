@@ -190,6 +190,11 @@ function bodySubstitutions(body, nested) {
       if (end > body.length) { unsafe = true; nested.push(body.slice(i + 2)); break; }
       nested.push(body.slice(i + 2, Math.max(i + 2, end - 1)));
       i = end - 1;
+    } else if ((body[i] === '<' || body[i] === '>') && body[i + 1] === '(') {
+      const end = matchParen(body, i + 2);
+      if (end > body.length) { unsafe = true; nested.push(body.slice(i + 2)); break; }
+      nested.push(body.slice(i + 2, Math.max(i + 2, end - 1)));
+      i = end - 1;
     } else if (body[i] === '`') {
       const end = matchBacktick(body, i + 1);
       if (end >= body.length) { unsafe = true; nested.push(body.slice(i + 1)); break; }
@@ -282,6 +287,18 @@ function parseShell(str) {
       pending.push(hd);
       i = hd.next; continue;
     }
+    if (c === '(' && isArrayAssignPrefix(cur)) {
+      const end = matchParen(str, i + 1);
+      const closed = end <= n;
+      if (!closed) unsafe = true;
+      const body = str.slice(i + 1, closed ? end - 1 : n);
+      if (bodySubstitutions(body, nested)) unsafe = true;
+      const normBody = body.replace(/\r?\n/g, ' ');
+      cur += '(' + normBody + ')';
+      has = true;
+      i = Math.min(end, n);
+      continue;
+    }
     if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') {
       // `>&` / `2>&1` / `&>` are redirections, not command separators. Only an UNQUOTED < or > counts, so
       // `echo ">" & git merge` still splits at the '&'.
@@ -322,7 +339,8 @@ function parseShell(str) {
 const base = (p) => p.replace(/\/+$/, '').split('/').pop();
 // Word that is only known at runtime (variable, substitution, brace expansion, glob) -- cannot be proven safe.
 const DYN = /[$`{*?[]/;
-const isAssign = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
+const isArrayAssignPrefix = (s) => /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=$/.test(s);
+const isAssign = (t) => /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/.test(t);
 
 // Wrapper commands that merely run another command: option set (with values) and leading positionals.
 const NOVAL = new Set();
@@ -501,7 +519,7 @@ const FILE_WRITERS = new Set(['tee', 'cp', 'mv', 'install', 'ln', 'dd', 'truncat
   'ruby', 'node', 'php', 'awk', 'gawk', 'ed', 'ex', 'vi', 'vim', 'nano']);
 const ENV_BUILTINS = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
 
-function assignName(a) { return a.slice(0, a.indexOf('=')); }
+function assignName(a) { return a.slice(0, a.indexOf('=')).replace(/\[.*/, '').replace(/\+$/, ''); }
 
 function configEnvGuard(assigns, bin) {
   for (const a of assigns) {
@@ -689,6 +707,59 @@ function httpGuard(bin, args) {
   return apiWriteNeedsGuard(args.join(' ')) || hasOpaqueTarget(args);
 }
 
+const OPERATIONAL_BINS = new Set(['kargo', 'oc', 'kubectl', 'helm', 'argocd', 'tkn']);
+const KUBE_VERBS = new Set([
+  'apply', 'delete', 'patch', 'create', 'replace', 'scale', 'edit', 'rollout',
+  'exec', 'run', 'cp', 'rsh', 'attach', 'port-forward'
+]);
+const HELM_VERBS = new Set(['install', 'upgrade', 'rollback', 'uninstall', 'delete']);
+const KARGO_VERBS = new Set(['promote', 'verify']);
+
+function isOperationalMutation(bin, args) {
+  const b = bin.toLowerCase();
+  if (!OPERATIONAL_BINS.has(b)) return false;
+  const GLOBAL_VALUED = new Set([
+    '-n', '--namespace', '--context', '--kube-context', '--kubeconfig',
+    '-s', '--server', '--user', '--cluster', '-p', '--project',
+    '--as', '--as-group', '-l', '--selector', '-f', '--filename',
+    '-k', '--kustomize', '-o', '--output', '--timeout', '--token',
+    '--auth-token', '--certificate-authority', '--client-certificate', '--client-key'
+  ]);
+  const pos = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('-')) {
+      if (GLOBAL_VALUED.has(a)) i++;
+      continue;
+    }
+    pos.push(a.toLowerCase());
+  }
+  if (!pos.length) return false;
+  if (b === 'kargo') return KARGO_VERBS.has(pos[0]) || (pos[0] === 'stage' && KARGO_VERBS.has(pos[1]));
+  if (b === 'oc' || b === 'kubectl') {
+    if (pos[0] === 'rollout' && (pos[1] === 'status' || pos[1] === 'history')) return false;
+    return KUBE_VERBS.has(pos[0]);
+  }
+  if (b === 'helm') return HELM_VERBS.has(pos[0]);
+  if (b === 'argocd') return pos[0] === 'app' && (pos[1] === 'sync' || pos[1] === 'delete' || pos[1] === 'set');
+  if (b === 'tkn') {
+    const res = pos[0];
+    const verb = pos[1];
+    if ((res === 'pipeline' || res === 'p') && (verb === 'start' || verb === 'delete')) return true;
+    if ((res === 'pipelinerun' || res === 'pr') && (verb === 'create' || verb === 'start' || verb === 'cancel' || verb === 'delete')) return true;
+    if ((res === 'task' || res === 't') && (verb === 'start' || verb === 'delete')) return true;
+    if ((res === 'taskrun' || res === 'tr') && (verb === 'create' || verb === 'start' || verb === 'cancel' || verb === 'delete')) return true;
+    return false;
+  }
+  return false;
+}
+
+function combineCategories(c1, c2) {
+  if (c1 === 'git_merge' || c2 === 'git_merge') return 'git_merge';
+  if (c1 === 'operational' || c2 === 'operational') return 'operational';
+  return null;
+}
+
 function analyzeTokens(tokens, depth, strict) {
   const redirs = tokens.redirs || [];
   const t = stripPrefix(tokens);
@@ -696,81 +767,96 @@ function analyzeTokens(tokens, depth, strict) {
   const src = SRC.cur;
   if (t.extras && t.extras.length) return analyzeString(`${t.extras.join(' ')} ${t.join(' ')}`, depth + 1, true); // env -S 'git merge x'
   if (!t.length) { // assignment-only / redirect-only command
-    return configEnvGuard(assigns, '') || configFileWriteGuard('', [], redirs, src);
+    return (configEnvGuard(assigns, '') || configFileWriteGuard('', [], redirs, src)) ? 'git_merge' : null;
   }
   const rawBin = t[0];
   const bin = base(rawBin).toLowerCase();
   const rest = t.slice(1);
   if (/\s/.test(rawBin)) return analyzeString(t.join(' '), depth + 1, true); // `sudo -s 'git merge x'`: the "command" is a script
-  if (configEnvGuard(assigns, bin)) return true;
-  if (ENV_BUILTINS.has(bin) && configEnvGuard(rest.filter(isAssign), '')) return true; // export GIT_CONFIG_COUNT=1
-  if (configFileWriteGuard(bin, rest, redirs, src)) return true;
-  if (DYN.test(rawBin)) { // dynamic command word
-    if (strict) return true;
-    // Only the FIRST non-flag argument (the sub-command) matters: `$TOOL --help`, `$HOME/bin/t --grep=merge status` are fine.
-    const sub = rest.find((x) => !x.startsWith('-'));
-    return !!sub && (/^(merge|push|api)$/i.test(sub) || DYN.test(sub));
+  if (configEnvGuard(assigns, bin)) return 'git_merge';
+  if (ENV_BUILTINS.has(bin) && configEnvGuard(rest.filter(isAssign), '')) return 'git_merge'; // export GIT_CONFIG_COUNT=1
+  if (configFileWriteGuard(bin, rest, redirs, src)) return 'git_merge';
+  if (bin === 'eval') return 'git_merge';
+  if (DYN.test(bin)) { // dynamic command word (e.g. $CMD, $TOOL)
+    if (rest.length > 0 && rest.every((x) => x === '--help' || x === '-h' || x === '--version' || x === '-v')) {
+      return null;
+    }
+    return 'git_merge';
   }
   if (SHELLS.has(bin)) {
     const ci = rest.findIndex((x) => /^-[A-Za-z]*c[A-Za-z]*$/.test(x));
     if (ci !== -1 && rest[ci + 1] !== undefined) return analyzeString(rest[ci + 1], depth + 1, true);
     // `bash -s [-- args]` reads the program from stdin even when positional args follow.
-    if (rest.some((x) => /^-[A-Za-z]*s[A-Za-z]*$/.test(x))) return true;
+    if (rest.some((x) => /^-[A-Za-z]*s[A-Za-z]*$/.test(x))) return 'git_merge';
     // No -c and no script file: the shell reads its program from stdin (`... | bash`, `bash <<EOF`, `bash -s`,
     // here-strings) which cannot be inspected => needs approval. `bash script.sh` is NOT flagged (file body unseen).
     const hasScript = rest.some((x, k) => !x.startsWith('-') && !(k > 0 && /^-[A-Za-z]*[oO]$/.test(rest[k - 1])));
-    return !hasScript;
+    return hasScript ? null : 'git_merge';
   }
   if (bin === 'su' || bin === 'script' || bin === 'runuser') { // `su -c 'cmd' user`, `script -qc 'cmd' file`
     const ci = rest.findIndex((x) => /^-[A-Za-z]*c$/.test(x) || /^--command(=|$)/.test(x));
-    if (ci === -1) return false;
+    if (ci === -1) return null;
     const sc = rest[ci].includes('=') ? rest[ci].slice(rest[ci].indexOf('=') + 1) : rest[ci + 1];
-    return sc === undefined ? false : analyzeString(sc, depth + 1, true);
+    return sc === undefined ? null : analyzeString(sc, depth + 1, true);
   }
-  if (bin === 'eval') return analyzeString(rest.join(' '), depth + 1, true);
   if (bin === 'find') {
     for (let i = 0; i < rest.length; i++) {
       if (/^-(exec|execdir|ok|okdir)$/.test(rest[i])) {
         let j = i + 1; const sub = [];
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '+') sub.push(rest[j++]);
-        if (analyzeTokens(sub, depth + 1)) return true;
+        const cat = analyzeTokens(sub, depth + 1, strict);
+        if (cat) return cat;
       }
     }
-    return false;
+    return null;
   }
-  if (bin === 'git') return gitGuard(rest, depth);
+  if (bin === 'git') return gitGuard(rest, depth) ? 'git_merge' : null;
   if (bin === 'gh' || bin === 'glab') {
     const pos = positionals(rest);
     // Only the command path (group/action) being dynamic is suspicious (`gh pr $ACT 5`); a dynamic ID/arg in a
     // read-style call (`gh pr view "$PR"`, `glab mr list --label "$L"`) is not.
-    if (pos.slice(0, 2).some((x) => DYN.test(x))) return true;
-    if (hasSubseq(pos, bin === 'gh' ? ['pr', 'merge'] : ['mr', 'merge'])) return true;
-    if (pos[0] && pos[0].toLowerCase() === 'api') return httpGuard(bin, rest);
-    return false;
+    if (pos.slice(0, 2).some((x) => DYN.test(x))) return 'git_merge';
+    if (hasSubseq(pos, bin === 'gh' ? ['pr', 'merge'] : ['mr', 'merge'])) return 'git_merge';
+    if (pos[0] && pos[0].toLowerCase() === 'api') return httpGuard(bin, rest) ? 'git_merge' : null;
+    return null;
   }
-  if (HTTP_CLIENTS.has(bin)) return httpGuard(bin, rest);
-  return false;
+  if (HTTP_CLIENTS.has(bin)) return httpGuard(bin, rest) ? 'git_merge' : null;
+  if (isOperationalMutation(bin, rest)) return 'operational';
+  return null;
 }
 
 // Source text currently being analyzed (config-file checks look for `.git` anywhere in it).
 const SRC = { cur: '' };
 function analyzeString(str, depth, strict) {
-  if (depth > MAX_DEPTH) return true; // pathological nesting => fail closed
+  if (depth > MAX_DEPTH) return 'git_merge'; // pathological nesting => fail closed
   const prev = SRC.cur;
   SRC.cur = str;
   try {
     const { cmds, nested, unsafe } = parseShell(str);
-    if (unsafe) return true; // unterminated construct: cannot be analyzed reliably => guarded
-    for (const c of cmds) if (analyzeTokens(c, depth, strict)) return true;
-    for (const nsub of nested) if (analyzeString(nsub, depth + 1)) return true;
-    return false;
+    if (unsafe) return 'git_merge'; // unterminated construct: cannot be analyzed reliably => guarded
+    let category = null;
+    for (const c of cmds) {
+      const cat = analyzeTokens(c, depth, strict);
+      category = combineCategories(category, cat);
+      if (category === 'git_merge') return 'git_merge';
+    }
+    for (const nsub of nested) {
+      const cat = analyzeString(nsub, depth + 1);
+      category = combineCategories(category, cat);
+      if (category === 'git_merge') return 'git_merge';
+    }
+    return category;
   } finally {
     SRC.cur = prev;
   }
 }
 
+function shellCategory(cmd) {
+  try { return analyzeString(cmd, 0); } catch { return 'git_merge'; }
+}
+
 function shellNeedsGuard(cmd) {
-  try { return analyzeString(cmd, 0); } catch { return true; }
+  return shellCategory(cmd) !== null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -889,9 +975,13 @@ function classifyTool(name, args) {
 // ---------------------------------------------------------------------------------------------
 // Approval verdict (shared by validate-mutations.sh and the Claude HTTP hook)
 // ---------------------------------------------------------------------------------------------
-function approvalVerdict(approval, localSha) {
+function approvalVerdict(approval, localSha, category = 'git_merge') {
+  if (category !== 'operational') category = 'git_merge';
   if (!approval || typeof approval !== 'object' || !approval.approved) {
     return { allow: false, reason: 'Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).' };
+  }
+  if (category === 'operational') {
+    return { allow: true, reason: '' };
   }
   if (!approval.approved_mr_sha || !localSha || approval.approved_mr_sha !== localSha) {
     return { allow: false, reason: `Merge REFUSED: live HEAD (${localSha || ''}) differs from authenticated approval SHA (${approval.approved_mr_sha}).` };
@@ -906,7 +996,7 @@ function approvalVerdict(approval, localSha) {
 const SHELL_TOOLS = new Set(['bash', 'shell', 'run_in_terminal', 'execute_command', 'run_shell_command', 'run_command', 'execute']);
 
 // Classify a PreToolUse payload (agy {toolCall:{name,args}} or Claude {tool_name,tool_input}).
-// Returns null if malformed, else { name, guard, readok, cmd, isShell }.
+// Returns null if malformed, else { name, guard, readok, cmd, isShell, guardCategory }.
 function classify(d, opts = {}) {
   CTX.cwd = opts.cwd || undefined;
   CTX.spawns = 0;
@@ -921,15 +1011,20 @@ function classify(d, opts = {}) {
   const cmd = (rawCmd || '').trim();
   const args = d.toolCall?.args ?? d.tool_input ?? d.functionCall?.args ?? {};
   const isShell = SHELL_TOOLS.has(name.toLowerCase());
-  if (isShell) return { name, guard: !!cmd && shellNeedsGuard(cmd), readok: false, cmd, isShell };
+  if (isShell) {
+    const cat = cmd ? shellCategory(cmd) : null;
+    return { name, guard: cat !== null, readok: false, cmd, isShell, guardCategory: cat };
+  }
   const c = classifyTool(name, args);
-  return { name, guard: c.guard, readok: c.readok, cmd, isShell };
+  const guardCategory = c.guardCategory || (c.guard ? 'git_merge' : null);
+  return { name, guard: c.guard, readok: c.readok, cmd, isShell, guardCategory };
 }
 
 function main(raw) {
   const r = classify(JSON.parse(raw));
   if (!r) return '__MALFORMED__';
-  return `OK|||${r.name}|||${r.guard ? 1 : 0}|||${r.readok ? 1 : 0}|||${r.cmd}`;
+  const guardField = r.guardCategory === 'operational' ? 2 : (r.guard ? 1 : 0);
+  return `OK|||${r.name}|||${guardField}|||${r.readok ? 1 : 0}|||${r.cmd}`;
 }
 
 if (require.main === module) {
@@ -950,11 +1045,13 @@ if (require.main === module) {
     try { ro = require('../roles').isReadOnlyRoleName(process.argv[3]); } catch { ro = true; }
     process.stdout.write(ro ? '1' : '0');
   } else if (process.argv[2] === '--verdict') {
-    // node merge-guard.js --verdict -- <approval-json> <local-sha>  =>  ALLOW||| | BLOCK|||<reason>
-    const [, , , , rawApproval, sha] = process.argv;
+    // node merge-guard.js --verdict [--] <approval-json> <local-sha> [category]  =>  ALLOW||| | BLOCK|||<reason>
+    const args = process.argv.slice(process.argv.indexOf('--verdict') + 1);
+    if (args[0] === '--') args.shift();
+    const [rawApproval, sha = '', category = 'git_merge'] = args;
     let approval = null;
     try { approval = JSON.parse(rawApproval || ''); } catch { approval = null; }
-    const v = approvalVerdict(approval, sha || '');
+    const v = approvalVerdict(approval, sha, category);
     process.stdout.write(`${v.allow ? 'ALLOW' : 'BLOCK'}|||${v.reason}`);
   } else {
     let raw = '';

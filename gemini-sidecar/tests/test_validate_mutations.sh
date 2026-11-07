@@ -805,6 +805,106 @@ else
   ((FAIL++))
 fi
 
+# =============================================================================
+# T-20: Operational Mutations, Field 3 Regex Validation & Line 100 Fast-Exit Gate
+# =============================================================================
+
+run_test_deny_with_reason \
+  "T-20a: kargo promote blocked for architect (read-only role violation)" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote --project myproj --freight foo"}}}' \
+  "architect" \
+  "is not authorized for operational mutations; sysadmin required."
+
+run_test_deny_with_reason \
+  "T-20b: mutating operational action blocked for non-sysadmin role (developer)" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote --project myproj --freight foo"}}}' \
+  "developer" \
+  "Role 'developer' is not authorized for operational mutations; sysadmin required."
+
+run_test_mock_classifier() {
+  local name="$1"
+  local mock_classifier_line="$2"
+  local role="$3"
+  local expected_decision="$4"
+  local expected_reason_substr="${5:-}"
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  local mock_hook="${tmp_dir}/validate-mutations.sh"
+  cp "$HOOK" "$mock_hook"
+  cat <<EOF > "${tmp_dir}/merge-guard.js"
+#!/usr/bin/env node
+process.stdout.write("${mock_classifier_line}");
+EOF
+  chmod +x "${tmp_dir}/merge-guard.js"
+
+  local input='{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote","AbsolutePath":"/tmp/test"}}}'
+  local output
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" DARWIN_WORK_STYLE=autonomous bash "$mock_hook" 2>/dev/null)" || true
+  rm -rf "$tmp_dir"
+
+  if ! echo "$output" | jq empty 2>/dev/null; then
+    ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
+    ((FAIL++))
+    return
+  fi
+
+  local actual_decision
+  actual_decision="$(echo "$output" | jq -r '.decision')"
+
+  if [[ "$actual_decision" != "$expected_decision" ]]; then
+    ERRORS+=("FAIL [$name]: expected decision='$expected_decision', got '$actual_decision' (output: $output)")
+    ((FAIL++))
+    return
+  fi
+
+  if [[ -n "$expected_reason_substr" ]]; then
+    local reason
+    reason="$(echo "$output" | jq -r '.reason // empty')"
+    if [[ "$reason" != *"$expected_reason_substr"* ]]; then
+      ERRORS+=("FAIL [$name]: expected reason containing '$expected_reason_substr', got '$reason'")
+      ((FAIL++))
+      return
+    fi
+  fi
+
+  echo "PASS [$name]"
+  ((PASS++))
+}
+
+run_test_mock_classifier \
+  "T-20c: strict regex validation on field 3 rejects arbitrary tokens and fails closed" \
+  "OK|||view_file|||invalid_token|||1|||" \
+  "developer" \
+  "deny" \
+  "unparseable guard category from classifier"
+
+run_test_mock_classifier \
+  "T-20d: line 100 fast-exit gate correctly passes NEEDS_GUARD=0" \
+  "OK|||view_file|||0|||1|||" \
+  "" \
+  "allow"
+
+run_test_mock_classifier \
+  "T-20e: line 100 fast-exit gate does NOT fast-exit NEEDS_GUARD=2" \
+  "OK|||view_file|||2|||1|||" \
+  "" \
+  "deny"
+
+run_test_mock_classifier \
+  "T-20f: read-only role architect denied on operational command (NEEDS_GUARD=2)" \
+  "OK|||execute_command|||2|||0|||kargo promote" \
+  "architect" \
+  "deny" \
+  "is not authorized for operational mutations; sysadmin required"
+
+run_test_mock_classifier \
+  "T-20g: mutating role developer denied on operational command (NEEDS_GUARD=2)" \
+  "OK|||execute_command|||2|||0|||kargo promote" \
+  "developer" \
+  "deny" \
+  "is not authorized for operational mutations; sysadmin required"
+
 echo ""
 echo "=== Results ==="
 echo "Passed: $PASS"

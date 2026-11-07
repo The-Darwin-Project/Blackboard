@@ -83,6 +83,15 @@ of a wasted pipeline cycle.
 
 - Pod delete is available across observed namespaces.
 
+### Operational Mutations and Infrastructure Releases
+
+Infrastructure release pipeline and promotion tasks (e.g. Kargo promotions, cluster-level resource mutations, rollouts) route strictly to `sysadmin` (possessing `/secrets/kargo/auth-token` and deployment credentials).
+
+Role boundaries for operational actions:
+- Per `roles.js`, `architect` is in `READ_ONLY_ROLES` and strictly blocked from executing mutating commands.
+- `developer` lacks deployment credentials and is not authorized to execute operational mutations (`kargo promote`, `kargo verify`, `kubectl apply`, `helm upgrade`, `argocd app sync`, etc.).
+- Mutation guards enforce these boundaries: operational actions attempted by `developer` or `architect` fail closed with explicit authorization rejection before reaching execution.
+
 ### Source Code Mutations — Always Require Approval
 
 This gate is the single authority for source code mutations. No domain, phase, or
