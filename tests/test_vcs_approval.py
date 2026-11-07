@@ -12,6 +12,10 @@ swallow-and-fallback branches for both GitLab and GitHub resolution.
 """
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -312,3 +316,141 @@ class TestVerifyMergeGuard:
         allowed, reason = verify_merge_guard({"approved": True, "approved_mr_sha": None}, "sha1")
         assert allowed is False
         assert "differs" in reason.lower()
+
+    def test_operational_category_approved_without_mr_sha_allowed(self):
+        """ATDD: Operational category allows execution on approved events even without approved_mr_sha or localSha."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="operational",
+        )
+        assert allowed is True
+        assert "operational" in reason.lower()
+
+    def test_operational_category_unapproved_refused(self):
+        """ATDD: Operational category still refuses unapproved events."""
+        allowed, reason = verify_merge_guard(
+            {"approved": False, "approved_mr_sha": None},
+            None,
+            category="operational",
+        )
+        assert allowed is False
+        assert "not approved" in reason.lower()
+
+    def test_git_merge_category_on_operational_approval_refused(self):
+        """ATDD: Git merge category strictly refuses operational approval lacking approved_mr_sha."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="git_merge",
+        )
+        assert allowed is False
+        assert "differs" in reason.lower()
+
+    def test_invalid_category_fails_closed_to_git_merge(self):
+        """ATDD: Unknown category fails closed to git_merge rules requiring matching SHA."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="unknown_category",
+        )
+        assert allowed is False
+        assert "differs" in reason.lower()
+
+    def test_git_merge_category_matching_sha_authorized(self):
+        """ATDD: Git merge category allows execution when approved and SHAs match."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": "abc1234"},
+            "abc1234",
+            category="git_merge",
+        )
+        assert allowed is True
+        assert "authorized" in reason.lower()
+
+
+SHA = "a" * 40
+OTHER_SHA = "b" * 40
+
+
+class TestVerifyMergeGuardStrictApproval:
+    """`approved` must be the boolean True: truthy non-booleans must not authorize anything (VMER-2271)."""
+
+    @pytest.mark.parametrize("approved", ["false", "true", "yes", 1, 2, {}, [], [False], "x"])
+    @pytest.mark.parametrize("category", ["git_merge", "operational", "unknown"])
+    def test_truthy_non_boolean_approved_refused(self, approved, category):
+        allowed, reason = verify_merge_guard({"approved": approved, "approved_mr_sha": SHA}, SHA, category=category)
+        assert allowed is False, f"approved={approved!r} category={category}"
+        assert "refused" in reason.lower()
+
+    @pytest.mark.parametrize("record", [None, {}, {"approved": None}, {"approved": False}, {"approved_mr_sha": SHA}, "approved", 1, [], ["approved"]])
+    @pytest.mark.parametrize("category", ["git_merge", "operational"])
+    def test_missing_or_non_dict_record_refused(self, record, category):
+        allowed, _ = verify_merge_guard(record, SHA, category=category)
+        assert allowed is False, f"record={record!r} category={category}"
+
+    def test_boolean_true_is_accepted(self):
+        assert verify_merge_guard({"approved": True, "approved_mr_sha": SHA}, SHA)[0] is True
+        assert verify_merge_guard({"approved": True}, None, category="operational")[0] is True
+
+    def test_operational_none_record_refused_with_operational_wording(self):
+        allowed, reason = verify_merge_guard(None, None, category="operational")
+        assert allowed is False
+        assert reason.startswith("Operational mutation REFUSED")
+
+    def test_git_merge_refusal_keeps_merge_wording(self):
+        allowed, reason = verify_merge_guard({"approved": False}, SHA)
+        assert allowed is False
+        assert reason.startswith("Merge REFUSED")
+
+    def test_operational_ignores_local_head_sha(self):
+        for local in (None, "", SHA, OTHER_SHA):
+            allowed, _ = verify_merge_guard({"approved": True, "approved_mr_sha": SHA}, local, category="operational")
+            assert allowed is True, f"local_head_sha={local!r}"
+
+    @pytest.mark.parametrize("category", ["OPERATIONAL", "Operational", " operational", "operational ", "", None, "ops"])
+    def test_only_exact_operational_relaxes_sha_rule(self, category):
+        allowed, reason = verify_merge_guard({"approved": True, "approved_mr_sha": None}, None, category=category)
+        assert allowed is False
+        assert "differs" in reason.lower()
+
+    def test_git_merge_sha_binding_edge_cases(self):
+        assert verify_merge_guard({"approved": True, "approved_mr_sha": SHA}, OTHER_SHA)[0] is False
+        assert verify_merge_guard({"approved": True, "approved_mr_sha": SHA}, "")[0] is False
+        assert verify_merge_guard({"approved": True, "approved_mr_sha": SHA}, None)[0] is False
+        assert verify_merge_guard({"approved": True, "approved_mr_sha": ""}, "")[0] is False
+
+
+MERGE_GUARD_JS = Path(__file__).resolve().parents[1] / "gemini-sidecar" / "hooks" / "merge-guard.js"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+class TestJsPythonVerdictParity:
+    """The Python verdict is the reference copy of gemini-sidecar/hooks/merge-guard.js approvalVerdict (the enforcing
+    implementation). Drive both with ONE fixture matrix so they cannot drift apart silently."""
+
+    RECORDS = [
+        None, {}, {"approved": False}, {"approved": None}, {"approved": "false"}, {"approved": "true"}, {"approved": 1},
+        {"approved": True}, {"approved": True, "approved_mr_sha": None}, {"approved": True, "approved_mr_sha": ""},
+        {"approved": True, "approved_mr_sha": SHA}, {"approved": True, "approved_mr_sha": OTHER_SHA}, [], "approved",
+    ]
+    LOCALS = ["", SHA, OTHER_SHA]
+    CATEGORIES = ["git_merge", "operational", "OPERATIONAL", "bogus"]
+
+    @staticmethod
+    def _js(record, local, category):
+        out = subprocess.run(
+            ["node", str(MERGE_GUARD_JS), "--verdict", "--", json.dumps(record), local, category],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout
+        return out.split("|||", 1)[0] == "ALLOW"
+
+    def test_allow_decisions_match_across_the_matrix(self):
+        mismatches = []
+        for record in self.RECORDS:
+            for local in self.LOCALS:
+                for category in self.CATEGORIES:
+                    py = verify_merge_guard(record, local or None, category=category)[0]
+                    js = self._js(record, local, category)
+                    if py != js:
+                        mismatches.append((record, local, category, py, js))
+        assert not mismatches, f"JS/Python verdict drift: {mismatches}"

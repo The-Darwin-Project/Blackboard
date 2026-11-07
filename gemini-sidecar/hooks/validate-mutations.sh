@@ -11,10 +11,14 @@
 # 4. [Constraint]: Single-responsibility — validation ONLY.
 # 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
 #    have AGENT_ROLE="" — real role arrives via WS, exposed by /hook-status endpoint.
-# 6. [Security]: Merge-approval guard is the server-side backstop for the Developer merge
-#    guard (breaking prompt injection circularity, C2). Applies to EVERY role. Detection lives in
-#    hooks/merge-guard.js (tokenizing shell analyzer + verb-based MCP classifier); this script only
-#    enforces its verdict (guard=1 => approval + SHA check). Do not re-add regex detection here.
+# 6. [Security]: The approval guards are the server-side backstop for the Developer merge guard (breaking prompt
+#    injection circularity, C2). They apply to EVERY role. Detection lives in hooks/merge-guard.js (tokenizing shell
+#    analyzer + verb-based MCP classifier); this script only enforces its verdict. Do not re-add regex detection here.
+#    The classifier's guard field is a 0/1/2 code (anything else => deny):
+#      0 = not guarded;  1 = git_merge (merge / default-branch write): approved === true AND approved_mr_sha == local HEAD,
+#      any role;  2 = operational (kubectl/oc/helm/argocd/kargo/tkn mutations, cluster/ArgoCD MCP writes): role must
+#      normalise to `sysadmin` AND approved === true (no commit to bind, so no SHA check). A command that is both
+#      (find -exec ...; git merge) is classified 1: the SHA-bound rule always wins.
 #    Read-only roles may call only allowlisted non-shell tools (readok=1 or HOOK_EXTRA_ALLOWED_TOOLS).
 # 7. [Contract]: PreToolUse decision enum contract: strictly `decision: "deny"` to halt tool execution.
 
@@ -32,8 +36,11 @@ MUTATION_TOOLS="write_to_file replace_file_content multi_replace_file_content ed
 # Time budget. The agy hook timeout is 10s (cli-setup.js writeAgyHooks) and a hook that gets killed is
 # treated as a non-blocking error, i.e. FAIL-OPEN. So every external call below is capped by what is left
 # of HOOK_BUDGET_SEC (integer seconds, default 8 => 2s margin) and the script DENIES itself on exhaustion.
-# Worst-case ladder: classify <=2s, approval fetch <=3s, git rev-parse <=1s, verdict <=1s, role lookup <=2s,
-# ATDD tamper lock: target-path extraction <=2s, /proxy/tamper strike report <=1s (skipped, never blocking, when the budget is gone).
+# Worst-case ladder: classify <=2s, then EITHER guard=1 (approval fetch <=3s, git rev-parse <=1s, verdict <=1s) OR guard=2
+# (role lookup <=4s first, then approval fetch <=3s, verdict <=1s -- checked BEFORE the NORM_CMD/ATDD work so a sysadmin's
+# operational call never starves on unrelated normalisation), ATDD tamper lock: target-path extraction <=2s,
+# /proxy/tamper strike report <=1s (skipped, never blocking, when the budget is gone). Every step is capped by tmo(), so the
+# real bound is HOOK_BUDGET_SEC (8s) whatever the ladder sums to; exhaustion => deny_budget (fail closed).
 HOOK_T0=$SECONDS
 HOOK_BUDGET="${HOOK_BUDGET_SEC:-8}"
 # tmo <cap>: prints min(cap, seconds left); returns 1 when the budget is exhausted.
@@ -46,6 +53,15 @@ tmo() {
 deny_budget() {
     echo '{"decision": "deny", "reason": "Hook time budget exhausted before the call could be validated: failing closed"}'
     exit 0
+}
+
+# json_escape <text>: JSON-string-escapes text (backslash, quote, control chars) in pure bash -- no node on the deny path.
+json_escape() {
+    local v="$1"
+    v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+    v="${v//$'\n'/\\n}"; v="${v//$'\r'/\\r}"; v="${v//$'\t'/\\t}"
+    v=$(printf '%s' "$v" | tr -d '\000-\010\013\014\016-\037')
+    printf '%s' "$v"
 }
 
 # Read stdin (PreToolUse JSON payload)
@@ -74,6 +90,11 @@ _REST="${_REST#*|||}"
 READ_OK="${_REST%%|||*}"
 COMMAND="${_REST#*|||}"
 
+if ! [[ "$NEEDS_GUARD" =~ ^[012]$ ]]; then
+    echo '{"decision":"deny","reason":"Security guard error: unparseable guard category from classifier."}'
+    exit 0
+fi
+
 # Exact (case-insensitive) membership test; avoids treating TOOL_NAME as a grep pattern.
 in_list() {
     local needle="${1,,}" item
@@ -97,7 +118,7 @@ fi
 # that cannot merge/write a default branch (guard=0) are allowed without a role lookup. This prevents
 # hook timeouts and sidecar degradation from impacting read-only tools. HOOK_EXTRA_ALLOWED_TOOLS
 # (space-separated, operator-set env) can add exact tool names to the read-only allowlist.
-if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" != 1 ]; then
+if [ "$IS_SHELL" = 0 ] && [ "$IS_MUTATION" = 0 ] && [ "$NEEDS_GUARD" = 0 ]; then
     if [ "$READ_OK" = 1 ] || in_list "$TOOL_NAME" "${HOOK_EXTRA_ALLOWED_TOOLS:-}"; then
         echo '{"decision":"allow"}'
         exit 0
@@ -119,7 +140,7 @@ if [ "$NEEDS_GUARD" = 1 ]; then
     t=$(tmo 1) || deny_budget
     LOCAL_SHA=$(timeout -k 1 "$t" git rev-parse HEAD 2>/dev/null)
     t=$(tmo 1) || deny_budget
-    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" 2>/dev/null)
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "$LOCAL_SHA" "git_merge" 2>/dev/null)
     GUARD_RESULT="${GUARD_DECISION%%|||*}"
     GUARD_REASON="${GUARD_DECISION#*|||}"
     if [ "$GUARD_RESULT" != "ALLOW" ]; then
@@ -158,6 +179,31 @@ fi
 if [ -z "$ROLE" ]; then
     node -e "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'Unresolved or empty agent role: failing closed' }));"
     exit 0
+fi
+
+# --- Operational mutation guard (NEEDS_GUARD=2; applies to ALL roles) ---
+# Requires (a) role == sysadmin, compared on the NORMALISED role exactly like roles.js normalizeRole (trim, lower-case,
+# strip [^a-z0-9_-]) so `Sysadmin`/` sysadmin ` match here as they do on the Claude path, and (b) out-of-band approval with
+# approved === true. No SHA binding (there is no commit). Runs right after role resolution and BEFORE the NORM_CMD /
+# tamper-lock work so the 8s budget is spent on the approval fetch, not on unrelated normalisation.
+if [ "$NEEDS_GUARD" = "2" ]; then
+    ROLE_N=$(printf '%s' "$ROLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+    if [ "$ROLE_N" != "sysadmin" ]; then
+        echo "{\"decision\":\"deny\",\"reason\":\"Operational mutation REFUSED: Role '$(json_escape "$ROLE")' is not authorized for operational mutations; sysadmin required.\"}"
+        exit 0
+    fi
+    t=$(tmo 3) || deny_budget
+    APPROVAL_JSON=$(curl -sf --connect-timeout 1 --max-time "$t" "http://localhost:${SIDECAR_PORT:-9090}/proxy/approval" 2>/dev/null)
+    t=$(tmo 1) || deny_budget
+    GUARD_DECISION=$(timeout -k 1 "$t" node "$HOOK_DIR/merge-guard.js" --verdict -- "$APPROVAL_JSON" "" "operational" 2>/dev/null)
+    GUARD_RESULT="${GUARD_DECISION%%|||*}"
+    GUARD_REASON="${GUARD_DECISION#*|||}"
+    if [ "$GUARD_RESULT" != "ALLOW" ]; then
+        [ -z "$GUARD_REASON" ] && GUARD_REASON="Operational mutation REFUSED: unable to verify out-of-band approval (guard check failed)."
+        echo "{\"decision\": \"deny\", \"reason\": \"$(json_escape "$GUARD_REASON")\"}"
+        exit 0
+    fi
+    # Sysadmin + approved: the operational call is authorised. (Role-based read-only checks below never apply to sysadmin.)
 fi
 
 # An unresolved work style must not silently degrade to "autonomous" for the developer role: that would switch the
@@ -342,6 +388,10 @@ BLOCK_PATTERN+="|\\b(gh|glab)([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:]
 BLOCK_PATTERN+='|\bgit\s+.*(-c\s*(alias|credential|core\.hooksPath|core\.sshCommand|http\.proxy|uploadpack|receivepack)\b|--config-env\b)|\b(GIT_CONFIG_[A-Za-z0-9_]*|GIT_SSH_COMMAND)\b'
 # Config and hook file redirection/writes or copy/moves
 BLOCK_PATTERN+='|(>>?|[|;&][[:space:]]*tee([[:space:]]+-[a-zA-Z]+)*)[[:space:]]*[^[:space:]]*(\.git/config|\.gitconfig|\.git/hooks)|\b(cp|mv|install|ln)\b.*(\.git/config|\.gitconfig|\.git/hooks)'
+# K8s/OCP/Helm/ArgoCD/Tekton/Kargo mutations below are DEFENCE IN DEPTH, deliberately kept (not dead code): the primary gate is the
+# merge-guard.js read-allowlist classifier (NEEDS_GUARD=2, handled above), but if it is skipped or bypassed (classifier crash, a future
+# parsing gap) these regexes still deny the obvious verbs for read-only roles. They are a coarse subset of that classifier, not a second
+# source of truth; when a verb is added to the classifier, adding it here is optional.
 # K8s/OCP mutations (with flag-gap tolerance)
 BLOCK_PATTERN+='|\b(kubectl|oc)\s+(((-\S+)(\s+\S+)?\s+)*(apply|delete|patch|edit|scale|create|run|exec|replace|rollout)\b)'
 # Helm mutations

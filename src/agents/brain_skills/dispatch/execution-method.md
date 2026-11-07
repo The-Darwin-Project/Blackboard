@@ -81,7 +81,29 @@ of a wasted pipeline cycle.
 
 ### Direct RBAC
 
-- Pod delete is available across observed namespaces.
+- Pod delete is available across observed namespaces, executed by `sysadmin` and subject to the operational approval gate below (event approved + `sysadmin` role).
+
+### Operational Mutations and Infrastructure Releases
+
+Infrastructure release pipeline and promotion tasks (e.g. Kargo promotions, cluster-level resource mutations, rollouts) route strictly to `sysadmin` (possessing `/secrets/kargo/auth-token` and deployment credentials).
+
+Role boundaries for operational actions:
+- Per `roles.js`, `architect` is in `READ_ONLY_ROLES` and strictly blocked from executing mutating commands.
+- `developer` lacks deployment credentials and is not authorized to execute operational mutations (`kargo promote`, `kargo verify`, `kubectl apply`, `helm upgrade`, `argocd app sync`, etc.).
+- Mutation guards enforce these boundaries: operational actions attempted by any role other than `sysadmin` fail closed with an explicit "Operational mutation REFUSED ... sysadmin required" rejection before reaching execution.
+
+Two guard categories are enforced server-side by the sidecar (`gemini-sidecar/hooks/merge-guard.js` classifies; the agy hook `validate-mutations.sh` and the Claude hook `claude-guard.js` enforce; `src/utils/vcs_approval.py::verify_merge_guard` is the Python reference of the same verdict). The hook's classifier emits a guard code `0` (not guarded) / `1` (`git_merge`) / `2` (`operational`); any other value is denied:
+
+| Category (guard code) | What it covers | Who may run it | Approval required |
+|---|---|---|---|
+| `git_merge` (1) | `git merge`, pushes to the default branch, `gh pr merge`, `glab mr merge`, merge-endpoint API calls, MCP merge/write tools | any role that is otherwise permitted | `approved === true` AND `approved_mr_sha` equals the live `git rev-parse HEAD` |
+| `operational` (2) | any `kubectl`/`oc`/`helm`/`argocd`/`kargo`/`tkn` invocation that is not a known read-only verb (`get`, `describe`, `logs`, `top`, `rollout status\|history`, `helm list\|status\|get\|history\|show\|template\|lint`, `argocd app get\|list\|diff\|history\|manifests\|logs`, `kargo get\|list`, `tkn list\|describe\|logs`, `--help`), and write tools of cluster MCP servers (ArgoCD sync/create/update/delete, k8s pods/resources writes) | `sysadmin` only | `approved === true` (boolean; no SHA binding, there is no commit) |
+
+Rules of the road:
+- A call that is both (e.g. `find . -exec kubectl exec ... \; -exec git merge ...`) is `git_merge`: the SHA-bound rule always wins, so a `sysadmin` holding an operational-only approval (no `approved_mr_sha`) cannot merge.
+- A dynamic verb on an operational binary (`kubectl $VERB ...`, `kubectl "$@"`) is treated as `operational`.
+- **Sysadmin dispatch prerequisite:** the approval is the event-wide, out-of-band flag set only by a human (dashboard / Slack / queue approval), never by agent text. Before dispatching `sysadmin` for an operational mutation, the Brain must have an approved plan on the event (`bb_get_approval` -> `approved: true`); without it the hook denies the call and `sysadmin` must report the denial instead of retrying. Read-only investigation (`get`/`describe`/`logs`/`top`/`rollout status`, ArgoCD/k8s MCP reads) needs no approval. Note that the approval is not scoped to a command, namespace or plan revision: it authorizes `sysadmin`'s operational mutations for the rest of the event.
+- Interactive/exec verbs (`exec`, `rsh`, `cp`, `attach`, `port-forward`, `run`, `debug`) count as operational mutations for the same reason.
 
 ### Source Code Mutations — Always Require Approval
 

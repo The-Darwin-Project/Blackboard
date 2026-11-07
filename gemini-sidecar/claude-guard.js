@@ -2,9 +2,13 @@
 // @ai-rules:
 // 1. [Pattern]: Merge-approval guard for the CLAUDE path. Claude Code PreToolUse hooks are HTTP
 //    (POST /hooks/pre-tool-use in http-handler.js); the agy path uses hooks/validate-mutations.sh.
-//    Both share hooks/merge-guard.js (classification) + approvalVerdict (same approval/SHA contract).
+//    Both share hooks/merge-guard.js (classification) + approvalVerdict. The classifier's guardCategory selects the rule:
+//    'git_merge' (guard code 1 on the agy side) = any role, approved === true AND approved_mr_sha == live HEAD;
+//    'operational' (guard code 2) = normalised role must be `sysadmin` AND approved === true, NO SHA binding.
+//    A call that is both is classified git_merge, so the SHA-bound rule always wins.
 // 2. [Contract]: Returns null (allow) or a denial reason string. Any failure while the call is
-//    merge-class (analysis error, approval unreachable, git unavailable) => denial (fail CLOSED).
+//    guarded (merge-class OR operational: analysis error, approval unreachable, git unavailable) => denial (fail CLOSED).
+//    The role gate uses roles.js normalizeRole (validate-mutations.sh normalises its role the same way).
 //    For MUTATING roles, calls that are not merge-class are never blocked here. READ-ONLY roles (roles.js) are
 //    delegated wholesale to hooks/validate-mutations.sh (denylist + read-only tool allowlist + merge guard), on top of
 //    Claude's engine-level permission files (cli-executor.js ROLE_SETTINGS_FILE). developer + atdd_green (deps.workStyle)
@@ -125,11 +129,14 @@ async function claudeMergeGuard(payload, deps) {
   if (!result) return 'Malformed or unrecognized tool payload (failing closed).';
   if (result.isShell && !result.cmd) return 'Shell tool call with empty or unextractable command (failing closed).';
   if (!result.guard) return null;
+  if (result.guardCategory === 'operational' && role !== 'sysadmin') {
+    return `Operational mutation REFUSED: Role '${role}' is not authorized for operational mutations; sysadmin required.`;
+  }
 
   let approval = null;
   try { approval = await withTimeout(deps.fetchApproval(), APPROVAL_TIMEOUT_MS); } catch { approval = null; }
-  const sha = await gitHead(payload.cwd);
-  const verdict = mergeGuard.approvalVerdict(approval, sha);
+  const sha = result.guardCategory === 'operational' ? null : await gitHead(payload.cwd);
+  const verdict = mergeGuard.approvalVerdict(approval, sha, result.guardCategory || 'git_merge');
   return verdict.allow ? null : verdict.reason;
 }
 

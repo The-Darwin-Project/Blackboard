@@ -257,3 +257,294 @@ describe('claudeMergeGuard: developer ATDD tamper lock (C1)', () => {
     } finally { s.close(); }
   });
 });
+
+// =============================================================================
+// ATDD Step 5: Bash Compound Array Lexer & Operational Mutation Disambiguation
+// =============================================================================
+
+const MERGE_GUARD_PATH = path.resolve(__dirname, '..', 'hooks', 'merge-guard.js');
+const mg = require(MERGE_GUARD_PATH);
+
+describe('ATDD Step 5: Bash compound array parsing and substitution auditing', () => {
+  it('parses declare -A F=([k]=v) without triggering DYN false-positive', () => {
+    const res = mg.classify(bash('declare -A F=([k]=v)'));
+    assert.equal(res.guard, false, 'associative array assignment should not trigger guard');
+    assert.equal(res.guardCategory, null, 'guardCategory must be null');
+  });
+
+  it('parses multi-line associative array with newlines cleanly as single command', () => {
+    const cmd = 'F=(\n [v4-14]=abc\n [v4-15]=def\n)';
+    const parsed = mg.parseShell(cmd);
+    assert.equal(parsed.cmds.length, 1, 'multi-line array should parse as single command');
+    const res = mg.classify(bash(cmd));
+    assert.equal(res.guard, false, 'multi-line array assignment must not trigger guard');
+    assert.equal(res.guardCategory, null);
+  });
+
+  it('parses array append F+=([k]=v) and element append F[k]+=v cleanly', () => {
+    for (const cmd of ['F+=([k]=v)', 'F[k]+=v', 'F[k]=v']) {
+      const res = mg.classify(bash(cmd));
+      assert.equal(res.guard, false, `append assignment '${cmd}' must not trigger guard`);
+      assert.equal(res.guardCategory, null);
+    }
+  });
+
+  it('audits command and process substitutions embedded in array assignments for smuggling', () => {
+    // Command substitution in array assignment
+    const cmdSub = 'arr=($(git merge main))';
+    const resCmd = mg.classify(bash(cmdSub));
+    assert.equal(resCmd.guard, true, 'command substitution smuggling must trigger guard');
+    assert.equal(resCmd.guardCategory, 'git_merge', 'embedded git merge must escalate to git_merge');
+
+    // Process substitution in array assignment
+    const procSub = 'arr=([k]=<(git merge main))';
+    const resProc = mg.classify(bash(procSub));
+    assert.equal(resProc.guard, true, 'process substitution smuggling must trigger guard');
+    assert.equal(resProc.guardCategory, 'git_merge', 'process substitution git merge must escalate to git_merge');
+  });
+});
+
+describe('ATDD Step 5: Dynamic command evaluation vs operational boundary scoping', () => {
+  it('fails closed to git_merge for unanalyzable dynamic command evaluations (eval, $CMD)', () => {
+    for (const cmd of ['eval "$CMD"', 'eval "echo hi"', '$CMD', 'eval "git status"']) {
+      const res = mg.classify(bash(cmd));
+      assert.equal(res.guard, true, `unanalyzable dynamic command '${cmd}' must trigger guard`);
+      assert.equal(res.guardCategory, 'git_merge', `unanalyzable dynamic command '${cmd}' must fail closed to git_merge`);
+    }
+  });
+
+  it('does not escalate static operational commands with dynamic arguments to git_merge', () => {
+    for (const cmd of ['kargo promote --freight "$F"', 'kargo verify --freight "$F"', 'oc apply -f "$FILE"', 'kubectl delete pod "$POD"']) {
+      const res = mg.classify(bash(cmd));
+      assert.equal(res.guard, true, `operational mutation '${cmd}' must be guarded`);
+      assert.equal(res.guardCategory, 'operational', `operational mutation '${cmd}' must have category operational, not git_merge`);
+    }
+  });
+});
+
+describe('ATDD Step 5: Context-aware approval verdict contract & --verdict CLI', () => {
+  it('approvalVerdict grants ALLOW for category operational on approved event without mr_sha or localSha', () => {
+    const approval = { approved: true, approved_mr_sha: null };
+    const verdict = mg.approvalVerdict(approval, '', 'operational');
+    assert.equal(verdict.allow, true, 'operational execution must be allowed on approved event');
+    assert.equal(verdict.reason, '');
+  });
+
+  it('approvalVerdict grants BLOCK for category git_merge on operational event', () => {
+    const approval = { approved: true, approved_mr_sha: null };
+    const verdict = mg.approvalVerdict(approval, '', 'git_merge');
+    assert.equal(verdict.allow, false, 'git_merge must be blocked when approved_mr_sha is missing');
+    assert.match(verdict.reason, /Merge REFUSED/);
+  });
+
+  it('approvalVerdict defaults unknown category to git_merge (fail-closed)', () => {
+    const approval = { approved: true, approved_mr_sha: null };
+    const verdict = mg.approvalVerdict(approval, '', 'invalid_token');
+    assert.equal(verdict.allow, false, 'unknown category must fail closed to git_merge');
+    assert.match(verdict.reason, /Merge REFUSED/);
+  });
+
+  it('--verdict CLI argument parsing handles rawApproval, sha, and category with and without --', () => {
+    const approvalJson = JSON.stringify({ approved: true, approved_mr_sha: null });
+
+    // With '--'
+    const outWithDash = execFileSync(process.execPath, [MERGE_GUARD_PATH, '--verdict', '--', approvalJson, '', 'operational'], { encoding: 'utf8' });
+    assert.equal(outWithDash.startsWith('ALLOW|||'), true, `expected ALLOW with -- flag, got: ${outWithDash}`);
+
+    // Without '--'
+    const outWithoutDash = execFileSync(process.execPath, [MERGE_GUARD_PATH, '--verdict', approvalJson, '', 'operational'], { encoding: 'utf8' });
+    assert.equal(outWithoutDash.startsWith('ALLOW|||'), true, `expected ALLOW without -- flag, got: ${outWithoutDash}`);
+
+    // Git merge attempt without sha must BLOCK both ways
+    const gitWithDash = execFileSync(process.execPath, [MERGE_GUARD_PATH, '--verdict', '--', approvalJson, '', 'git_merge'], { encoding: 'utf8' });
+    assert.equal(gitWithDash.startsWith('BLOCK|||'), true, `expected BLOCK for git_merge, got: ${gitWithDash}`);
+  });
+
+  it('Claude PreToolUse: denies operational mutation when event is not approved', async () => {
+    const s = await setup({ approved: false }, 'sysadmin');
+    try {
+      const r = await s.post(bash('kargo promote --freight v1.0', repoMain));
+      assert.ok(denied(r), 'unapproved operational mutation must be denied');
+      assert.match(r.body.hookSpecificOutput.permissionDecisionReason, /event not approved/);
+    } finally { s.close(); }
+  });
+
+  it('Claude PreToolUse: denies git merge or push on operational event (approved: true, approved_mr_sha: null)', async () => {
+    const s = await setup({ approved: true, approved_mr_sha: null }, 'sysadmin');
+    try {
+      const rMerge = await s.post(bash('git merge feat/x', repoMain));
+      assert.ok(denied(rMerge), 'git merge must be denied on operational event');
+      assert.match(rMerge.body.hookSpecificOutput.permissionDecisionReason, /Merge REFUSED/);
+
+      const rPush = await s.post(bash('git push origin main', repoMain));
+      assert.ok(denied(rPush), 'git push must be denied on operational event');
+      assert.match(rPush.body.hookSpecificOutput.permissionDecisionReason, /Merge REFUSED/);
+    } finally { s.close(); }
+  });
+
+  it('Claude PreToolUse: denies operational mutation for developer role even when event is approved', async () => {
+    const s = await setup({ approved: true, approved_mr_sha: null }, 'developer');
+    try {
+      const r = await s.post(bash('kargo promote --freight v1.0', repoMain));
+      assert.ok(denied(r), 'developer role must be denied operational mutations');
+      assert.match(r.body.hookSpecificOutput.permissionDecisionReason, /Role 'developer' is not authorized for operational mutations; sysadmin required/);
+    } finally { s.close(); }
+  });
+
+  it('Claude PreToolUse: allows operational mutation for sysadmin role when event is approved', async () => {
+    const s = await setup({ approved: true, approved_mr_sha: null }, 'sysadmin');
+    try {
+      const r = await s.post(bash('kargo promote --freight v1.0', repoMain));
+      assert.ok(!denied(r), 'sysadmin role must be allowed operational mutations on approved event');
+    } finally { s.close(); }
+  });
+
+  it('Claude PreToolUse: fails closed to git_merge on dynamic command binary', async () => {
+    const s = await setup({ approved: false }, 'sysadmin');
+    try {
+      const r = await s.post(bash('$CMD origin main', repoMain));
+      assert.ok(denied(r), 'dynamic command binary must fail closed to git_merge');
+    } finally { s.close(); }
+  });
+});
+
+
+
+// ---------------------------------------------------------------------------------------------
+// VMER-2271 remediation: strict approval, role normalisation, bypass classes and MCP operational tools end to end
+// (real loopback HTTP: handleRequest -> claude-guard.js -> merge-guard.js child process; fake Brain approval)
+// ---------------------------------------------------------------------------------------------
+describe('VMER-2271: operational gate on the Claude path', () => {
+  const OP_APPROVED = { approved: true, approved_mr_sha: null };
+  const reason = (r) => r.body?.hookSpecificOutput?.permissionDecisionReason || '';
+
+  it('truthy non-boolean `approved` is rejected for operational commands (sysadmin)', async () => {
+    for (const approved of ['false', 'true', 1, 'yes']) {
+      const s = await setup({ approved, approved_mr_sha: null }, 'sysadmin');
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(denied(r), `approved=${JSON.stringify(approved)} must not authorize an operational mutation`);
+        assert.match(reason(r), /Operational mutation REFUSED/);
+      } finally { s.close(); }
+    }
+  });
+
+  it('truthy non-boolean `approved` is rejected for git merge even with a matching SHA', async () => {
+    for (const approved of ['true', 1]) {
+      const s = await setup({ approved, approved_mr_sha: featSha }, 'developer');
+      try {
+        const r = await s.post(bash('git merge origin/main', repoFeat));
+        assert.ok(denied(r), `approved=${JSON.stringify(approved)} must not authorize a merge`);
+        assert.match(reason(r), /Merge REFUSED/);
+      } finally { s.close(); }
+    }
+  });
+
+  it('boolean approved + matching SHA still authorizes a git merge (control)', async () => {
+    const s = await setup({ approved: true, approved_mr_sha: featSha }, 'developer');
+    try {
+      assert.ok(!denied(await s.post(bash('git merge origin/main', repoFeat))), 'matching SHA + approved:true must allow');
+    } finally { s.close(); }
+  });
+
+  it('role normalisation: Sysadmin / padded / upper-case sysadmin pass the operational gate when approved', async () => {
+    for (const role of ['Sysadmin', ' sysadmin ', 'SYSADMIN']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(!denied(r), `role ${JSON.stringify(role)} must pass: ${reason(r)}`);
+      } finally { s.close(); }
+    }
+  });
+
+  it('roles other than sysadmin are denied operational mutations even when approved', async () => {
+    for (const role of ['developer', 'qe', 'tester', 'executor', 'architect', 'explorer', 'code_reviewer', 'sysadmin2', 'not_a_role']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(denied(r), `role ${role} must be denied`);
+        assert.match(reason(r), /not authorized for operational mutations; sysadmin required/, `role ${role}`);
+      } finally { s.close(); }
+    }
+  });
+
+  it('valued-flag and dynamic-verb bypasses are denied when unapproved and allowed when approved', async () => {
+    const cmds = ['kubectl -v 6 exec -it prodpod -- /bin/sh', 'kubectl -v 5 apply -f x', 'kubectl --request-timeout 5s delete pod x',
+      'kargo --config-path /x promote --stage s', 'kubectl $VERB pod x', 'oc $ACTION deploy/x', 'helm $ACT r c', 'kubectl label pod x a=b',
+      'kargo approve --freight x', 'argocd app rollback a 1'];
+    const un = await setup({ approved: false }, 'sysadmin');
+    try {
+      for (const c of cmds) assert.ok(denied(await un.post(bash(c, repoMain))), `unapproved: ${c}`);
+    } finally { un.close(); }
+    const ok = await setup(OP_APPROVED, 'sysadmin');
+    try {
+      for (const c of cmds) assert.ok(!denied(await ok.post(bash(c, repoMain))), `approved: ${c}`);
+    } finally { ok.close(); }
+  });
+
+  it('read-only operational verbs need no approval and no brain', async () => {
+    const s = await setup(null, 'sysadmin'); // brain answers 502 => approval unreachable
+    try {
+      for (const c of ['kubectl get pods -A', 'kubectl -v 6 describe pod x', 'kubectl rollout status deploy/x', 'helm list', 'argocd app get a', 'kargo get stages', 'tkn pr logs x']) {
+        assert.ok(!denied(await s.post(bash(c, repoMain))), `read-only must pass: ${c}`);
+      }
+    } finally { s.close(); }
+  });
+
+  it('approval unreachable (brain 502) denies operational mutations (fail closed)', async () => {
+    const s = await setup(null, 'sysadmin');
+    try {
+      const r = await s.post(bash('kubectl delete pod x', repoMain));
+      assert.ok(denied(r));
+      assert.match(reason(r), /Operational mutation REFUSED/);
+    } finally { s.close(); }
+  });
+
+  it('git_merge wins in mixed commands: operational-only approval cannot merge, SHA-bound approval can', async () => {
+    const mixed = ['find . -exec oc rsh x \\; -exec git merge origin/main \\;', 'find . -exec git merge origin/main \\; -exec oc rsh x \\;',
+      'find . -exec oc rsh x \\; -exec gh pr merge 5 \\;', 'kubectl delete pod x && git merge origin/main'];
+    const opOnly = await setup(OP_APPROVED, 'sysadmin');
+    try {
+      for (const c of mixed) {
+        const r = await opOnly.post(bash(c, repoFeat));
+        assert.ok(denied(r), `operational-only approval must not merge: ${c}`);
+        assert.match(reason(r), /Merge REFUSED/, c);
+      }
+    } finally { opOnly.close(); }
+    const sha = await setup({ approved: true, approved_mr_sha: featSha }, 'sysadmin');
+    try {
+      assert.ok(!denied(await sha.post(bash(mixed[0], repoFeat))), 'SHA-bound approval authorizes the mixed command');
+    } finally { sha.close(); }
+  });
+
+  it('MCP cluster tools: sysadmin needs approval; developer/architect are role-denied; reads are free', async () => {
+    const tool = (name, cwd) => ({ tool_name: name, tool_input: {}, cwd });
+    const sync = 'mcp__ArgoCD__sync_application';
+    const approved = await setup(OP_APPROVED, 'sysadmin');
+    try { assert.ok(!denied(await approved.post(tool(sync, repoMain))), 'approved sysadmin may sync'); } finally { approved.close(); }
+    const un = await setup({ approved: false }, 'sysadmin');
+    try {
+      const r = await un.post(tool(sync, repoMain));
+      assert.ok(denied(r), 'unapproved sysadmin may not sync');
+      assert.match(reason(r), /Operational mutation REFUSED/);
+      assert.ok(!denied(await un.post(tool('mcp__ArgoCD__get_application', repoMain))), 'ArgoCD reads need no approval');
+    } finally { un.close(); }
+    for (const role of ['developer', 'architect']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(tool('mcp__K8s_konflux__pods_delete', repoMain));
+        assert.ok(denied(r), `${role} must be denied a cluster MCP write`);
+        assert.match(reason(r), /sysadmin required/, role);
+      } finally { s.close(); }
+    }
+  });
+
+  it('test builtins are not dynamic command words on the Claude path', async () => {
+    const s = await setup(null, 'developer'); // approval unreachable: a git_merge verdict would deny
+    try {
+      assert.ok(!denied(await s.post(bash('[ -f x ] && echo y', repoMain))));
+      assert.ok(!denied(await s.post(bash('[[ -d x ]] || true', repoMain))));
+      assert.ok(denied(await s.post(bash('eval "git status"', repoMain))), 'eval stays guarded');
+    } finally { s.close(); }
+  });
+});

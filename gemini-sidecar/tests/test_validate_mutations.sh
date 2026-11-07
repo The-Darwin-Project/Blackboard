@@ -4,6 +4,10 @@
 # 1. [Constraint]: Test-only file — verifies validate-mutations.sh against Antigravity PreToolUse protocol.
 # 2. [Pattern]: Pipes stdin JSON through the hook, asserts decision and reason via jq.
 # 3. [Contract]: T-1 (mutation block), T-2 (read-only allow), T-3 (fail-closed malformed), T-4 (native mutation block).
+# 4. [Contract]: T-21 drives the REAL classifier + hook against a loopback /proxy/approval stub (node http server on an
+#    ephemeral port): sysadmin + NEEDS_GUARD=2 approved/unapproved/non-boolean/proxy-down/budget, role normalisation, JSON-escaped
+#    role in the deny, and sysadmin + git_merge with an operational-only (null SHA) approval. NOT run by CI's npm test (it globs
+#    tests/*.js): run `bash gemini-sidecar/tests/test_validate_mutations.sh` locally / from the python-test CI job.
 
 set -uo pipefail
 
@@ -468,12 +472,18 @@ run_test "T-9al: list_merge_requests allowed for explorer" \
 
 # Read-only roles: only allowlisted (read/comms) non-shell tools
 for t in mcp__GitHub__push_files mcp__GitHub__create_or_update_file mcp__GitHub__create_branch mcp__GitHub__create_pull_request \
-         mcp__GitHub__issue_write mcp__GitHub__fork_repository mcp__ArgoCD__sync_application mcp__ArgoCD__create_application \
+         mcp__GitHub__issue_write mcp__GitHub__fork_repository \
          mcp__Jenkins__jenkins_trigger_build mcp__GitLab__glab_mr_approve mcp__GitLab__glab_ci_run mcp__GitLab__glab_mr_note_delete \
          mcp__Playwright__browser_run_code_unsafe some_unknown_tool \
          mcp__GitHub__pull_request_review_write mcp__GitHub__create_team_discussion mcp__GitHub__create_commit mcp__GitHub__request_copilot_review; do
   run_test_deny_with_reason "T-10a: read-only role denied for $t" \
     "{\"toolCall\":{\"name\":\"$t\",\"args\":{\"branch\":\"feat/x\"}}}" explorer "read-only"
+done
+# Cluster/ArgoCD MCP writes are 'operational' (guard=2): a read-only role is still denied, by the operational role gate.
+for t in mcp__ArgoCD__sync_application mcp__ArgoCD__create_application mcp__ArgoCD__delete_application mcp__ArgoCD__update_application \
+         mcp__ArgoCD__run_resource_action mcp__K8s_konflux__pods_delete mcp__K8s_konflux__resources_create_or_update; do
+  run_test_deny_with_reason "T-10a2: read-only role denied (operational MCP) for $t" \
+    "{\"toolCall\":{\"name\":\"$t\",\"args\":{}}}" explorer "sysadmin required"
 done
 for t in mcp__GitHub__get_file_contents mcp__GitHub__list_pull_requests mcp__GitHub__search_code mcp__GitHub__pull_request_read \
          mcp__GitHub__add_comment_to_pending_review mcp__GitHub__add_issue_comment mcp__GitHub__get_commit mcp__GitHub__get_workflow_run \
@@ -804,6 +814,233 @@ else
   ERRORS+=("FAIL [T-19b]: expected allow, got: $OUT")
   ((FAIL++))
 fi
+
+# =============================================================================
+# T-20: Operational Mutations, Field 3 Regex Validation & Line 100 Fast-Exit Gate
+# =============================================================================
+
+run_test_deny_with_reason \
+  "T-20a: kargo promote blocked for architect (read-only role violation)" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote --project myproj --freight foo"}}}' \
+  "architect" \
+  "is not authorized for operational mutations; sysadmin required."
+
+run_test_deny_with_reason \
+  "T-20b: mutating operational action blocked for non-sysadmin role (developer)" \
+  '{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote --project myproj --freight foo"}}}' \
+  "developer" \
+  "Role 'developer' is not authorized for operational mutations; sysadmin required."
+
+run_test_mock_classifier() {
+  local name="$1"
+  local mock_classifier_line="$2"
+  local role="$3"
+  local expected_decision="$4"
+  local expected_reason_substr="${5:-}"
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  local mock_hook="${tmp_dir}/validate-mutations.sh"
+  cp "$HOOK" "$mock_hook"
+  cat <<EOF > "${tmp_dir}/merge-guard.js"
+#!/usr/bin/env node
+process.stdout.write("${mock_classifier_line}");
+EOF
+  chmod +x "${tmp_dir}/merge-guard.js"
+
+  local input='{"toolCall":{"name":"run_command","args":{"CommandLine":"kargo promote","AbsolutePath":"/tmp/test"}}}'
+  local output
+  output="$(echo "$input" | SIDECAR_PORT=1 AGENT_ROLE="$role" AGENT_CLI="agy" DARWIN_WORK_STYLE=autonomous bash "$mock_hook" 2>/dev/null)" || true
+  rm -rf "$tmp_dir"
+
+  if ! echo "$output" | jq empty 2>/dev/null; then
+    ERRORS+=("FAIL [$name]: output is not valid JSON: $output")
+    ((FAIL++))
+    return
+  fi
+
+  local actual_decision
+  actual_decision="$(echo "$output" | jq -r '.decision')"
+
+  if [[ "$actual_decision" != "$expected_decision" ]]; then
+    ERRORS+=("FAIL [$name]: expected decision='$expected_decision', got '$actual_decision' (output: $output)")
+    ((FAIL++))
+    return
+  fi
+
+  if [[ -n "$expected_reason_substr" ]]; then
+    local reason
+    reason="$(echo "$output" | jq -r '.reason // empty')"
+    if [[ "$reason" != *"$expected_reason_substr"* ]]; then
+      ERRORS+=("FAIL [$name]: expected reason containing '$expected_reason_substr', got '$reason'")
+      ((FAIL++))
+      return
+    fi
+  fi
+
+  echo "PASS [$name]"
+  ((PASS++))
+}
+
+run_test_mock_classifier \
+  "T-20c: strict regex validation on field 3 rejects arbitrary tokens and fails closed" \
+  "OK|||view_file|||invalid_token|||1|||" \
+  "developer" \
+  "deny" \
+  "unparseable guard category from classifier"
+
+run_test_mock_classifier \
+  "T-20d: line 100 fast-exit gate correctly passes NEEDS_GUARD=0" \
+  "OK|||view_file|||0|||1|||" \
+  "" \
+  "allow"
+
+run_test_mock_classifier \
+  "T-20e: line 100 fast-exit gate does NOT fast-exit NEEDS_GUARD=2" \
+  "OK|||view_file|||2|||1|||" \
+  "" \
+  "deny"
+
+run_test_mock_classifier \
+  "T-20f: read-only role architect denied on operational command (NEEDS_GUARD=2)" \
+  "OK|||execute_command|||2|||0|||kargo promote" \
+  "architect" \
+  "deny" \
+  "is not authorized for operational mutations; sysadmin required"
+
+run_test_mock_classifier \
+  "T-20g: mutating role developer denied on operational command (NEEDS_GUARD=2)" \
+  "OK|||execute_command|||2|||0|||kargo promote" \
+  "developer" \
+  "deny" \
+  "is not authorized for operational mutations; sysadmin required"
+
+# =============================================================================
+# T-21: Operational approval path (guard=2) and git_merge SHA binding, against a loopback /proxy/approval stub
+# =============================================================================
+STUB_JS="$(mktemp)"
+cat > "$STUB_JS" <<'STUBEOF'
+const http = require('http');
+const body = process.argv[2];
+const srv = http.createServer((req, res) => {
+  if (req.url === '/proxy/approval') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(body); }
+  else { res.writeHead(404); res.end(); }
+});
+srv.listen(0, () => { console.log(srv.address().port); });
+STUBEOF
+STUB_PID=""
+STUB_PORT=""
+start_stub() { # start_stub '<approval json>' -> sets STUB_PID / STUB_PORT
+  local portfile; portfile="$(mktemp)"
+  node "$STUB_JS" "$1" > "$portfile" 2>/dev/null &
+  STUB_PID=$!
+  local i
+  for i in $(seq 1 50); do [[ -s "$portfile" ]] && break; sleep 0.1; done
+  STUB_PORT="$(tr -d '[:space:]' < "$portfile")"
+  rm -f "$portfile"
+}
+stop_stub() { [[ -n "$STUB_PID" ]] && kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""; }
+
+# run_stub_test <name> <role> <command-or-mcp-json-input> <approval-json|DOWN> <expected decision> [reason substring] [extra env KEY=VAL ...]
+run_stub_test() {
+  local name="$1" role="$2" input="$3" approval="$4" expected="$5" substr="${6:-}"
+  shift 6 2>/dev/null || shift $#
+  local port=1
+  if [[ "$approval" != "DOWN" ]]; then start_stub "$approval"; port="$STUB_PORT"; fi
+  local output
+  output="$(echo "$input" | env SIDECAR_PORT="$port" AGENT_ROLE="$role" AGENT_CLI=agy DARWIN_WORK_STYLE=autonomous "$@" bash "$HOOK" 2>/dev/null)" || true
+  [[ "$approval" != "DOWN" ]] && stop_stub
+  if ! echo "$output" | jq empty 2>/dev/null; then
+    ERRORS+=("FAIL [$name]: output is not valid JSON: $output"); ((FAIL++)); return
+  fi
+  local decision reason
+  decision="$(echo "$output" | jq -r '.decision')"
+  reason="$(echo "$output" | jq -r '.reason // empty')"
+  if [[ "$decision" != "$expected" ]]; then
+    ERRORS+=("FAIL [$name]: expected '$expected', got '$decision' (output: $output)"); ((FAIL++)); return
+  fi
+  if [[ -n "$substr" && "$reason" != *"$substr"* ]]; then
+    ERRORS+=("FAIL [$name]: expected reason containing '$substr', got '$reason'"); ((FAIL++)); return
+  fi
+  echo "PASS [$name]"; ((PASS++))
+}
+
+sh_input() { jq -cn --arg c "$1" '{toolCall:{name:"run_command",args:{CommandLine:$c}}}'; }
+mcp_input() { jq -cn --arg n "$1" '{toolCall:{name:$n,args:{}}}'; }
+APPROVED_OP='{"approved":true,"approved_mr_sha":null,"approved_by":"maintainer"}'
+OP_CMD="$(sh_input 'kubectl delete pod x')"
+
+run_stub_test "T-21a: sysadmin + operational + approved:true => allow" sysadmin "$OP_CMD" "$APPROVED_OP" allow
+run_stub_test "T-21b: sysadmin + operational + approved:false => deny (operational wording)" sysadmin "$OP_CMD" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21c: sysadmin + operational + proxy down => deny (fail closed)" sysadmin "$OP_CMD" DOWN deny "Operational mutation REFUSED"
+run_stub_test "T-21d: sysadmin + operational + approved:\"false\" (string) => deny" sysadmin "$OP_CMD" '{"approved":"false"}' deny "Operational mutation REFUSED"
+run_stub_test "T-21e: sysadmin + operational + approved:1 (int) => deny" sysadmin "$OP_CMD" '{"approved":1}' deny "Operational mutation REFUSED"
+run_stub_test "T-21f: sysadmin + operational + approved:\"true\" (string) => deny" sysadmin "$OP_CMD" '{"approved":"true"}' deny
+run_stub_test "T-21g: sysadmin + operational + garbage approval body => deny" sysadmin "$OP_CMD" 'not-json' deny
+run_stub_test "T-21h: sysadmin + operational + empty approval object => deny" sysadmin "$OP_CMD" '{}' deny
+run_stub_test "T-21i: role 'Sysadmin' (case) is normalised like claude-guard => allow" Sysadmin "$OP_CMD" "$APPROVED_OP" allow
+run_stub_test "T-21j: role ' SYSADMIN ' (padding) is normalised => allow" " SYSADMIN " "$OP_CMD" "$APPROVED_OP" allow
+run_stub_test "T-21k: role developer + approved operational => deny (role gate beats approval)" developer "$OP_CMD" "$APPROVED_OP" deny "Role 'developer' is not authorized for operational mutations; sysadmin required."
+run_stub_test "T-21l: role qe + approved operational => deny" qe "$OP_CMD" "$APPROVED_OP" deny "sysadmin required"
+run_stub_test "T-21m: role architect + approved operational => deny" architect "$OP_CMD" "$APPROVED_OP" deny "Role 'architect' is not authorized for operational mutations; sysadmin required."
+run_stub_test "T-21n: role sysadmin2 (prefix lookalike) => deny" sysadmin2 "$OP_CMD" "$APPROVED_OP" deny "sysadmin required"
+
+# $ROLE is JSON-escaped in the operational deny: a quote/backslash in the role must not break the JSON document.
+run_stub_test "T-21o: hostile role with quote+backslash => valid JSON deny that echoes the role" 'dev"x\y' "$OP_CMD" "$APPROVED_OP" deny 'dev"x\y'
+
+# Dynamic verbs / valued flags (the bypasses the 6-lens review found) reach the operational gate through the real hook.
+run_stub_test "T-21p: kubectl -v 6 exec ... + unapproved => deny" sysadmin "$(sh_input 'kubectl -v 6 exec -it prodpod -- /bin/sh')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21q: kubectl --request-timeout 5s delete pod x + developer => deny" developer "$(sh_input 'kubectl --request-timeout 5s delete pod x')" "$APPROVED_OP" deny "sysadmin required"
+run_stub_test "T-21r: kubectl \$VERB pod x + unapproved sysadmin => deny" sysadmin "$(sh_input 'kubectl $VERB pod x')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21s: kubectl label pod x a=b + approved sysadmin => allow" sysadmin "$(sh_input 'kubectl label pod x a=b')" "$APPROVED_OP" allow
+run_stub_test "T-21t: read-only kubectl get pods + UNAPPROVED sysadmin => allow (no guard)" sysadmin "$(sh_input 'kubectl get pods -A')" '{"approved":false}' allow
+run_stub_test "T-21u: read-only helm list + proxy down sysadmin => allow (no guard)" sysadmin "$(sh_input 'helm list -A')" DOWN allow
+
+# MCP operational tools take the same path.
+run_stub_test "T-21v: ArgoCD sync_application + approved sysadmin => allow" sysadmin "$(mcp_input 'mcp__ArgoCD__sync_application')" "$APPROVED_OP" allow
+run_stub_test "T-21w: ArgoCD sync_application + unapproved sysadmin => deny" sysadmin "$(mcp_input 'mcp__ArgoCD__sync_application')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x: ArgoCD sync_application + developer => deny" developer "$(mcp_input 'mcp__ArgoCD__sync_application')" "$APPROVED_OP" deny "sysadmin required"
+run_stub_test "T-21y: ArgoCD get_application + unapproved architect => allow (read-only MCP)" architect "$(mcp_input 'mcp__ArgoCD__get_application')" '{"approved":false}' allow
+
+# git_merge keeps the SHA binding for sysadmin: an operational-only approval (approved_mr_sha=null) must not merge.
+run_stub_test "T-21z1: sysadmin git merge + operational-only approval (null SHA) => deny" sysadmin "$(sh_input 'git merge origin/main')" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21z2: sysadmin gh pr merge + null-SHA approval => deny" sysadmin "$(sh_input 'gh pr merge 5')" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21z3: sysadmin find -exec oc rsh ;-exec git merge + null-SHA approval => deny (no category downgrade)" sysadmin "$(sh_input 'find . -exec oc rsh x \; -exec git merge origin/main \;')" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21z4: sysadmin find -exec git merge ;-exec oc rsh + null-SHA approval => deny" sysadmin "$(sh_input 'find . -exec git merge origin/main \; -exec oc rsh x \;')" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21z5: sysadmin kubectl delete && git merge + null-SHA approval => deny" sysadmin "$(sh_input 'kubectl delete pod x && git merge origin/main')" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21z6: sysadmin git merge + approved:\"false\" string => deny" sysadmin "$(sh_input 'git merge origin/main')" '{"approved":"false","approved_mr_sha":"abc"}' deny "Merge REFUSED"
+
+# Budget safety: an exhausted budget must DENY the operational call (never fall through to allow), even with a healthy proxy.
+run_stub_test "T-21z7: sysadmin operational with HOOK_BUDGET_SEC=0 => deny (budget exhausted)" sysadmin "$OP_CMD" "$APPROVED_OP" deny "budget exhausted" HOOK_BUDGET_SEC=0
+
+# Test builtins are not dynamic command words (no spurious git_merge guard => no approval needed).
+run_stub_test "T-21z8: developer '[ -f x ] && echo y' with proxy down => allow" developer "$(sh_input '[ -f x ] && echo y')" DOWN allow
+run_stub_test "T-21z9: developer 'eval \"git status\"' with proxy down => deny (dynamic word stays guarded)" developer "$(sh_input 'eval "git status"')" DOWN deny "Merge REFUSED"
+
+# Boolean TLS flags must not swallow the verb: the call is operational (denied without approval), not a fast-allow read.
+run_stub_test "T-21y1: sysadmin helm --kube-insecure-skip-tls-verify upgrade list + approved:false => deny (operational)" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21y2: sysadmin kubectl --insecure-skip-tls-verify delete get pod + approved:false => deny (operational)" sysadmin "$(sh_input 'kubectl --insecure-skip-tls-verify delete get pod')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21y3: developer helm --kube-insecure-skip-tls-verify upgrade list with proxy down => deny" developer "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" DOWN deny
+run_stub_test "T-21y4: sysadmin helm --kube-insecure-skip-tls-verify list (read) with proxy down => allow" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify list')" DOWN allow
+run_stub_test "T-21y5: sysadmin helm --kube-insecure-skip-tls-verify upgrade list + operational approval => allow" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" "$APPROVED_OP" allow
+
+# Cluster MCP tools with a merge / default-branch push verb stay git_merge (SHA-bound): an operational-only approval must not pass.
+run_stub_test "T-21y6: sysadmin mcp__argocd__merge_application + null-SHA approval => deny (git_merge wins)" sysadmin "$(mcp_input mcp__argocd__merge_application)" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21y7: sysadmin mcp__openshift__accept_merge_request + null-SHA approval => deny" sysadmin "$(mcp_input mcp__openshift__accept_merge_request)" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21y8: sysadmin mcp__argocd__push_files + null-SHA approval => deny" sysadmin "$(mcp_input mcp__argocd__push_files)" "$APPROVED_OP" deny "Merge REFUSED"
+
+# Round 3: a read-looking first token (events) must not exempt a mutating cluster MCP tool; argocd/kargo/tkn positional scan.
+run_stub_test "T-21x1: sysadmin mcp__K8s_konflux__events_create + approved:false => deny (operational)" sysadmin "$(mcp_input mcp__K8s_konflux__events_create)" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x2: sysadmin mcp__K8s_konflux__events_create + operational approval => allow" sysadmin "$(mcp_input mcp__K8s_konflux__events_create)" "$APPROVED_OP" allow
+run_stub_test "T-21x3: developer mcp__K8s_konflux__events_create with proxy down => deny" developer "$(mcp_input mcp__K8s_konflux__events_create)" DOWN deny
+run_stub_test "T-21x4: developer mcp__K8s_konflux__events_list with proxy down => allow (read)" developer "$(mcp_input mcp__K8s_konflux__events_list)" DOWN allow
+run_stub_test "T-21x5: sysadmin argocd app get sync + approved:false => deny (operational)" sysadmin "$(sh_input 'argocd app get sync myapp')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x6: sysadmin kargo get promote + approved:false => deny (operational)" sysadmin "$(sh_input 'kargo get promote --stage s')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x7: sysadmin tkn pipeline list delete + approved:false => deny (operational)" sysadmin "$(sh_input 'tkn pipeline list delete x')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21x8: sysadmin argocd app get myapp (read) with proxy down => allow" sysadmin "$(sh_input 'argocd app get myapp')" DOWN allow
+run_stub_test "T-21x9: sysadmin tkn pipeline describe mypipe (read) with proxy down => allow" sysadmin "$(sh_input 'tkn pipeline describe mypipe')" DOWN allow
+
+rm -f "$STUB_JS"
 
 echo ""
 echo "=== Results ==="

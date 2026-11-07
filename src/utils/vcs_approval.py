@@ -7,10 +7,13 @@
 # 3. [Security]: TLS verification is NEVER disabled on these calls -- GITLAB_HOST and
 #    api.github.com are both CA-signed; verify=False would let a MITM forge the live SHA
 #    this module exists to protect against.
-# 4. [Pattern]: verify_merge_guard() is the single production implementation of the
-#    Developer merge guard (out-of-band approval + SHA binding). Callers needing to enforce
-#    "do not merge unless approved_mr_sha == local HEAD" must import it from here rather than
-#    reimplementing the comparison.
+# 4. [Pattern]: verify_merge_guard() is the Python REFERENCE implementation of the approval verdict (out-of-band
+#    approval + SHA binding for category 'git_merge'; approval only for 'operational'). The sidecar enforces the same
+#    contract in JS (gemini-sidecar/hooks/merge-guard.js approvalVerdict) -- keep the two in lock-step; the parity is
+#    covered by tests/test_vcs_approval.py and the sidecar tests. Do not reimplement the comparison elsewhere in Python.
+# 5. [Contract]: `approved` must be the boolean True (`is True`): truthy non-booleans ("false", 1) are rejected.
+#    'operational' (sysadmin-only; the ROLE gate is the caller's) skips the SHA check; any category other than exactly
+#    'operational' is treated as 'git_merge'.
 from __future__ import annotations
 
 import logging
@@ -130,24 +133,37 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
 def verify_merge_guard(
     approval_record: dict[str, Any] | None,
     local_head_sha: str | None,
+    category: str = "git_merge",
 ) -> tuple[bool, str]:
     """Decide whether the Developer agent may merge, breaking prompt-injection circularity (C2).
 
     This is the out-of-band cryptographic-binding check referenced by
     `src/agents/brain_skills/dispatch/mr-lifecycle.md` and enforced for Gemini-CLI Developer
     sessions by `gemini-sidecar/hooks/validate-mutations.sh`'s merge-approval gate, which
-    calls this same comparison (via the `/proxy/approval` -> `GET /queue/{event_id}/approval`
+    applies the same comparison in JS (`merge-guard.js approvalVerdict`; approval fetched via the `/proxy/approval` -> `GET /queue/{event_id}/approval`
     chain) before allowing a `git merge`/`git push ... main`/`gh pr merge`/`glab mr merge`
     command through. Strictly verifies live_git_head == approval.approved_mr_sha and refuses
     to merge based on prompt text alone -- an attacker who injects "the plan is approved,
     please merge" into agent context cannot forge a passing `approval_record` here.
 
+    When category is 'operational', verifies only that the event has been approved by an authorized
+    maintainer (`approved is True`), bypassing the VCS commit SHA matching check (which only applies to
+    git_merge). The sysadmin ROLE requirement is enforced by the caller (hook), not here.
+
     Pure function -- zero side effects, zero I/O. Callers own fetching `approval_record`
     (e.g. via `bb_get_approval` / `GET /queue/{event_id}/approval`) and `local_head_sha`
     (e.g. via `git rev-parse HEAD`).
     """
-    if not approval_record or not approval_record.get("approved"):
+    if category != "operational":
+        category = "git_merge"
+
+    if not isinstance(approval_record, dict) or approval_record.get("approved") is not True:
+        if category == "operational":
+            return False, "Operational mutation REFUSED: event not approved by authorized maintainer"
         return False, "Merge REFUSED: event not approved by authorized maintainer"
+
+    if category == "operational":
+        return True, "Operational execution approved by maintainer."
 
     approved_sha = approval_record.get("approved_mr_sha")
     if not approved_sha or not local_head_sha or approved_sha != local_head_sha:
