@@ -312,3 +312,53 @@ class TestVerifyMergeGuard:
         allowed, reason = verify_merge_guard({"approved": True, "approved_mr_sha": None}, "sha1")
         assert allowed is False
         assert "differs" in reason.lower()
+
+    def test_operational_category_approved_without_mr_sha_allowed(self):
+        """ATDD: Operational category allows execution on approved events even without approved_mr_sha or localSha."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="operational",
+        )
+        assert allowed is True
+        assert "operational" in reason.lower()
+
+    def test_operational_category_unapproved_refused(self):
+        """ATDD: Operational category still refuses unapproved events."""
+        allowed, reason = verify_merge_guard(
+            {"approved": False, "approved_mr_sha": None},
+            None,
+            category="operational",
+        )
+        assert allowed is False
+        assert "not approved" in reason.lower()
+
+    def test_git_merge_category_on_operational_approval_refused(self):
+        """ATDD: Git merge category strictly refuses operational approval lacking approved_mr_sha."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="git_merge",
+        )
+        assert allowed is False
+        assert "differs" in reason.lower()
+
+    def test_invalid_category_fails_closed_to_git_merge(self):
+        """ATDD: Unknown category fails closed to git_merge rules requiring matching SHA."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": None},
+            None,
+            category="unknown_category",
+        )
+        assert allowed is False
+        assert "differs" in reason.lower()
+
+    def test_git_merge_category_matching_sha_authorized(self):
+        """ATDD: Git merge category allows execution when approved and SHAs match."""
+        allowed, reason = verify_merge_guard(
+            {"approved": True, "approved_mr_sha": "abc1234"},
+            "abc1234",
+            category="git_merge",
+        )
+        assert allowed is True
+        assert "authorized" in reason.lower()

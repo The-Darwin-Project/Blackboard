@@ -617,6 +617,88 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
     assert.ok(payload.reason.includes('Merge REFUSED'), 'reason must state merge refusal');
   });
 
+  it('validate-mutations.sh emits decision: "deny" when role developer attempts operational mutation (kargo promote)', () => {
+    const hookPath = path.join(hooksDir, 'validate-mutations.sh');
+    const input = JSON.stringify({
+      toolCall: {
+        name: 'run_command',
+        args: { CommandLine: 'kargo promote --project myproj --freight foo' }
+      }
+    });
+
+    const res = spawnSync('bash', [hookPath], {
+      input,
+      env: { ...process.env, AGENT_ROLE: 'developer', AGENT_CLI: 'agy', DARWIN_WORK_STYLE: 'autonomous' },
+      encoding: 'utf8'
+    });
+
+    assert.equal(res.status, 0);
+    const payload = JSON.parse(res.stdout);
+    assert.equal(payload.decision, 'deny', 'mutating operational action must be denied for non-sysadmin developer');
+    assert.ok(
+      payload.reason.includes("Role 'developer' is not authorized for operational mutations; sysadmin required."),
+      `expected role restriction reason, got: ${payload.reason}`
+    );
+  });
+
+  it('validate-mutations.sh emits decision: "deny" when role architect attempts kargo promote', () => {
+    const hookPath = path.join(hooksDir, 'validate-mutations.sh');
+    const input = JSON.stringify({
+      toolCall: {
+        name: 'run_command',
+        args: { CommandLine: 'kargo promote --project myproj --freight foo' }
+      }
+    });
+
+    const res = spawnSync('bash', [hookPath], {
+      input,
+      env: { ...process.env, AGENT_ROLE: 'architect', AGENT_CLI: 'agy', DARWIN_WORK_STYLE: 'autonomous' },
+      encoding: 'utf8'
+    });
+
+    assert.equal(res.status, 0);
+    const payload = JSON.parse(res.stdout);
+    assert.equal(payload.decision, 'deny', 'kargo promote must be denied for read-only architect');
+    assert.ok(
+      payload.reason.includes('sysadmin required') || payload.reason.includes('mutation blocked'),
+      `expected sysadmin required or mutation blocked reason, got: ${payload.reason}`
+    );
+  });
+
+  it('validate-mutations.sh fails closed with decision: "deny" when classifier returns unparseable field 3', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darwin-agy-parity-'));
+    try {
+      const mockHook = path.join(tmpDir, 'validate-mutations.sh');
+      const hookPath = path.join(hooksDir, 'validate-mutations.sh');
+      fs.copyFileSync(hookPath, mockHook);
+      const mockClassifier = path.join(tmpDir, 'merge-guard.js');
+      fs.writeFileSync(mockClassifier, '#!/usr/bin/env node\nprocess.stdout.write("OK|||view_file|||invalid_token|||1|||");\n', { mode: 0o755 });
+
+      const input = JSON.stringify({
+        toolCall: {
+          name: 'view_file',
+          args: { AbsolutePath: '/tmp/test' }
+        }
+      });
+
+      const res = spawnSync('bash', [mockHook], {
+        input,
+        env: { ...process.env, AGENT_ROLE: 'developer', AGENT_CLI: 'agy', DARWIN_WORK_STYLE: 'autonomous' },
+        encoding: 'utf8'
+      });
+
+      assert.equal(res.status, 0);
+      const payload = JSON.parse(res.stdout);
+      assert.equal(payload.decision, 'deny', 'unparseable classifier output must fail closed with decision: deny');
+      assert.ok(
+        payload.reason.includes('unparseable guard category from classifier'),
+        `expected unparseable classifier reason, got: ${payload.reason}`
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('require-results.sh emits decision: "continue" (not "block") for agy Stop hook when results missing', () => {
     const hookPath = path.join(hooksDir, 'require-results.sh');
     const testPort = '19090';
