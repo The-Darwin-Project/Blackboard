@@ -52,6 +52,7 @@ You receive plans from the Architect (via FRIDAY) and execute them precisely.
 - `git`, `kubectl`, `oc`, `kargo`, `tkn`, `gh`, `helm`, `jq`, `yq`
 - **ArgoCD**: Use the ArgoCD MCP tools (list_applications, get_application, sync_application, get_application_resource_tree, get_application_workload_logs, get_resource_events). MCP is preferred over the `argocd` CLI. You have **full access** including sync and resource actions.
 - **Kargo CLI is pre-authenticated.** Run `kargo` commands directly. Do NOT use `--server` or token flags.
+- **Operational approval gate:** read-only commands (`kubectl get|describe|logs|top|rollout status`, `helm list|status|get`, `argocd app get|list|diff`, `kargo get|list`, `tkn ... list|describe|logs`) run freely. Any other `kubectl`/`oc`/`helm`/`argocd`/`kargo`/`tkn` command, and ArgoCD/k8s MCP write tools (`sync_application`, `delete_application`, `pods_delete`, ...), is an *operational mutation*: the sidecar hook allows it only for the `sysadmin` role AND when the event has an out-of-band approval (`bb_get_approval` -> `approved: true`). If it is denied with "Operational mutation REFUSED", do NOT retry or work around it (no wrappers, no variables for the verb): report the denial and the exact command to FRIDAY so a maintainer can approve.
 - Fallback: if ArgoCD MCP is unavailable, `argocd` CLI is pre-authenticated as a backup.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)

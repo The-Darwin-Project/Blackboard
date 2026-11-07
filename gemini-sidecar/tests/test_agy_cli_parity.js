@@ -2,6 +2,8 @@
 // @ai-rules:
 // 1. [Constraint]: Pure unit tests for cli-executor.js and cli-setup.js agy CLI parity — uses node:test + node:assert/strict.
 // 2. [Pattern]: Sets AGENT_CLI=agy, clears require.cache between tests, restores environment.
+// 4. [Coverage]: VMER-2271 operational gate through the REAL validate-mutations.sh + merge-guard.js against a loopback
+//    /proxy/approval stub (async spawn: spawnSync would block the in-process stub server).
 // 3. [Coverage]: Validates buildCLICommand agy path, flag order, effort normalization, mode plan security,
 //    conversation persistence, writeAgyMcpServer, and isAgySessionError recovery.
 
@@ -10,7 +12,8 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawnSync } = require('child_process');
+const http = require('http');
+const { spawn, spawnSync } = require('child_process');
 
 const CONFIG_PATH = path.resolve(__dirname, '..', 'config.js');
 const CLI_EXECUTOR_PATH = path.resolve(__dirname, '..', 'cli-executor.js');
@@ -659,9 +662,10 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
     assert.equal(res.status, 0);
     const payload = JSON.parse(res.stdout);
     assert.equal(payload.decision, 'deny', 'kargo promote must be denied for read-only architect');
-    assert.ok(
-      payload.reason.includes('sysadmin required') || payload.reason.includes('mutation blocked'),
-      `expected sysadmin required or mutation blocked reason, got: ${payload.reason}`
+    assert.match(
+      payload.reason,
+      /Operational mutation REFUSED: Role 'architect' is not authorized for operational mutations; sysadmin required\./,
+      `architect must be rejected by the operational role gate (not just any mutation block), got: ${payload.reason}`
     );
   });
 
@@ -764,5 +768,186 @@ describe('Antigravity PreToolUse and Stop hook protocol contract validation', ()
 });
 
 
+describe('VMER-2271: validate-mutations.sh operational gate (NEEDS_GUARD=2) against a loopback /proxy/approval', () => {
+  const hookPath = path.resolve(__dirname, '..', 'hooks', 'validate-mutations.sh');
+  const shInput = (CommandLine) => JSON.stringify({ toolCall: { name: 'run_command', args: { CommandLine } } });
+  const mcpInput = (name) => JSON.stringify({ toolCall: { name, args: {} } });
+  const OP_APPROVED = { approved: true, approved_mr_sha: null, approved_by: 'maintainer' };
 
+  // Starts a stub Brain-side /proxy/approval. body === undefined => do not start one (proxy down: connection refused on port 1).
+  function startApprovalStub(body) {
+    if (body === undefined) return Promise.resolve({ port: 1, close: () => {} });
+    return new Promise((resolve) => {
+      const srv = http.createServer((req, res) => {
+        if (req.url === '/proxy/approval') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(typeof body === 'string' ? body : JSON.stringify(body));
+        } else { res.writeHead(404); res.end(); }
+      });
+      srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => srv.close() }));
+    });
+  }
 
+  function runHook(input, { role, port, env = {} }) {
+    return new Promise((resolve, reject) => {
+      const child = spawn('bash', [hookPath], {
+        env: { ...process.env, AGENT_ROLE: role, AGENT_CLI: 'agy', DARWIN_WORK_STYLE: 'autonomous', SIDECAR_PORT: String(port), ...env },
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
+      let out = '';
+      child.stdout.on('data', (c) => { out += c; });
+      child.on('error', reject);
+      child.on('close', (code) => { try { resolve({ code, payload: JSON.parse(out) }); } catch (e) { reject(new Error(`unparseable hook output: ${out}`)); } });
+      child.stdin.end(input);
+    });
+  }
+
+  async function withStub(body, fn) {
+    const stub = await startApprovalStub(body);
+    try { return await fn(stub.port); } finally { stub.close(); }
+  }
+
+  it('sysadmin + operational + approved:true => allow', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      const { code, payload } = await runHook(shInput('kubectl delete pod x'), { role: 'sysadmin', port });
+      assert.equal(code, 0);
+      assert.equal(payload.decision, 'allow');
+    });
+  });
+
+  it('sysadmin + operational + approved:false => deny with operational wording', async () => {
+    await withStub({ approved: false }, async (port) => {
+      const { payload } = await runHook(shInput('kubectl delete pod x'), { role: 'sysadmin', port });
+      assert.equal(payload.decision, 'deny');
+      assert.match(payload.reason, /Operational mutation REFUSED/);
+      assert.doesNotMatch(payload.reason, /^Merge REFUSED/);
+    });
+  });
+
+  it('sysadmin + operational + proxy down => deny (fail closed)', async () => {
+    await withStub(undefined, async (port) => {
+      const { payload } = await runHook(shInput('kubectl delete pod x'), { role: 'sysadmin', port });
+      assert.equal(payload.decision, 'deny');
+      assert.match(payload.reason, /Operational mutation REFUSED/);
+    });
+  });
+
+  it('truthy non-boolean `approved` ("false", "true", 1) and garbage bodies are denied', async () => {
+    for (const body of [{ approved: 'false' }, { approved: 'true' }, { approved: 1 }, {}, 'not-json', '[]', 'null']) {
+      await withStub(body, async (port) => {
+        const { payload } = await runHook(shInput('kubectl delete pod x'), { role: 'sysadmin', port });
+        assert.equal(payload.decision, 'deny', `body=${JSON.stringify(body)}`);
+      });
+    }
+  });
+
+  it('role gate runs before approval: developer/qe/architect denied even with a valid approval; Sysadmin (case) allowed', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      for (const role of ['developer', 'qe', 'architect', 'explorer', 'sysadmin2']) {
+        const { payload } = await runHook(shInput('kubectl delete pod x'), { role, port });
+        assert.equal(payload.decision, 'deny', role);
+        assert.match(payload.reason, new RegExp(`Role '${role}' is not authorized for operational mutations; sysadmin required\\.`), role);
+      }
+      for (const role of ['Sysadmin', ' SYSADMIN ']) {
+        const { payload } = await runHook(shInput('kubectl delete pod x'), { role, port });
+        assert.equal(payload.decision, 'allow', `role ${JSON.stringify(role)} normalises to sysadmin`);
+      }
+    });
+  });
+
+  it('a hostile role (quote/backslash) is JSON-escaped in the deny and cannot break the document', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      const role = 'dev"x\\y';
+      const { payload } = await runHook(shInput('kubectl delete pod x'), { role, port });
+      assert.equal(payload.decision, 'deny');
+      assert.ok(payload.reason.includes(role), `escaped role must round-trip, got: ${payload.reason}`);
+    });
+  });
+
+  it('valued-flag, dynamic-verb and previously-unlisted verbs hit the operational gate', async () => {
+    const cmds = ['kubectl -v 6 exec -it prodpod -- /bin/sh', 'kubectl --request-timeout 5s delete pod x', 'kubectl $VERB pod x',
+      'kargo --config-path /x promote --stage s', 'kubectl label pod x a=b', 'oc adm drain n', 'argocd app rollback a 1', 'helm repo add x y'];
+    await withStub({ approved: false }, async (port) => {
+      for (const c of cmds) {
+        const { payload } = await runHook(shInput(c), { role: 'sysadmin', port });
+        assert.equal(payload.decision, 'deny', `unapproved: ${c}`);
+        assert.match(payload.reason, /Operational mutation REFUSED/, c);
+      }
+    });
+    await withStub(OP_APPROVED, async (port) => {
+      for (const c of cmds) {
+        const { payload } = await runHook(shInput(c), { role: 'sysadmin', port });
+        assert.equal(payload.decision, 'allow', `approved: ${c}`);
+      }
+    });
+  });
+
+  it('read-only operational verbs are not guarded: allowed with an unapproved event and with the proxy down', async () => {
+    const cmds = ['kubectl get pods -A', 'kubectl rollout status deploy/x', 'helm list', 'argocd app get a', 'kargo get stages'];
+    for (const body of [{ approved: false }, undefined]) {
+      await withStub(body, async (port) => {
+        for (const c of cmds) {
+          const { payload } = await runHook(shInput(c), { role: 'sysadmin', port });
+          assert.equal(payload.decision, 'allow', c);
+        }
+      });
+    }
+  });
+
+  it('MCP cluster writes: sysadmin approved allow / unapproved deny; developer role-denied; ArgoCD reads allowed for architect', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      assert.equal((await runHook(mcpInput('mcp__ArgoCD__sync_application'), { role: 'sysadmin', port })).payload.decision, 'allow');
+      const dev = (await runHook(mcpInput('mcp__ArgoCD__sync_application'), { role: 'developer', port })).payload;
+      assert.equal(dev.decision, 'deny');
+      assert.match(dev.reason, /sysadmin required/);
+    });
+    await withStub({ approved: false }, async (port) => {
+      const un = (await runHook(mcpInput('mcp__ArgoCD__sync_application'), { role: 'sysadmin', port })).payload;
+      assert.equal(un.decision, 'deny');
+      assert.match(un.reason, /Operational mutation REFUSED/);
+      assert.equal((await runHook(mcpInput('mcp__ArgoCD__get_application'), { role: 'architect', port })).payload.decision, 'allow');
+    });
+  });
+
+  it('sysadmin + git merge with an operational-only approval (approved_mr_sha=null) is denied: git_merge keeps the SHA binding', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      for (const c of ['git merge origin/main', 'gh pr merge 5', 'git push origin main', 'kubectl delete pod x && git merge origin/main',
+        'find . -exec oc rsh x \\; -exec git merge origin/main \\;', 'find . -exec git merge origin/main \\; -exec oc rsh x \\;',
+        'find . -exec oc rsh x \\; -exec gh pr merge 5 \\;']) {
+        const { payload } = await runHook(shInput(c), { role: 'sysadmin', port });
+        assert.equal(payload.decision, 'deny', c);
+        assert.match(payload.reason, /Merge REFUSED/, c);
+      }
+    });
+  });
+
+  it('operational gate is budget-safe: an exhausted hook budget denies instead of falling through', async () => {
+    await withStub(OP_APPROVED, async (port) => {
+      const { payload } = await runHook(shInput('kubectl delete pod x'), { role: 'sysadmin', port, env: { HOOK_BUDGET_SEC: '0' } });
+      assert.equal(payload.decision, 'deny');
+      assert.match(payload.reason, /budget exhausted/);
+    });
+  });
+
+  it('guard code outside 0/1/2 (e.g. 3 or "1|2") is denied as an unparseable category', () => {
+    for (const code of ['3', '12', 'x', '']) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darwin-agy-guardcode-'));
+      try {
+        fs.copyFileSync(hookPath, path.join(tmpDir, 'validate-mutations.sh'));
+        fs.writeFileSync(path.join(tmpDir, 'merge-guard.js'), `process.stdout.write("OK|||view_file|||${code}|||1|||");\n`);
+        const res = spawnSync('bash', [path.join(tmpDir, 'validate-mutations.sh')], {
+          input: JSON.stringify({ toolCall: { name: 'view_file', args: {} } }),
+          env: { ...process.env, AGENT_ROLE: 'developer', AGENT_CLI: 'agy', DARWIN_WORK_STYLE: 'autonomous', SIDECAR_PORT: '1' }, encoding: 'utf8',
+        });
+        const payload = JSON.parse(res.stdout);
+        assert.equal(payload.decision, 'deny', `guard code ${JSON.stringify(code)}`);
+      } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+    }
+  });
+
+  it('a tool name containing ||| cannot shift the classifier fields into a fast allow', async () => {
+    const { code, payload } = await runHook(JSON.stringify({ toolCall: { name: 'x|||0|||1|||y', args: {} } }), { role: 'developer', port: 1 });
+    assert.equal(code, 0);
+    assert.equal(payload.decision, 'deny');
+  });
+});

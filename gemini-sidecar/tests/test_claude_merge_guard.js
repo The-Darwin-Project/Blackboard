@@ -408,3 +408,143 @@ describe('ATDD Step 5: Context-aware approval verdict contract & --verdict CLI',
   });
 });
 
+
+
+// ---------------------------------------------------------------------------------------------
+// VMER-2271 remediation: strict approval, role normalisation, bypass classes and MCP operational tools end to end
+// (real loopback HTTP: handleRequest -> claude-guard.js -> merge-guard.js child process; fake Brain approval)
+// ---------------------------------------------------------------------------------------------
+describe('VMER-2271: operational gate on the Claude path', () => {
+  const OP_APPROVED = { approved: true, approved_mr_sha: null };
+  const reason = (r) => r.body?.hookSpecificOutput?.permissionDecisionReason || '';
+
+  it('truthy non-boolean `approved` is rejected for operational commands (sysadmin)', async () => {
+    for (const approved of ['false', 'true', 1, 'yes']) {
+      const s = await setup({ approved, approved_mr_sha: null }, 'sysadmin');
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(denied(r), `approved=${JSON.stringify(approved)} must not authorize an operational mutation`);
+        assert.match(reason(r), /Operational mutation REFUSED/);
+      } finally { s.close(); }
+    }
+  });
+
+  it('truthy non-boolean `approved` is rejected for git merge even with a matching SHA', async () => {
+    for (const approved of ['true', 1]) {
+      const s = await setup({ approved, approved_mr_sha: featSha }, 'developer');
+      try {
+        const r = await s.post(bash('git merge origin/main', repoFeat));
+        assert.ok(denied(r), `approved=${JSON.stringify(approved)} must not authorize a merge`);
+        assert.match(reason(r), /Merge REFUSED/);
+      } finally { s.close(); }
+    }
+  });
+
+  it('boolean approved + matching SHA still authorizes a git merge (control)', async () => {
+    const s = await setup({ approved: true, approved_mr_sha: featSha }, 'developer');
+    try {
+      assert.ok(!denied(await s.post(bash('git merge origin/main', repoFeat))), 'matching SHA + approved:true must allow');
+    } finally { s.close(); }
+  });
+
+  it('role normalisation: Sysadmin / padded / upper-case sysadmin pass the operational gate when approved', async () => {
+    for (const role of ['Sysadmin', ' sysadmin ', 'SYSADMIN']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(!denied(r), `role ${JSON.stringify(role)} must pass: ${reason(r)}`);
+      } finally { s.close(); }
+    }
+  });
+
+  it('roles other than sysadmin are denied operational mutations even when approved', async () => {
+    for (const role of ['developer', 'qe', 'tester', 'executor', 'architect', 'explorer', 'code_reviewer', 'sysadmin2', 'not_a_role']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(bash('kubectl delete pod x', repoMain));
+        assert.ok(denied(r), `role ${role} must be denied`);
+        assert.match(reason(r), /not authorized for operational mutations; sysadmin required/, `role ${role}`);
+      } finally { s.close(); }
+    }
+  });
+
+  it('valued-flag and dynamic-verb bypasses are denied when unapproved and allowed when approved', async () => {
+    const cmds = ['kubectl -v 6 exec -it prodpod -- /bin/sh', 'kubectl -v 5 apply -f x', 'kubectl --request-timeout 5s delete pod x',
+      'kargo --config-path /x promote --stage s', 'kubectl $VERB pod x', 'oc $ACTION deploy/x', 'helm $ACT r c', 'kubectl label pod x a=b',
+      'kargo approve --freight x', 'argocd app rollback a 1'];
+    const un = await setup({ approved: false }, 'sysadmin');
+    try {
+      for (const c of cmds) assert.ok(denied(await un.post(bash(c, repoMain))), `unapproved: ${c}`);
+    } finally { un.close(); }
+    const ok = await setup(OP_APPROVED, 'sysadmin');
+    try {
+      for (const c of cmds) assert.ok(!denied(await ok.post(bash(c, repoMain))), `approved: ${c}`);
+    } finally { ok.close(); }
+  });
+
+  it('read-only operational verbs need no approval and no brain', async () => {
+    const s = await setup(null, 'sysadmin'); // brain answers 502 => approval unreachable
+    try {
+      for (const c of ['kubectl get pods -A', 'kubectl -v 6 describe pod x', 'kubectl rollout status deploy/x', 'helm list', 'argocd app get a', 'kargo get stages', 'tkn pr logs x']) {
+        assert.ok(!denied(await s.post(bash(c, repoMain))), `read-only must pass: ${c}`);
+      }
+    } finally { s.close(); }
+  });
+
+  it('approval unreachable (brain 502) denies operational mutations (fail closed)', async () => {
+    const s = await setup(null, 'sysadmin');
+    try {
+      const r = await s.post(bash('kubectl delete pod x', repoMain));
+      assert.ok(denied(r));
+      assert.match(reason(r), /Operational mutation REFUSED/);
+    } finally { s.close(); }
+  });
+
+  it('git_merge wins in mixed commands: operational-only approval cannot merge, SHA-bound approval can', async () => {
+    const mixed = ['find . -exec oc rsh x \\; -exec git merge origin/main \\;', 'find . -exec git merge origin/main \\; -exec oc rsh x \\;',
+      'find . -exec oc rsh x \\; -exec gh pr merge 5 \\;', 'kubectl delete pod x && git merge origin/main'];
+    const opOnly = await setup(OP_APPROVED, 'sysadmin');
+    try {
+      for (const c of mixed) {
+        const r = await opOnly.post(bash(c, repoFeat));
+        assert.ok(denied(r), `operational-only approval must not merge: ${c}`);
+        assert.match(reason(r), /Merge REFUSED/, c);
+      }
+    } finally { opOnly.close(); }
+    const sha = await setup({ approved: true, approved_mr_sha: featSha }, 'sysadmin');
+    try {
+      assert.ok(!denied(await sha.post(bash(mixed[0], repoFeat))), 'SHA-bound approval authorizes the mixed command');
+    } finally { sha.close(); }
+  });
+
+  it('MCP cluster tools: sysadmin needs approval; developer/architect are role-denied; reads are free', async () => {
+    const tool = (name, cwd) => ({ tool_name: name, tool_input: {}, cwd });
+    const sync = 'mcp__ArgoCD__sync_application';
+    const approved = await setup(OP_APPROVED, 'sysadmin');
+    try { assert.ok(!denied(await approved.post(tool(sync, repoMain))), 'approved sysadmin may sync'); } finally { approved.close(); }
+    const un = await setup({ approved: false }, 'sysadmin');
+    try {
+      const r = await un.post(tool(sync, repoMain));
+      assert.ok(denied(r), 'unapproved sysadmin may not sync');
+      assert.match(reason(r), /Operational mutation REFUSED/);
+      assert.ok(!denied(await un.post(tool('mcp__ArgoCD__get_application', repoMain))), 'ArgoCD reads need no approval');
+    } finally { un.close(); }
+    for (const role of ['developer', 'architect']) {
+      const s = await setup(OP_APPROVED, role);
+      try {
+        const r = await s.post(tool('mcp__K8s_konflux__pods_delete', repoMain));
+        assert.ok(denied(r), `${role} must be denied a cluster MCP write`);
+        assert.match(reason(r), /sysadmin required/, role);
+      } finally { s.close(); }
+    }
+  });
+
+  it('test builtins are not dynamic command words on the Claude path', async () => {
+    const s = await setup(null, 'developer'); // approval unreachable: a git_merge verdict would deny
+    try {
+      assert.ok(!denied(await s.post(bash('[ -f x ] && echo y', repoMain))));
+      assert.ok(!denied(await s.post(bash('[[ -d x ]] || true', repoMain))));
+      assert.ok(denied(await s.post(bash('eval "git status"', repoMain))), 'eval stays guarded');
+    } finally { s.close(); }
+  });
+});

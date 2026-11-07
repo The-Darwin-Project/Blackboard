@@ -2,22 +2,32 @@
 // gemini-sidecar/hooks/merge-guard.js
 // @ai-rules:
 // 1. [Pattern]: Classifier helper for validate-mutations.sh. Reads the PreToolUse JSON on stdin and prints
-//    ONE line: `OK|||<tool>|||<guard 0|1>|||<readok 0|1>|||<shell command>` or `__MALFORMED__`.
-//    guard=1  -> the call can merge / write to a default branch; it MUST pass the out-of-band approval check.
+//    ONE line: `OK|||<tool>|||<guard 0|1|2>|||<readok 0|1>|||<shell command>` or `__MALFORMED__`.
+//    guard=1  -> category 'git_merge': the call can merge / write to a default branch. Needs approved === true AND
+//                approved_mr_sha === live HEAD, for ANY role.
+//    guard=2  -> category 'operational': mutating kubectl/oc/helm/argocd/kargo/tkn command or cluster/ArgoCD/Kargo MCP write.
+//                Needs role `sysadmin` AND approved === true; there is no commit, so NO SHA check. git_merge always wins
+//                when a call is both (combineCategories, find -exec clauses, pipelines).
 //    readok=1 -> non-shell tool that is read-only / comms (the only MCP tools read-only roles may call).
 // 2. [Contract]: Fail-CLOSED. Any exception, unparseable shape or excessive shell nesting => guard=1 or
-//    __MALFORMED__ (the shell wrapper denies). Never print anything else to stdout.
+//    __MALFORMED__ (the shell wrapper denies). Never print anything else to stdout. A tool name containing `|||` is
+//    MALFORMED (it would shift the delimited fields).
 // 3. [Constraint]: Shell commands are TOKENIZED (quotes, escapes, ;&|, $(..), backticks, bash -c, eval,
 //    env/sudo/xargs/find -exec wrappers, binary basename) -- not regex-matched -- so global options,
 //    quoting and wrappers cannot hide `git merge|push`, `gh pr merge`, `glab mr merge`, or non-GET
 //    curl/wget/gh api/glab api calls against merge endpoints.
 // 4. [Gotcha]: Still defense-in-depth, not a sandbox: it cannot see inside scripts (`sh x.sh`), `python -c`,
-//    `curl -d @file`, or values resolved at runtime ($VAR as a command word is treated as suspicious only
-//    when merge/push appears among the arguments).
+//    `curl -d @file`, or what runs INSIDE a pod (`kubectl exec pod -- git merge x` is 'operational'; the payload after `--`
+//    is not analyzed). A dynamic command word ($VAR, `eval`, glob) is guarded as git_merge (see rule 5); the test builtins
+//    `[` and `[[` are NOT dynamic words.
+// 10. [Contract]: Operational classification is a READ ALLOWLIST per binary (kubectl/oc/helm/argocd/kargo/tkn): anything not
+//    a known read verb/sub-verb is 'operational', value-taking flags before the verb cannot hide it, and a dynamic verb
+//    ($VERB, "$@") is guarded like a dynamic git/gh/glab subcommand. Extend the *_READ sets to unguard a new read verb.
+//    MCP tools: cluster-server/noun tools (ArgoCD, k8s, Helm, Kargo ...) with a mutating verb are 'operational'.
 // 5. [Contract]: Also the Claude path's engine: claude-guard.js require()s classify()/approvalVerdict() for the
 //    HTTP PreToolUse hook (payload `cwd` -> git lookups). `--verdict` CLI mode shares approvalVerdict with the
 //    agy shell hook. Dynamic words ($ { ` * ?) in the command/sub-command position, stdin-fed shells
-//    (`| bash`, heredocs, `bash -s`) and `-c "$(...)"` payloads are treated as merge-class (fail closed).
+//    (`| bash`, heredocs, `bash -s`) and `-c "$(...)"` payloads are treated as merge-class (fail closed). `[`/`[[` excepted.
 // 7. [Contract]: Tokenizer handles heredocs (<<, <<-, quoted/unquoted delimiters; unquoted bodies' $( ) are analyzed),
 //    # comments, $'..' ANSI-C (escapes decoded), $"..", quoted vs unquoted < > (only unquoted ones are redirections).
 //    git state is read via gitQuery(): ok=false (budget/spawn-cap/timeout/not-a-repo) is UNKNOWN and always guards;
@@ -181,10 +191,22 @@ function matchParen(str, start) {
 
 // Collect $( ) / backtick substitutions that an UNQUOTED heredoc body would execute. Returns true if one is
 // unterminated (caller treats the whole command as unanalyzable => guarded).
-function bodySubstitutions(body, nested) {
+// quoteAware=true is for array-assignment bodies `arr=('$(x)' "$(y)")`: inside '...' nothing expands (skip it), inside
+// "..." substitutions are live. Heredoc bodies MUST stay quoteAware=false: a single quote there is a literal character
+// and `$( )` still executes.
+function bodySubstitutions(body, nested, quoteAware = false) {
   let unsafe = false;
+  let inDouble = false;
   for (let i = 0; i < body.length; i++) {
     if (body[i] === '\\') { i++; continue; }
+    if (quoteAware) {
+      if (body[i] === '"') { inDouble = !inDouble; continue; }
+      if (body[i] === "'" && !inDouble) {
+        const k = body.indexOf("'", i + 1);
+        if (k === -1) { unsafe = true; break; } // unterminated '...' => unanalyzable
+        i = k; continue;
+      }
+    }
     if (body[i] === '$' && body[i + 1] === '(') {
       const end = matchParen(body, i + 2);
       if (end > body.length) { unsafe = true; nested.push(body.slice(i + 2)); break; }
@@ -292,7 +314,7 @@ function parseShell(str) {
       const closed = end <= n;
       if (!closed) unsafe = true;
       const body = str.slice(i + 1, closed ? end - 1 : n);
-      if (bodySubstitutions(body, nested)) unsafe = true;
+      if (bodySubstitutions(body, nested, true)) unsafe = true;
       const normBody = body.replace(/\r?\n/g, ' ');
       cur += '(' + normBody + ')';
       has = true;
@@ -708,50 +730,94 @@ function httpGuard(bin, args) {
 }
 
 const OPERATIONAL_BINS = new Set(['kargo', 'oc', 'kubectl', 'helm', 'argocd', 'tkn']);
-const KUBE_VERBS = new Set([
-  'apply', 'delete', 'patch', 'create', 'replace', 'scale', 'edit', 'rollout',
-  'exec', 'run', 'cp', 'rsh', 'attach', 'port-forward'
+// Operational classification is a READ ALLOWLIST: for an operational binary every invocation is 'operational' unless
+// its verb (and, where the verb has sub-verbs, the sub-verb) is a known read-only one. A mutating verb we have never
+// heard of (kubectl label, oc adm, kargo approve, argocd app rollback, tkn rerun ...) therefore fails CLOSED instead of
+// slipping through a denylist.
+const KUBE_READ = new Set(['get', 'describe', 'logs', 'top', 'explain', 'version', 'diff', 'events', 'api-resources',
+  'api-versions', 'cluster-info', 'wait', 'help', 'completion', 'whoami', 'status', 'projects', 'kustomize']);
+const KUBE_READ_SUB = {
+  rollout: new Set(['status', 'history']),
+  config: new Set(['view', 'current-context', 'get-contexts', 'get-clusters', 'get-users']),
+  auth: new Set(['can-i', 'whoami']),
+  plugin: new Set(['list'])
+};
+const HELM_READ = new Set(['list', 'ls', 'status', 'get', 'history', 'show', 'template', 'lint', 'version', 'env', 'search', 'help', 'completion']);
+const ARGO_READ_SUB = new Set(['get', 'list', 'ls', 'diff', 'history', 'manifests', 'logs', 'resources', 'wait', 'get-resource']);
+const ARGO_READ_TOP = new Set(['version', 'help', 'completion']);
+const KARGO_READ = new Set(['get', 'list', 'ls', 'describe', 'version', 'help', 'completion']);
+const TKN_READ_SUB = new Set(['list', 'ls', 'describe', 'desc', 'logs', 'version']);
+const TKN_READ_TOP = new Set(['version', 'help', 'completion']);
+// Flags (before the verb) that consume the NEXT token as their value. An UNLISTED valued flag is handled by the
+// "value-looking token after a flag" rule in operationalPositionals, not by this list.
+const OP_VALUED = new Set([
+  '-n', '--namespace', '--context', '--kube-context', '--kubeconfig', '-s', '--server', '--user', '--cluster',
+  '-p', '--project', '--as', '--as-group', '--as-uid', '-l', '--selector', '-f', '--filename', '-k', '--kustomize',
+  '-o', '--output', '--timeout', '--token', '--auth-token', '--kube-token', '--certificate-authority',
+  '--client-certificate', '--client-key', '-v', '--v', '--vmodule', '--loglevel', '--log-level', '--request-timeout',
+  '--config', '--config-path', '--tls-server-name', '--username', '--password', '--cache-dir', '--profile',
+  '--profile-output', '--kube-apiserver', '--insecure-skip-tls-verify-host', '--field-selector', '--grpc-web-root-path',
+  '--argocd-context', '--controller-namespace', '--registry-config', '--repository-config', '--repository-cache',
+  '--burst-limit', '--qps', '--kube-as-user', '--kube-as-group', '--kube-ca-file', '--kube-insecure-skip-tls-verify'
 ]);
-const HELM_VERBS = new Set(['install', 'upgrade', 'rollback', 'uninstall', 'delete']);
-const KARGO_VERBS = new Set(['promote', 'verify']);
+const BARE_WORD = /^[A-Za-z][A-Za-z-]*$/;
+
+// Positional words of an operational CLI invocation, in order. Tokens consumed as the value of a known valued flag are
+// dropped. A token right after an UNKNOWN flag is dropped only when it LOOKS like a value (`6`, `5s`, `/x`, `a=b`): a bare
+// alphabetic word there is as likely to be the verb (boolean flag + verb), so it is kept as a candidate and, being an
+// unknown verb, fails closed. A dynamic token ($VERB, "$@") is always kept. Scanning stops at `--` (the remote command of
+// `kubectl exec pod -- ...`); `sep` reports whether it was seen. `help` = --help/-h before `--`.
+function operationalPositionals(args) {
+  const pos = [];
+  let help = false;
+  let sep = false;
+  let afterFlag = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') { sep = true; break; }
+    if (a.startsWith('-')) {
+      if (a === '--help' || a === '-h') help = true;
+      if (OP_VALUED.has(a)) { i++; afterFlag = false; continue; }
+      afterFlag = !a.includes('=');
+      continue;
+    }
+    if (afterFlag && !DYN.test(a) && !BARE_WORD.test(a)) { afterFlag = false; continue; }
+    afterFlag = false;
+    pos.push(a);
+  }
+  return { pos, help, sep };
+}
 
 function isOperationalMutation(bin, args) {
   const b = bin.toLowerCase();
   if (!OPERATIONAL_BINS.has(b)) return false;
-  const GLOBAL_VALUED = new Set([
-    '-n', '--namespace', '--context', '--kube-context', '--kubeconfig',
-    '-s', '--server', '--user', '--cluster', '-p', '--project',
-    '--as', '--as-group', '-l', '--selector', '-f', '--filename',
-    '-k', '--kustomize', '-o', '--output', '--timeout', '--token',
-    '--auth-token', '--certificate-authority', '--client-certificate', '--client-key'
-  ]);
-  const pos = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith('-')) {
-      if (GLOBAL_VALUED.has(a)) i++;
-      continue;
-    }
-    pos.push(a.toLowerCase());
+  const { pos: rawPos, help, sep } = operationalPositionals(args);
+  if (help) return false; // `kubectl delete pod x --help` prints usage and exits
+  if (!rawPos.length) {
+    // bare invocation / --version / -h: read-only. Tokens only after `--` have no verb => unknown => guarded.
+    return sep;
   }
-  if (!pos.length) return false;
-  if (b === 'kargo') return KARGO_VERBS.has(pos[0]) || (pos[0] === 'stage' && KARGO_VERBS.has(pos[1]));
-  if (b === 'oc' || b === 'kubectl') {
-    if (pos[0] === 'rollout' && (pos[1] === 'status' || pos[1] === 'history')) return false;
-    return KUBE_VERBS.has(pos[0]);
+  // A dynamic verb or sub-verb ($VERB, "$@") can never match a read allowlist below, so it is guarded (the same fail-closed
+  // rule as a dynamic git/gh/glab subcommand) without a special case; dynamic ARGUMENTS after a read verb are fine.
+  const pos = rawPos.map((x) => x.toLowerCase());
+  if (b === 'kubectl' || b === 'oc') {
+    const sub = KUBE_READ_SUB[pos[0]];
+    if (sub) return !sub.has(pos[1]);
+    return !KUBE_READ.has(pos[0]);
   }
-  if (b === 'helm') return HELM_VERBS.has(pos[0]);
-  if (b === 'argocd') return pos[0] === 'app' && (pos[1] === 'sync' || pos[1] === 'delete' || pos[1] === 'set');
+  if (b === 'helm') return !HELM_READ.has(pos[0]);
+  if (b === 'kargo') return !KARGO_READ.has(pos[0]);
+  if (b === 'argocd') {
+    if (ARGO_READ_TOP.has(pos[0])) return false;
+    // `argocd app|appset|proj|repo|cluster|... <verb>`; `app actions list` is read, `app actions run` is not.
+    if (pos[1] === 'actions') return pos[2] !== 'list';
+    return !ARGO_READ_SUB.has(pos[1]);
+  }
   if (b === 'tkn') {
-    const res = pos[0];
-    const verb = pos[1];
-    if ((res === 'pipeline' || res === 'p') && (verb === 'start' || verb === 'delete')) return true;
-    if ((res === 'pipelinerun' || res === 'pr') && (verb === 'create' || verb === 'start' || verb === 'cancel' || verb === 'delete')) return true;
-    if ((res === 'task' || res === 't') && (verb === 'start' || verb === 'delete')) return true;
-    if ((res === 'taskrun' || res === 'tr') && (verb === 'create' || verb === 'start' || verb === 'cancel' || verb === 'delete')) return true;
-    return false;
+    if (TKN_READ_TOP.has(pos[0])) return false;
+    return !TKN_READ_SUB.has(pos[1]);
   }
-  return false;
+  return true;
 }
 
 function combineCategories(c1, c2) {
@@ -777,7 +843,8 @@ function analyzeTokens(tokens, depth, strict) {
   if (ENV_BUILTINS.has(bin) && configEnvGuard(rest.filter(isAssign), '')) return 'git_merge'; // export GIT_CONFIG_COUNT=1
   if (configFileWriteGuard(bin, rest, redirs, src)) return 'git_merge';
   if (bin === 'eval') return 'git_merge';
-  if (DYN.test(bin)) { // dynamic command word (e.g. $CMD, $TOOL)
+  // `[` / `[[` are the shell test builtins, not a glob character class: `[ -f x ] && echo y` is not a dynamic command word.
+  if (bin !== '[' && bin !== '[[' && DYN.test(bin)) { // dynamic command word (e.g. $CMD, $TOOL)
     if (rest.length > 0 && rest.every((x) => x === '--help' || x === '-h' || x === '--version' || x === '-v')) {
       return null;
     }
@@ -800,15 +867,18 @@ function analyzeTokens(tokens, depth, strict) {
     return sc === undefined ? null : analyzeString(sc, depth + 1, true);
   }
   if (bin === 'find') {
+    // Accumulate across EVERY -exec/-execdir/-ok/-okdir clause: `find . -exec oc rsh x \; -exec git merge m \;` is
+    // git_merge whatever the clause order. Only git_merge short-circuits.
+    let category = null;
     for (let i = 0; i < rest.length; i++) {
       if (/^-(exec|execdir|ok|okdir)$/.test(rest[i])) {
         let j = i + 1; const sub = [];
         while (j < rest.length && rest[j] !== ';' && rest[j] !== '+') sub.push(rest[j++]);
-        const cat = analyzeTokens(sub, depth + 1, strict);
-        if (cat) return cat;
+        category = combineCategories(category, analyzeTokens(sub, depth + 1, strict));
+        if (category === 'git_merge') return category;
       }
     }
-    return null;
+    return category;
   }
   if (bin === 'git') return gitGuard(rest, depth) ? 'git_merge' : null;
   if (bin === 'gh' || bin === 'glab') {
@@ -874,6 +944,13 @@ const HARD_WRITE = new Set(['delete', 'remove', 'merge', 'push', 'revoke', 'dest
 const WRITE = new Set(['create', 'update', 'write', 'set', 'add', 'run', 'sync', 'trigger', 'cancel', 'retry', 'close', 'reopen',
   'approve', 'upload', 'login', 'bootstrap', 'import', 'edit', 'save', 'amend', 'rebase', 'subscribe', 'unsubscribe', 'send',
   'execute', 'exec', 'start', 'stop', 'apply', 'patch', 'scale', 'rollback', 'promote', 'deploy', 'put', 'post', 'commit', 'upsert', 'submit']);
+// Cluster / delivery MCP servers and tool nouns whose WRITE tools are 'operational' (sysadmin + event approval), not git_merge.
+// Matched on the SERVER part of mcp__<server>__<tool> (first name token) and, for un-prefixed names, on the tool tokens.
+const OPERATIONAL_SERVER_TOKENS = new Set(['argocd', 'argo', 'k8s', 'kube', 'kubernetes', 'kubectl', 'openshift', 'ocp', 'oc', 'helm', 'kargo', 'tekton', 'tkn']);
+const OPERATIONAL_NOUNS = new Set(['application', 'applications', 'pod', 'pods', 'deployment', 'deployments', 'promotion', 'promotions', 'freight', 'kargo', 'helm', 'k8s', 'kubectl', 'argocd']);
+// Mutating verbs for those tools (WRITE/HARD_WRITE minus the git-only ones, plus cluster-specific ones).
+const OPERATIONAL_WRITE = new Set([...WRITE, ...HARD_WRITE, 'restart', 'evict', 'drain', 'cordon', 'uncordon', 'taint', 'label', 'annotate',
+  'terminate', 'refresh', 'install', 'uninstall', 'upgrade', 'replace', 'expose', 'autoscale', 'debug', 'attach', 'copy', 'cp', 'forward', 'rerun']);
 const FAMILY_TOKENS = new Set(['team', 'bb', 'svc', 'ka']); // comms / blackboard / journal / kubearchive MCPs
 // Tokens allowed after `browser_` for read-only roles (snapshot, take_screenshot, console_messages, network_requests,
 // network_request, find, tabs, wait_for, navigate, navigate_back, resize, hover, click, close).
@@ -906,9 +983,10 @@ function apiTokens(args) {
   return toks;
 }
 
+// Returns { guard, readok, guardCategory } where guardCategory is 'git_merge' | 'operational' | null (null iff !guard).
 function classifyTool(name, args) {
   const lname = name.toLowerCase();
-  if (NATIVE_MUTATION.has(lname)) return { guard: false, readok: false };
+  if (NATIVE_MUTATION.has(lname)) return { guard: false, readok: false, guardCategory: null };
   const a = args && typeof args === 'object' ? args : {};
   // mcp__<server>__<tool>: classify on the tool part only, so server names cannot masquerade as verbs/families.
   const parts = name.split('__');
@@ -918,6 +996,7 @@ function classifyTool(name, args) {
   const verb = tokens.find((t) => !PREFIX_TOKENS.has(t)) || '';
   const readFirst = READ_VERBS.has(verb);
   let guard = false;
+  let guardCategory = null;
 
   // merge verb: any `merge` token that is not the noun in "merge request(s)"; `accept` + merge-noun too
   if (!readFirst) {
@@ -948,6 +1027,17 @@ function classifyTool(name, args) {
     if (!apiRead && (apiWriteNeedsGuard(toks.join(' ')) || hasOpaqueTarget(toks))) guard = true;
   }
 
+  if (guard) guardCategory = 'git_merge'; // VCS merge / default-branch write / merge-endpoint API call
+  // Cluster / delivery MCP tools (k8s, OpenShift, ArgoCD, Helm, Kargo, Tekton): a MUTATING verb is operational. A VCS merge
+  // verdict above always wins (git_merge is the stricter, SHA-bound rule).
+  if (!guard && !readFirst) {
+    const serverTokens = parts.length >= 3 && /^mcp$/i.test(parts[0]) ? nameTokens(parts[1]) : [];
+    const clusterServer = serverTokens.length > 0 && OPERATIONAL_SERVER_TOKENS.has(serverTokens[0]) && !serverTokens.includes('archive');
+    const clusterNoun = tokens.some((t) => OPERATIONAL_NOUNS.has(t));
+    const opWrite = tokens.some((t) => OPERATIONAL_WRITE.has(t));
+    if ((clusterServer || clusterNoun) && opWrite && !FAMILY_TOKENS.has(verb)) { guard = true; guardCategory = 'operational'; }
+  }
+
   // Action tokens: server-name prefixes dropped, and `merge` dropped when it is only the noun
   // ("list_merge_requests") or the call is a read verb.
   const act = tokens.filter((t, i) => !PREFIX_TOKENS.has(t)
@@ -969,15 +1059,21 @@ function classifyTool(name, args) {
     else if (!readFirst && act.some((t) => WRITE.has(t))) readok = false;
     else readok = act.some((t) => READ_VERBS.has(t));
   }
-  return { guard, readok };
+  return { guard, readok, guardCategory };
 }
 
 // ---------------------------------------------------------------------------------------------
 // Approval verdict (shared by validate-mutations.sh and the Claude HTTP hook)
 // ---------------------------------------------------------------------------------------------
+// category 'git_merge' (default; anything that is not exactly 'operational'): approval AND approved_mr_sha === local HEAD.
+// category 'operational': approval only (no commit to bind to); the ROLE gate (sysadmin) is enforced by the callers.
+// `approved` must be the boolean true: truthy non-booleans ("false", 1, {}) are rejected.
 function approvalVerdict(approval, localSha, category = 'git_merge') {
   if (category !== 'operational') category = 'git_merge';
-  if (!approval || typeof approval !== 'object' || !approval.approved) {
+  if (!approval || typeof approval !== 'object' || approval.approved !== true) {
+    if (category === 'operational') {
+      return { allow: false, reason: 'Operational mutation REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).' };
+    }
     return { allow: false, reason: 'Merge REFUSED: event not approved by authorized maintainer (bb_get_approval/proxy/approval reports approved=false or was unreachable).' };
   }
   if (category === 'operational') {
@@ -1006,6 +1102,7 @@ function classify(d, opts = {}) {
   let name = d.toolCall?.name || d.tool_name || d.functionCall?.name || '';
   if (!name || typeof name !== 'string') return null;
   name = name.trim();
+  if (name.includes('|||')) return null; // would shift the `|||`-delimited fields of main()'s output (guard=0 => fast allow)
   const rawCmd = d.toolCall?.args?.CommandLine ?? d.toolCall?.args?.command ?? (d.tool_input && d.tool_input.command) ?? (d.functionCall?.args?.command) ?? '';
   if (rawCmd !== null && rawCmd !== undefined && typeof rawCmd !== 'string') return null;
   const cmd = (rawCmd || '').trim();
@@ -1016,8 +1113,7 @@ function classify(d, opts = {}) {
     return { name, guard: cat !== null, readok: false, cmd, isShell, guardCategory: cat };
   }
   const c = classifyTool(name, args);
-  const guardCategory = c.guardCategory || (c.guard ? 'git_merge' : null);
-  return { name, guard: c.guard, readok: c.readok, cmd, isShell, guardCategory };
+  return { name, guard: c.guard, readok: c.readok, cmd, isShell, guardCategory: c.guardCategory ?? (c.guard ? 'git_merge' : null) };
 }
 
 function main(raw) {
