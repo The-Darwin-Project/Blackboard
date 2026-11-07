@@ -382,3 +382,79 @@ describe('approvalVerdict: strict boolean approved, category-specific reasons', 
     assert.match(mg.approvalVerdict({ approved: false }, '', 'operational').reason, /^Operational mutation REFUSED/);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// ai-review + QE mutation gaps (PR #314): boolean flags, find -exec ordering via classify(), git_merge precedence on cluster MCPs
+// ---------------------------------------------------------------------------------------------
+const verdict = (cmd) => { const r = mg.classify(sh(cmd), { cwd: repo }); return { guard: r.guard, category: r.guardCategory }; };
+const OPERATIONAL = { guard: true, category: 'operational' };
+const GIT_MERGE = { guard: true, category: 'git_merge' };
+const UNGUARDED = { guard: false, category: null };
+
+describe('operational classifier: BOOLEAN flags must not swallow the verb (OP_VALUED holds only value-taking flags)', () => {
+  it('boolean TLS flag before a mutating verb followed by a read-looking positional is guarded', () => {
+    assert.deepEqual(verdict('helm --kube-insecure-skip-tls-verify upgrade list mychart'), OPERATIONAL);
+    assert.deepEqual(verdict('kubectl --insecure-skip-tls-verify delete get pod'), OPERATIONAL);
+    assert.deepEqual(verdict('oc --insecure-skip-tls-verify delete get pod x'), OPERATIONAL);
+    assert.deepEqual(verdict('helm --kube-insecure-skip-tls-verify=true upgrade list mychart'), OPERATIONAL);
+    assert.deepEqual(verdict('kubectl --insecure-skip-tls-verify-host delete get pod'), OPERATIONAL);
+  });
+  it('OP_VALUED itself no longer lists any boolean flag', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../hooks/merge-guard.js'), 'utf8');
+    const body = src.slice(src.indexOf('const OP_VALUED = new Set(['), src.indexOf(']);', src.indexOf('const OP_VALUED = new Set([')));
+    for (const f of ['--kube-insecure-skip-tls-verify', '--insecure-skip-tls-verify', '--insecure-skip-tls-verify-host', '--debug', '--insecure', '--plaintext']) {
+      assert.ok(!body.includes(`'${f}'`), `${f} must not be in OP_VALUED`);
+    }
+  });
+  it('the same boolean flags in front of a genuine read verb stay unguarded', () => {
+    assert.deepEqual(verdict('helm --kube-insecure-skip-tls-verify list'), UNGUARDED);
+    assert.deepEqual(verdict('kubectl --insecure-skip-tls-verify get pods'), UNGUARDED);
+    assert.deepEqual(verdict('helm --kube-insecure-skip-tls-verify status rel'), UNGUARDED);
+  });
+  it('a known mutating verb anywhere in the positionals guards a call whose first positional is a read verb', () => {
+    for (const cmd of ['helm list upgrade mychart', 'helm get install x', 'kubectl get delete pod', 'oc describe apply x',
+      'kubectl logs exec pod', 'kubectl rollout status delete x']) {
+      assert.deepEqual(verdict(cmd), OPERATIONAL, cmd);
+    }
+  });
+  it('read commands whose arguments are only resource names that look like sub-commands stay unguarded', () => {
+    for (const cmd of ['kubectl get rollout myapp', 'kubectl get certificate', 'kubectl get pod -n apply', 'helm search repo nginx',
+      'helm get values test', 'kubectl rollout status deploy/x']) {
+      assert.deepEqual(verdict(cmd), UNGUARDED, cmd);
+    }
+  });
+});
+
+describe('classify(): find -exec with an operational and a git_merge clause is git_merge in either order', () => {
+  it('operational first, git_merge second', () => assert.deepEqual(verdict('find . -exec oc rsh x \\; -exec git merge origin/main \\;'), GIT_MERGE));
+  it('git_merge first, operational second (reverse)', () => assert.deepEqual(verdict('find . -exec git merge origin/main \\; -exec oc rsh x \\;'), GIT_MERGE));
+});
+
+describe('classify(): cluster MCP tools carrying a merge / default-branch push verb are git_merge, never downgraded to operational', () => {
+  const tool = (name, input = {}) => { const r = mg.classify({ tool_name: name, tool_input: input }, { cwd: repo }); return { guard: r.guard, category: r.guardCategory }; };
+  it('merge verbs on cluster servers', () => {
+    assert.deepEqual(tool('mcp__argocd__merge_application'), GIT_MERGE);
+    assert.deepEqual(tool('mcp__openshift__accept_merge_request'), GIT_MERGE);
+  });
+  it('push_files on a cluster server (unspecified or protected branch)', () => {
+    assert.deepEqual(tool('mcp__argocd__push_files'), GIT_MERGE);
+    assert.deepEqual(tool('mcp__argocd__push_files', { branch: 'main' }), GIT_MERGE);
+  });
+  it('the same cluster server with a plain mutating verb remains operational (control)', () => {
+    assert.deepEqual(tool('mcp__argocd__sync_application'), OPERATIONAL);
+    assert.deepEqual(tool('mcp__openshift__delete_pod'), OPERATIONAL);
+  });
+});
+
+describe('classifyTool: un-prefixed cluster tool names with k8s nouns (OPERATIONAL_NOUNS)', () => {
+  it('mutating verb + k8s noun is operational', () => {
+    for (const n of ['delete_namespace', 'patch_secret', 'update_configmap', 'delete_node', 'scale_statefulset', 'create_pvc']) {
+      assert.equal(mg.classifyTool(n, {}).guardCategory, 'operational', n);
+    }
+  });
+  it('read verbs on the same nouns, and generic non-cluster nouns, are not guarded', () => {
+    for (const n of ['get_namespace', 'list_secrets', 'describe_node', 'cancel_job', 'create_project']) {
+      assert.equal(mg.classifyTool(n, {}).guardCategory, null, n);
+    }
+  });
+});

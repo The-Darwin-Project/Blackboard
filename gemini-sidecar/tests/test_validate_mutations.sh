@@ -1017,6 +1017,18 @@ run_stub_test "T-21z7: sysadmin operational with HOOK_BUDGET_SEC=0 => deny (budg
 run_stub_test "T-21z8: developer '[ -f x ] && echo y' with proxy down => allow" developer "$(sh_input '[ -f x ] && echo y')" DOWN allow
 run_stub_test "T-21z9: developer 'eval \"git status\"' with proxy down => deny (dynamic word stays guarded)" developer "$(sh_input 'eval "git status"')" DOWN deny "Merge REFUSED"
 
+# Boolean TLS flags must not swallow the verb: the call is operational (denied without approval), not a fast-allow read.
+run_stub_test "T-21y1: sysadmin helm --kube-insecure-skip-tls-verify upgrade list + approved:false => deny (operational)" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21y2: sysadmin kubectl --insecure-skip-tls-verify delete get pod + approved:false => deny (operational)" sysadmin "$(sh_input 'kubectl --insecure-skip-tls-verify delete get pod')" '{"approved":false}' deny "Operational mutation REFUSED"
+run_stub_test "T-21y3: developer helm --kube-insecure-skip-tls-verify upgrade list with proxy down => deny" developer "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" DOWN deny
+run_stub_test "T-21y4: sysadmin helm --kube-insecure-skip-tls-verify list (read) with proxy down => allow" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify list')" DOWN allow
+run_stub_test "T-21y5: sysadmin helm --kube-insecure-skip-tls-verify upgrade list + operational approval => allow" sysadmin "$(sh_input 'helm --kube-insecure-skip-tls-verify upgrade list mychart')" "$APPROVED_OP" allow
+
+# Cluster MCP tools with a merge / default-branch push verb stay git_merge (SHA-bound): an operational-only approval must not pass.
+run_stub_test "T-21y6: sysadmin mcp__argocd__merge_application + null-SHA approval => deny (git_merge wins)" sysadmin "$(mcp_input mcp__argocd__merge_application)" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21y7: sysadmin mcp__openshift__accept_merge_request + null-SHA approval => deny" sysadmin "$(mcp_input mcp__openshift__accept_merge_request)" "$APPROVED_OP" deny "Merge REFUSED"
+run_stub_test "T-21y8: sysadmin mcp__argocd__push_files + null-SHA approval => deny" sysadmin "$(mcp_input mcp__argocd__push_files)" "$APPROVED_OP" deny "Merge REFUSED"
+
 rm -f "$STUB_JS"
 
 echo ""

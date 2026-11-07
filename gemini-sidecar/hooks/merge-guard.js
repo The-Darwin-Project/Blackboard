@@ -743,22 +743,34 @@ const KUBE_READ_SUB = {
   plugin: new Set(['list'])
 };
 const HELM_READ = new Set(['list', 'ls', 'status', 'get', 'history', 'show', 'template', 'lint', 'version', 'env', 'search', 'help', 'completion']);
+// Known mutating verbs. Defence in depth for kubectl/oc/helm: a read verb at pos[0] does NOT make the call safe if ANY other
+// positional is one of these, because a mis-parsed flag (boolean vs valued) could have shifted the real verb out of pos[0].
+// Cost: a resource literally named `delete` (`kubectl get pod delete`) is guarded -- fail closed.
+const KUBE_MUTATING = new Set(['delete', 'apply', 'create', 'patch', 'replace', 'scale', 'edit', 'set', 'label', 'annotate', 'taint',
+  'drain', 'cordon', 'uncordon', 'exec', 'run', 'expose', 'autoscale', 'cp', 'port-forward', 'attach', 'debug', 'adm', 'rsh', 'rsync',
+  'new-app', 'start-build', 'import-image']);
+// Verbs that are ALSO common resource / release / subcommand names (rollout, certificate, tag, policy, proxy; helm test|repo|plugin|pull)
+// are left out so `kubectl get rollout x`, `kubectl get certificate`, `helm search repo x`, `helm get values test` stay read-only.
+const HELM_MUTATING = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback', 'push']);
 const ARGO_READ_SUB = new Set(['get', 'list', 'ls', 'diff', 'history', 'manifests', 'logs', 'resources', 'wait', 'get-resource']);
 const ARGO_READ_TOP = new Set(['version', 'help', 'completion']);
 const KARGO_READ = new Set(['get', 'list', 'ls', 'describe', 'version', 'help', 'completion']);
 const TKN_READ_SUB = new Set(['list', 'ls', 'describe', 'desc', 'logs', 'version']);
 const TKN_READ_TOP = new Set(['version', 'help', 'completion']);
-// Flags (before the verb) that consume the NEXT token as their value. An UNLISTED valued flag is handled by the
-// "value-looking token after a flag" rule in operationalPositionals, not by this list.
+// Flags (before the verb) that consume the NEXT token as their value. ONLY genuine single-value flags belong here: a
+// BOOLEAN flag listed here (--insecure-skip-tls-verify, --kube-insecure-skip-tls-verify, --debug, --plaintext ...) makes
+// operationalPositionals swallow the VERB as its "value" (`helm --kube-insecure-skip-tls-verify upgrade list x` -> verb
+// `list` => unguarded). An UNLISTED flag is handled by the "value-looking token after a flag" rule in
+// operationalPositionals (a bare word after it is kept as the verb candidate and fails closed), so when unsure, leave it out.
 const OP_VALUED = new Set([
   '-n', '--namespace', '--context', '--kube-context', '--kubeconfig', '-s', '--server', '--user', '--cluster',
   '-p', '--project', '--as', '--as-group', '--as-uid', '-l', '--selector', '-f', '--filename', '-k', '--kustomize',
   '-o', '--output', '--timeout', '--token', '--auth-token', '--kube-token', '--certificate-authority',
   '--client-certificate', '--client-key', '-v', '--v', '--vmodule', '--loglevel', '--log-level', '--request-timeout',
   '--config', '--config-path', '--tls-server-name', '--username', '--password', '--cache-dir', '--profile',
-  '--profile-output', '--kube-apiserver', '--insecure-skip-tls-verify-host', '--field-selector', '--grpc-web-root-path',
+  '--profile-output', '--kube-apiserver', '--field-selector', '--grpc-web-root-path',
   '--argocd-context', '--controller-namespace', '--registry-config', '--repository-config', '--repository-cache',
-  '--burst-limit', '--qps', '--kube-as-user', '--kube-as-group', '--kube-ca-file', '--kube-insecure-skip-tls-verify'
+  '--burst-limit', '--qps', '--kube-as-user', '--kube-as-group', '--kube-ca-file'
 ]);
 const BARE_WORD = /^[A-Za-z][A-Za-z-]*$/;
 
@@ -802,10 +814,10 @@ function isOperationalMutation(bin, args) {
   const pos = rawPos.map((x) => x.toLowerCase());
   if (b === 'kubectl' || b === 'oc') {
     const sub = KUBE_READ_SUB[pos[0]];
-    if (sub) return !sub.has(pos[1]);
-    return !KUBE_READ.has(pos[0]);
+    if (sub) return !sub.has(pos[1]) || pos.slice(2).some((x) => KUBE_MUTATING.has(x));
+    return !KUBE_READ.has(pos[0]) || pos.slice(1).some((x) => KUBE_MUTATING.has(x));
   }
-  if (b === 'helm') return !HELM_READ.has(pos[0]);
+  if (b === 'helm') return !HELM_READ.has(pos[0]) || pos.slice(1).some((x) => HELM_MUTATING.has(x));
   if (b === 'kargo') return !KARGO_READ.has(pos[0]);
   if (b === 'argocd') {
     if (ARGO_READ_TOP.has(pos[0])) return false;
@@ -947,7 +959,14 @@ const WRITE = new Set(['create', 'update', 'write', 'set', 'add', 'run', 'sync',
 // Cluster / delivery MCP servers and tool nouns whose WRITE tools are 'operational' (sysadmin + event approval), not git_merge.
 // Matched on the SERVER part of mcp__<server>__<tool> (first name token) and, for un-prefixed names, on the tool tokens.
 const OPERATIONAL_SERVER_TOKENS = new Set(['argocd', 'argo', 'k8s', 'kube', 'kubernetes', 'kubectl', 'openshift', 'ocp', 'oc', 'helm', 'kargo', 'tekton', 'tkn']);
-const OPERATIONAL_NOUNS = new Set(['application', 'applications', 'pod', 'pods', 'deployment', 'deployments', 'promotion', 'promotions', 'freight', 'kargo', 'helm', 'k8s', 'kubectl', 'argocd']);
+// Un-prefixed tool names (`delete_namespace`, `patch_secret`) are matched on these nouns. Generic words that other MCPs use for
+// non-cluster objects (job, cluster, release, project, pipeline, role, route) are deliberately NOT here.
+const OPERATIONAL_NOUNS = new Set(['application', 'applications', 'pod', 'pods', 'deployment', 'deployments', 'promotion', 'promotions',
+  'freight', 'kargo', 'helm', 'k8s', 'kubectl', 'argocd', 'namespace', 'namespaces', 'node', 'nodes', 'secret', 'secrets', 'configmap',
+  'configmaps', 'service', 'services', 'serviceaccount', 'serviceaccounts', 'statefulset', 'statefulsets', 'daemonset', 'daemonsets',
+  'replicaset', 'replicasets', 'cronjob', 'cronjobs', 'ingress', 'ingresses', 'pv', 'pvc', 'pvcs', 'persistentvolume', 'persistentvolumes',
+  'persistentvolumeclaim', 'persistentvolumeclaims', 'rolebinding', 'rolebindings', 'clusterrole', 'clusterrolebinding', 'pipelinerun',
+  'pipelineruns', 'taskrun', 'taskruns']);
 // Mutating verbs for those tools (WRITE/HARD_WRITE minus the git-only ones, plus cluster-specific ones).
 const OPERATIONAL_WRITE = new Set([...WRITE, ...HARD_WRITE, 'restart', 'evict', 'drain', 'cordon', 'uncordon', 'taint', 'label', 'annotate',
   'terminate', 'refresh', 'install', 'uninstall', 'upgrade', 'replace', 'expose', 'autoscale', 'debug', 'attach', 'copy', 'cp', 'forward', 'rerun']);
