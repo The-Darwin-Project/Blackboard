@@ -13,7 +13,10 @@
 #     One ShiftReport per sweep: batches are merged cumulatively into the same date:window key.
 # 11. [Constraint]: On quota/generic failure, events already in ctx.created_incidents are COMMITTED (Jira write is not
 #     idempotent); only the uncommitted remainder is restaged. Never restage a member whose incident exists.
-# 12. [Constraint]: auto_reconcile is enabled on the final declare_clusters attempt AND as an emergency fallback if all retries fail. Manifest events are never dropped.
+# 12. [Constraint]: auto_reconcile is enabled on the final declare_clusters attempt. If ALL attempts are rejected, a bounded
+#     emergency fallback salvages the last parsed plan (salvage_cluster_plan), reconciles the remainder, and sets ctx.degraded_plan.
+#     A degraded batch is reported (metrics.degraded_plan_count, noise_reduction_pct=0, ops notify) and STOPS the sweep drain, so a
+#     broken LLM/schema integration yields at most one low-confidence incident batch per sweep. Manifest events are never dropped.
 # 13. [Constraint]: The cart commits each cluster's members to Jira-done IMMEDIATELY after its incident is created (not at the end),
 #     so a crash/SIGTERM/CancelledError later in the sweep cannot make requeue_inflight() re-file an existing incident.
 # 14. [Gotcha]: INFLIGHT_TTL EXPIREs (deletes) the inflight SET after 1h -- it never requeues. Anything stranded there is lost unless
@@ -56,6 +59,16 @@ DEFAULT_BATCH_TIMEOUT_S = 1800.0
 MIN_BATCH_TIMEOUT_S = 60.0
 MAX_BATCH_TIMEOUT_S = 3300.0  # 55m (< 3600s inflight TTL safety net)
 SUMMARY_PROMPT_CHARS = 140
+FALLBACK_NOTIFY_TIMEOUT_S = 10.0
+ANALYSIS_NUDGE_ROUND = 19  # 0-indexed: the 20th round (2/3 of MAX_ANALYSIS_ROUNDS)
+
+
+def _append_user_turn(contents: list, text: str) -> None:
+    """Append user text keeping strict user/model alternation (merge into a trailing user turn)."""
+    if contents and contents[-1].get("role") == "user":
+        contents[-1].setdefault("parts", []).append({"text": text})
+    else:
+        contents.append({"role": "user", "parts": [{"text": text}]})
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -326,6 +339,12 @@ class NightwatcherObserver:
 
             # Decide whether to drain another batch within this sweep.
             ctx = self._batch_ctx
+            if ctx and ctx.degraded_plan:
+                logger.warning(
+                    "Nightwatcher: batch %d used the emergency clustering fallback, stopping drain (circuit breaker); "
+                    "remaining backlog waits for the next sweep", batch_no,
+                )
+                return
             if not (ctx and ctx.created_incidents):
                 logger.warning("Nightwatcher: batch %d produced no incidents, stopping drain to avoid re-leasing the same items", batch_no)
                 return
@@ -469,6 +488,7 @@ class NightwatcherObserver:
             investigations=list(ctx.investigations) if ctx else [],
             metrics={"escalation_count": len(done_ids), "incident_count": len(created),
                      "investigation_count": len(ctx.investigations) if ctx else 0,
+                     "degraded_plan_count": 1 if (ctx and ctx.degraded_plan) else 0,
                      "failed_cluster_count": 0},
             started_at=sweep_start, completed_at=time.time(),
         )
@@ -481,7 +501,7 @@ class NightwatcherObserver:
         if prior is None:
             return new
         metrics = dict(prior.metrics)
-        for key in ("escalation_count", "incident_count", "investigation_count", "failed_cluster_count"):
+        for key in ("escalation_count", "incident_count", "investigation_count", "failed_cluster_count", "degraded_plan_count"):
             metrics[key] = (prior.metrics.get(key) or 0) + (new.metrics.get(key) or 0)
         esc_total = metrics.get("escalation_count") or 0
         metrics["noise_reduction_pct"] = (
@@ -539,35 +559,27 @@ class NightwatcherObserver:
         review_nudge_sent = False
 
         def _finalize_analysis_handover():
-            contents.append({
-                "role": "user",
-                "parts": [{
-                    "text": (
-                        "Analysis phase complete. Proceeding to REPORT phase. "
-                        "You must now group all manifest events into incident clusters using declare_clusters."
-                    )
-                }],
-            })
+            _append_user_turn(
+                contents,
+                "Analysis phase complete. Proceeding to REPORT phase. "
+                "You must now group all manifest events into incident clusters using declare_clusters.",
+            )
             return contents, ctx
 
         for round_idx in range(MAX_ANALYSIS_ROUNDS):
-            if round_idx >= 19 and current_phase in ("review", "investigate") and not review_nudge_sent:
+            if round_idx >= ANALYSIS_NUDGE_ROUND and current_phase in ("review", "investigate") and not review_nudge_sent:
                 review_nudge_sent = True
                 action_prompt = (
                     "advance to investigate via set_phase('investigate')."
                     if current_phase == "review"
                     else "advance to report via set_phase('report')."
                 )
-                contents.append({
-                    "role": "user",
-                    "parts": [{
-                        "text": (
-                            f"Notice: Analysis round {round_idx + 1}/{MAX_ANALYSIS_ROUNDS}. "
-                            f"You have used 2/3 of your analysis budget. "
-                            f"Complete your {current_phase} and {action_prompt}"
-                        )
-                    }],
-                })
+                _append_user_turn(
+                    contents,
+                    f"Notice: Analysis round {round_idx + 1}/{MAX_ANALYSIS_ROUNDS}. "
+                    f"You have used 2/3 of your analysis budget. "
+                    f"Complete your {current_phase} and {action_prompt}",
+                )
             if hasattr(self.blackboard, "refresh_inflight_ttl"):
                 await self.blackboard.refresh_inflight_ttl()
             tools = get_phase_tools(current_phase)
@@ -626,11 +638,14 @@ class NightwatcherObserver:
         Validation errors are fed back to the model. auto_reconcile (code-built fallback
         cluster for unassigned events) is enabled ONLY on the final attempt, so the model
         always gets MAX_DECLARE_RETRIES chances to produce a complete plan itself.
-        Raises RuntimeError if no plan is accepted.
+        If every attempt is rejected, a bounded emergency fallback salvages the last parsed plan,
+        reconciles the remainder and flags ``ctx.degraded_plan`` (see @ai-rules 12).
+        Raises RuntimeError only when there is nothing to cluster.
         """
         from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
-        from .nightwatcher_tools import _handle_declare_clusters
+        from .nightwatcher_tools import _handle_declare_clusters, reconcile_cluster_plan, salvage_cluster_plan
         from ..agents.llm import record_token_usage
+        last_clusters = None
         for attempt in range(MAX_DECLARE_RETRIES + 1):
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
@@ -639,14 +654,25 @@ class NightwatcherObserver:
             )
             record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
+                call_args = response.function_call.args or {}
+                if isinstance(call_args, dict) and isinstance(call_args.get("clusters"), list):
+                    last_clusters = call_args["clusters"]
                 try:
                     result = await _handle_declare_clusters(
-                        response.function_call.args or {}, ctx,
+                        call_args, ctx,
                         auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
                     )
-                except Exception as exc:
-                    logger.warning("Nightwatcher: error processing declare_clusters on attempt %d: %s", attempt + 1, exc)
-                    result = f"Cluster plan validation failed: {exc}"
+                except (TypeError, ValueError, KeyError):
+                    # Only malformed-LLM-payload errors are retryable. Anything else (AttributeError, etc.) is a code
+                    # defect and must propagate to _sweep's safe-requeue path instead of being absorbed into a Jira write.
+                    logger.warning(
+                        "Nightwatcher: malformed declare_clusters payload on attempt %d/%d",
+                        attempt + 1, MAX_DECLARE_RETRIES + 1, exc_info=True,
+                    )
+                    result = (
+                        "Cluster plan validation failed: malformed cluster plan structure. "
+                        "Call declare_clusters with a list of cluster objects, each with a platform and a list of event ID strings."
+                    )
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": result}]})
                 if ctx.declared_clusters:
@@ -664,26 +690,34 @@ class NightwatcherObserver:
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text":
                     "You must call declare_clusters with your cluster plan. Every manifest event must be assigned."}]})
-        if not ctx.declared_clusters:
-            logger.warning(
-                "Nightwatcher: cluster declaration exhausted %d retries; triggering emergency auto-reconciliation fallback",
-                MAX_DECLARE_RETRIES + 1,
+        logger.warning(
+            "Nightwatcher: cluster declaration exhausted %d attempts; triggering emergency auto-reconciliation fallback",
+            MAX_DECLARE_RETRIES + 1,
+        )
+        salvaged = salvage_cluster_plan(last_clusters, ctx.manifest_ids, ctx.escalations_by_id)
+        plan = reconcile_cluster_plan(salvaged, ctx.manifest_ids, ctx.escalations_by_id)
+        if not plan:
+            raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+        # Establish the plan BEFORE any await so a cancelled/slow notification can never skip it.
+        ctx.declared_clusters = plan
+        ctx.degraded_plan = True
+        salvaged_events = sum(len(c["events"]) for c in salvaged)
+        logger.info(
+            "Nightwatcher: emergency fallback plan established: %d cluster(s), %d salvaged event(s), %d auto-reconciled",
+            len(plan), salvaged_events, len(ctx.manifest_ids) - salvaged_events,
+        )
+        try:
+            await asyncio.wait_for(
+                self._notify_ops(
+                    f":warning: Nightwatcher: cluster declaration failed all {MAX_DECLARE_RETRIES + 1} attempts; used the emergency "
+                    f"auto-reconciliation fallback ({salvaged_events} event(s) salvaged from the model's plan, "
+                    f"{len(ctx.manifest_ids) - salvaged_events} auto-reconciled into one low-confidence incident). "
+                    f"Sweep drain stops after this batch; check LLM/schema health."
+                ),
+                timeout=FALLBACK_NOTIFY_TIMEOUT_S,
             )
-            if hasattr(self, "_notify_ops"):
-                await self._notify_ops(
-                    f"Nightwatcher: cluster declaration exhausted all {MAX_DECLARE_RETRIES + 1} retries; "
-                    f"triggered emergency auto-reconciliation fallback for {len(ctx.manifest_ids)} event(s)."
-                )
-            from .nightwatcher_tools import reconcile_cluster_plan
-            ctx.declared_clusters = reconcile_cluster_plan([], ctx.manifest_ids, ctx.escalations_by_id)
-            if ctx.declared_clusters:
-                logger.info(
-                    "Nightwatcher: emergency fallback cluster plan established with %d cluster(s)",
-                    len(ctx.declared_clusters),
-                )
-                return
-
-        raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+        except TimeoutError:
+            logger.warning("Nightwatcher: fallback ops notification timed out after %.0fs (non-fatal)", FALLBACK_NOTIFY_TIMEOUT_S)
 
     async def _run_report_cart(self, ctx, contents, json_members, escalations,
                                system_prompt, shift_date, window, window_start,
@@ -790,12 +824,17 @@ class NightwatcherObserver:
                 logger.warning("Nightwatcher: restaged %d failed cluster events", len(ctx.failed_cluster_events))
 
         # Step 4: Summary
-        noise_pct = round((1 - len(ctx.created_incidents) / max(pending_count, 1)) * 100, 1) if ctx.created_incidents else 0
+        # A degraded (emergency-fallback) plan is not real clustering, so it must not claim noise reduction.
+        noise_pct = (
+            round((1 - len(ctx.created_incidents) / max(pending_count, 1)) * 100, 1)
+            if ctx.created_incidents and not ctx.degraded_plan else 0
+        )
         metrics = {
             "escalation_count": pending_count,
             "incident_count": len(ctx.created_incidents),
             "noise_reduction_pct": noise_pct,
             "investigation_count": len(ctx.investigations),
+            "degraded_plan_count": 1 if ctx.degraded_plan else 0,
             "failed_cluster_count": len([c for c in ctx.declared_clusters if any(eid in ctx.failed_cluster_events for eid in c.get("events", []))]),
             "sweep_duration_s": round(time.time() - sweep_start, 1),
         }
