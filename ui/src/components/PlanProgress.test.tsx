@@ -2,14 +2,15 @@
 /**
  * 4-Layer Farley ATDD Executable Acceptance Specification
  * Scenario T-5: PlanProgress Farley ATDD Status Transitions & Done Counter
+ * Scenario T-6: PlanProgress Dual-Correlation, Stream Affordance & Animations
  *
  * Layer 1: Domain Scenarios (Given/When/Then)
  * Layer 2: Domain DSL operations
  * Layer 3: Protocol Driver (React Testing Library)
  * Layer 4: System Under Test (PlanProgress component)
  */
-import { render, screen, cleanup } from '@testing-library/react';
-import { describe, it, expect, afterEach } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PlanProgress } from './PlanProgress';
 import type { ConversationTurn } from '../api/types';
 
@@ -21,8 +22,20 @@ afterEach(cleanup);
 class PlanProgressDriver {
   private container: HTMLElement | null = null;
 
-  renderComponent(turns: ConversationTurn[]) {
-    const result = render(<PlanProgress conversation={turns} />);
+  renderComponent(
+    turns: ConversationTurn[],
+    options?: {
+      activeAgentRoles?: Set<string>;
+      onOpenStream?: (role: string) => void;
+    }
+  ) {
+    const result = render(
+      <PlanProgress
+        conversation={turns}
+        activeAgentRoles={options?.activeAgentRoles}
+        onOpenStream={options?.onOpenStream}
+      />
+    );
     this.container = result.container;
     return result;
   }
@@ -37,7 +50,7 @@ class PlanProgressDriver {
     if (!this.container) throw new Error('Not rendered');
     const summaryEl = screen.getByText(summary);
     // Return step item container
-    return summaryEl.parentElement as HTMLElement;
+    return summaryEl.closest('[data-testid="plan-step"]') || summaryEl.parentElement as HTMLElement;
   }
 
   getStepIcon(summary: string): string {
@@ -55,6 +68,16 @@ class PlanProgressDriver {
     const stepEl = this.getStepElement(summary);
     return stepEl.style.borderLeft || '';
   }
+
+  queryWorkingBeacon(summary: string): HTMLElement | null {
+    const stepEl = this.getStepElement(summary);
+    return stepEl.querySelector('[data-testid="plan-step-working-beacon"]');
+  }
+
+  queryStreamButton(summary: string): HTMLElement | null {
+    const stepEl = this.getStepElement(summary);
+    return stepEl.querySelector('button[data-testid="plan-step-stream-btn"]');
+  }
 }
 
 // =============================================================================
@@ -63,6 +86,8 @@ class PlanProgressDriver {
 class PlanProgressDSL {
   private driver: PlanProgressDriver;
   private turns: ConversationTurn[] = [];
+  private activeAgentRoles: Set<string> | undefined = undefined;
+  private onOpenStream: ReturnType<typeof vi.fn> | undefined = undefined;
 
   constructor(driver: PlanProgressDriver) {
     this.driver = driver;
@@ -81,6 +106,19 @@ class PlanProgressDSL {
         },
       } as unknown as ConversationTurn,
     ];
+  }
+
+  givenReplanWithSteps(steps: Array<{ id: string; agent: string; summary: string }>) {
+    this.turns.push({
+      turn: this.turns.length + 1,
+      actor: 'architect',
+      action: 'plan',
+      thoughts: 'Plan updated with revised steps',
+      timestamp: 1700000050 + this.turns.length,
+      taskForAgent: {
+        steps,
+      },
+    } as unknown as ConversationTurn);
   }
 
   givenStepUpdated(stepId: string, status: string, agent: string, summary: string) {
@@ -113,8 +151,19 @@ class PlanProgressDSL {
     } as unknown as ConversationTurn);
   }
 
+  givenActiveAgentRoles(roles: string[]) {
+    this.activeAgentRoles = new Set(roles);
+  }
+
+  givenOnOpenStreamCallback(callback: ReturnType<typeof vi.fn>) {
+    this.onOpenStream = callback;
+  }
+
   whenRendered() {
-    return this.driver.renderComponent(this.turns);
+    return this.driver.renderComponent(this.turns, {
+      activeAgentRoles: this.activeAgentRoles,
+      onOpenStream: this.onOpenStream,
+    });
   }
 
   thenTestEvidenceTextContains(...fragments: string[]) {
@@ -136,10 +185,37 @@ class PlanProgressDSL {
     const border = this.driver.getStepBorderStyle(summary);
     expect(border).toContain(expectedColor);
   }
+
+  thenStepShowsWorkingBeacon(summary: string) {
+    const beacon = this.driver.queryWorkingBeacon(summary);
+    expect(beacon).not.toBeNull();
+    expect(beacon?.textContent).toContain('Working...');
+  }
+
+  thenStepDoesNotShowWorkingBeacon(summary: string) {
+    const beacon = this.driver.queryWorkingBeacon(summary);
+    expect(beacon).toBeNull();
+  }
+
+  thenStepShowsStreamButton(summary: string) {
+    const btn = this.driver.queryStreamButton(summary);
+    expect(btn).not.toBeNull();
+  }
+
+  thenStepDoesNotShowStreamButton(summary: string) {
+    const btn = this.driver.queryStreamButton(summary);
+    expect(btn).toBeNull();
+  }
+
+  whenStreamButtonClicked(summary: string) {
+    const btn = this.driver.queryStreamButton(summary);
+    if (!btn) throw new Error(`Stream button not found on ${summary}`);
+    fireEvent.click(btn);
+  }
 }
 
 // =============================================================================
-// Layer 1: Domain Scenarios (Scenario T-5)
+// Layer 1: Domain Scenarios (Scenario T-5 & T-6)
 // =============================================================================
 describe('Scenario T-5: Farley ATDD PlanProgress Acceptance Specification', () => {
   it('T-5.1: counts green_verified steps as done alongside completed steps', () => {
@@ -227,5 +303,244 @@ describe('Scenario T-5: Farley ATDD PlanProgress Acceptance Specification', () =
 
     dsl.whenRendered();
     dsl.thenTestEvidenceTextContains('12 passed in 0.4s');
+  });
+});
+
+describe('Scenario T-6: Dual-Correlation, Stream Affordance & Animations Acceptance Specification', () => {
+  it('T-6.1: highlights only the first pending step when multiple steps share the same agent role', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: First dev task' },
+      { id: '2', agent: 'developer', summary: 'Step 2: Second dev task' },
+    ]);
+    dsl.givenActiveAgentRoles(['developer']);
+
+    dsl.whenRendered();
+
+    // Only step 1 should show the working beacon and stream affordance
+    dsl.thenStepShowsWorkingBeacon('Step 1: First dev task');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Second dev task');
+  });
+
+  it('T-6.2: canonicalizes agent roles case-insensitively and ignores empty string agent', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'SysAdmin', summary: 'Step 1: Server setup' },
+      { id: '2', agent: '', summary: 'Step 2: Unassigned step' },
+    ]);
+    dsl.givenActiveAgentRoles(['sysadmin', '']);
+
+    dsl.whenRendered();
+
+    dsl.thenStepShowsWorkingBeacon('Step 1: Server setup');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Unassigned step');
+  });
+
+  it('T-6.3: suppresses active beacon when all steps are terminal even if agent is active', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Done dev task' },
+    ]);
+    dsl.givenStepUpdated('1', 'completed', 'developer', 'Step 1: Done dev task');
+    dsl.givenActiveAgentRoles(['developer']);
+
+    dsl.whenRendered();
+
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 1: Done dev task');
+    dsl.thenStepDoesNotShowStreamButton('Step 1: Done dev task');
+  });
+
+  it('T-6.4: fires onOpenStream with agent role when Stream ↗ button is clicked', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+    const streamSpy = vi.fn();
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Live dev task' },
+    ]);
+    dsl.givenActiveAgentRoles(['developer']);
+    dsl.givenOnOpenStreamCallback(streamSpy);
+
+    dsl.whenRendered();
+
+    dsl.thenStepShowsStreamButton('Step 1: Live dev task');
+    dsl.whenStreamButtonClicked('Step 1: Live dev task');
+
+    expect(streamSpy).toHaveBeenCalledWith('developer');
+  });
+
+  it('T-6.5: safely slices replan turns and ignores steps from prior plan action', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    // Initial plan with step 1, completed BEFORE the replan
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Old plan step' },
+    ]);
+    dsl.givenStepUpdated('1', 'completed', 'developer', 'Step 1: Old plan step');
+
+    // Replan reuses step id '1' (new summary). The pre-replan "completed" update targets the same id,
+    // so only slicing from the latest plan turn keeps it from leaking into the new plan.
+    dsl.givenReplanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Re-planned task' },
+    ]);
+    dsl.givenActiveAgentRoles(['developer']);
+
+    dsl.whenRendered();
+
+    // The re-planned step is pending (not completed), active, and counted as 0/1
+    dsl.thenStepIconIs('Step 1: Re-planned task', '\u2B1C');
+    dsl.thenStepShowsWorkingBeacon('Step 1: Re-planned task');
+    dsl.thenDoneCounterShows('0/1');
+  });
+
+  it('T-6.5b: applies plan_step updates that arrive after the replan to the reused step id', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([{ id: '1', agent: 'developer', summary: 'Step 1: Old plan step' }]);
+    dsl.givenStepUpdated('1', 'completed', 'developer', 'Step 1: Old plan step');
+    dsl.givenReplanWithSteps([{ id: '1', agent: 'developer', summary: 'Step 1: Re-planned task' }]);
+    dsl.givenStepUpdated('1', 'green_verified', 'developer', 'Step 1: Re-planned task');
+
+    dsl.whenRendered();
+
+    dsl.thenStepIconIs('Step 1: Re-planned task', '\uD83D\uDFE2 \u2713');
+    dsl.thenDoneCounterShows('1/1');
+  });
+
+  it('T-6.6: does not violate React rules of hooks when re-rendering from empty conversation to populated plan', () => {
+    const { rerender } = render(<PlanProgress conversation={[]} activeAgentRoles={new Set(['developer'])} />);
+    expect(screen.queryByText('Plan')).toBeNull();
+
+    const planTurn: ConversationTurn = {
+      turn: 1,
+      actor: 'architect',
+      action: 'plan',
+      timestamp: 1000,
+      taskForAgent: {
+        steps: [{ id: '1', agent: 'developer', summary: 'Step 1: Implementation' }],
+      },
+    };
+
+    expect(() => {
+      rerender(<PlanProgress conversation={[planTurn]} activeAgentRoles={new Set(['developer'])} />);
+    }).not.toThrow();
+
+    expect(screen.getByText('Step 1: Implementation')).toBeInTheDocument();
+  });
+  it('T-6.7: treats an explicit in_progress step as active without any active agent role, and offers Stream', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+    const streamSpy = vi.fn();
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Running dev task' },
+      { id: '2', agent: 'qe', summary: 'Step 2: Waiting qe task' },
+    ]);
+    dsl.givenStepUpdated('1', 'in_progress', 'developer', 'Step 1: Running dev task');
+    dsl.givenOnOpenStreamCallback(streamSpy);
+    // No activeAgentRoles at all: only step.status === 'in_progress' can make step 1 active
+
+    dsl.whenRendered();
+
+    dsl.thenStepShowsWorkingBeacon('Step 1: Running dev task');
+    dsl.thenStepShowsStreamButton('Step 1: Running dev task');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Waiting qe task');
+    dsl.thenStepDoesNotShowStreamButton('Step 2: Waiting qe task');
+    dsl.thenStepIconIs('Step 1: Running dev task', '\uD83D\uDD04');
+  });
+
+  it('T-6.8: normalizes hyphen/space/underscore role variants between step agent and active roles', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'code-reviewer', summary: 'Step 1: Review hyphen' },
+      { id: '2', agent: 'Code Reviewer', summary: 'Step 2: Review spaced' },
+      { id: '3', agent: 'architect', summary: 'Step 3: Not active' },
+    ]);
+    // Active role arrives with underscore form; the first uncompleted step for that canonical role gets the beacon
+    dsl.givenActiveAgentRoles(['Code_Reviewer']);
+
+    dsl.whenRendered();
+
+    dsl.thenStepShowsWorkingBeacon('Step 1: Review hyphen');
+    // Step 2 shares the canonical role but is not the first uncompleted one
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Review spaced');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 3: Not active');
+  });
+
+  it('T-6.9: correlates the active role to the first UNCOMPLETED step, skipping completed and blocked ones', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Finished dev task' },
+      { id: '2', agent: 'developer', summary: 'Step 2: Blocked dev task' },
+      { id: '3', agent: 'developer', summary: 'Step 3: Current dev task' },
+      { id: '4', agent: 'developer', summary: 'Step 4: Later dev task' },
+    ]);
+    dsl.givenStepUpdated('1', 'completed', 'developer', 'Step 1: Finished dev task');
+    dsl.givenStepUpdated('2', 'blocked', 'developer', 'Step 2: Blocked dev task');
+    dsl.givenActiveAgentRoles(['developer']);
+
+    dsl.whenRendered();
+
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 1: Finished dev task');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Blocked dev task');
+    dsl.thenStepShowsWorkingBeacon('Step 3: Current dev task');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 4: Later dev task');
+  });
+
+  it('T-6.10: suppresses correlated beacons when every step is terminal (blocked/red_locked/green_verified)', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'Step 1: Blocked' },
+      { id: '2', agent: 'qe', summary: 'Step 2: Red locked' },
+      { id: '3', agent: 'sysadmin', summary: 'Step 3: Green verified' },
+    ]);
+    dsl.givenStepUpdated('1', 'blocked', 'developer', 'Step 1: Blocked');
+    dsl.givenStepUpdated('2', 'red_locked', 'qe', 'Step 2: Red locked');
+    dsl.givenStepUpdated('3', 'green_verified', 'sysadmin', 'Step 3: Green verified');
+    dsl.givenActiveAgentRoles(['developer', 'qe', 'sysadmin']);
+
+    dsl.whenRendered();
+
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 1: Blocked');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 2: Red locked');
+    dsl.thenStepDoesNotShowWorkingBeacon('Step 3: Green verified');
+    // Only green_verified counts as done (blocked / red_locked do not)
+    dsl.thenDoneCounterShows('1/3');
+  });
+
+  it('T-6.11: counts green_verified and completed as done but not in_progress/blocked/red_locked', () => {
+    const driver = new PlanProgressDriver();
+    const dsl = new PlanProgressDSL(driver);
+
+    dsl.givenPlanWithSteps([
+      { id: '1', agent: 'developer', summary: 'S1' },
+      { id: '2', agent: 'developer', summary: 'S2' },
+      { id: '3', agent: 'developer', summary: 'S3' },
+      { id: '4', agent: 'developer', summary: 'S4' },
+      { id: '5', agent: 'developer', summary: 'S5' },
+    ]);
+    dsl.givenStepUpdated('1', 'green_verified', 'developer', 'S1');
+    dsl.givenStepUpdated('2', 'completed', 'developer', 'S2');
+    dsl.givenStepUpdated('3', 'in_progress', 'developer', 'S3');
+    dsl.givenStepUpdated('4', 'blocked', 'developer', 'S4');
+    dsl.givenStepUpdated('5', 'red_locked', 'developer', 'S5');
+
+    dsl.whenRendered();
+
+    dsl.thenDoneCounterShows('2/5');
   });
 });

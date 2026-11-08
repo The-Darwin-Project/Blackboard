@@ -6,27 +6,16 @@
 // 4. [Pattern]: useWSReconnect clears recentlyClosedRef only. Query invalidation owned by OpsControl.
 // 5. [Constraint]: Must be nested inside WebSocketProvider AND OpsControlProvider (reads activeEvents).
 // 6. [Pattern]: Both this and OpsControl call useActiveEvents() — React Query deduplicates via same key.
-import { createContext, useContext, useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
+// 7. [Constraint]: Component-only module. Context object + useActiveStreams/useActiveStreamsSafe live in activeStreamsStore.ts;
+//    the ActiveStream type lives in utils/streamReducers.ts.
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import {
-  type Streams, type ActiveStream,
+  type Streams,
   applyProgress, applyTurn, removeStreamsForEvent, computeGCDeletes,
 } from '../utils/streamReducers';
-
-export type { ActiveStream };
-
-interface ActiveStreamsState {
-  activeStreams: Streams;
-}
-
-const ActiveStreamsContext = createContext<ActiveStreamsState | null>(null);
-
-export function useActiveStreams(): ActiveStreamsState {
-  const ctx = useContext(ActiveStreamsContext);
-  if (!ctx) throw new Error('useActiveStreams must be used within ActiveStreamsProvider');
-  return ctx;
-}
+import { ActiveStreamsContext, type ActiveStreamsState } from './activeStreamsStore';
 
 export function ActiveStreamsProvider({ children }: { children: ReactNode }) {
   const [activeStreams, setActiveStreams] = useState<Streams>({});
@@ -34,9 +23,11 @@ export function ActiveStreamsProvider({ children }: { children: ReactNode }) {
   const { invalidateActive, invalidateEvent, invalidateClosed } = useQueueInvalidation();
 
   const activeEventsRef = useRef(activeEvents);
-  activeEventsRef.current = activeEvents;
   const activeStreamsRef = useRef(activeStreams);
-  activeStreamsRef.current = activeStreams;
+  useLayoutEffect(() => {
+    activeEventsRef.current = activeEvents;
+    activeStreamsRef.current = activeStreams;
+  }, [activeEvents, activeStreams]);
   const recentlyClosedRef = useRef<Set<string>>(new Set());
   const staleCandidatesRef = useRef<Set<string>>(new Set());
 

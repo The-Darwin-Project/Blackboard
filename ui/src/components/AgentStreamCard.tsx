@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, ExternalLink } from 'lucide-react';
 import { ACTOR_COLORS } from '../constants/colors';
+import { FloatingWindow } from './workspace/FloatingWindow';
+import { copyLogLines } from '../utils/clipboard';
 
 interface AgentStreamCardProps {
   agentName: string;
@@ -46,82 +48,6 @@ function MessageCards({ messages, color }: { messages: string[]; color: string }
   );
 }
 
-
-function FloatingWindow({
-  agentName, eventId, messages, onClose,
-}: {
-  agentName: string;
-  eventId: string | null;
-  messages: string[];
-  onClose: () => void;
-}) {
-  const color = ACTOR_COLORS[agentName] || '#6b7280';
-  const [pos, setPos] = useState({ x: 120, y: 80 });
-  const [size, setSize] = useState({ width: 700, height: 500 });
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-  const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages.length]);
-
-  return (
-    <div style={{
-      position: 'fixed', top: pos.y, left: pos.x,
-      width: size.width, height: size.height,
-      background: '#0f172a', border: `2px solid ${color}`,
-      borderRadius: 12, zIndex: 1000, display: 'flex', flexDirection: 'column',
-      boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
-    }}>
-      {/* Draggable header */}
-      <div style={{
-        padding: '8px 12px', background: '#1e293b', borderBottom: `1px solid ${color}33`,
-        borderRadius: '10px 10px 0 0', cursor: 'move', display: 'flex',
-        justifyContent: 'space-between', alignItems: 'center',
-      }} onMouseDown={(e) => {
-        dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
-        const onMove = (ev: MouseEvent) => {
-          if (!dragRef.current) return;
-          setPos({ x: dragRef.current.origX + ev.clientX - dragRef.current.startX, y: dragRef.current.origY + ev.clientY - dragRef.current.startY });
-        };
-        const onUp = () => { dragRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ background: color, color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
-            {agentName}
-          </span>
-          {eventId && <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>[{eventId}]</span>}
-        </div>
-        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 18, cursor: 'pointer', lineHeight: 1, padding: '0 4px' }}>×</button>
-      </div>
-
-      {/* Scrollable content */}
-      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: 12, fontFamily: 'monospace', fontSize: 13, lineHeight: '1.5', color: '#94a3b8' }}>
-        <MessageCards messages={messages} color={color} />
-      </div>
-
-      {/* Resize handle */}
-      <div style={{
-        position: 'absolute', bottom: 0, right: 0, width: 16, height: 16,
-        cursor: 'nwse-resize', borderRight: `2px solid ${color}66`, borderBottom: `2px solid ${color}66`, borderRadius: '0 0 10px 0',
-      }} onMouseDown={(e) => {
-        e.stopPropagation();
-        resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: size.width, origH: size.height };
-        const onMove = (ev: MouseEvent) => {
-          if (!resizeRef.current) return;
-          setSize({ width: Math.max(400, resizeRef.current.origW + ev.clientX - resizeRef.current.startX), height: Math.max(250, resizeRef.current.origH + ev.clientY - resizeRef.current.startY) });
-        };
-        const onUp = () => { resizeRef.current = null; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
-      }} />
-    </div>
-  );
-}
-
 export default function AgentStreamCard({ agentName, eventId, messages, isActive }: AgentStreamCardProps) {
   const color = ACTOR_COLORS[agentName] || '#4ade80';
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -132,7 +58,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
     if (scrollRef.current && !userScrolled) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages.length, userScrolled]);
+  }, [messages, userScrolled]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -140,7 +66,6 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
     setUserScrolled(!atBottom);
   }, []);
-
 
   return (
     <>
@@ -166,7 +91,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
           </div>
           <div style={{ display: 'flex', gap: 3 }}>
             <button
-              onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
+              onClick={() => copyLogLines(messages)}
               title="Copy stream"
               aria-label="Copy stream"
               className="hover:bg-white/10 hover:border-white/20 transition-colors"

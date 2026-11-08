@@ -1,25 +1,20 @@
 // BlackBoard/ui/src/components/PlanProgress.tsx
 // @ai-rules:
 // 1. [Pattern]: Derives plan state from conversation turns -- no separate API. Same useEventDocument data.
-// 2. [Constraint]: Last action="plan" turn = active plan. Last action="plan_step" per step_id = current status.
-// 3. [Pattern]: Vertical side panel layout -- sits as a flex column sibling of the event chat.
+// 2. [Constraint]: Last action="plan" turn = active plan. Last action="plan_step" per step_id >= plan turn = current status.
+// 3. [Pattern]: Dual-correlation: step.status === 'in_progress' OR first uncompleted step matching active agent role.
 // 4. [Constraint]: Uses ACTOR_COLORS from constants/colors.ts -- single source of truth for agent colors.
+// 5. [Constraint]: Exports components only (react-refresh). usePlanState lives in hooks/usePlanState.ts; canonicalRole/PlanStep in utils/planState.ts.
 import { useMemo } from 'react';
 import { ACTOR_COLORS } from '../constants/colors';
+import { usePlanState } from '../hooks/usePlanState';
+import { canonicalRole, TERMINAL_STATUSES } from '../utils/planState';
 import type { ConversationTurn } from '../api/types';
 
-interface PlanStep {
-  id: string;
-  agent: string;
-  summary: string;
-  status: string;
-  timestamp?: number;
-  // Backend (PlanStepRequest.test_evidence) sends a dict; legacy/other producers may send a plain string.
-  test_evidence?: string | Record<string, unknown>;
-}
-
-interface PlanProgressProps {
-  conversation: ConversationTurn[];
+export interface PlanProgressProps {
+  conversation?: ConversationTurn[];
+  activeAgentRoles?: Set<string>;
+  onOpenStream?: (agentRole: string) => void;
 }
 
 const STATUS_ICON: Record<string, string> = {
@@ -40,46 +35,41 @@ const BORDER_COLOR: Record<string, string> = {
   pending: '#334155',
 };
 
-export function usePlanState(conversation: ConversationTurn[]) {
-  return useMemo(() => {
-    let plan: ConversationTurn | null = null;
-    for (let i = conversation.length - 1; i >= 0; i--) {
-      const t = conversation[i];
-      if (t.action === 'plan' && t.taskForAgent && (t.taskForAgent as Record<string, unknown>).steps) {
-        plan = t;
-        break;
-      }
-    }
-    if (!plan) return { hasPlan: false, planTurn: null, steps: [] as PlanStep[] };
-
-    const rawSteps = (plan.taskForAgent as { steps: Array<{ id: string; agent: string; summary?: string }> }).steps;
-    const stepMap = new Map<string, PlanStep>();
-    for (const s of rawSteps) {
-      stepMap.set(s.id, { id: s.id, agent: s.agent || '', summary: s.summary || '', status: 'pending' });
-    }
-
-    for (const t of conversation) {
-      if (t.action === 'plan_step' && t.taskForAgent) {
-        const tf = t.taskForAgent as { step_id?: string; status?: string; test_evidence?: string | Record<string, unknown> };
-        if (tf.step_id && stepMap.has(tf.step_id)) {
-          const existing = stepMap.get(tf.step_id)!;
-          existing.status = tf.status || 'completed';
-          if (tf.test_evidence) existing.test_evidence = tf.test_evidence;
-          existing.timestamp = t.timestamp;
-        }
-      }
-    }
-
-    return { hasPlan: true, planTurn: plan, steps: Array.from(stepMap.values()) };
-  }, [conversation]);
-}
-
-export function PlanProgress({ conversation }: PlanProgressProps) {
+export function PlanProgress({
+  conversation,
+  activeAgentRoles,
+  onOpenStream,
+}: PlanProgressProps) {
   const { planTurn, steps } = usePlanState(conversation);
+
+  // Normalized active roles (hooks MUST run unconditionally before any early returns)
+  const normalizedActiveRoles = useMemo(() => {
+    const set = new Set<string>();
+    if (activeAgentRoles) {
+      for (const r of activeAgentRoles) {
+        const c = canonicalRole(r);
+        if (c !== '') set.add(c);
+      }
+    }
+    return set;
+  }, [activeAgentRoles]);
+
+  // Identify first uncompleted step id per agent role for fallback correlation
+  const firstUncompletedStepByRole = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const step of steps) {
+      const roleStr = canonicalRole(step.agent);
+      if (roleStr !== '' && !TERMINAL_STATUSES.has(step.status) && !map.has(roleStr)) {
+        map.set(roleStr, step.id);
+      }
+    }
+    return map;
+  }, [steps]);
 
   if (!planTurn || steps.length === 0) return null;
 
   const done = steps.filter(s => s.status === 'completed' || s.status === 'green_verified').length;
+  const allTerminal = steps.length > 0 && steps.every(s => TERMINAL_STATUSES.has(s.status));
   const source = (planTurn.taskForAgent as { source?: string })?.source || planTurn.actor;
   const reasoning = (planTurn.taskForAgent as { reasoning?: string })?.reasoning || '';
   const isAgentSourced = source !== 'architect' && source !== 'brain';
@@ -139,41 +129,90 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
 
       <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
         {steps.map((step) => {
-          const isActive = step.status === 'in_progress';
+          const roleStr = canonicalRole(step.agent);
+          const isExplicitActive = step.status === 'in_progress';
+          const isCorrelatedActive =
+            !allTerminal &&
+            roleStr !== '' &&
+            firstUncompletedStepByRole.get(roleStr) === step.id &&
+            normalizedActiveRoles.has(roleStr);
+
+          const isActive = isExplicitActive || isCorrelatedActive;
           const isDone = step.status === 'completed' || step.status === 'green_verified';
+
           return (
             <div
               key={step.id}
+              data-testid="plan-step"
+              className={isActive ? 'relative overflow-hidden transition-all duration-300' : ''}
               style={{
+                position: 'relative',
                 padding: '6px 10px',
-                borderLeft: `3px solid var(--step-border, ${BORDER_COLOR[step.status] || '#334155'})`,
+                borderLeft: `3px solid var(--step-border, ${isActive ? '#10b981' : (BORDER_COLOR[step.status] || '#334155')})`,
                 marginLeft: 4,
-                marginBottom: 2,
-                background: isActive ? '#1e3a5f15' : 'transparent',
+                marginBottom: 4,
+                background: isActive ? 'rgba(16, 185, 129, 0.08)' : 'transparent',
+                borderTopRightRadius: 6,
+                borderBottomRightRadius: 6,
+                boxShadow: isActive ? '0 0 12px rgba(16,185,129,0.15)' : 'none',
               }}
             >
+              {/* Radar shimmer effect on active step card */}
+              {isActive && (
+                <div
+                  className="absolute inset-0 pointer-events-none opacity-20 animate-pulse bg-gradient-to-r from-transparent via-emerald-500/20 to-transparent"
+                  style={{ animationDuration: '2.5s' }}
+                />
+              )}
+
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 4,
+                justifyContent: 'space-between',
                 marginBottom: 2,
               }}>
-                <span style={{ fontSize: 12, flexShrink: 0 }}>
-                  {STATUS_ICON[step.status] || STATUS_ICON.pending}
-                </span>
-                <span style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: ACTOR_COLORS[step.agent] || '#94a3b8',
-                }}>
-                  {step.agent}
-                </span>
-                {isAgentSourced && (
-                  <span style={{ fontSize: 9, color: '#64748b' }}>
-                    suggested
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontSize: 12, flexShrink: 0 }}>
+                    {STATUS_ICON[step.status] || STATUS_ICON.pending}
                   </span>
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: ACTOR_COLORS[step.agent] || '#94a3b8',
+                  }}>
+                    {step.agent}
+                  </span>
+                  {isAgentSourced && (
+                    <span style={{ fontSize: 9, color: '#64748b' }}>
+                      suggested
+                    </span>
+                  )}
+                  {/* Working Beacon with animated bouncing dots */}
+                  {isActive && (
+                    <span
+                      data-testid="plan-step-working-beacon"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                      <span>Working...</span>
+                    </span>
+                  )}
+                </div>
+
+                {/* Stream button */}
+                {isActive && onOpenStream && step.agent && (
+                  <button
+                    data-testid="plan-step-stream-btn"
+                    onClick={() => onOpenStream(step.agent)}
+                    title={`Open live stream for ${step.agent}`}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 hover:scale-105 transition-all cursor-pointer"
+                  >
+                    <span>Stream</span>
+                    <span className="text-[9px]">↗</span>
+                  </button>
                 )}
               </div>
+
               <div style={{
                 fontSize: 11,
                 color: isDone ? '#64748b' : '#e2e8f0',

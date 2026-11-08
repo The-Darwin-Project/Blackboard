@@ -26,6 +26,8 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useAuth } from '../../contexts/AuthContext';
 import WorkspaceTaskItem from './WorkspaceTaskItem';
+import ContextMenu, { type ContextMenuItem } from '../ops/ContextMenu';
+import { eventMenuItems } from '../ops/sidebarMenus';
 import type { ActiveEvent } from '../../api/types';
 
 const EMPTY_EVENTS: ActiveEvent[] = [];
@@ -112,6 +114,9 @@ export default function WorkspaceSessionsHub({
   const [activeOpen, setActiveOpen] = useState(true);
   const [deferredOpen, setDeferredOpen] = useState(true);
   const [closedOpen, setClosedOpen] = useState(false); // Default collapsed per design
+
+  // ContextMenu state for right click actions
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
 
   // Distinct projects derived from all active + closed + waiting_approval events
   const availableProjects = useMemo(() => {
@@ -225,6 +230,15 @@ export default function WorkspaceSessionsHub({
     }
   };
 
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>, evt: ActiveEvent) => {
+    e.preventDefault();
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: eventMenuItems(evt, handleSelect, opsControl.send, opsControl.connected),
+    });
+  };
+
   const { size: width, isResizing, startResize, panelRef } = useResizablePanel({
     direction: 'horizontal', min: 240, max: 480, defaultSize: 300,
     storageKey: 'darwin:workspaceSessionsWidth', enabled: isOpen,
@@ -331,6 +345,7 @@ export default function WorkspaceSessionsHub({
                       evt={evt}
                       isSelected={evt.id === selectedEventId}
                       onSelect={handleSelect}
+                      onContextMenu={handleContextMenu}
                     />
                   ))
                 )}
@@ -367,6 +382,7 @@ export default function WorkspaceSessionsHub({
                     evt={evt}
                     isSelected={evt.id === selectedEventId}
                     onSelect={handleSelect}
+                    onContextMenu={handleContextMenu}
                   />
                 ))
               )}
@@ -402,6 +418,7 @@ export default function WorkspaceSessionsHub({
                     evt={evt}
                     isSelected={evt.id === selectedEventId}
                     onSelect={handleSelect}
+                    onContextMenu={handleContextMenu}
                   />
                 ))
               )}
@@ -437,6 +454,7 @@ export default function WorkspaceSessionsHub({
                     evt={evt}
                     isSelected={evt.id === selectedEventId}
                     onSelect={handleSelect}
+                    onContextMenu={handleContextMenu}
                   />
                 ))
               )}
@@ -449,6 +467,16 @@ export default function WorkspaceSessionsHub({
       <div className={`absolute top-0 right-0 w-1.5 h-full cursor-col-resize group ${isResizing ? 'bg-accent/40' : ''}`} onMouseDown={startResize}>
         <div className={`w-px h-full mx-auto transition-colors ${isResizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent/40'}`} />
       </div>
+
+      {/* Context Menu */}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxMenu.items}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
     </aside>
   );
 }

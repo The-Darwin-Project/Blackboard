@@ -11,7 +11,7 @@ import { useEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Activity, Cpu, Layers, Radio } from 'lucide-react';
 import GridTile from './GridTile';
 import { useOpsControl } from '../../contexts/OpsStateContext';
-import { useActiveStreams } from '../../contexts/ActiveStreamsContext';
+import { useActiveStreams } from '../../contexts/activeStreamsStore';
 import { useFlowMetrics } from '../../hooks/useFlowMetrics';
 import { computeGridCols } from '../../utils/streamReducers';
 import type { ActiveStream } from '../../utils/streamReducers';
