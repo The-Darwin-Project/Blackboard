@@ -2087,8 +2087,7 @@ async def test_vmer_2272_s_each_narrowed_exception_type_is_retried_not_propagate
 async def test_vmer_2272_t_fallback_keeps_last_list_plan_when_later_attempts_are_non_list():
     """VMER-2272-T: a later malformed (missing / non-list) clusters payload must not erase an earlier salvageable plan."""
     monkeypatch_plan = {"clusters": [{"events": ["evt-1", "evt-ghost"], "platform": "kargo", "root_cause": "rcKeep", "services": ["a"]}]}
-    # NOTE: the FINAL attempt runs with auto_reconcile=True and would ACCEPT an empty plan ({} / []), so the last attempt
-    # must be a non-list payload to reach the emergency fallback.
+    # NOTE: empty plans ({} / []) are rejected even on the FINAL attempt (auto_reconcile=True), so they reach the fallback too.
     later = [fc("declare_clusters", {}), fc("declare_clusters", {"clusters": "oops"})]
     assert MAX_DECLARE_RETRIES + 1 == 1 + len(later)                # guard: script covers every attempt exactly
     escs = [make_escalation(f"evt-{i}") for i in (1, 2)]
@@ -2191,3 +2190,38 @@ def test_vmer_2272_x2_merge_reports_sums_degraded_counts_from_both_sides():
                                  metrics={"incident_count": 1, "escalation_count": 1, **m})
     assert NightwatcherObserver._merge_reports(mk(degraded_plan_count=1), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 2
     assert NightwatcherObserver._merge_reports(mk(), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"clusters": []}, {}, {"clusters": None}], ids=["empty-list", "omitted", "none"])
+async def test_vmer_2272_w_empty_plan_on_every_attempt_is_degraded_not_silently_accepted(payload):
+    """ai-review HIGH (#6720705283): zero clusters on every attempt (REAL handler) must hit the emergency fallback:
+    degraded_plan=True, ops notified once, plan is a single auto_reconciled cluster, drain-stop flag set."""
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2, 3)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", payload))
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+    assert ctx.degraded_plan is True
+    assert len(ctx.declared_clusters) == 1 and ctx.declared_clusters[0]["auto_reconciled"] is True
+    assert sorted(ctx.declared_clusters[0]["events"]) == ["evt-1", "evt-2", "evt-3"]
+    obs._slack_notify.assert_awaited_once()
+    assert "0 event(s) salvaged" in obs._slack_notify.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_x_partial_plan_on_final_attempt_still_accepted_non_degraded():
+    """Guard: the legit final-attempt reconcile of a NON-empty partial plan is unchanged (not degraded)."""
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2)]
+    ctx = make_ctx(escs)
+    partial = fc("declare_clusters", {"clusters": [
+        {"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]})
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=partial)
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.degraded_plan is False
+    assert any(c.get("auto_reconciled") for c in ctx.declared_clusters)
+    obs._slack_notify.assert_not_awaited()

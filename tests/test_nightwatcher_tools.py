@@ -416,11 +416,12 @@ class TestPostShiftSummary:
 # =========================================================================
 
 class TestValidateClusterPlan:
-    def test_empty_clusters_with_auto_reconcile_succeeds(self):
-        """VMER-2272-V1: empty clusters list is permitted when auto_reconcile=True."""
+    def test_empty_clusters_with_auto_reconcile_is_rejected(self):
+        """VMER-2272-V1 (ai-review HIGH): empty clusters must be rejected even with auto_reconcile=True,
+        otherwise it is reconciled into a non-degraded plan and bypasses the degraded_plan safety net."""
         ok, error = validate_cluster_plan([], {"evt-1", "evt-2"}, auto_reconcile=True)
-        assert ok is True
-        assert error == ""
+        assert ok is False
+        assert error == "No clusters declared. You must create at least one cluster."
 
     def test_empty_clusters_without_auto_reconcile_fails(self):
         """VMER-2272-V2: empty clusters list is rejected when auto_reconcile=False."""
@@ -822,7 +823,7 @@ class TestVmer2272ClusterPlanGuards:
 
     def test_validate_none_clusters_is_treated_as_empty(self):
         assert validate_cluster_plan(None, self.IDS)[0] is False
-        assert validate_cluster_plan(None, self.IDS, auto_reconcile=True) == (True, "")
+        assert validate_cluster_plan(None, self.IDS, auto_reconcile=True)[0] is False
 
     def test_reconcile_none_clusters_materialises_single_fallback_cluster(self):
         plan = reconcile_cluster_plan(None, self.IDS)
@@ -839,13 +840,14 @@ class TestVmer2272ClusterPlanGuards:
         assert "must be a list" in out and ctx.declared_clusters == []
 
     @pytest.mark.asyncio
-    async def test_handle_declare_clusters_none_clusters_with_auto_reconcile_builds_fallback(self):
+    @pytest.mark.parametrize("args", [{"clusters": None}, {"clusters": []}, {}])
+    async def test_handle_declare_clusters_empty_with_auto_reconcile_is_rejected(self, args):
         ctx = NightwatcherContext(blackboard=AsyncMock(), archivist=AsyncMock(), provisioner=AsyncMock(),
                                   registry=AsyncMock(), bridge=AsyncMock(), incident_adapter=AsyncMock(),
                                   slack_notify=AsyncMock(), manifest_ids=set(self.IDS))
-        out = await _handle_declare_clusters({"clusters": None}, ctx, auto_reconcile=True)
-        assert out.startswith("Cluster plan accepted")
-        assert ctx.declared_clusters[0]["auto_reconciled"] is True
+        out = await _handle_declare_clusters(args, ctx, auto_reconcile=True)
+        assert out.startswith("Cluster plan validation failed") and "No clusters declared" in out
+        assert ctx.declared_clusters == []
 
 
 class TestVmer2272SalvageClusterPlan:

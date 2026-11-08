@@ -10,7 +10,7 @@
 # 8. [Constraint]: build_report_tool() includes link guidance in BOTH normal and overflow description branches.
 # 9. [Pattern]: _handle_extend_incident follows same 3-param signature (args, ctx, cluster) as write. Unified bookkeeping.
 # 10. [Constraint]: write_incident result MUST contain "Incident created" substring (dedup sentinel in handlers_dispatch.py:357).
-# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent).
+# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent). An empty/None cluster list is rejected even then, so it reaches the degraded emergency fallback.
 # 12. [Constraint]: validators/handlers must tolerate malformed LLM payloads (None/non-list clusters, non-dict clusters, non-string IDs) by REJECTING with feedback, never raising.
 # 13. [Pattern]: ctx.degraded_plan marks a plan built by the emergency fallback (salvage_cluster_plan + reconcile); the cart surfaces it in metrics and the sweep stops draining.
 """
@@ -105,8 +105,9 @@ def validate_cluster_plan(
     if not isinstance(clusters, list):
         return False, "Clusters must be a list of cluster objects."
     if not clusters:
-        if auto_reconcile:
-            return True, ""
+        # Rejected even with auto_reconcile=True: an empty plan carries zero model signal, so accepting it would
+        # reconcile the whole manifest into one cluster as a *non-degraded* plan, bypassing ctx.degraded_plan,
+        # the ops notification and the sweep circuit breaker. Rejection routes it to the emergency fallback.
         return False, "No clusters declared. You must create at least one cluster."
     all_assigned: set[str] = set()
     for i, c in enumerate(clusters):
