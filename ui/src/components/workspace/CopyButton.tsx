@@ -2,13 +2,15 @@
 // @ai-rules:
 // 1. [Constraint]: Native <button type="button"> only; do NOT add a custom onKeyDown. The browser already fires onClick for Enter/Space,
 //    and a duplicate key handler double-copies on Firefox. Parent row key handlers are shielded by the row's e.target !== e.currentTarget guard.
-// 2. [Constraint]: Text is sanitized before it reaches the clipboard (C0/DEL/C1 controls, U+2028/U+2029, bidi controls) via sanitizeClipboardText.
+// 2. [Constraint]: Text is sanitized before it reaches the clipboard (ANSI sequences, C0/DEL/C1 controls, U+2028/U+2029, bidi controls) via
+//    sanitizeClipboardText from utils/clipboard.ts (kept out of this file for react-refresh/only-export-components).
 // 3. [Pattern]: Feedback ('copied') is transient (2000ms) and is reset, with its timer, whenever the `text` prop changes or the component unmounts.
 //    A copy that resolves after `text` changed must not flag the new value as copied (guarded by textRef).
 // 4. [Gotcha]: execCommand('copy') returning false is a failure (no 'copied' state); the temporary textarea is always removed in finally.
 import { useState, useRef, useEffect } from 'react';
 import type { MouseEvent } from 'react';
 import { Copy, Check } from 'lucide-react';
+import { sanitizeClipboardText } from '../../utils/clipboard';
 
 export interface CopyButtonProps {
   text: string | null | undefined;
@@ -16,11 +18,6 @@ export interface CopyButtonProps {
   className?: string;
   iconSize?: number;
 }
-
-/** Strips C0/DEL/C1 controls, line/paragraph separators and bidi controls from clipboard text. */
-// eslint-disable-next-line no-control-regex
-export const CLIPBOARD_UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
-export const sanitizeClipboardText = (text: string): string => text.replace(CLIPBOARD_UNSAFE_CHARS, '');
 
 export function CopyButton({ text, label = 'Copy Event ID', className = '', iconSize = 12 }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);

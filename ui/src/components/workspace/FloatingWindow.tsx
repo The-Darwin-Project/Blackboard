@@ -2,12 +2,15 @@
 // @ai-rules:
 // 1. [Pattern]: Reusable, viewport-clamped floating window with drag, resize, and unmount listener cleanup.
 // 2. [Constraint]: Clamps pos.x and pos.y so window header cannot be dragged off-screen.
-// 3. [Constraint]: Enforces minWidth (320px) and minHeight (220px) on resize and initial render.
+// 3. [Constraint]: Enforces minWidth (320px) and minHeight (220px) on resize and initial render. Initial size/position are clamped to
+//    window.innerWidth/innerHeight (never below the minimums) so the header and resize handle start on-screen on small viewports.
 // 4. [Constraint]: Re-clamps window on viewport resize events.
-import { useCallback, useEffect, useRef, useState } from 'react';
+// 5. [Gotcha]: Drag/resize handlers read posRef/sizeRef (synced in a layout effect, never during render) so their identity is stable.
+// 6. [Gotcha]: Auto-scroll depends on the `messages` array identity, not its length: the buffer is capped (MAX_BUFFER) and length stops changing.
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Copy, X } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
-import { sanitizeClipboardText } from './CopyButton';
+import { copyLogLines } from '../../utils/clipboard';
 
 export interface FloatingWindowProps {
   agentName: string;
@@ -18,16 +21,29 @@ export interface FloatingWindowProps {
 
 const MIN_WIDTH = 320;
 const MIN_HEIGHT = 220;
+const DEFAULT_SIZE = { width: 700, height: 500 };
+const DEFAULT_POS = { x: 120, y: 80 };
+const EMPTY_MESSAGES: string[] = [];
+
+/** Initial geometry: default size shrunk to the viewport (>= minimums), default position clamped so the whole window is visible. */
+function initialGeometry() {
+  const width = Math.min(DEFAULT_SIZE.width, Math.max(MIN_WIDTH, window.innerWidth));
+  const height = Math.min(DEFAULT_SIZE.height, Math.max(MIN_HEIGHT, window.innerHeight));
+  const x = Math.min(DEFAULT_POS.x, Math.max(0, window.innerWidth - width));
+  const y = Math.min(DEFAULT_POS.y, Math.max(0, window.innerHeight - height));
+  return { size: { width, height }, pos: { x, y } };
+}
 
 export function FloatingWindow({
   agentName,
   eventId,
-  messages = [],
+  messages = EMPTY_MESSAGES,
   onClose,
 }: FloatingWindowProps) {
   const color = ACTOR_COLORS[agentName] || '#6b7280';
-  const [pos, setPos] = useState({ x: 120, y: 80 });
-  const [size, setSize] = useState({ width: 700, height: 500 });
+  const [initial] = useState(initialGeometry);
+  const [pos, setPos] = useState(initial.pos);
+  const [size, setSize] = useState(initial.size);
 
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
@@ -37,18 +53,20 @@ export function FloatingWindow({
   const cleanupDragRef = useRef<(() => void) | null>(null);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
 
-  // Synchronous refs to prevent listener churn in resize effect
+  // Refs mirror the latest geometry so handlers stay stable (no listener churn); synced after commit, not during render
   const posRef = useRef(pos);
-  posRef.current = pos;
   const sizeRef = useRef(size);
-  sizeRef.current = size;
+  useLayoutEffect(() => {
+    posRef.current = pos;
+    sizeRef.current = size;
+  }, [pos, size]);
 
-  // Auto-scroll when messages update
+  // Auto-scroll when messages update (identity changes even when the capped buffer length does not)
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages?.length]);
+  }, [messages]);
 
   // Ensure window listeners are cleaned up if component unmounts mid-drag or mid-resize
   useEffect(() => {
@@ -74,8 +92,8 @@ export function FloatingWindow({
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      origX: pos.x,
-      origY: pos.y,
+      origX: posRef.current.x,
+      origY: posRef.current.y,
     };
 
     const handleMouseMove = (ev: MouseEvent) => {
@@ -84,8 +102,8 @@ export function FloatingWindow({
       const rawY = dragRef.current.origY + (ev.clientY - dragRef.current.startY);
 
       // Clamp so window never goes off-screen (clamp against actual window size)
-      const maxX = Math.max(0, window.innerWidth - size.width);
-      const maxY = Math.max(0, window.innerHeight - size.height);
+      const maxX = Math.max(0, window.innerWidth - sizeRef.current.width);
+      const maxY = Math.max(0, window.innerHeight - sizeRef.current.height);
       const nextX = Math.min(Math.max(0, rawX), maxX);
       const nextY = Math.min(Math.max(0, rawY), maxY);
 
@@ -106,7 +124,7 @@ export function FloatingWindow({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [pos.x, pos.y, size.width, size.height]);
+  }, []);
 
   // Window resize handler
   const handleMouseDownResize = useCallback((e: React.MouseEvent) => {
@@ -119,8 +137,8 @@ export function FloatingWindow({
     resizeRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      origW: size.width,
-      origH: size.height,
+      origW: sizeRef.current.width,
+      origH: sizeRef.current.height,
     };
 
     const handleMouseMove = (ev: MouseEvent) => {
@@ -128,8 +146,8 @@ export function FloatingWindow({
       const rawW = resizeRef.current.origW + (ev.clientX - resizeRef.current.startX);
       const rawH = resizeRef.current.origH + (ev.clientY - resizeRef.current.startY);
 
-      const maxW = Math.max(MIN_WIDTH, window.innerWidth - pos.x);
-      const maxH = Math.max(MIN_HEIGHT, window.innerHeight - pos.y);
+      const maxW = Math.max(MIN_WIDTH, window.innerWidth - posRef.current.x);
+      const maxH = Math.max(MIN_HEIGHT, window.innerHeight - posRef.current.y);
 
       const nextW = Math.min(Math.max(MIN_WIDTH, rawW), maxW);
       const nextH = Math.min(Math.max(MIN_HEIGHT, rawH), maxH);
@@ -151,7 +169,7 @@ export function FloatingWindow({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [size.width, size.height, pos.x, pos.y]);
+  }, []);
 
   // Viewport resize re-clamping (uses refs to avoid listener churn on drag)
   useEffect(() => {
@@ -175,12 +193,7 @@ export function FloatingWindow({
     };
   }, []);
 
-  const handleCopyLogs = useCallback(() => {
-    if (messages && messages.length > 0) {
-      const sanitized = sanitizeClipboardText(messages.join('\n'));
-      navigator.clipboard?.writeText(sanitized).catch(() => {});
-    }
-  }, [messages]);
+  const handleCopyLogs = useCallback(() => copyLogLines(messages), [messages]);
 
   return (
     <div
@@ -282,7 +295,7 @@ export function FloatingWindow({
           background: '#090d16',
         }}
       >
-        {(!messages || messages.length === 0) ? (
+        {messages.length === 0 ? (
           <div style={{ color: '#334155', fontStyle: 'italic', fontSize: 11 }}>Idle</div>
         ) : (
           messages.slice(-100).map((line, i) => (

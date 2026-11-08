@@ -2,12 +2,14 @@
 // @ai-rules:
 // 1. [Pattern]: Unit tests for WorkspaceInspector tabs, state indicators, and floating stream integration.
 // 2. [Contract]: Verifies active stream badge rendering and onOpenStream floating window triggers.
+// 3. [Pattern]: PlanProgress is mocked as a probe exposing the activeAgentRoles it receives; usePlanState/canonicalRole are REAL
+//    (they live in hooks/usePlanState.ts and utils/planState.ts), so role normalization is exercised end to end.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import WorkspaceInspector from '../WorkspaceInspector';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as OpsStateContext from '../../../contexts/OpsStateContext';
-import * as ActiveStreamsContextModule from '../../../contexts/ActiveStreamsContext';
+import * as ActiveStreamsContextModule from '../../../contexts/activeStreamsStore';
 import * as queueHook from '../../../hooks/useQueue';
 import { DOMAIN_COLORS } from '../../../constants/colors';
 
@@ -20,9 +22,14 @@ const rgb = (hex: string) => {
 
 // Mock child tabs
 vi.mock('../../PlanProgress', () => ({
-  default: ({ conversation, onOpenStream }: { conversation: unknown[]; onOpenStream?: (role: string) => void }) => (
+  default: ({ conversation, onOpenStream, activeAgentRoles }: {
+    conversation: unknown[];
+    onOpenStream?: (role: string) => void;
+    activeAgentRoles?: Set<string>;
+  }) => (
     <div data-testid="plan-progress">
       <span>Plan with {conversation?.length || 0} turns</span>
+      <span data-testid="plan-active-roles">{[...(activeAgentRoles ?? [])].sort().join(',')}</span>
       {onOpenStream && (
         <button
           data-testid="mock-stream-trigger"
@@ -33,15 +40,6 @@ vi.mock('../../PlanProgress', () => ({
       )}
     </div>
   ),
-  canonicalRole: (role?: string) => (role || '').trim().toLowerCase(),
-  usePlanState: (conversation: unknown[]) => {
-    const hasPlan = Array.isArray(conversation) && (conversation as { action?: string }[]).some((t) => t.action === 'plan');
-    return {
-      hasPlan,
-      planTurn: hasPlan ? conversation[0] : null,
-      steps: hasPlan ? [{ id: '1', agent: 'developer', summary: 'Step 1', status: 'completed' }] : [],
-    };
-  },
 }));
 
 vi.mock('../WorkspaceDiffViewer', () => ({
@@ -140,15 +138,17 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     onClose?: () => void;
     selectedEventId?: string | null;
   } = {}) => {
-    return render(
+    const ui = (p: typeof props) => (
       <QueryClientProvider client={queryClient}>
         <WorkspaceInspector
-          isOpen={props.isOpen ?? true}
-          onClose={props.onClose || vi.fn()}
-          selectedEventId={props.selectedEventId ?? 'evt-123'}
+          isOpen={p.isOpen ?? true}
+          onClose={p.onClose || vi.fn()}
+          selectedEventId={p.selectedEventId ?? 'evt-123'}
         />
       </QueryClientProvider>
     );
+    const result = render(ui(props));
+    return { ...result, rerenderWith: (next: typeof props) => result.rerender(ui(next)) };
   };
 
   it('renders tab buttons (Plan, Diffs, Swarm, Logs) and allows switching between them', () => {
@@ -425,7 +425,7 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
 
       // Floating window is mounted
       expect(screen.getByTestId('floating-window')).toBeInTheDocument();
-      expect(screen.getByText('developer')).toBeInTheDocument();
+      expect(within(screen.getByTestId('floating-window')).getByText('developer')).toBeInTheDocument();
 
       // Switch to Diffs tab
       const diffsTab = screen.getByRole('button', { name: /^Diffs/ });
@@ -439,6 +439,126 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       const closeBtn = screen.getByRole('button', { name: 'Close' });
       fireEvent.click(closeBtn);
       expect(screen.queryByTestId('floating-window')).not.toBeInTheDocument();
+    });
+
+    const mockStreams = (activeStreams: Record<string, { actor: string; eventId: string; isActive: boolean; messages: string[] }>) =>
+      vi.spyOn(ActiveStreamsContextModule, 'useActiveStreamsSafe').mockReturnValue({ activeStreams });
+    const mockAgents = (agents: Array<Record<string, unknown>>) =>
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({ agents } as never);
+    const activeRoles = () => screen.getByTestId('plan-active-roles').textContent;
+
+    it('does not show the beacon (and passes no active roles) for an inactive stream that still has buffered messages', () => {
+      mockStreams({
+        'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: false, messages: ['finished output'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+      expect(activeRoles()).toBe('');
+    });
+
+    it('does not show the beacon for an active stream that belongs to a different event', () => {
+      mockStreams({
+        'developer:evt-999': { actor: 'developer', eventId: 'evt-999', isActive: true, messages: ['other event'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+      expect(activeRoles()).toBe('');
+    });
+
+    it('canonicalizes stream actors (case + hyphen) into the active roles passed to PlanProgress', () => {
+      mockStreams({
+        'Code-Reviewer:evt-123': { actor: 'Code-Reviewer', eventId: 'evt-123', isActive: true, messages: [] },
+        'QE:evt-123': { actor: 'QE', eventId: 'evt-123', isActive: true, messages: [] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('code_reviewer,qe');
+      expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
+    it('falls back to busy opsControl.agents bound to the selected event (current_role, then role, then agent_id)', () => {
+      mockAgents([
+        { agent_id: 'a1', role: 'ignored', current_role: 'Architect', busy: true, bound_event_id: 'evt-123' },
+        { agent_id: 'a2', role: 'sys-admin', busy: true, bound_event_id: 'evt-123' },
+        { agent_id: 'Developer', busy: true, bound_event_id: 'evt-123' },
+      ]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('architect,developer,sys_admin');
+      expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
+    it('ignores opsControl.agents that are idle or bound to another event', () => {
+      mockAgents([
+        { agent_id: 'a1', role: 'developer', busy: false, bound_event_id: 'evt-123' },
+        { agent_id: 'a2', role: 'qe', busy: true, bound_event_id: 'evt-999' },
+        { agent_id: 'a3', role: 'architect', busy: true, bound_event_id: null },
+      ]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+    });
+
+    it('streams the matching agent messages into the floating window', () => {
+      mockStreams({
+        'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['Compiling typescript...', 'Tests passing'] },
+        'qe:evt-123': { actor: 'qe', eventId: 'evt-123', isActive: true, messages: ['qe-only line'] },
+        'developer:evt-999': { actor: 'developer', eventId: 'evt-999', isActive: true, messages: ['other-event line'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+
+      const win = screen.getByTestId('floating-window');
+      expect(win.textContent).toContain('Compiling typescript...');
+      expect(win.textContent).toContain('Tests passing');
+      expect(win.textContent).not.toContain('qe-only line');
+      expect(win.textContent).not.toContain('other-event line');
+    });
+
+    it('matches the stream by actor/eventId fields (case-insensitive), not by splitting the record key', () => {
+      mockStreams({
+        // Arbitrary key shape (contains extra colons); only actor/eventId may be used for matching
+        'x:y:z': { actor: 'Developer', eventId: 'EVT-123', isActive: false, messages: ['matched by fields'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      expect(screen.getByTestId('floating-window').textContent).toContain('matched by fields');
+    });
+
+    it('still shows buffered messages in the floating window after the agent stream goes inactive', () => {
+      mockStreams({
+        'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: false, messages: ['historic log line'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      expect(screen.getByTestId('floating-window').textContent).toContain('historic log line');
+    });
+
+    it('shows Idle in the floating window when no stream matches the target', () => {
+      mockStreams({});
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      expect(screen.getByTestId('floating-window').textContent).toContain('Idle');
+    });
+
+    it('auto-closes the floating window when the selected event changes', () => {
+      mockStreams({
+        'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['line'] },
+      });
+      const { rerenderWith } = renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      expect(screen.getByTestId('floating-window')).toBeInTheDocument();
+
+      rerenderWith({ selectedEventId: 'evt-456' });
+      expect(screen.queryByTestId('floating-window')).not.toBeInTheDocument();
+    });
+
+    it('keeps the floating window open when the same event is re-rendered', () => {
+      mockStreams({
+        'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['line'] },
+      });
+      const { rerenderWith } = renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      rerenderWith({ selectedEventId: 'evt-123' });
+      expect(screen.getByTestId('floating-window')).toBeInTheDocument();
     });
   });
 });

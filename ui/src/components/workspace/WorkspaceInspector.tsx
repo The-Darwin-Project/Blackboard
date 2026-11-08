@@ -5,6 +5,8 @@
 // 3. [Gotcha]: DOMAIN_COLORS is indexed via Object.hasOwn on the lowercased domain so prototype keys and unknown domains fall back to casual.
 // 4. [Pattern]: Hoists FloatingWindow for agent message streams across tab transitions (Plan <-> Swarm <-> Logs).
 // 5. [Pattern]: Ambient activity beacon in Plan tab header when agents are active for selectedEventId.
+// 6. [Constraint]: activeAgentRoles counts only stream.isActive (not buffered messages) and busy ops agents; stream lookup matches
+//    on stream.actor / stream.eventId, never by splitting the 'actor:eventId' key.
 /**
  * Collapsible & resizable right sidebar for Agent Workspace.
  * Hosts Plan execution, Diff viewer, Swarm topology, Live Logs tabs, and Session Telemetry.
@@ -14,9 +16,11 @@ import { ListTodo, GitCompare, Users, Terminal, X, ChevronDown, ChevronRight, Za
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useEventDocument } from '../../hooks/useQueue';
 import { useOpsControlSafe } from '../../contexts/OpsStateContext';
-import { useActiveStreamsSafe } from '../../contexts/ActiveStreamsContext';
+import { useActiveStreamsSafe } from '../../contexts/activeStreamsStore';
 import { updateEventTitle } from '../../api/client';
-import PlanProgress, { usePlanState, canonicalRole } from '../PlanProgress';
+import PlanProgress from '../PlanProgress';
+import { usePlanState } from '../../hooks/usePlanState';
+import { canonicalRole } from '../../utils/planState';
 import WorkspaceDiffViewer from './WorkspaceDiffViewer';
 import WorkspaceSwarmPanel from './WorkspaceSwarmPanel';
 import ActivityStream from '../ActivityStream';
@@ -36,6 +40,8 @@ interface WorkspaceInspectorProps {
 }
 
 type TabType = 'plan' | 'diffs' | 'swarm' | 'logs';
+
+const EMPTY_MESSAGES: string[] = [];
 
 const TOKEN_SEGMENTS: { key: keyof TokenUsageDict; label: string; color: string }[] = [
   { key: 'input_tokens', label: 'In', color: '#34d399' },
@@ -131,11 +137,9 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
     // 1. From activeStreams
     if (activeStreams) {
       Object.values(activeStreams).forEach((stream) => {
-        if (
-          stream &&
-          stream.eventId === selectedEventId &&
-          (stream.isActive || (stream.messages && stream.messages.length > 0))
-        ) {
+        // Only a live stream counts: applyTurn flips isActive=false when the agent's turn lands, while
+        // the buffered messages remain (for the floating log window) and must not keep the beacon lit.
+        if (stream && stream.eventId === selectedEventId && stream.isActive) {
           const r = canonicalRole(stream.actor);
           if (r) roles.add(r);
         }
@@ -158,19 +162,17 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
 
   // Resolve messages for floatingTarget (case-insensitive stream key matching)
   const floatingMessages = useMemo(() => {
-    if (!floatingTarget || !activeStreams) return [];
+    if (!floatingTarget || !activeStreams) return EMPTY_MESSAGES;
     const targetAgent = canonicalRole(floatingTarget.agentName);
     const targetEvent = (floatingTarget.eventId || '').toLowerCase();
 
-    const streamKey = Object.keys(activeStreams).find((k) => {
-      const [agentPart, eventPart] = k.split(':');
-      return (
-        canonicalRole(agentPart) === targetAgent &&
-        (eventPart || '').toLowerCase() === targetEvent
-      );
-    });
+    const stream = Object.values(activeStreams).find((s) =>
+      !!s &&
+      canonicalRole(s.actor) === targetAgent &&
+      (s.eventId || '').toLowerCase() === targetEvent,
+    );
 
-    return streamKey ? activeStreams[streamKey]?.messages || [] : [];
+    return stream?.messages ?? EMPTY_MESSAGES;
   }, [floatingTarget, activeStreams]);
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);

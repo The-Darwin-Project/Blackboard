@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, ExternalLink } from 'lucide-react';
 import { ACTOR_COLORS } from '../constants/colors';
 import { FloatingWindow } from './workspace/FloatingWindow';
-import { sanitizeClipboardText } from './workspace/CopyButton';
+import { copyLogLines } from '../utils/clipboard';
 
 interface AgentStreamCardProps {
   agentName: string;
@@ -58,7 +58,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
     if (scrollRef.current && !userScrolled) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages.length, userScrolled]);
+  }, [messages, userScrolled]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -91,12 +91,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
           </div>
           <div style={{ display: 'flex', gap: 3 }}>
             <button
-              onClick={() => {
-                if (messages.length > 0) {
-                  const sanitized = sanitizeClipboardText(messages.join('\n'));
-                  navigator.clipboard?.writeText(sanitized).catch(() => {});
-                }
-              }}
+              onClick={() => copyLogLines(messages)}
               title="Copy stream"
               aria-label="Copy stream"
               className="hover:bg-white/10 hover:border-white/20 transition-colors"

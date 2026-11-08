@@ -165,7 +165,7 @@ describe('CopyButton', () => {
       await Promise.resolve();
     });
 
-    expect(writeTextMock).toHaveBeenCalledWith('evt-123[31mmalicious');
+    expect(writeTextMock).toHaveBeenCalledWith('evt-123malicious');
   });
 
   it('9b. sanitization: strips C0/DEL/C1 controls, U+2028/U+2029 and bidi controls', async () => {

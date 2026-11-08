@@ -46,7 +46,8 @@ vi.mock('../api/client', () => ({
   getWSAuthFailureCallback: () => () => {},
 }));
 
-import { ActiveStreamsProvider, useActiveStreams } from '../contexts/ActiveStreamsContext';
+import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
+import { useActiveStreams } from '../contexts/activeStreamsStore';
 
 function createWrapper() {
   const queryClient = new QueryClient({
