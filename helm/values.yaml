@@ -187,9 +187,9 @@ gcp:
       temperature: "0.3"
       maxOutputTokens: "2048"
     nightwatcher:
-      model: "gemini-3.8-flash" # Shift consolidation (high thinking for clustering)
+      model: "gemini-3.8-flash" # Shift consolidation (medium thinking for clustering)
       temperature: "0.5"
-      thinkingLevel: "high"
+      thinkingLevel: "medium"
       maxOutputTokens: "16000"
     jenkinsObserver:
       model: "gemini-3.5-flash-lite" # CI gating triage (lightweight, fast)

@@ -416,6 +416,19 @@ class TestPostShiftSummary:
 # =========================================================================
 
 class TestValidateClusterPlan:
+    def test_empty_clusters_with_auto_reconcile_is_rejected(self):
+        """VMER-2272-V1 (ai-review HIGH): empty clusters must be rejected even with auto_reconcile=True,
+        otherwise it is reconciled into a non-degraded plan and bypasses the degraded_plan safety net."""
+        ok, error = validate_cluster_plan([], {"evt-1", "evt-2"}, auto_reconcile=True)
+        assert ok is False
+        assert error == "No clusters declared. You must create at least one cluster."
+
+    def test_empty_clusters_without_auto_reconcile_fails(self):
+        """VMER-2272-V2: empty clusters list is rejected when auto_reconcile=False."""
+        ok, error = validate_cluster_plan([], {"evt-1", "evt-2"}, auto_reconcile=False)
+        assert ok is False
+        assert error == "No clusters declared. You must create at least one cluster."
+
     def test_happy_path(self):
         """All events covered, no overlaps."""
         clusters = [
@@ -787,3 +800,135 @@ class TestCartLoopRouting:
         """None extends_issue_key -> falsy -> new incident."""
         cluster = {"events": ["evt-1"], "root_cause": "x", "platform": "P", "services": ["svc"]}
         assert not cluster.get("extends_issue_key")
+
+
+# =========================================================================
+# VMER-2272: guard branches (malformed LLM payloads) + salvage_cluster_plan
+# =========================================================================
+
+class TestVmer2272ClusterPlanGuards:
+    IDS = {"evt-1", "evt-2"}
+
+    @pytest.mark.parametrize("clusters,needle", [
+        ("not-a-list", "must be a list"),
+        ([None], "not a valid object"),
+        (["str"], "not a valid object"),
+        ([{"events": "evt-1"}], "no events"),
+        ([{"events": None}], "no events"),
+        ([{"events": [123]}], "non-string event ID"),
+    ])
+    def test_validate_rejects_malformed_payloads(self, clusters, needle):
+        ok, err = validate_cluster_plan(clusters, self.IDS)
+        assert ok is False and needle in err
+
+    def test_validate_none_clusters_is_treated_as_empty(self):
+        assert validate_cluster_plan(None, self.IDS)[0] is False
+        assert validate_cluster_plan(None, self.IDS, auto_reconcile=True)[0] is False
+
+    def test_reconcile_none_clusters_materialises_single_fallback_cluster(self):
+        plan = reconcile_cluster_plan(None, self.IDS)
+        assert len(plan) == 1 and plan[0]["auto_reconciled"] is True
+        assert plan[0]["events"] == ["evt-1", "evt-2"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("args", [{"clusters": "oops"}, {"clusters": {"events": ["evt-1"]}}])
+    async def test_handle_declare_clusters_rejects_non_list(self, args):
+        ctx = NightwatcherContext(blackboard=AsyncMock(), archivist=AsyncMock(), provisioner=AsyncMock(),
+                                  registry=AsyncMock(), bridge=AsyncMock(), incident_adapter=AsyncMock(),
+                                  slack_notify=AsyncMock(), manifest_ids=set(self.IDS))
+        out = await _handle_declare_clusters(args, ctx, auto_reconcile=True)
+        assert "must be a list" in out and ctx.declared_clusters == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("args", [{"clusters": None}, {"clusters": []}, {}])
+    async def test_handle_declare_clusters_empty_with_auto_reconcile_is_rejected(self, args):
+        ctx = NightwatcherContext(blackboard=AsyncMock(), archivist=AsyncMock(), provisioner=AsyncMock(),
+                                  registry=AsyncMock(), bridge=AsyncMock(), incident_adapter=AsyncMock(),
+                                  slack_notify=AsyncMock(), manifest_ids=set(self.IDS))
+        out = await _handle_declare_clusters(args, ctx, auto_reconcile=True)
+        assert out.startswith("Cluster plan validation failed") and "No clusters declared" in out
+        assert ctx.declared_clusters == []
+
+
+class TestVmer2272SalvageClusterPlan:
+    IDS = {"evt-1", "evt-2", "evt-3"}
+
+    def test_non_list_and_none_yield_empty(self):
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        assert salvage_cluster_plan(None, self.IDS) == []
+        assert salvage_cluster_plan("x", self.IDS) == []
+        assert salvage_cluster_plan({"events": ["evt-1"]}, self.IDS) == []
+
+    def test_drops_unusable_clusters_and_strips_bad_ids_first_claim_wins(self):
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        src = [
+            "junk",
+            {"events": "evt-1"},
+            {"events": ["evt-1", 7, "evt-ghost"], "root_cause": "a", "extends_issue_key": "VMER-1"},
+            {"events": ["evt-1", "evt-2"], "root_cause": "b"},
+            {"events": ["evt-ghost"], "root_cause": "c"},
+        ]
+        snapshot = copy.deepcopy(src)
+        out = salvage_cluster_plan(src, self.IDS)
+        assert [(c["root_cause"], c["events"]) for c in out] == [("a", ["evt-1"]), ("b", ["evt-2"])]
+        assert out[0]["extends_issue_key"] == "VMER-1"
+        assert src == snapshot                               # pure: input untouched
+        out[0]["events"].append("zzz")
+        assert src == snapshot                               # no aliasing
+
+    def test_invalid_platform_is_coerced_only_when_platforms_are_configured(self, monkeypatch):
+        from src.observers import nightwatcher_tools as nt
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        clusters = [{"events": ["evt-1"], "platform": "bogus"}]
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", [])
+        assert salvage_cluster_plan(clusters, self.IDS)[0]["platform"] == "bogus"      # no allow-list -> untouched
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])
+        assert salvage_cluster_plan(clusters, self.IDS)[0]["platform"] == "gitlab"     # deterministic fallback
+
+    def test_non_iterable_or_missing_events_are_dropped_without_raising(self):
+        """QE mutation kill (S03): a cluster whose ``events`` is None/int/absent must be skipped, never raise."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        src = [
+            {"events": None, "root_cause": "none"},
+            {"events": 5, "root_cause": "int"},
+            {"root_cause": "missing"},
+            {"events": ("evt-1",), "root_cause": "tuple-ok"},
+        ]
+        out = salvage_cluster_plan(src, self.IDS)
+        assert [(c["root_cause"], c["events"]) for c in out] == [("tuple-ok", ["evt-1"])]
+
+    def test_unhashable_event_ids_are_stripped_not_raised(self):
+        """QE mutation kill (S07): list/dict IDs would raise TypeError on set membership; they must be stripped."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        out = salvage_cluster_plan([{"events": [["evt-1"], {"k": "v"}, None, "evt-2"], "root_cause": "u"}], self.IDS)
+        assert [(c["root_cause"], c["events"]) for c in out] == [("u", ["evt-2"])]
+
+    def test_nested_fields_are_deep_copied(self):
+        """QE mutation kill (S09): non-event nested fields (services, extends metadata) must not alias the input."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        src = [{"events": ["evt-1"], "root_cause": "r", "services": ["a"], "meta": {"k": ["v"]}}]
+        snapshot = copy.deepcopy(src)
+        out = salvage_cluster_plan(src, self.IDS)
+        assert out[0]["services"] is not src[0]["services"] and out[0]["meta"] is not src[0]["meta"]
+        out[0]["services"].append("zzz")
+        out[0]["meta"]["k"].append("zzz")
+        assert src == snapshot
+
+    def test_valid_platform_is_never_overwritten(self, monkeypatch):
+        """QE mutation kill (S12): a VALID platform must survive even when it differs from the deterministic fallback."""
+        from src.observers import nightwatcher_tools as nt
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])      # fallback with no hints would be "gitlab"
+        out = salvage_cluster_plan([{"events": ["evt-1"], "platform": "kargo"}], self.IDS)
+        assert out[0]["platform"] == "kargo"
+
+    def test_coerced_platform_is_derived_from_the_clusters_own_events(self, monkeypatch):
+        """QE mutation kill (S13/S14): coercion uses the escalations of THIS cluster's events, not the global default."""
+        from types import SimpleNamespace
+        from src.observers import nightwatcher_tools as nt
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])
+        esc = {"evt-1": SimpleNamespace(platform="kargo"), "evt-2": SimpleNamespace(platform="gitlab"),
+               "evt-3": SimpleNamespace(platform="gitlab")}
+        out = salvage_cluster_plan([{"events": ["evt-1"], "platform": "bogus"}], self.IDS, esc)
+        assert out[0]["platform"] == "kargo"                                  # not "gitlab" (sorted default / other events)

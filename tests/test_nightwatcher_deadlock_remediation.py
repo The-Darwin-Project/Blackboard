@@ -15,10 +15,15 @@ Jira: VMER-2236 (Plan: nightwatcher-backlog-and-quota-deadlock)
   T-5  Auto-reconcile wiring in _run_clustering_agent (last attempt only)
   T-6  Drain script: arg validation, Redis target, critical guard, backup, batching
   S-*  _sweep: quota_exhausted report, partial-incident commit vs restage, batch loop, env validation
+
+Jira: VMER-2272 (labels VMER-2272-A..R; distinct from the T-n sections above): handover/nudge turn alternation,
+emergency clustering fallback (salvage, degraded marker, drain circuit breaker, error handling), thinking default, helm render.
 """
 
+import asyncio
 import json
 import re
+import shutil
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -39,6 +44,7 @@ from src.observers.nightwatcher import (
     _env_int,
 )
 from src.observers.nightwatcher_prompt import build_manifest_table
+from src.observers import nightwatcher_tools as nw_tools
 from src.observers.nightwatcher_tools import NightwatcherContext
 from src.state.blackboard import BlackboardState
 
@@ -111,6 +117,10 @@ def make_ctx(escalations, created=None) -> NightwatcherContext:
         escalations_by_id={e.event_id: e for e in escalations},
         created_incidents=list(created or []),
     )
+
+
+def _roles_alternate(contents) -> bool:
+    return all(a["role"] != b["role"] for a, b in zip(contents, contents[1:]))
 
 
 def incident(*event_ids, key="VMER-1") -> ShiftIncident:
@@ -396,11 +406,81 @@ async def test_t4_handle_report_incident_tolerates_explicit_null_summary():
 
 
 # ==============================================================================
+# VMER-2272 (A/B): Analysis loop progress reminder and terminal handover directive
+# ==============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_condition", ["set_phase_report", "text_nudges_exhausted", "rounds_exhausted"])
+async def test_vmer_2272_a_analysis_loop_handover_injected_on_all_exit_paths(exit_condition):
+    """VMER-2272-A: All 3 exit paths from _run_analysis_loop inject the terminal handover and keep roles alternating."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    escs = [make_escalation("evt-1")]
+
+    if exit_condition == "set_phase_report":
+        adapter.generate = AsyncMock(side_effect=[
+            fc("set_phase", {"phase": "investigate"}),
+            fc("set_phase", {"phase": "report"}),
+        ])
+    elif exit_condition == "text_nudges_exhausted":
+        adapter.generate = AsyncMock(return_value=MockResponse(text="chatting..."))
+    elif exit_condition == "rounds_exhausted":
+        adapter.generate = AsyncMock(return_value=fc("get_event_report", {"event_id": "evt-1"}))
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    assert contents[-1]["role"] == "user"
+    handover_text = contents[-1]["parts"][-1]["text"]   # merged into a trailing user turn on some paths
+    assert "Proceeding to REPORT phase" in handover_text
+    assert "declare_clusters" in handover_text
+    assert _roles_alternate(contents), [c["role"] for c in contents]
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_b_analysis_loop_progress_reminder_injected_at_round_19_in_review_phase():
+    """VMER-2272-B: At round >= 19 (0-indexed 19, i.e. 20th round) in 'review' phase, inject progress reminder exactly once."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    escs = [make_escalation("evt-1")]
+
+    responses = [fc("get_event_report", {"event_id": "evt-1"})] * 22
+    responses.append(fc("set_phase", {"phase": "investigate"}))
+    responses.append(fc("set_phase", {"phase": "report"}))
+    adapter.generate = AsyncMock(side_effect=responses)
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    reminder_texts = [
+        p["text"] for c in contents if c.get("role") == "user"
+        for p in c.get("parts", []) if "Notice: Analysis round" in p.get("text", "")
+    ]
+    assert len(reminder_texts) == 1
+    assert "Notice: Analysis round 20/30" in reminder_texts[0]
+    assert "set_phase('investigate')" in reminder_texts[0]
+    assert _roles_alternate(contents), [c["role"] for c in contents]   # reminder merges into the trailing tool-result turn
+
+
+# ==============================================================================
 # T-5: Auto-reconcile wiring (_run_clustering_agent) + validator behaviour
 # ==============================================================================
 
 @pytest.mark.asyncio
 async def test_t5_auto_reconcile_enabled_only_on_final_attempt():
+    """VMER-2272-C: Even if validation fails across all retries, the post-loop fallback establishes clusters without RuntimeError."""
     ctx = make_ctx([make_escalation("evt-1")])
     adapter = AsyncMock()
     adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", {"clusters": []})] * (MAX_DECLARE_RETRIES + 1))
@@ -408,12 +488,13 @@ async def test_t5_auto_reconcile_enabled_only_on_final_attempt():
 
     with patch("src.observers.nightwatcher_tools._handle_declare_clusters",
                new=AsyncMock(return_value="Cluster plan validation failed: x")) as handler:
-        with pytest.raises(RuntimeError, match="cluster declaration failed"):
-            await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "high")
+        await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "high")
 
     flags = [c.kwargs["auto_reconcile"] for c in handler.call_args_list]
     assert flags == [False] * MAX_DECLARE_RETRIES + [True]
     assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+    assert len(ctx.declared_clusters) >= 1
+    assert ctx.declared_clusters[0]["auto_reconciled"] is True
 
 
 @pytest.mark.asyncio
@@ -458,14 +539,105 @@ async def test_t5_incomplete_plan_rejected_with_feedback_until_final_attempt_the
 
 @pytest.mark.asyncio
 async def test_t5_no_tool_call_consumes_an_attempt_and_nudges():
+    """VMER-2272-D: when the LLM emits text without tool calls across all retries, the fallback establishes clusters."""
     ctx = make_ctx([make_escalation("evt-1")])
     adapter = AsyncMock()
     adapter.generate = AsyncMock(return_value=MockResponse(text="thinking..."))
     contents: list = []
-    with pytest.raises(RuntimeError):
-        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
+    await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
     assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
     assert any("must call declare_clusters" in c["parts"][0]["text"] for c in contents if c["role"] == "user")
+    assert len(ctx.declared_clusters) == 1
+    assert ctx.declared_clusters[0]["auto_reconciled"] is True
+
+
+@pytest.mark.asyncio
+async def test_t5c_empty_manifest_raises_runtime_error_when_retries_exhaust():
+    """VMER-2272-E: Empty manifest edge case cannot be reconciled into fallback clusters; raises RuntimeError."""
+    ctx = make_ctx([])
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=MockResponse(text="thinking..."))
+    contents: list = []
+    with pytest.raises(RuntimeError, match="cluster declaration failed"):
+        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
+    assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+
+
+# ==============================================================================
+# VMER-2272: Thinking level default, Helm lint verification, and handover alternation
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_vmer_2272_thinking_level_defaults_to_medium():
+    """VMER-2272-F: LLM_THINKING_NIGHTWATCHER defaults to 'medium' in the analysis loop when unset."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("set_phase", {"phase": "investigate"}))
+    escs = [make_escalation("evt-1")]
+
+    with patch.dict("os.environ", {}, clear=False):
+        import os
+        os.environ.pop("LLM_THINKING_NIGHTWATCHER", None)
+        obs._get_adapter = AsyncMock(return_value=adapter)
+        contents, ctx = await obs._run_analysis_loop(
+            escs, [e.model_dump_json() for e in escs], "SYSTEM",
+            "ws", "we", "2026-01-01", "morning", time.time(), 1,
+        )
+
+    assert adapter.generate.called
+    kwargs = adapter.generate.call_args[1]
+    assert kwargs.get("thinking_level") == "medium"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not available")
+def test_vmer_2272_helm_lint_succeeds():
+    """VMER-2272-G: Helm chart lints cleanly and renders LLM_THINKING_NIGHTWATCHER="medium" into the ConfigMap."""
+    import subprocess
+    import yaml
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    helm_dir = root / "helm"
+    res = subprocess.run(["helm", "lint", str(helm_dir)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, f"helm lint failed:\n{res.stdout}\n{res.stderr}"
+    assert "0 chart(s) failed" in res.stdout
+
+    tpl = subprocess.run(["helm", "template", "darwin", str(helm_dir)], capture_output=True, text=True, timeout=60)
+    assert tpl.returncode == 0, f"helm template failed:\n{tpl.stderr}"
+    configmaps = [
+        d for d in yaml.safe_load_all(tpl.stdout)
+        if isinstance(d, dict) and d.get("kind") == "ConfigMap" and "LLM_THINKING_NIGHTWATCHER" in (d.get("data") or {})
+    ]
+    assert len(configmaps) == 1
+    assert configmaps[0]["data"]["LLM_THINKING_NIGHTWATCHER"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_handover_preserves_model_turn_on_set_phase_report():
+    """VMER-2272-H: Handover Exit Path 1 (set_phase report) preserves model turn before user handover turn."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[
+        fc("set_phase", {"phase": "investigate"}),
+        fc("set_phase", {"phase": "report"}),
+    ])
+    escs = [make_escalation("evt-1")]
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    # Last turn is handover user prompt, preceding turn is model set_phase('report')
+    assert contents[-1]["role"] == "user"
+    assert "Proceeding to REPORT phase" in contents[-1]["parts"][0]["text"]
+    assert contents[-2]["role"] == "model"
 
 
 # ==============================================================================
@@ -1683,3 +1855,373 @@ async def test_round5_summary_type_safety():
     assert "Incident created" in res_none
     assert ctx.created_incidents[1].summary == ""
 
+
+# ==============================================================================
+# VMER-2272 emergency fallback: salvage, degraded marker, circuit breaker, error handling
+# ==============================================================================
+
+def _rejected_plan_args():
+    """A plan the validator rejects on EVERY attempt (invalid platform, unknown id, duplicate id), yet salvageable."""
+    return {"clusters": [
+        {"events": ["evt-1"], "platform": "kargo", "root_cause": "rcA", "services": ["a"], "extends_issue_key": "VMER-9"},
+        {"events": ["evt-2", "evt-ghost"], "platform": "bogus", "root_cause": "rcB", "services": ["b"]},
+        {"events": ["evt-1"], "platform": "kargo", "root_cause": "rcDup", "services": ["c"]},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_i_fallback_salvages_last_plan_and_reconciles_only_remainder(monkeypatch):
+    """VMER-2272-I: valid clusters / extends_issue_key survive; unknown+duplicate IDs stripped; bad platform coerced."""
+    monkeypatch.setattr(nw_tools, "VALID_PLATFORMS", ["kargo", "gitlab"])
+    escs = [make_escalation(f"evt-{i}", platform="gitlab") for i in (1, 2, 3)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", _rejected_plan_args()))
+    obs = make_observer()
+
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+
+    assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+    assert ctx.degraded_plan is True
+    plan = ctx.declared_clusters
+    all_events = [e for c in plan for e in c["events"]]
+    assert sorted(all_events) == ["evt-1", "evt-2", "evt-3"]            # nothing dropped, no duplicates, no ghosts
+    by_root = {c["root_cause"]: c for c in plan}
+    assert by_root["rcA"]["extends_issue_key"] == "VMER-9" and by_root["rcA"]["events"] == ["evt-1"]
+    assert by_root["rcB"]["events"] == ["evt-2"] and by_root["rcB"]["platform"] == "gitlab"   # coerced to a valid platform
+    assert "rcDup" not in by_root
+    recon = [c for c in plan if c.get("auto_reconciled")]
+    assert len(recon) == 1 and recon[0]["events"] == ["evt-3"]          # only the true remainder is auto-reconciled
+    obs._slack_notify.assert_awaited_once()
+    assert "emergency" in obs._slack_notify.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_j_fallback_builds_plan_before_notifying_and_survives_notify_failures():
+    """VMER-2272-J: ctx.declared_clusters is set BEFORE the ops notify is awaited; a hung notify is bounded by a timeout."""
+    ctx = make_ctx([make_escalation("evt-1")])
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=MockResponse(text="no tool call"))
+    seen = {}
+
+    async def hang(text):
+        seen["plan_ready"] = bool(ctx.declared_clusters) and ctx.degraded_plan
+        await asyncio.sleep(3600)
+
+    obs = make_observer(slack_notify=hang)
+    with patch.object(nw, "FALLBACK_NOTIFY_TIMEOUT_S", 0.05):
+        await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+
+    assert seen["plan_ready"] is True
+    assert ctx.declared_clusters[0]["auto_reconciled"] is True
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_k_malformed_payload_error_is_retryable_logged_with_traceback_and_not_leaked(caplog):
+    """VMER-2272-K: TypeError/ValueError/KeyError are retried with a GENERIC message and logged with exc_info."""
+    ctx = make_ctx([make_escalation("evt-1")])
+    good = fc("declare_clusters", {"clusters": [{"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]})
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", {"clusters": []}), good])
+    contents: list = []
+
+    real = nw_tools._handle_declare_clusters
+    calls = {"n": 0}
+
+    async def flaky(args, c, auto_reconcile=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("secret-internal-detail")
+        return await real(args, c, auto_reconcile=auto_reconcile)
+
+    with patch("src.observers.nightwatcher_tools._handle_declare_clusters", new=flaky), \
+         caplog.at_level("WARNING", logger="src.observers.nightwatcher"):
+        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "medium")
+
+    assert ctx.degraded_plan is False and len(ctx.declared_clusters) == 1      # accepted on retry, not via fallback
+    fed_back = [c["parts"][0]["text"] for c in contents if c["role"] == "user"][0]
+    assert "malformed cluster plan structure" in fed_back and "secret-internal-detail" not in fed_back
+    rec = next(r for r in caplog.records if "malformed declare_clusters payload" in r.getMessage())
+    assert rec.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_l_programming_error_propagates_instead_of_being_absorbed_by_fallback():
+    """VMER-2272-L: a non-payload exception (code defect) is NOT swallowed -> no fallback, no Jira write path."""
+    ctx = make_ctx([make_escalation("evt-1")])
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", {"clusters": []}))
+    with patch("src.observers.nightwatcher_tools._handle_declare_clusters", new=AsyncMock(side_effect=AttributeError("bug"))):
+        with pytest.raises(AttributeError):
+            await make_observer()._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.declared_clusters == [] and ctx.degraded_plan is False
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_m_accepted_plan_is_not_degraded():
+    ctx = make_ctx([make_escalation("evt-1")])
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", {"clusters": [
+        {"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]}))
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.degraded_plan is False
+    obs._slack_notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_n_report_cart_uses_medium_thinking_default(monkeypatch):
+    """VMER-2272-N: the report cart passes the 'medium' default through to the clustering step."""
+    monkeypatch.delenv("LLM_THINKING_NIGHTWATCHER", raising=False)
+    esc = make_escalation("evt-1")
+    obs = make_observer()
+    obs._get_adapter = AsyncMock(return_value=AsyncMock())
+    obs._run_clustering_agent = AsyncMock(side_effect=RuntimeError("stop"))
+    with pytest.raises(RuntimeError, match="stop"):
+        await obs._run_report_cart(make_ctx([esc]), [], [esc.model_dump_json()], [esc], "SYS",
+                                   "2026-01-01", "morning", "ws", "we", time.time(), 1)
+    assert obs._run_clustering_agent.call_args[0][-1] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_o_degraded_batch_stops_drain_and_is_visible_in_report(fast_batches):
+    """VMER-2272-O: circuit breaker -- a degraded batch is the last of the sweep; report flags it, no fake noise reduction."""
+    responses = [
+        fc("set_phase", {"phase": "investigate"}), fc("set_phase", {"phase": "report"}),
+        *[fc("declare_clusters", {"clusters": "not-a-list"})] * (MAX_DECLARE_RETRIES + 1),
+        fc("write_incident", {"summary": "degraded", "description": "d", "priority": "Normal", "status": "New"}),
+        fc("post_shift_summary", {"summary": "done"}),
+    ]
+    obs = _batch_obs(2, pending_after=[5], adapter_responses=responses)
+    await obs._sweep()
+
+    bb = obs.blackboard
+    assert bb.lease_pending_escalations.await_count == 1            # second batch never leased
+    bb.count_pending_escalations.assert_not_awaited()
+    final = bb.persist_shift_report.call_args[0][0]
+    assert final.status == "completed" and len(final.incidents) == 1
+    assert final.metrics["degraded_plan_count"] == 1
+    assert final.metrics["noise_reduction_pct"] == 0
+    bb.commit_inflight.assert_awaited()                             # incidented members still committed, never re-filed
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_p_healthy_sweep_reports_zero_degraded_and_merge_sums_counts(fast_batches):
+    obs = _batch_obs(2, pending_after=[1, 0])
+    await obs._sweep()
+    final = obs.blackboard.persist_shift_report.call_args[0][0]
+    assert final.metrics["degraded_plan_count"] == 0
+
+    a = ShiftReport(shift_date="d", window="morning", window_start="a", window_end="b", metrics={"degraded_plan_count": 1, "incident_count": 1, "escalation_count": 1})
+    b = ShiftReport(shift_date="d", window="morning", window_start="a", window_end="b", metrics={"incident_count": 1, "escalation_count": 1})
+    assert NightwatcherObserver._merge_reports(a, b).metrics["degraded_plan_count"] == 1
+
+
+def test_vmer_2272_q_append_user_turn_merges_into_trailing_user_turn():
+    contents = [{"role": "model", "parts": [{"text": "m"}]}]
+    nw._append_user_turn(contents, "one")
+    nw._append_user_turn(contents, "two")
+    assert [c["role"] for c in contents] == ["model", "user"]
+    assert [p["text"] for p in contents[1]["parts"]] == ["one", "two"]
+    empty: list = []
+    nw._append_user_turn(empty, "x")
+    assert empty == [{"role": "user", "parts": [{"text": "x"}]}]
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_r_nudge_guard_branches():
+    """VMER-2272-R: reminder fires once, only in review/investigate, with the phase-appropriate action."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    responses = [fc("set_phase", {"phase": "investigate"})]
+    responses += [fc("get_event_report", {"event_id": "evt-1"})] * 25     # stays in investigate past round 19
+    responses.append(fc("set_phase", {"phase": "report"}))
+    adapter.generate = AsyncMock(side_effect=responses)
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    escs = [make_escalation("evt-1")]
+    contents, _ = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM", "ws", "we", "2026-01-01", "morning", time.time(), 1)
+    texts = [p["text"] for c in contents if c["role"] == "user" for p in c["parts"] if "Notice: Analysis round" in p["text"]]
+    assert len(texts) == 1 and "set_phase('report')" in texts[0] and "investigate" in texts[0]
+    assert _roles_alternate(contents)
+
+    # Never fires before round 19
+    adapter2 = AsyncMock()
+    adapter2.generate = AsyncMock(side_effect=[fc("set_phase", {"phase": "investigate"}), fc("set_phase", {"phase": "report"})])
+    obs._get_adapter = AsyncMock(return_value=adapter2)
+    contents2, _ = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM", "ws", "we", "2026-01-01", "morning", time.time(), 1)
+    assert not any("Notice: Analysis round" in p["text"] for c in contents2 for p in c["parts"])
+
+
+# ==============================================================================
+# VMER-2272 QE mutation-kill tests (labels S..X; each kills a surviving single-point mutant)
+# ==============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", [TypeError("t"), ValueError("v"), KeyError("k")], ids=["TypeError", "ValueError", "KeyError"])
+async def test_vmer_2272_s_each_narrowed_exception_type_is_retried_not_propagated(exc):
+    """VMER-2272-S: every member of (TypeError, ValueError, KeyError) is a retryable payload error."""
+    ctx = make_ctx([make_escalation("evt-1")])
+    good = fc("declare_clusters", {"clusters": [{"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]})
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", {"clusters": []}), good])
+    real = nw_tools._handle_declare_clusters
+    calls = {"n": 0}
+
+    async def flaky(args, c, auto_reconcile=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return await real(args, c, auto_reconcile=auto_reconcile)
+
+    with patch("src.observers.nightwatcher_tools._handle_declare_clusters", new=flaky):
+        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.degraded_plan is False and len(ctx.declared_clusters) == 1
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_t_fallback_keeps_last_list_plan_when_later_attempts_are_non_list():
+    """VMER-2272-T: a later malformed (missing / non-list) clusters payload must not erase an earlier salvageable plan."""
+    monkeypatch_plan = {"clusters": [{"events": ["evt-1", "evt-ghost"], "platform": "kargo", "root_cause": "rcKeep", "services": ["a"]}]}
+    # NOTE: empty plans ({} / []) are rejected even on the FINAL attempt (auto_reconcile=True), so they reach the fallback too.
+    later = [fc("declare_clusters", {}), fc("declare_clusters", {"clusters": "oops"})]
+    assert MAX_DECLARE_RETRIES + 1 == 1 + len(later)                # guard: script covers every attempt exactly
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", monkeypatch_plan), *later])
+    await make_observer()._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    by_root = {c["root_cause"]: c for c in ctx.declared_clusters}
+    assert by_root["rcKeep"]["events"] == ["evt-1"]
+    assert ctx.degraded_plan is True
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_u_fallback_notification_reports_salvaged_and_reconciled_counts(monkeypatch):
+    """VMER-2272-U: the ops message states exactly how many events were salvaged vs auto-reconciled."""
+    monkeypatch.setattr(nw_tools, "VALID_PLATFORMS", ["kargo", "gitlab"])
+    escs = [make_escalation(f"evt-{i}", platform="gitlab") for i in (1, 2, 3)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", _rejected_plan_args()))
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    msg = obs._slack_notify.call_args[0][0]
+    assert "2 event(s) salvaged" in msg and "1 auto-reconciled" in msg
+
+
+def test_vmer_2272_v_fallback_notify_timeout_is_a_sane_bound():
+    """VMER-2272-V: the notify bound must be finite and short (it blocks the sweep's critical path)."""
+    assert 0 < nw.FALLBACK_NOTIFY_TIMEOUT_S <= 30
+
+
+def _degraded_three_event_obs(*, degraded: bool):
+    """One lease of 3 events -> exactly 1 incident. degraded=True forces the emergency fallback; False accepts a real plan."""
+    obs = make_observer()
+    escs = [make_escalation(f"evt-b{i}", service="svc", platform="Konflux") for i in (1, 2, 3)]
+    bb = obs.blackboard
+    bb.lease_pending_escalations = AsyncMock(side_effect=[(escs, [e.model_dump_json() for e in escs]), ([], [])])
+    bb.count_pending_escalations = AsyncMock(side_effect=[0, 0])
+    for name in ("commit_inflight", "restage_orphans", "requeue_inflight", "persist_shift_report", "clear_escalation_flag"):
+        setattr(bb, name, AsyncMock())
+    if degraded:
+        declare = [fc("declare_clusters", {"clusters": "not-a-list"})] * (MAX_DECLARE_RETRIES + 1)
+    else:
+        declare = [fc("declare_clusters", {"clusters": [{"events": [e.event_id for e in escs], "root_cause": "rc",
+                                                          "platform": "Konflux", "services": ["svc"]}]})]
+    responses = [
+        fc("set_phase", {"phase": "investigate"}), fc("set_phase", {"phase": "report"}), *declare,
+        fc("write_incident", {"summary": "one", "description": "d", "priority": "Normal", "status": "New"}),
+        fc("post_shift_summary", {"summary": "done"}),
+    ]
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=responses)
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    obs._incident_adapter.create_incident = AsyncMock(return_value={"issue_key": "VMER-1", "issue_url": "u"})
+    obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
+    return obs
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_w_degraded_batch_claims_no_noise_reduction_but_healthy_one_does(fast_batches):
+    """VMER-2272-W: 3 events -> 1 incident. Healthy = 66.7% reduction; degraded must report 0 (non-vacuous: 1 pending would give 0 anyway)."""
+    healthy = _degraded_three_event_obs(degraded=False)
+    await healthy._sweep()
+    hm = healthy.blackboard.persist_shift_report.call_args[0][0].metrics
+    assert hm["escalation_count"] == 3 and hm["incident_count"] == 1
+    assert hm["noise_reduction_pct"] == pytest.approx(66.7) and hm["degraded_plan_count"] == 0
+
+    degraded = _degraded_three_event_obs(degraded=True)
+    await degraded._sweep()
+    dm = degraded.blackboard.persist_shift_report.call_args[0][0].metrics
+    assert dm["escalation_count"] == 3 and dm["incident_count"] == 1
+    assert dm["noise_reduction_pct"] == 0 and dm["degraded_plan_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_x_failure_settle_report_carries_degraded_count():
+    """VMER-2272-X: a batch that degraded and THEN failed (quota) must still flag degraded_plan_count in the persisted report."""
+    esc = make_escalation("evt-1")
+    obs, _raw = _sweep_obs([esc], raise_in_cart=QuotaExhaustedError("q"), created=[incident("evt-1")])
+    inner = obs._run_analysis_loop
+
+    async def degraded_analysis(*a, **kw):
+        contents, ctx = await inner(*a, **kw)
+        ctx.degraded_plan = True
+        return contents, ctx
+
+    obs._run_analysis_loop = degraded_analysis
+    await obs._sweep()
+    report = obs.blackboard.persist_shift_report.call_args[0][0]
+    assert report.status == "quota_exhausted" and report.metrics["degraded_plan_count"] == 1
+
+    obs2, _ = _sweep_obs([esc], raise_in_cart=QuotaExhaustedError("q"), created=[incident("evt-1")])
+    await obs2._sweep()
+    assert obs2.blackboard.persist_shift_report.call_args[0][0].metrics["degraded_plan_count"] == 0
+
+
+def test_vmer_2272_x2_merge_reports_sums_degraded_counts_from_both_sides():
+    """VMER-2272-X2: both operands contribute (kills 'key dropped from the sum tuple', which keeps only prior's value)."""
+    mk = lambda **m: ShiftReport(shift_date="d", window="morning", window_start="a", window_end="b",
+                                 metrics={"incident_count": 1, "escalation_count": 1, **m})
+    assert NightwatcherObserver._merge_reports(mk(degraded_plan_count=1), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 2
+    assert NightwatcherObserver._merge_reports(mk(), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"clusters": []}, {}, {"clusters": None}], ids=["empty-list", "omitted", "none"])
+async def test_vmer_2272_w_empty_plan_on_every_attempt_is_degraded_not_silently_accepted(payload):
+    """ai-review HIGH (#6720705283): zero clusters on every attempt (REAL handler) must hit the emergency fallback:
+    degraded_plan=True, ops notified once, plan is a single auto_reconciled cluster, drain-stop flag set."""
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2, 3)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", payload))
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+    assert ctx.degraded_plan is True
+    assert len(ctx.declared_clusters) == 1 and ctx.declared_clusters[0]["auto_reconciled"] is True
+    assert sorted(ctx.declared_clusters[0]["events"]) == ["evt-1", "evt-2", "evt-3"]
+    obs._slack_notify.assert_awaited_once()
+    assert "0 event(s) salvaged" in obs._slack_notify.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_x_partial_plan_on_final_attempt_still_accepted_non_degraded():
+    """Guard: the legit final-attempt reconcile of a NON-empty partial plan is unchanged (not degraded)."""
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2)]
+    ctx = make_ctx(escs)
+    partial = fc("declare_clusters", {"clusters": [
+        {"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]})
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=partial)
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.degraded_plan is False
+    assert any(c.get("auto_reconciled") for c in ctx.declared_clusters)
+    obs._slack_notify.assert_not_awaited()

@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Pattern]: Stateless tool handlers. All state lives in NightwatcherContext dataclass.
 # 2. [Constraint]: write_incident merges LLM judgment (args) + code-prefilled (cluster dict). Never mix.
-# 3. [Constraint]: validate_cluster_plan and reconcile_cluster_plan are pure -- no side effects, no async, never mutate the caller's cluster list.
+# 3. [Constraint]: validate_cluster_plan, reconcile_cluster_plan and salvage_cluster_plan are pure -- no side effects, no async, never mutate the caller's cluster list.
 # 4. [Pattern]: build_report_tool() and build_summary_tool() generate dynamic tool dicts per iteration.
 # 5. [Pattern]: get_phase_tools() filters static schemas. Dynamic tools are built separately by the cart loop.
 # 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
@@ -10,7 +10,9 @@
 # 8. [Constraint]: build_report_tool() includes link guidance in BOTH normal and overflow description branches.
 # 9. [Pattern]: _handle_extend_incident follows same 3-param signature (args, ctx, cluster) as write. Unified bookkeeping.
 # 10. [Constraint]: write_incident result MUST contain "Incident created" substring (dedup sentinel in handlers_dispatch.py:357).
-# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent).
+# 11. [Constraint]: auto_reconcile defaults to False everywhere; only the final declare_clusters retry opts in (see nightwatcher._run_clustering_agent). An empty/None cluster list is rejected even then, so it reaches the degraded emergency fallback.
+# 12. [Constraint]: validators/handlers must tolerate malformed LLM payloads (None/non-list clusters, non-dict clusters, non-string IDs) by REJECTING with feedback, never raising.
+# 13. [Pattern]: ctx.degraded_plan marks a plan built by the emergency fallback (salvage_cluster_plan + reconcile); the cart surfaces it in metrics and the sweep stops draining.
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
 
@@ -73,6 +75,7 @@ class NightwatcherContext:
     declared_clusters: list[dict] = field(default_factory=list)
     failed_cluster_events: list[str] = field(default_factory=list)
     committed_event_ids: set[str] = field(default_factory=set)  # already SREM'd from inflight (see Nightwatcher._commit_processed)
+    degraded_plan: bool = False  # True when the cluster plan came from the emergency fallback, not a model-accepted plan
     _summary_text: str = ""
 
 
@@ -97,17 +100,28 @@ def validate_cluster_plan(
     ``reconcile_cluster_plan`` to materialise a fallback cluster for them).
     Unknown and duplicate event IDs are ALWAYS rejected, regardless of the flag.
     """
+    if clusters is None:
+        clusters = []
+    if not isinstance(clusters, list):
+        return False, "Clusters must be a list of cluster objects."
     if not clusters:
+        # Rejected even with auto_reconcile=True: an empty plan carries zero model signal, so accepting it would
+        # reconcile the whole manifest into one cluster as a *non-degraded* plan, bypassing ctx.degraded_plan,
+        # the ops notification and the sweep circuit breaker. Rejection routes it to the emergency fallback.
         return False, "No clusters declared. You must create at least one cluster."
     all_assigned: set[str] = set()
     for i, c in enumerate(clusters):
-        events = c.get("events", [])
-        if not events:
+        if not isinstance(c, dict):
+            return False, f"Cluster {i + 1} is not a valid object."
+        events = c.get("events")
+        if not isinstance(events, (list, tuple, set)) or not events:
             return False, f"Cluster {i + 1} has no events. Every cluster must contain at least one event."
         platform = c.get("platform", "")
         if VALID_PLATFORMS and platform not in VALID_PLATFORMS:
             return False, f"Cluster {i + 1} has invalid platform '{platform}'. Must be one of: {', '.join(sorted(VALID_PLATFORMS))}"
         for eid in events:
+            if not isinstance(eid, str):
+                return False, f"Cluster {i + 1} contains non-string event ID."
             if eid in all_assigned:
                 return False, f"Event {eid} appears in multiple clusters. Each event must be in exactly one cluster."
             if eid not in manifest_ids:
@@ -160,6 +174,8 @@ def reconcile_cluster_plan(
     so downstream report builders render it correctly. It is NOT a correlation claim:
     the events share no established root cause and are only grouped to avoid dropping them.
     """
+    if clusters is None:
+        clusters = []
     result = copy.deepcopy(clusters)  # deep: nested "events" lists must not alias the caller's
     assigned = {eid for c in clusters for eid in c.get("events", [])}
     missing = manifest_ids - assigned
@@ -183,6 +199,44 @@ def reconcile_cluster_plan(
         "Nightwatcher: auto-reconciled %d unassigned events into fallback cluster", len(missing)
     )
     return result
+
+
+def salvage_cluster_plan(
+    clusters: "list[dict] | None",
+    manifest_ids: set[str],
+    escalations_by_id: "dict[str, StagedEscalation] | None" = None,
+) -> list[dict]:
+    """Best-effort salvage of a REJECTED cluster plan (pure; never mutates ``clusters``).
+
+    Keeps every structurally usable cluster so the emergency fallback does not throw away the
+    model's grouping or its ``extends_issue_key`` (which the cart still validates fail-closed):
+    non-dict clusters and clusters without usable events are dropped, unknown / non-string /
+    duplicate event IDs are stripped (first claim wins), and an invalid platform is coerced to
+    the deterministic fallback platform. Anything left unassigned is the caller's job to reconcile.
+    """
+    if not isinstance(clusters, list):
+        return []
+    kept: list[dict] = []
+    seen: set[str] = set()
+    for c in clusters:
+        if not isinstance(c, dict):
+            continue
+        raw_events = c.get("events")
+        if not isinstance(raw_events, (list, tuple, set)):
+            continue
+        events: list[str] = []
+        for eid in raw_events:
+            if isinstance(eid, str) and eid in manifest_ids and eid not in seen:
+                seen.add(eid)
+                events.append(eid)
+        if not events:
+            continue
+        cluster = copy.deepcopy({k: v for k, v in c.items() if k != "events"})
+        cluster["events"] = events
+        if VALID_PLATFORMS and cluster.get("platform", "") not in VALID_PLATFORMS:
+            cluster["platform"] = _fallback_platform(set(events), [], escalations_by_id)
+        kept.append(cluster)
+    return kept
 
 
 _MAX_TOOL_DESC_CHARS = 4000
@@ -421,7 +475,9 @@ async def _handle_search_existing_incidents(args: dict, ctx: NightwatcherContext
 
 
 async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext, auto_reconcile: bool = False) -> str:
-    clusters = args.get("clusters", [])
+    clusters = args.get("clusters") or []
+    if not isinstance(clusters, list):
+        return "Cluster plan validation failed: clusters must be a list of cluster objects."
     ok, error = validate_cluster_plan(clusters, ctx.manifest_ids, auto_reconcile=auto_reconcile)
     if not ok:
         return f"Cluster plan validation failed: {error}"

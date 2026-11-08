@@ -103,8 +103,8 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | `1800` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) |
 | `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
-| `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` | Max output tokens per LLM turn |
-| `LLM_THINKING_NIGHTWATCHER` | `high` | Thinking budget for complex clustering |
+| `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` (Helm sets `16000`) | Max output tokens per cart-step LLM turn (analysis loop uses `LLM_MAX_TOKENS_NIGHTWATCHER_ANALYSIS`, default `16384`) |
+| `LLM_THINKING_NIGHTWATCHER` | `medium` | Thinking budget for complex clustering |
 
 ## Two Shifts Per Day
 
@@ -115,7 +115,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 
 ## Safety Invariants
 
-1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` (pure, `auto_reconcile=False` by default) enforces this before any Jira writes. Sole exception: on the FINAL declare retry only, unassigned events are grouped by `reconcile_cluster_plan()` into a clearly-flagged fallback cluster (`auto_reconciled=True`, not a correlation claim) instead of failing the sweep. Unknown/duplicate IDs are always rejected.
+1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` (pure, `auto_reconcile=False` by default) enforces this before any Jira writes. Exceptions, both bounded: (a) on the FINAL declare attempt only (and only for a NON-empty plan -- an empty/omitted `clusters` list is ALWAYS rejected so it reaches (b) and is flagged degraded), unassigned events are grouped by `reconcile_cluster_plan()` into a clearly-flagged fallback cluster (`auto_reconciled=True`, not a correlation claim); (b) if ALL attempts are rejected (unknown/duplicate IDs, invalid platform, malformed payload, no tool call), the **emergency fallback** in `_run_clustering_agent` salvages the last parsed plan (`salvage_cluster_plan()`: keeps valid clusters and `extends_issue_key`, strips unknown/duplicate IDs, coerces an invalid platform), auto-reconciles only the remainder, sets `ctx.degraded_plan=True` and notifies ops. `RuntimeError` (safe requeue) is raised only when there is nothing to cluster or when the failure is a code defect (anything other than `TypeError`/`ValueError`/`KeyError` from `_handle_declare_clusters` propagates).
 2. `MAX_ANALYSIS_ROUNDS = 30` caps the analysis loop (review + investigate phases). Report phase is bounded by N declared clusters.
 3. `requeue_inflight()` on startup recovers from prior crashes -- no data loss.
 4. Phase transitions are forward-only and single-step. LLM cannot skip phases.
@@ -123,6 +123,8 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 6. Ephemeral-only dispatch: Nightwatcher uses `EphemeralProvisioner` (Tekton TaskRun), never in-pod sidecars.
 7. Partial failure: if Jira write fails for a cluster, cart continues with remaining clusters. Failed cluster events are restaged via `restage_orphans()`.
 8. Duplicates are structurally impossible: code drives exactly one `write_incident` call per declared cluster.
+9. Emergency-fallback circuit breaker: a degraded batch (`ctx.degraded_plan`) STOPS the sweep drain, so a broken LLM/schema integration yields at most one low-confidence incident batch per sweep instead of draining the whole backlog. It is visible in the `ShiftReport`: `metrics.degraded_plan_count` (summed across batches) and `noise_reduction_pct = 0` for that batch. Monitor `degraded_plan_count` / the ops Slack warning after the `LLM_THINKING_NIGHTWATCHER=medium` rollout.
+10. Analysis-loop handover: every exit path of `_run_analysis_loop` ends with a user "Analysis phase complete" handover turn; the round-20 progress nudge and the handover are merged into a trailing user turn (`_append_user_turn`) so roles strictly alternate.
 
 ## Shifts API & UI
 

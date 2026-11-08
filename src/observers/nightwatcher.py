@@ -13,7 +13,10 @@
 #     One ShiftReport per sweep: batches are merged cumulatively into the same date:window key.
 # 11. [Constraint]: On quota/generic failure, events already in ctx.created_incidents are COMMITTED (Jira write is not
 #     idempotent); only the uncommitted remainder is restaged. Never restage a member whose incident exists.
-# 12. [Constraint]: auto_reconcile is enabled ONLY on the final declare_clusters attempt (_run_clustering_agent).
+# 12. [Constraint]: auto_reconcile is enabled on the final declare_clusters attempt. If ALL attempts are rejected, a bounded
+#     emergency fallback salvages the last parsed plan (salvage_cluster_plan), reconciles the remainder, and sets ctx.degraded_plan.
+#     A degraded batch is reported (metrics.degraded_plan_count, noise_reduction_pct=0, ops notify) and STOPS the sweep drain, so a
+#     broken LLM/schema integration yields at most one low-confidence incident batch per sweep. Manifest events are never dropped.
 # 13. [Constraint]: The cart commits each cluster's members to Jira-done IMMEDIATELY after its incident is created (not at the end),
 #     so a crash/SIGTERM/CancelledError later in the sweep cannot make requeue_inflight() re-file an existing incident.
 # 14. [Gotcha]: INFLIGHT_TTL EXPIREs (deletes) the inflight SET after 1h -- it never requeues. Anything stranded there is lost unless
@@ -56,6 +59,16 @@ DEFAULT_BATCH_TIMEOUT_S = 1800.0
 MIN_BATCH_TIMEOUT_S = 60.0
 MAX_BATCH_TIMEOUT_S = 3300.0  # 55m (< 3600s inflight TTL safety net)
 SUMMARY_PROMPT_CHARS = 140
+FALLBACK_NOTIFY_TIMEOUT_S = 10.0
+ANALYSIS_NUDGE_ROUND = 19  # 0-indexed: the 20th round (2/3 of MAX_ANALYSIS_ROUNDS)
+
+
+def _append_user_turn(contents: list, text: str) -> None:
+    """Append user text keeping strict user/model alternation (merge into a trailing user turn)."""
+    if contents and contents[-1].get("role") == "user":
+        contents[-1].setdefault("parts", []).append({"text": text})
+    else:
+        contents.append({"role": "user", "parts": [{"text": text}]})
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -95,7 +108,17 @@ def _env_float(name: str, default: float, minimum: float = 0.0, maximum: Optiona
         return maximum
     return value
 
-from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
+from .nightwatcher_tools import (
+    NightwatcherContext,
+    execute_tool,
+    get_phase_tools,
+    validate_cluster_plan,
+    build_report_tool,
+    build_extend_tool,
+    build_summary_tool,
+    _handle_write_incident,
+    _handle_extend_incident,
+)
 from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
 
 
@@ -316,6 +339,12 @@ class NightwatcherObserver:
 
             # Decide whether to drain another batch within this sweep.
             ctx = self._batch_ctx
+            if ctx and ctx.degraded_plan:
+                logger.warning(
+                    "Nightwatcher: batch %d used the emergency clustering fallback, stopping drain (circuit breaker); "
+                    "remaining backlog waits for the next sweep", batch_no,
+                )
+                return
             if not (ctx and ctx.created_incidents):
                 logger.warning("Nightwatcher: batch %d produced no incidents, stopping drain to avoid re-leasing the same items", batch_no)
                 return
@@ -459,6 +488,7 @@ class NightwatcherObserver:
             investigations=list(ctx.investigations) if ctx else [],
             metrics={"escalation_count": len(done_ids), "incident_count": len(created),
                      "investigation_count": len(ctx.investigations) if ctx else 0,
+                     "degraded_plan_count": 1 if (ctx and ctx.degraded_plan) else 0,
                      "failed_cluster_count": 0},
             started_at=sweep_start, completed_at=time.time(),
         )
@@ -471,7 +501,7 @@ class NightwatcherObserver:
         if prior is None:
             return new
         metrics = dict(prior.metrics)
-        for key in ("escalation_count", "incident_count", "investigation_count", "failed_cluster_count"):
+        for key in ("escalation_count", "incident_count", "investigation_count", "failed_cluster_count", "degraded_plan_count"):
             metrics[key] = (prior.metrics.get(key) or 0) + (new.metrics.get(key) or 0)
         esc_total = metrics.get("escalation_count") or 0
         metrics["noise_reduction_pct"] = (
@@ -524,10 +554,32 @@ class NightwatcherObserver:
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
         analysis_max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER_ANALYSIS", "16384"))
-        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "medium")
         text_nudge_count = 0
+        review_nudge_sent = False
 
-        for _ in range(MAX_ANALYSIS_ROUNDS):
+        def _finalize_analysis_handover():
+            _append_user_turn(
+                contents,
+                "Analysis phase complete. Proceeding to REPORT phase. "
+                "You must now group all manifest events into incident clusters using declare_clusters.",
+            )
+            return contents, ctx
+
+        for round_idx in range(MAX_ANALYSIS_ROUNDS):
+            if round_idx >= ANALYSIS_NUDGE_ROUND and current_phase in ("review", "investigate") and not review_nudge_sent:
+                review_nudge_sent = True
+                action_prompt = (
+                    "advance to investigate via set_phase('investigate')."
+                    if current_phase == "review"
+                    else "advance to report via set_phase('report')."
+                )
+                _append_user_turn(
+                    contents,
+                    f"Notice: Analysis round {round_idx + 1}/{MAX_ANALYSIS_ROUNDS}. "
+                    f"You have used 2/3 of your analysis budget. "
+                    f"Complete your {current_phase} and {action_prompt}",
+                )
             if hasattr(self.blackboard, "refresh_inflight_ttl"):
                 await self.blackboard.refresh_inflight_ttl()
             tools = get_phase_tools(current_phase)
@@ -536,7 +588,7 @@ class NightwatcherObserver:
                 tools=tools, temperature=temperature,
                 max_output_tokens=analysis_max_tokens, thinking_level=thinking,
             )
-            from src.agents.llm import record_token_usage
+            from ..agents.llm import record_token_usage
             record_token_usage("nightwatcher", response.usage)
             if response.function_call:
                 name = response.function_call.name
@@ -550,7 +602,8 @@ class NightwatcherObserver:
                         current_phase = new_phase
                         logger.info("Nightwatcher phase: %s -> %s (%s)", phases[cur_idx], new_phase, args.get("reasoning", ""))
                         if new_phase == "report":
-                            return contents, ctx
+                            contents.append({"role": "model", "parts": response.raw_parts or [{"text": "set_phase('report')"}]})
+                            return _finalize_analysis_handover()
                         tool_result = f"Phase: {current_phase.upper()}"
                     else:
                         tool_result = (
@@ -572,10 +625,11 @@ class NightwatcherObserver:
                         "You have finished your analysis. Call set_phase('report') to proceed to the report phase."}]})
                 else:
                     logger.warning("Nightwatcher: forcing transition to report phase after %d nudges", text_nudge_count)
-                    return contents, ctx
+                    contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
+                    return _finalize_analysis_handover()
 
         logger.warning("Nightwatcher: MAX_ANALYSIS_ROUNDS exhausted, forcing transition to report phase")
-        return contents, ctx
+        return _finalize_analysis_handover()
 
     async def _run_clustering_agent(self, adapter, ctx, system_prompt, contents,
                                     temperature, max_tokens, thinking) -> None:
@@ -584,11 +638,14 @@ class NightwatcherObserver:
         Validation errors are fed back to the model. auto_reconcile (code-built fallback
         cluster for unassigned events) is enabled ONLY on the final attempt, so the model
         always gets MAX_DECLARE_RETRIES chances to produce a complete plan itself.
-        Raises RuntimeError if no plan is accepted.
+        If every attempt is rejected, a bounded emergency fallback salvages the last parsed plan,
+        reconciles the remainder and flags ``ctx.degraded_plan`` (see @ai-rules 12).
+        Raises RuntimeError only when there is nothing to cluster.
         """
         from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
-        from .nightwatcher_tools import _handle_declare_clusters
-        from src.agents.llm import record_token_usage
+        from .nightwatcher_tools import _handle_declare_clusters, reconcile_cluster_plan, salvage_cluster_plan
+        from ..agents.llm import record_token_usage
+        last_clusters = None
         for attempt in range(MAX_DECLARE_RETRIES + 1):
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
@@ -597,10 +654,25 @@ class NightwatcherObserver:
             )
             record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
-                result = await _handle_declare_clusters(
-                    response.function_call.args, ctx,
-                    auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
-                )
+                call_args = response.function_call.args or {}
+                if isinstance(call_args, dict) and isinstance(call_args.get("clusters"), list):
+                    last_clusters = call_args["clusters"]
+                try:
+                    result = await _handle_declare_clusters(
+                        call_args, ctx,
+                        auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
+                    )
+                except (TypeError, ValueError, KeyError):
+                    # Only malformed-LLM-payload errors are retryable. Anything else (AttributeError, etc.) is a code
+                    # defect and must propagate to _sweep's safe-requeue path instead of being absorbed into a Jira write.
+                    logger.warning(
+                        "Nightwatcher: malformed declare_clusters payload on attempt %d/%d",
+                        attempt + 1, MAX_DECLARE_RETRIES + 1, exc_info=True,
+                    )
+                    result = (
+                        "Cluster plan validation failed: malformed cluster plan structure. "
+                        "Call declare_clusters with a list of cluster objects, each with a platform and a list of event ID strings."
+                    )
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": result}]})
                 if ctx.declared_clusters:
@@ -608,10 +680,44 @@ class NightwatcherObserver:
                     return
                 logger.warning("Nightwatcher: cluster plan rejected on attempt %d: %s", attempt + 1, result[:200])
             else:
+                sanitized_text = (response.text or "").replace("\n", " ").replace("\r", " ").strip()[:200]
+                logger.warning(
+                    "Nightwatcher: cluster declaration attempt %d/%d emitted no valid tool call (text len=%d, parts=%d): %s",
+                    attempt + 1, MAX_DECLARE_RETRIES + 1,
+                    len(response.text or ""), len(response.raw_parts or []),
+                    sanitized_text,
+                )
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text":
                     "You must call declare_clusters with your cluster plan. Every manifest event must be assigned."}]})
-        raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+        logger.warning(
+            "Nightwatcher: cluster declaration exhausted %d attempts; triggering emergency auto-reconciliation fallback",
+            MAX_DECLARE_RETRIES + 1,
+        )
+        salvaged = salvage_cluster_plan(last_clusters, ctx.manifest_ids, ctx.escalations_by_id)
+        plan = reconcile_cluster_plan(salvaged, ctx.manifest_ids, ctx.escalations_by_id)
+        if not plan:
+            raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+        # Establish the plan BEFORE any await so a cancelled/slow notification can never skip it.
+        ctx.declared_clusters = plan
+        ctx.degraded_plan = True
+        salvaged_events = sum(len(c["events"]) for c in salvaged)
+        logger.info(
+            "Nightwatcher: emergency fallback plan established: %d cluster(s), %d salvaged event(s), %d auto-reconciled",
+            len(plan), salvaged_events, len(ctx.manifest_ids) - salvaged_events,
+        )
+        try:
+            await asyncio.wait_for(
+                self._notify_ops(
+                    f":warning: Nightwatcher: cluster declaration failed all {MAX_DECLARE_RETRIES + 1} attempts; used the emergency "
+                    f"auto-reconciliation fallback ({salvaged_events} event(s) salvaged from the model's plan, "
+                    f"{len(ctx.manifest_ids) - salvaged_events} auto-reconciled into one low-confidence incident). "
+                    f"Sweep drain stops after this batch; check LLM/schema health."
+                ),
+                timeout=FALLBACK_NOTIFY_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning("Nightwatcher: fallback ops notification timed out after %.0fs (non-fatal)", FALLBACK_NOTIFY_TIMEOUT_S)
 
     async def _run_report_cart(self, ctx, contents, json_members, escalations,
                                system_prompt, shift_date, window, window_start,
@@ -625,7 +731,7 @@ class NightwatcherObserver:
         adapter = await self._get_adapter()
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
-        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "medium")
 
         # Step 1: Declare clusters
         await self._run_clustering_agent(
@@ -682,7 +788,7 @@ class NightwatcherObserver:
                     tools=report_tools, temperature=temperature,
                     max_output_tokens=max_tokens, thinking_level=thinking,
                 )
-                from src.agents.llm import record_token_usage
+                from ..agents.llm import record_token_usage
                 record_token_usage("nightwatcher", response.usage)
                 if response.function_call and response.function_call.name == expected_tool:
                     if is_extend:
@@ -718,12 +824,17 @@ class NightwatcherObserver:
                 logger.warning("Nightwatcher: restaged %d failed cluster events", len(ctx.failed_cluster_events))
 
         # Step 4: Summary
-        noise_pct = round((1 - len(ctx.created_incidents) / max(pending_count, 1)) * 100, 1) if ctx.created_incidents else 0
+        # A degraded (emergency-fallback) plan is not real clustering, so it must not claim noise reduction.
+        noise_pct = (
+            round((1 - len(ctx.created_incidents) / max(pending_count, 1)) * 100, 1)
+            if ctx.created_incidents and not ctx.degraded_plan else 0
+        )
         metrics = {
             "escalation_count": pending_count,
             "incident_count": len(ctx.created_incidents),
             "noise_reduction_pct": noise_pct,
             "investigation_count": len(ctx.investigations),
+            "degraded_plan_count": 1 if ctx.degraded_plan else 0,
             "failed_cluster_count": len([c for c in ctx.declared_clusters if any(eid in ctx.failed_cluster_events for eid in c.get("events", []))]),
             "sweep_duration_s": round(time.time() - sweep_start, 1),
         }
@@ -735,7 +846,7 @@ class NightwatcherObserver:
             tools=summary_tools, temperature=temperature,
             max_output_tokens=max_tokens, thinking_level=thinking,
         )
-        from src.agents.llm import record_token_usage
+        from ..agents.llm import record_token_usage
         record_token_usage("nightwatcher", response.usage)
         if response.function_call and response.function_call.name == "post_shift_summary":
             from .nightwatcher_tools import _handle_post_shift_summary
