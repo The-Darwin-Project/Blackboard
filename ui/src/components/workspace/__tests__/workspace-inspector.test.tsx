@@ -534,6 +534,48 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
     });
 
+    it('lights no beacon and passes no roles when no event is selected, even for busy agents with null event ids (null !== null guard)', () => {
+      mockAgents([
+        { agent_id: 'a1', role: 'developer', busy: true, bound_event_id: null, current_event_id: null },
+        { agent_id: 'a2', role: 'qe', busy: true },
+      ]);
+      render(
+        <QueryClientProvider client={queryClient}>
+          <WorkspaceInspector isOpen onClose={vi.fn()} selectedEventId={null} />
+        </QueryClientProvider>,
+      );
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+    });
+
+    it('falls back to registeredAgents when opsControl.agents is undefined (and tolerates both being absent)', () => {
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({
+        agents: undefined,
+        registeredAgents: [{ agent_id: 'a1', role: 'qe', busy: true, current_event_id: 'evt-123' }],
+      } as never);
+      const first = renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('qe');
+      first.unmount();
+
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({ agents: undefined, registeredAgents: undefined } as never);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+    });
+
+    it('does not throw when opsControl itself is null', () => {
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue(null as never);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+    });
+
+    it('treats a busy agent with an empty role/agent_id as no role (no empty-string role leaks)', () => {
+      mockAgents([{ agent_id: '', role: '', current_role: null, busy: true, bound_event_id: 'evt-123' }]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+    });
+
     it('streams the matching agent messages into the floating window', () => {
       mockStreams({
         'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['Compiling typescript...', 'Tests passing'] },

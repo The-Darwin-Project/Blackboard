@@ -196,3 +196,195 @@ async def test_cross_agent_plan_step_is_ignored_and_logged(caplog):
         ev = await _progress([orch, _plan_step(2, "developer", "1", "completed")])
     assert "- [ ] Step 1: verify (qe) -- pending" in ev
     assert any("Ignored plan_step update for step 1" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# QE edge-case coverage (mutation-driven): turn=None, failed-turn precision, malformed turns, role canonicalisation
+# ---------------------------------------------------------------------------
+def _raw(**kw):
+    """Build a turn bypassing validation (ConversationTurn.turn is a required int; legacy/partial docs may carry None)."""
+    return ConversationTurn.model_construct(**kw)
+
+
+@pytest.mark.asyncio
+async def test_turn_with_same_number_as_plan_is_not_post_plan():
+    # Only turns strictly AFTER the plan count; a colliding turn number must not complete the step.
+    orch = _plan(5, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    ev = await _progress([orch, _execute(5, "developer")])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_with_none_turn_number_does_not_self_complete():
+    fallback = _raw(turn=None, actor="developer", action="plan",
+                    taskForAgent={"steps": [{"id": "1", "agent": "developer", "summary": "a"}], "source": "developer"})
+    ev = await _progress([fallback])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+    # ...and a later numbered execute still completes it (no TypeError comparing int <= None)
+    ev = await _progress([fallback, _execute(7, "developer")])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_post_plan_turn_with_none_turn_number_is_counted_without_crashing():
+    orch = _plan(5, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    legacy_exec = _raw(turn=None, actor="developer", action="execute", result="done")
+    ev = await _progress([orch, legacy_exec])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_plan_step_with_none_turn_number_is_applied():
+    orch = _plan(5, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
+    ps = _raw(turn=None, actor="qe", action="plan_step", taskForAgent={"step_id": "1", "status": "in_progress"})
+    ev = await _progress([orch, ps])
+    assert "- [~] Step 1: v (qe) -- in_progress" in ev
+
+
+@pytest.mark.asyncio
+async def test_error_action_turn_does_not_auto_complete_even_without_error_prefix():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    boom = ConversationTurn(turn=2, actor="developer", action="error", result="boom")
+    no_result = ConversationTurn(turn=3, actor="developer", action="error")
+    ev = await _progress([orch, boom, no_result])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["Error: x", "  Error: x", "\n\t Error: boom", "Error:"])
+async def test_error_prefix_variants_are_failed_turns(result):
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    ev = await _progress([orch, _execute(2, "developer", result=result)])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [None, "", "   ", "Errors were fixed", "Error", "error: lowercase is not the convention",
+                                    "Fixed it. Earlier run printed Error: foo"])
+async def test_non_error_prefix_results_still_complete(result):
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    turn = ConversationTurn(turn=2, actor="developer", action="execute", result=result)
+    ev = await _progress([orch, turn])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_does_not_consume_the_step_a_later_success_completes():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    ev = await _progress([orch, _execute(2, "developer", result="Error: transient"), _execute(3, "developer")])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_failed_worker_plan_turn_does_not_auto_complete():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    bad = ConversationTurn(turn=2, actor="developer", action="plan", result="Error: nope",
+                           taskForAgent={"steps": [{"id": "9", "agent": "developer", "summary": "x"}], "source": "developer"})
+    ev = await _progress([orch, bad])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+
+
+@pytest.mark.asyncio
+async def test_non_string_source_does_not_crash_and_is_treated_as_worker_plan():
+    weird = ConversationTurn(turn=1, actor="developer", action="plan",
+                             taskForAgent={"steps": [{"id": "1", "agent": "developer", "summary": "a"}], "source": 123})
+    ev = await _progress([weird, _execute(2, "developer")])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+    # a None source behaves the same
+    none_src = ConversationTurn(turn=1, actor="developer", action="plan",
+                                taskForAgent={"steps": [{"id": "1", "agent": "developer", "summary": "a"}], "source": None})
+    assert "- [ ] Step 1: a (developer) -- pending" in await _progress([none_src])
+
+
+@pytest.mark.asyncio
+async def test_post_plan_worker_plan_turn_without_task_payload_completes_step_without_crashing():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    bare_plan = ConversationTurn(turn=2, actor="developer", action="plan")  # taskForAgent is None
+    ev = await _progress([orch, bare_plan])
+    assert "- [x] Step 1: a (developer) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_post_plan_orchestrator_sourced_plan_without_steps_does_not_auto_complete():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "a"}])
+    sourced = ConversationTurn(turn=2, actor="developer", action="plan", taskForAgent={"source": "brain"})  # no steps
+    ev = await _progress([orch, sourced])
+    assert "- [ ] Step 1: a (developer) -- pending" in ev
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_execute_ignored_even_when_step_is_assigned_to_an_orchestrator_role():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "architect", "summary": "design"}])
+    ev = await _progress([orch, _execute(2, "architect")])
+    assert "- [ ] Step 1: design (architect) -- pending" in ev
+
+
+@pytest.mark.asyncio
+async def test_unassigned_step_accepts_plan_step_from_any_actor():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "", "summary": "a"}, {"id": "2", "summary": "b"}])
+    ev = await _progress([orch, _plan_step(2, "developer", "1", "completed"), _plan_step(3, "qe", "2", "in_progress")])
+    assert "- [x] Step 1: a () -- completed" in ev
+    assert "- [~] Step 2: b (?) -- in_progress" in ev  # step without an agent key renders '?'
+
+
+@pytest.mark.asyncio
+async def test_plan_step_without_status_defaults_to_completed():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
+    ps = ConversationTurn(turn=2, actor="qe", action="plan_step", taskForAgent={"step_id": "1"})
+    ev = await _progress([orch, ps])
+    assert "- [x] Step 1: v (qe) -- completed" in ev
+
+
+@pytest.mark.asyncio
+async def test_malformed_plan_step_turns_are_ignored_without_crashing():
+    orch = _plan(1, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
+    unknown = _plan_step(2, "brain", "99", "completed")  # unknown step id
+    no_id = ConversationTurn(turn=3, actor="brain", action="plan_step", taskForAgent={"status": "completed"})
+    no_payload = ConversationTurn(turn=4, actor="brain", action="plan_step")
+    ev = await _progress([orch, unknown, no_id, no_payload])
+    assert "- [ ] Step 1: v (qe) -- pending" in ev
+    assert "0/1 steps completed" in ev
+    assert "Step 99" not in ev
+
+
+@pytest.mark.asyncio
+async def test_latest_worker_plan_wins_when_no_orchestrator_plan_exists():
+    first = _plan(1, "developer", [{"id": "1", "agent": "developer", "summary": "first"}])
+    second = _plan(2, "qe", [{"id": "1", "agent": "qe", "summary": "second"}])
+    ev = await _progress([first, second])
+    assert "Step 1: second (qe)" in ev and "first" not in ev
+
+
+@pytest.mark.asyncio
+async def test_latest_orchestrator_plan_wins_over_earlier_orchestrator_plan():
+    first = _plan(1, "brain", [{"id": "1", "agent": "developer", "summary": "first"}])
+    second = _plan(2, "architect", [{"id": "1", "agent": "developer", "summary": "second"}])
+    ev = await _progress([first, second])
+    assert "Step 1: second (developer)" in ev and "first" not in ev
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_without_steps_key_is_not_a_plan():
+    no_steps = ConversationTurn(turn=1, actor="developer", action="plan", taskForAgent={"source": "developer"})
+    ev = await _progress([no_steps])
+    assert "No plan has been created" in ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ["code-reviewer", "Code Reviewer", "  CODE_REVIEWER  ", "Code-Reviewer"])
+async def test_role_canonicalisation_for_auto_complete_and_plan_step(actor):
+    orch = _plan(1, "brain", [{"id": "1", "agent": "code_reviewer", "summary": "review"},
+                              {"id": "2", "agent": "Code-Reviewer", "summary": "re-review"}])
+    ev = await _progress([orch, _execute(2, actor)])
+    assert "- [x] Step 1: review (code_reviewer) -- completed" in ev
+    ev = await _progress([orch, _plan_step(2, actor, "1", "in_progress"), _plan_step(3, actor, "2", "in_progress")])
+    assert "- [~] Step 1: review (code_reviewer) -- in_progress" in ev
+    assert "- [~] Step 2: re-review (Code-Reviewer) -- in_progress" in ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", ["Brain", " brain ", "ARCHITECT", "Headhunter", "ALIGNER"])
+async def test_orchestrator_actor_canonicalisation_on_plan_step_override(actor):
+    orch = _plan(1, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
+    ev = await _progress([orch, _plan_step(2, actor, "1", "blocked")])
+    assert "- [!] Step 1: v (qe) -- blocked" in ev
