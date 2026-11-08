@@ -4,7 +4,7 @@
 # 2. [Pattern]: _progress() helper builds a mock event and returns the rendered progress evidence string.
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from src.agents.handlers_planning import handle_get_plan_progress
+from src.agents.handlers_planning import _canonical_role, _normalize_step_id, handle_get_plan_progress
 from src.models import ConversationTurn
 
 
@@ -388,3 +388,76 @@ async def test_orchestrator_actor_canonicalisation_on_plan_step_override(actor):
     orch = _plan(1, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
     ev = await _progress([orch, _plan_step(2, actor, "1", "blocked")])
     assert "- [!] Step 1: v (qe) -- blocked" in ev
+
+
+# ---------------------------------------------------------------------------
+# Round 2: non-string role payloads + step-id normalisation parity with ui/src/utils/planState.ts
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("value", [None, 42, 123, ["qe"], {"a": 1}, True])
+def test_canonical_role_non_string_is_empty(value):
+    assert _canonical_role(value) == ""
+
+
+# Mirrors the normalizeStepId table in ui/src/__tests__/planState.test.ts
+@pytest.mark.parametrize("value,expected", [
+    ("1", "1"), ("  1  ", "1"), (1, "1"), (0, "0"), (1.0, "1"), (2.5, "2.5"),
+    ("", None), ("   ", None), (None, None), (True, None), (False, None),
+    (float("nan"), None), (float("inf"), None), (["1"], None), ({"id": 1}, None),
+])
+def test_normalize_step_id_parity_table(value, expected):
+    assert _normalize_step_id(value) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [123, ["qe"], 42])
+async def test_non_string_agent_and_source_never_raise(bad):
+    weird = _raw(turn=1, actor="developer", action="plan",
+                 taskForAgent={"source": bad, "steps": [{"id": "1", "agent": bad, "summary": "a"}]})
+    ev = await _progress([weird, _execute(2, "developer")])
+    assert "Step 1: a" in ev and "-- pending" in ev  # unassigned step: worker execute can't auto-complete it
+    orch = _plan(1, "brain", [{"id": "1", "agent": bad, "summary": "a"}])
+    ev = await _progress([orch, _plan_step(2, "qe", "1", "in_progress")])
+    assert "- [~] Step 1: a" in ev  # unassigned -> any actor may update
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", [42, ["qe"]])
+async def test_non_string_actor_on_stored_turn_never_raises(actor):
+    orch = _plan(1, "brain", [{"id": "1", "agent": "qe", "summary": "v"}])
+    weird_exec = _raw(turn=2, actor=actor, action="execute", result=7)
+    weird_step = _raw(turn=3, actor=actor, action="plan_step", taskForAgent={"step_id": "1", "status": "completed"})
+    ev = await _progress([orch, weird_exec, weird_step])
+    assert "- [ ] Step 1: v (qe) -- pending" in ev
+
+
+@pytest.mark.asyncio
+async def test_numeric_and_string_step_ids_match_across_plan_and_plan_step():
+    orch = _plan(1, "brain", [{"id": 1, "agent": "qe", "summary": "a"}, {"id": "2", "agent": "qe", "summary": "b"}])
+    ev = await _progress([orch, _plan_step(2, "qe", "1", "in_progress"), _plan_step(3, "qe", 2, "blocked")])
+    assert "- [~] Step 1: a (qe) -- in_progress" in ev
+    assert "- [!] Step 2: b (qe) -- blocked" in ev
+
+
+@pytest.mark.asyncio
+async def test_null_bool_empty_step_ids_are_dropped_like_the_ui():
+    orch = _plan(1, "brain", [
+        {"id": None, "agent": "qe", "summary": "null"}, {"id": True, "agent": "qe", "summary": "bool"},
+        {"id": "", "agent": "qe", "summary": "empty"}, {"id": "  ", "agent": "qe", "summary": "blank"},
+        {"agent": "qe", "summary": "missing"}, {"id": "1", "agent": "qe", "summary": "ok"},
+    ])
+    bad_update = ConversationTurn(turn=2, actor="brain", action="plan_step", taskForAgent={"step_id": True, "status": "completed"})
+    ev = await _progress([orch, bad_update])
+    assert "0/1 steps completed" in ev
+    assert "Step 1: ok (qe) -- pending" in ev
+    assert "Step None" not in ev and "Step True" not in ev
+
+
+@pytest.mark.asyncio
+async def test_positional_plan_boundary_holds_when_plan_turn_number_is_none():
+    # Same plan_turn.turn is None; an identical-looking earlier worker plan must not be treated as post-plan.
+    earlier = _raw(turn=None, actor="developer", action="plan",
+                   taskForAgent={"steps": [{"id": "1", "agent": "developer", "summary": "old"}], "source": "developer"})
+    latest = _raw(turn=None, actor="qe", action="plan",
+                  taskForAgent={"steps": [{"id": "1", "agent": "developer", "summary": "new"}], "source": "qe"})
+    ev = await _progress([earlier, latest])
+    assert "Step 1: new (developer) -- pending" in ev

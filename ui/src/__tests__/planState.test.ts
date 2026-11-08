@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: Unit tests for utils/planState.ts (canonicalRole normalization, derivePlanState replan slicing, status mapping).
 import { describe, it, expect } from 'vitest';
-import { canonicalRole, derivePlanState, isOrchestratorPlan, TERMINAL_STATUSES } from '../utils/planState';
+import { canonicalRole, derivePlanState, isOrchestratorPlan, normalizeStepId, TERMINAL_STATUSES } from '../utils/planState';
 import type { ConversationTurn } from '../api/types';
 
 const plan = (
@@ -271,11 +271,90 @@ describe('derivePlanState edge cases (QE)', () => {
     expect(isOrchestratorPlan(rawTurn({ turn: 1, actor: 'brain', action: 'plan_step' }))).toBe(false);
   });
 
-  // KNOWN PARITY GAP (QE finding, LOW): backend _is_orchestrator_turn guards `isinstance(source, str)` and returns False for a
-  // non-string source; the UI's canonicalRole() calls .trim() on it and throws TypeError (crashes derivePlanState).
-  // it.fails documents the gap without turning CI red; flip to a plain `it` once isOrchestratorPlan guards typeof source.
-  it.fails('isOrchestratorPlan treats a non-string source like the backend (false, no throw)', () => {
-    expect(isOrchestratorPlan(rawTurn({ turn: 1, actor: 'developer', action: 'plan', taskForAgent: { source: 42 } }))).toBe(false);
+  // Parity with backend _is_orchestrator_turn / _canonical_role: non-string source/actor/agent are ignored, never thrown on.
+  it.each([42, 123, ['qe'], { a: 1 }, true])('isOrchestratorPlan ignores non-string source %j without throwing', (source) => {
+    expect(isOrchestratorPlan(rawTurn({ turn: 1, actor: 'developer', action: 'plan', taskForAgent: { source } }))).toBe(false);
+  });
+
+  it.each([42, 123, ['qe'], { a: 1 }, true])('canonicalRole returns "" for non-string %j', (value) => {
+    expect(canonicalRole(value)).toBe('');
+  });
+
+  it.each([42, 123, ['qe']])('isOrchestratorPlan ignores non-string actor %j without throwing', (actor) => {
+    expect(isOrchestratorPlan(rawTurn({ turn: 1, actor, action: 'plan', taskForAgent: { source: 'brain' } }))).toBe(true);
+    expect(isOrchestratorPlan(rawTurn({ turn: 1, actor, action: 'plan', taskForAgent: { source: 'qe' } }))).toBe(false);
+  });
+
+  it.each([123, ['qe'], 42])('derivePlanState treats non-string step.agent %j as unassigned and non-string source %j safely', (bad) => {
+    const worker = rawTurn({
+      turn: 1,
+      actor: 'developer',
+      action: 'plan',
+      timestamp: 101,
+      taskForAgent: { source: bad, steps: [{ id: '1', agent: bad, summary: 'a' }] },
+    });
+    const state = derivePlanState([worker, execute('developer', 2)]);
+    expect(state.steps).toEqual([{ id: '1', agent: '', summary: 'a', status: 'pending' }]);
+    // unassigned step accepts a plan_step from any actor
+    expect(statuses(derivePlanState([worker, step('1', 'in_progress', 2, 'qe')]))).toEqual(['in_progress']);
+  });
+
+  it('non-string plan_step / execute actor never throws', () => {
+    const weirdStep = rawTurn({ turn: 2, actor: 42, action: 'plan_step', taskForAgent: { step_id: '1', status: 'completed' } });
+    const weirdExec = rawTurn({ turn: 3, actor: ['qe'], action: 'execute', result: 7 });
+    const state = derivePlanState([orch([{ id: '1', agent: 'qe' }]), weirdStep, weirdExec]);
+    expect(statuses(state)).toEqual(['pending']);
+  });
+
+  // Step-id normalization parity with backend _normalize_step_id (tests/test_handlers_planning.py mirrors this table).
+  it.each([
+    ['1', '1'],
+    ['  1  ', '1'],
+    [1, '1'],
+    [0, '0'],
+    [1.0, '1'],
+    [2.5, '2.5'],
+    ['', null],
+    ['   ', null],
+    [null, null],
+    [undefined, null],
+    [true, null],
+    [false, null],
+    [NaN, null],
+    [Infinity, null],
+    [['1'], null],
+    [{ id: 1 }, null],
+  ])('normalizeStepId(%j) -> %j', (input, expected) => {
+    expect(normalizeStepId(input)).toBe(expected);
+  });
+
+  it('coerces numeric plan step ids and matches numeric / string plan_step step_ids', () => {
+    const numericPlan = rawTurn({
+      turn: 1,
+      actor: 'brain',
+      action: 'plan',
+      taskForAgent: { source: 'brain', steps: [{ id: 1, agent: 'qe', summary: 'a' }, { id: '2', agent: 'qe', summary: 'b' }] },
+    });
+    const s1 = rawTurn({ turn: 2, actor: 'qe', action: 'plan_step', taskForAgent: { step_id: '1', status: 'in_progress' } });
+    const s2 = rawTurn({ turn: 3, actor: 'qe', action: 'plan_step', taskForAgent: { step_id: 2, status: 'blocked' } });
+    const state = derivePlanState([numericPlan, s1, s2]);
+    expect(state.steps.map((x) => x.id)).toEqual(['1', '2']);
+    expect(statuses(state)).toEqual(['in_progress', 'blocked']);
+  });
+
+  it('rejects null / boolean / empty / missing step ids on both plan steps and plan_step turns', () => {
+    const badPlan = orch([
+      { id: null, agent: 'qe', summary: 'null' } as never,
+      { id: true, agent: 'qe', summary: 'bool' } as never,
+      { id: '', agent: 'qe', summary: 'empty' },
+      { id: '  ', agent: 'qe', summary: 'blank' },
+      { agent: 'qe', summary: 'missing' } as never,
+      { id: '1', agent: 'qe', summary: 'ok' },
+    ]);
+    const badUpdate = rawTurn({ turn: 2, actor: 'brain', action: 'plan_step', taskForAgent: { step_id: true, status: 'completed' } });
+    const state = derivePlanState([badPlan, badUpdate]);
+    expect(state.steps.map((x) => x.id)).toEqual(['1']);
+    expect(statuses(state)).toEqual(['pending']);
   });
 
   it('isOrchestratorPlan treats null / missing source safely', () => {

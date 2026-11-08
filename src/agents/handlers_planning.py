@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn
@@ -20,8 +21,32 @@ logger = logging.getLogger("darwin.brain")
 _ORCHESTRATOR_ROLES = frozenset({"brain", "architect", "headhunter", "aligner"})
 
 
-def _canonical_role(role: str | None) -> str:
-    return (role or "").strip().lower().replace("-", "_").replace(" ", "_")
+def _canonical_role(value: object) -> str:
+    """Canonical role key; non-string input (malformed stored payloads) yields "" instead of raising.
+
+    Mirrors ui/src/utils/planState.ts canonicalRole.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _normalize_step_id(value: object) -> str | None:
+    """Canonical step id: non-empty (trimmed) strings and finite numbers; anything else -> None.
+
+    None / bool / empty / NaN / containers are rejected, so such steps and plan_step updates are dropped.
+    Mirrors ui/src/utils/planState.ts normalizeStepId -- keep in sync. Integral floats render without
+    ".0" (JSON 1.0 and 1 are the same id on both sides).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and math.isfinite(value):
+        return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
+    return None
 
 
 def _is_orchestrator_turn(t: ConversationTurn) -> bool:
@@ -31,13 +56,12 @@ def _is_orchestrator_turn(t: ConversationTurn) -> bool:
     """
     if _canonical_role(t.actor) in _ORCHESTRATOR_ROLES:
         return True
-    source = (t.taskForAgent or {}).get("source")
-    return _canonical_role(source if isinstance(source, str) else None) in _ORCHESTRATOR_ROLES
+    return _canonical_role((t.taskForAgent or {}).get("source")) in _ORCHESTRATOR_ROLES
 
 
 def _is_failed_turn(t: ConversationTurn) -> bool:
     """A failed/aborted worker turn must not auto-complete a plan step (dispatch.py "Error:" convention)."""
-    return t.action == "error" or (t.result or "").lstrip().startswith("Error:")
+    return t.action == "error" or (isinstance(t.result, str) and t.result.lstrip().startswith("Error:"))
 
 
 def _auto_complete_step(steps: dict[str, dict], agent_role: str) -> None:
@@ -71,7 +95,7 @@ async def handle_create_plan(
     for s in steps:
         plan_lines.append(f"{s.get('id', '?')}. **{s.get('agent', '?')}**: {s.get('summary', '')}")
     plan_md = "\n".join(plan_lines)
-    step_map = [{"id": str(s.get("id", "")), "agent": s.get("agent", ""), "summary": s.get("summary", "")} for s in steps]
+    step_map = [{"id": _normalize_step_id(s.get("id")) or "", "agent": s.get("agent", ""), "summary": s.get("summary", "")} for s in steps]
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
@@ -103,17 +127,18 @@ async def handle_get_plan_progress(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
-    orchestrator_turn = None
-    agent_turn = None
-    for t in reversed(event_doc.conversation):
+    orchestrator_found: tuple[int, ConversationTurn] | None = None
+    agent_found: tuple[int, ConversationTurn] | None = None
+    for idx in range(len(event_doc.conversation) - 1, -1, -1):
+        t = event_doc.conversation[idx]
         if t.action == "plan" and t.taskForAgent and "steps" in t.taskForAgent:
             if _is_orchestrator_turn(t):
-                if not orchestrator_turn:
-                    orchestrator_turn = t
-            elif not agent_turn:
-                agent_turn = t
-    plan_turn = orchestrator_turn or agent_turn
-    if not plan_turn:
+                if orchestrator_found is None:
+                    orchestrator_found = (idx, t)
+            elif agent_found is None:
+                agent_found = (idx, t)
+    found = orchestrator_found or agent_found
+    if found is None:
         turn = ConversationTurn(
             turn=(await ctx.next_turn_number(event_id)),
             actor="brain", action="tool_result",
@@ -124,19 +149,25 @@ async def handle_get_plan_progress(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
+    plan_index, plan_turn = found
     raw_steps = plan_turn.taskForAgent.get("steps")
-    steps = {str(s.get("id")): {**s, "status": "pending"} for s in (raw_steps or []) if isinstance(s, dict) and "id" in s}
-    # Only turns strictly AFTER the plan turn count: the plan turn itself (esp. a worker-authored
-    # fallback plan) must never complete its own step, and pre-replan turns are ignored.
+    steps: dict[str, dict] = {}
+    for s in raw_steps if isinstance(raw_steps, list) else []:
+        sid = _normalize_step_id(s.get("id")) if isinstance(s, dict) else None
+        if sid is not None:
+            steps[sid] = {**s, "id": sid, "status": "pending"}
+    # Only turns strictly AFTER the plan turn count (positional, like the UI; plus a turn-number guard for
+    # colliding numbers): the plan turn itself (esp. a worker-authored fallback plan) must never complete
+    # its own step, and pre-replan turns are ignored.
     plan_turn_num = plan_turn.turn
-    for t in event_doc.conversation:
-        if t is plan_turn:
+    for idx, t in enumerate(event_doc.conversation):
+        if idx <= plan_index:
             continue
         if plan_turn_num is not None and t.turn is not None and t.turn <= plan_turn_num:
             continue
-        if t.action == "plan_step" and t.taskForAgent and "step_id" in t.taskForAgent:
-            sid = str(t.taskForAgent["step_id"])
-            if sid in steps:
+        if t.action == "plan_step" and t.taskForAgent:
+            sid = _normalize_step_id(t.taskForAgent.get("step_id"))
+            if sid is not None and sid in steps:
                 step_agent = _canonical_role(steps[sid].get("agent"))
                 actor = _canonical_role(t.actor)
                 if step_agent and actor not in _ORCHESTRATOR_ROLES and actor != step_agent:

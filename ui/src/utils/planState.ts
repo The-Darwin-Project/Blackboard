@@ -8,7 +8,9 @@
 //    assigned to that agent (in_progress preferred over pending; blocked/completed never touched; error turns ignored).
 //    The plan-establishing turn itself never completes a step.
 // 5. [Constraint]: Orchestrator detection (actor OR taskForAgent.source) mirrors src/agents/handlers_planning.py -- keep in sync.
-// 6. [Pattern]: canonicalRole lowercases and maps '-' / ' ' to '_' so "Code-Reviewer" === "code_reviewer".
+// 6. [Pattern]: canonicalRole lowercases and maps '-' / ' ' to '_' so "Code-Reviewer" === "code_reviewer"; non-string input -> ''.
+// 6b. [Pattern]: normalizeStepId (non-empty trimmed string or finite number; else null) mirrors _normalize_step_id in
+//    src/agents/handlers_planning.py -- keep in sync.
 // 7. [Pattern]: Lives outside PlanProgress.tsx so that file only exports components (react-refresh/only-export-components).
 import type { ConversationTurn } from '../api/types';
 
@@ -31,21 +33,31 @@ export interface PlanState {
 export const TERMINAL_STATUSES = new Set(['completed', 'green_verified', 'blocked', 'red_locked']);
 export const ORCHESTRATOR_ROLES = new Set(['brain', 'architect', 'headhunter', 'aligner']);
 
-export function canonicalRole(role?: string): string {
-  return (role || '').trim().toLowerCase().replace(/[- ]/g, '_');
+// Non-string input (malformed stored payloads) yields '' instead of throwing. Mirrors handlers_planning._canonical_role.
+export function canonicalRole(value?: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase().replace(/[- ]/g, '_');
+}
+
+// Step ids: non-empty (trimmed) strings and finite numbers are valid; null/undefined/boolean/empty/NaN/objects are
+// rejected. Mirrors handlers_planning._normalize_step_id.
+export function normalizeStepId(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
 }
 
 export function isOrchestratorPlan(t: ConversationTurn): boolean {
   if (t.action !== 'plan') return false;
   const actor = canonicalRole(t.actor);
   if (ORCHESTRATOR_ROLES.has(actor)) return true;
-  const source = canonicalRole((t.taskForAgent as { source?: string } | undefined)?.source);
+  const source = canonicalRole((t.taskForAgent as { source?: unknown } | undefined)?.source);
   return ORCHESTRATOR_ROLES.has(source);
 }
 
 // A failed/aborted worker turn must not auto-complete a plan step (backend "Error:" result convention).
 function isFailedTurn(t: ConversationTurn): boolean {
-  return t.action === 'error' || (t.result || '').trimStart().startsWith('Error:');
+  return t.action === 'error' || (typeof t.result === 'string' && t.result.trimStart().startsWith('Error:'));
 }
 
 // Complete ONE step for the agent: prefer in_progress, else first pending. blocked/completed are never touched.
@@ -88,12 +100,18 @@ export function derivePlanState(conversation: ConversationTurn[]): PlanState {
     return { hasPlan: false, planTurn: null, steps: [] };
   }
 
-  const rawSteps = (plan.taskForAgent as { steps?: Array<{ id: string; agent?: string; summary?: string }> }).steps;
+  const rawSteps = (plan.taskForAgent as { steps?: unknown }).steps;
   const stepMap = new Map<string, PlanStep>();
   if (Array.isArray(rawSteps)) {
-    for (const s of rawSteps) {
-      if (s && s.id) {
-        stepMap.set(s.id, { id: s.id, agent: s.agent || '', summary: s.summary || '', status: 'pending' });
+    for (const s of rawSteps as Array<Record<string, unknown> | null>) {
+      const id = s && typeof s === 'object' ? normalizeStepId(s.id) : null;
+      if (s && id !== null) {
+        stepMap.set(id, {
+          id,
+          agent: typeof s.agent === 'string' ? s.agent : '',
+          summary: typeof s.summary === 'string' ? s.summary : '',
+          status: 'pending',
+        });
       }
     }
   }
@@ -103,9 +121,10 @@ export function derivePlanState(conversation: ConversationTurn[]): PlanState {
   for (let i = planTurnIndex + 1; i < conversation.length; i++) {
     const t = conversation[i];
     if (t.action === 'plan_step' && t.taskForAgent) {
-      const tf = t.taskForAgent as { step_id?: string; status?: string; test_evidence?: string | Record<string, unknown> };
-      if (tf.step_id && stepMap.has(tf.step_id)) {
-        const existing = stepMap.get(tf.step_id)!;
+      const tf = t.taskForAgent as { step_id?: unknown; status?: string; test_evidence?: string | Record<string, unknown> };
+      const stepId = normalizeStepId(tf.step_id);
+      if (stepId !== null && stepMap.has(stepId)) {
+        const existing = stepMap.get(stepId)!;
         const actorRole = canonicalRole(t.actor);
         const assignedRole = canonicalRole(existing.agent);
         // Only assigned agent or orchestrator can update step status
