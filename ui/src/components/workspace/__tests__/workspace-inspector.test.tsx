@@ -497,6 +497,18 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
     });
 
+    it('resolves active agent from ephemeralAgents matching current_event_id', () => {
+      vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({
+        registeredAgents: [],
+        ephemeralAgents: [
+          { agent_id: 'pod-qe', role: 'qe', current_role: 'qe', busy: true, current_event_id: 'evt-123' },
+        ],
+      } as never);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('qe');
+      expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
     it('streams the matching agent messages into the floating window', () => {
       mockStreams({
         'developer:evt-123': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['Compiling typescript...', 'Tests passing'] },

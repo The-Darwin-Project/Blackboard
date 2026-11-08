@@ -28,6 +28,7 @@ import SourceIcon from '../SourceIcon';
 import CiContextCard from '../CiContextCard';
 import FloatingWindow from './FloatingWindow';
 import { extractDiffsFromConversation } from './diffParser';
+import type { AgentRegistryEntry } from '../../api/types';
 import { STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colors';
 import { formatTokenCount } from '../../utils/formatTokens';
 import CopyButton from './CopyButton';
@@ -146,19 +147,22 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
       });
     }
 
-    // 2. From opsControl.agents
-    if (opsControl?.agents) {
-      opsControl.agents.forEach((agent) => {
-        if (agent.bound_event_id === selectedEventId && agent.busy) {
-          const rawRole = agent.current_role || agent.role || agent.agent_id || '';
-          const r = canonicalRole(rawRole);
-          if (r) roles.add(r);
-        }
-      });
-    }
+    // 2. From opsControl (check agents, registeredAgents, and ephemeralAgents across bound_event_id and current_event_id)
+    const agentList: AgentRegistryEntry[] = [
+      ...(opsControl?.agents || opsControl?.registeredAgents || []),
+      ...(opsControl?.ephemeralAgents || []),
+    ];
+    agentList.forEach((agent) => {
+      const matchesEvent = agent.bound_event_id === selectedEventId || agent.current_event_id === selectedEventId;
+      if (matchesEvent && (agent.busy || agent.current_role)) {
+        const rawRole = agent.current_role || agent.role || agent.agent_id || '';
+        const r = canonicalRole(rawRole);
+        if (r) roles.add(r);
+      }
+    });
 
     return roles;
-  }, [selectedEventId, activeStreams, opsControl?.agents]);
+  }, [selectedEventId, activeStreams, opsControl?.agents, opsControl?.registeredAgents, opsControl?.ephemeralAgents]);
 
   // Resolve messages for floatingTarget (case-insensitive stream key matching)
   const floatingMessages = useMemo(() => {
