@@ -92,6 +92,26 @@ describe('copyLogLines', () => {
     expect(() => copyLogLines(['x'])).not.toThrow();
   });
 
+  it('attaches a rejection handler to a plain (non-spy) rejecting writeText promise', async () => {
+    // vi.fn() spies observe returned promises, which masks unhandled rejections; use a bare function instead.
+    const attached = vi.fn();
+    const rejected = Promise.reject(new Error('denied'));
+    const origCatch = rejected.catch.bind(rejected);
+    rejected.catch = ((...args: Parameters<typeof origCatch>) => {
+      attached();
+      return origCatch(...args);
+    }) as typeof rejected.catch;
+    const origThen = rejected.then.bind(rejected);
+    rejected.then = ((...args: Parameters<typeof origThen>) => {
+      if (args[1]) attached();
+      return origThen(...args);
+    }) as typeof rejected.then;
+    vi.stubGlobal('navigator', { clipboard: { writeText: () => rejected } });
+    expect(() => copyLogLines(['x'])).not.toThrow();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(attached).toHaveBeenCalled();
+  });
+
   it('swallows a rejected writeText (no unhandled rejection)', async () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);

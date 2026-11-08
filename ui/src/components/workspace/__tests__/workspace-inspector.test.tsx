@@ -513,6 +513,33 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(win.textContent).not.toContain('other-event line');
     });
 
+    it('selects the stream matching BOTH actor and eventId even when non-matching streams are enumerated first', () => {
+      mockStreams({
+        'a-other-actor-same-event': { actor: 'qe', eventId: 'evt-123', isActive: true, messages: ['wrong actor'] },
+        'b-same-actor-other-event': { actor: 'developer', eventId: 'evt-999', isActive: true, messages: ['wrong event'] },
+        'c-match': { actor: 'developer', eventId: 'evt-123', isActive: true, messages: ['the right one'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      const text = screen.getByTestId('floating-window').textContent ?? '';
+      expect(text).toContain('the right one');
+      expect(text).not.toContain('wrong actor');
+      expect(text).not.toContain('wrong event');
+    });
+
+    it('shows Idle (no cross-agent/cross-event leak) when only non-matching streams exist', () => {
+      mockStreams({
+        'p': { actor: 'qe', eventId: 'evt-123', isActive: true, messages: ['wrong actor'] },
+        'q': { actor: 'developer', eventId: 'evt-999', isActive: true, messages: ['wrong event'] },
+      });
+      renderComponent({ selectedEventId: 'evt-123' });
+      fireEvent.click(screen.getByTestId('mock-stream-trigger'));
+      const text = screen.getByTestId('floating-window').textContent ?? '';
+      expect(text).toContain('Idle');
+      expect(text).not.toContain('wrong actor');
+      expect(text).not.toContain('wrong event');
+    });
+
     it('matches the stream by actor/eventId fields (case-insensitive), not by splitting the record key', () => {
       mockStreams({
         // Arbitrary key shape (contains extra colons); only actor/eventId may be used for matching

@@ -232,6 +232,28 @@ describe('FloatingWindow Component', () => {
     expect(windowEl.style.height).toBe('300px');
   });
 
+  it('moves by the mouse delta relative to the starting position (not absolute coordinates)', () => {
+    const { container } = render(
+      <FloatingWindow agentName="developer" eventId="evt-123" messages={['log']} onClose={vi.fn()} />
+    );
+    const windowEl = container.firstElementChild as HTMLElement;
+    const headerEl = screen.getByText('developer').parentElement?.parentElement as HTMLElement;
+
+    // Default position is (120, 80); a +50/+30 mouse delta must land at (170, 110)
+    fireEvent.mouseDown(headerEl, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(window, { clientX: 250, clientY: 130 });
+    fireEvent.mouseUp(window);
+    expect(windowEl.style.left).toBe('170px');
+    expect(windowEl.style.top).toBe('110px');
+
+    // A second drag starts from the new position (live posRef), not from the original (120, 80)
+    fireEvent.mouseDown(headerEl, { clientX: 300, clientY: 300 });
+    fireEvent.mouseMove(window, { clientX: 310, clientY: 320 });
+    fireEvent.mouseUp(window);
+    expect(windowEl.style.left).toBe('180px');
+    expect(windowEl.style.top).toBe('130px');
+  });
+
   describe('initial geometry', () => {
     const geometry = (el: HTMLElement) => ({
       left: parseInt(el.style.left, 10),
