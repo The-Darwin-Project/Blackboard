@@ -5,8 +5,10 @@
 // 3. [Gotcha]: DOMAIN_COLORS is indexed via Object.hasOwn on the lowercased domain so prototype keys and unknown domains fall back to casual.
 // 4. [Pattern]: Hoists FloatingWindow for agent message streams across tab transitions (Plan <-> Swarm <-> Logs).
 // 5. [Pattern]: Ambient activity beacon in Plan tab header when agents are active for selectedEventId.
-// 6. [Constraint]: activeAgentRoles counts only stream.isActive (not buffered messages) and busy ops agents; stream lookup matches
-//    on stream.actor / stream.eventId, never by splitting the 'actor:eventId' key.
+// 6. [Constraint]: activeAgentRoles counts only stream.isActive (not buffered messages) and BUSY ops agents (agent.busy only --
+//    mark_idle clears current_role, so a stale current_role must never light the beacon) bound to / running the selected event;
+//    stream lookup matches on stream.actor / stream.eventId, never by splitting the 'actor:eventId' key.
+// 7. [Pattern]: Agent source is opsControl.agents (alias of registeredAgents); ephemeralAgents is a filtered subset of it, so it is not iterated separately.
 /**
  * Collapsible & resizable right sidebar for Agent Workspace.
  * Hosts Plan execution, Diff viewer, Swarm topology, Live Logs tabs, and Session Telemetry.
@@ -147,22 +149,19 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
       });
     }
 
-    // 2. From opsControl (check agents, registeredAgents, and ephemeralAgents across bound_event_id and current_event_id)
-    const agentList: AgentRegistryEntry[] = [
-      ...(opsControl?.agents || opsControl?.registeredAgents || []),
-      ...(opsControl?.ephemeralAgents || []),
-    ];
+    // 2. From opsControl: busy agents bound to / currently running the selected event.
+    //    ephemeralAgents is a subset of registeredAgents (== agents), so one list covers both.
+    const agentList: AgentRegistryEntry[] = opsControl?.agents ?? opsControl?.registeredAgents ?? [];
     agentList.forEach((agent) => {
       const matchesEvent = agent.bound_event_id === selectedEventId || agent.current_event_id === selectedEventId;
-      if (matchesEvent && (agent.busy || agent.current_role)) {
-        const rawRole = agent.current_role || agent.role || agent.agent_id || '';
-        const r = canonicalRole(rawRole);
+      if (matchesEvent && Boolean(agent.busy)) {
+        const r = canonicalRole(agent.current_role || agent.role || agent.agent_id || '');
         if (r) roles.add(r);
       }
     });
 
     return roles;
-  }, [selectedEventId, activeStreams, opsControl?.agents, opsControl?.registeredAgents, opsControl?.ephemeralAgents]);
+  }, [selectedEventId, activeStreams, opsControl?.agents, opsControl?.registeredAgents]);
 
   // Resolve messages for floatingTarget (case-insensitive stream key matching)
   const floatingMessages = useMemo(() => {

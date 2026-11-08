@@ -497,16 +497,41 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
     });
 
-    it('resolves active agent from ephemeralAgents matching current_event_id', () => {
+    it('lights the beacon for a busy ephemeral agent (present in registeredAgents) matching current_event_id', () => {
       vi.spyOn(OpsStateContext, 'useOpsControlSafe').mockReturnValue({
-        registeredAgents: [],
+        registeredAgents: [
+          { agent_id: 'pod-qe', role: 'qe', current_role: 'qe', busy: true, ephemeral: true, current_event_id: 'evt-123' },
+        ],
         ephemeralAgents: [
-          { agent_id: 'pod-qe', role: 'qe', current_role: 'qe', busy: true, current_event_id: 'evt-123' },
+          { agent_id: 'pod-qe', role: 'qe', current_role: 'qe', busy: true, ephemeral: true, current_event_id: 'evt-123' },
         ],
       } as never);
       renderComponent({ selectedEventId: 'evt-123' });
       expect(activeRoles()).toBe('qe');
       expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
+    it('lights the beacon for a busy agent whose current_event_id matches the selected event', () => {
+      mockAgents([{ agent_id: 'a1', role: 'developer', busy: true, current_event_id: 'evt-123', bound_event_id: null }]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('developer');
+      expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
+    it('does NOT light the beacon for a busy agent running a different event', () => {
+      mockAgents([{ agent_id: 'a1', role: 'developer', busy: true, current_event_id: 'evt-999', bound_event_id: null }]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
+    });
+
+    it('does NOT light the beacon for an idle agent even with a stale current_role / matching event ids', () => {
+      mockAgents([
+        { agent_id: 'a1', role: 'developer', current_role: 'developer', busy: false, current_event_id: 'evt-123', bound_event_id: 'evt-123' },
+      ]);
+      renderComponent({ selectedEventId: 'evt-123' });
+      expect(activeRoles()).toBe('');
+      expect(screen.queryByTestId('plan-tab-activity-beacon')).not.toBeInTheDocument();
     });
 
     it('streams the matching agent messages into the floating window', () => {

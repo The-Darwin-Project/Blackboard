@@ -24,6 +24,31 @@ def _canonical_role(role: str | None) -> str:
     return (role or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
+def _is_orchestrator_turn(t: ConversationTurn) -> bool:
+    """True if the turn's actor OR its taskForAgent.source is an orchestrator role.
+
+    Mirrors ui/src/utils/planState.ts isOrchestratorPlan so backend and UI agree.
+    """
+    if _canonical_role(t.actor) in _ORCHESTRATOR_ROLES:
+        return True
+    source = (t.taskForAgent or {}).get("source")
+    return _canonical_role(source if isinstance(source, str) else None) in _ORCHESTRATOR_ROLES
+
+
+def _is_failed_turn(t: ConversationTurn) -> bool:
+    """A failed/aborted worker turn must not auto-complete a plan step (dispatch.py "Error:" convention)."""
+    return t.action == "error" or (t.result or "").lstrip().startswith("Error:")
+
+
+def _auto_complete_step(steps: dict[str, dict], agent_role: str) -> None:
+    """Complete ONE step for agent_role: prefer in_progress, else first pending. Never touches blocked/completed."""
+    mine = [s for s in steps.values() if _canonical_role(s.get("agent")) == agent_role]
+    target = next((s for s in mine if s["status"] == "in_progress"), None) \
+        or next((s for s in mine if s["status"] == "pending"), None)
+    if target is not None:
+        target["status"] = "completed"
+
+
 async def handle_create_plan(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -81,14 +106,12 @@ async def handle_get_plan_progress(
     orchestrator_turn = None
     agent_turn = None
     for t in reversed(event_doc.conversation):
-        if t.action == "plan" and t.taskForAgent and isinstance(t.taskForAgent, dict) and "steps" in t.taskForAgent:
-            source = _canonical_role(t.taskForAgent.get("source") or t.actor)
-            if source in _ORCHESTRATOR_ROLES:
+        if t.action == "plan" and t.taskForAgent and "steps" in t.taskForAgent:
+            if _is_orchestrator_turn(t):
                 if not orchestrator_turn:
                     orchestrator_turn = t
-            else:
-                if not agent_turn:
-                    agent_turn = t
+            elif not agent_turn:
+                agent_turn = t
     plan_turn = orchestrator_turn or agent_turn
     if not plan_turn:
         turn = ConversationTurn(
@@ -101,29 +124,36 @@ async def handle_get_plan_progress(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
-    raw_steps = plan_turn.taskForAgent.get("steps") if isinstance(plan_turn.taskForAgent, dict) else None
+    raw_steps = plan_turn.taskForAgent.get("steps")
     steps = {str(s.get("id")): {**s, "status": "pending"} for s in (raw_steps or []) if isinstance(s, dict) and "id" in s}
-    # Process updates on or after the plan turn
-    plan_turn_num = plan_turn.turn if plan_turn.turn is not None else 0
+    # Only turns strictly AFTER the plan turn count: the plan turn itself (esp. a worker-authored
+    # fallback plan) must never complete its own step, and pre-replan turns are ignored.
+    plan_turn_num = plan_turn.turn
     for t in event_doc.conversation:
-        if (t.turn is not None and t.turn < plan_turn_num):
+        if t is plan_turn:
             continue
-        if t.action == "plan_step" and t.taskForAgent and isinstance(t.taskForAgent, dict) and "step_id" in t.taskForAgent:
+        if plan_turn_num is not None and t.turn is not None and t.turn <= plan_turn_num:
+            continue
+        if t.action == "plan_step" and t.taskForAgent and "step_id" in t.taskForAgent:
             sid = str(t.taskForAgent["step_id"])
             if sid in steps:
                 step_agent = _canonical_role(steps[sid].get("agent"))
                 actor = _canonical_role(t.actor)
                 if step_agent and actor not in _ORCHESTRATOR_ROLES and actor != step_agent:
+                    logger.warning(
+                        f"Ignored plan_step update for step {sid} on {event_id}: "
+                        f"actor '{actor}' does not own step (assigned to '{step_agent}')"
+                    )
                     continue
                 steps[sid]["status"] = t.taskForAgent.get("status", "completed")
-        elif (t.action == "execute" or (t.action == "plan" and _canonical_role(t.actor) not in _ORCHESTRATOR_ROLES)) and t.actor:
+        elif (
+            (t.action == "execute" or (t.action == "plan" and not _is_orchestrator_turn(t)))
+            and t.actor
+            and not _is_failed_turn(t)
+        ):
             actor = _canonical_role(t.actor)
             if actor and actor not in _ORCHESTRATOR_ROLES:
-                for s in steps.values():
-                    s_agent = _canonical_role(s.get("agent"))
-                    if s_agent == actor and s.get("status") in ("pending", "in_progress"):
-                        s["status"] = "completed"
-                        break
+                _auto_complete_step(steps, actor)
     progress = list(steps.values())
     done = sum(1 for s in progress if s["status"] == "completed")
     summary = f"## Plan Progress\n\n{done}/{len(progress)} steps completed:\n\n"

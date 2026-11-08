@@ -119,6 +119,15 @@ describe('derivePlanState', () => {
     expect(state.planTurn?.turn).toBe(5);
     expect(state.steps).toHaveLength(1);
     expect(state.steps[0].summary).toBe('Investigate issue');
+    // The fallback plan turn must not self-complete its own step.
+    expect(state.steps[0].status).toBe('pending');
+  });
+
+  it('completes the fallback plan step only on a subsequent worker execute turn', () => {
+    const fallback = plan([{ id: '1', agent: 'developer', summary: 'Investigate' }], 5, 'developer', 'developer');
+    expect(derivePlanState([fallback]).steps[0].status).toBe('pending');
+    const state = derivePlanState([fallback, execute('developer', 6)]);
+    expect(state.steps[0].status).toBe('completed');
   });
 
   it('rejects cross-agent step hijacking (developer cannot complete qe step)', () => {
@@ -154,6 +163,67 @@ describe('derivePlanState', () => {
     expect(state.steps[0].status).toBe('completed');
     expect(state.steps[1].status).toBe('completed');
     expect(state.steps[2].status).toBe('pending');
+  });
+
+  it('lets an orchestrator plan_step override any agent step', () => {
+    const orch = plan([{ id: '1', agent: 'developer', summary: 'fix' }, { id: '2', agent: 'qe', summary: 'verify' }], 1, 'brain', 'brain');
+    const state = derivePlanState([orch, step('2', 'completed', 2, 'brain'), step('1', 'blocked', 3, 'Architect')]);
+    expect(state.steps.find((s) => s.id === '2')?.status).toBe('completed');
+    expect(state.steps.find((s) => s.id === '1')?.status).toBe('blocked');
+  });
+
+  it('ignores orchestrator execute turns for worker steps', () => {
+    const orch = plan([{ id: '1', agent: 'developer', summary: 'fix' }], 1, 'brain', 'brain');
+    const state = derivePlanState([orch, execute('brain', 2), execute('architect', 3)]);
+    expect(state.steps[0].status).toBe('pending');
+  });
+
+  it('prefers an in_progress step over an earlier pending step for the same agent', () => {
+    const orch = plan(
+      [{ id: '1', agent: 'developer', summary: 'a' }, { id: '2', agent: 'developer', summary: 'b' }],
+      1, 'brain', 'brain',
+    );
+    const state = derivePlanState([orch, step('2', 'in_progress', 2), execute('developer', 3)]);
+    expect(state.steps.find((s) => s.id === '1')?.status).toBe('pending');
+    expect(state.steps.find((s) => s.id === '2')?.status).toBe('completed');
+  });
+
+  it('completes only one step per execute turn', () => {
+    const orch = plan(
+      [{ id: '1', agent: 'developer', summary: 'a' }, { id: '2', agent: 'developer', summary: 'b' }],
+      1, 'brain', 'brain',
+    );
+    const state = derivePlanState([orch, execute('developer', 2)]);
+    expect(state.steps.map((s) => s.status)).toEqual(['completed', 'pending']);
+    const two = derivePlanState([orch, execute('developer', 2), execute('developer', 3)]);
+    expect(two.steps.map((s) => s.status)).toEqual(['completed', 'completed']);
+  });
+
+  it('never overwrites a blocked step via auto-completion', () => {
+    const orch = plan([{ id: '1', agent: 'developer', summary: 'a' }], 1, 'brain', 'brain');
+    const state = derivePlanState([orch, step('1', 'blocked', 2, 'brain'), execute('developer', 3)]);
+    expect(state.steps[0].status).toBe('blocked');
+  });
+
+  it('does not auto-complete a step from a failed/error execute turn', () => {
+    const orch = plan([{ id: '1', agent: 'developer', summary: 'a' }], 1, 'brain', 'brain');
+    const state = derivePlanState([orch, execute('developer', 2, 'Error: Agent task failed')]);
+    expect(state.steps[0].status).toBe('pending');
+  });
+
+  it('evaluates orchestrator status from both actor and taskForAgent.source (parity)', () => {
+    // actor is a worker but source is orchestrator -> orchestrator plan
+    expect(isOrchestratorPlan(plan([], 1, 'developer', 'Brain'))).toBe(true);
+    // actor is orchestrator but source is a worker -> still orchestrator
+    expect(isOrchestratorPlan(plan([], 1, 'Architect', 'developer'))).toBe(true);
+    // neither
+    expect(isOrchestratorPlan(plan([], 1, 'developer', 'qe'))).toBe(false);
+    // missing taskForAgent / source
+    expect(isOrchestratorPlan({ turn: 1, actor: 'developer', action: 'plan' } as unknown as ConversationTurn)).toBe(false);
+    // precedence: source-orchestrator plan beats a later worker-actor proposal
+    const orch = plan([{ id: '1', agent: 'developer', summary: 'orch' }], 1, 'developer', 'brain');
+    const worker = plan([{ id: '1', agent: 'developer', summary: 'worker' }], 2, 'developer', 'developer');
+    expect(derivePlanState([orch, worker]).steps[0].summary).toBe('orch');
   });
 
   it('correctly derives plan state for the full evt-e3805021 sequence', () => {

@@ -4,9 +4,12 @@
 // 2. [Constraint]: Latest orchestrator plan (brain/architect/headhunter/aligner) is authoritative.
 //    Agent-sourced proposals only take effect if no orchestrator plan exists.
 // 3. [Pattern]: Only assigned agent or orchestrator can update step status (prevents cross-agent step hijacking).
-// 4. [Pattern]: Agent completion turns (execute/plan result) complete uncompleted step assigned to that agent.
-// 5. [Pattern]: canonicalRole lowercases and maps '-' / ' ' to '_' so "Code-Reviewer" === "code_reviewer".
-// 6. [Pattern]: Lives outside PlanProgress.tsx so that file only exports components (react-refresh/only-export-components).
+// 4. [Pattern]: Agent completion turns (execute / non-orchestrator plan) strictly AFTER the plan turn complete ONE step
+//    assigned to that agent (in_progress preferred over pending; blocked/completed never touched; error turns ignored).
+//    The plan-establishing turn itself never completes a step.
+// 5. [Constraint]: Orchestrator detection (actor OR taskForAgent.source) mirrors src/agents/handlers_planning.py -- keep in sync.
+// 6. [Pattern]: canonicalRole lowercases and maps '-' / ' ' to '_' so "Code-Reviewer" === "code_reviewer".
+// 7. [Pattern]: Lives outside PlanProgress.tsx so that file only exports components (react-refresh/only-export-components).
 import type { ConversationTurn } from '../api/types';
 
 export interface PlanStep {
@@ -15,6 +18,7 @@ export interface PlanStep {
   summary: string;
   status: string;
   timestamp?: number;
+  // Backend (PlanStepRequest.test_evidence) sends a dict; legacy/other producers may send a plain string.
   test_evidence?: string | Record<string, unknown>;
 }
 
@@ -35,9 +39,23 @@ export function isOrchestratorPlan(t: ConversationTurn): boolean {
   if (t.action !== 'plan') return false;
   const actor = canonicalRole(t.actor);
   if (ORCHESTRATOR_ROLES.has(actor)) return true;
-  const source = canonicalRole((t.taskForAgent as { source?: string })?.source);
-  if (ORCHESTRATOR_ROLES.has(source)) return true;
-  return false;
+  const source = canonicalRole((t.taskForAgent as { source?: string } | undefined)?.source);
+  return ORCHESTRATOR_ROLES.has(source);
+}
+
+// A failed/aborted worker turn must not auto-complete a plan step (backend "Error:" result convention).
+function isFailedTurn(t: ConversationTurn): boolean {
+  return t.action === 'error' || (t.result || '').trimStart().startsWith('Error:');
+}
+
+// Complete ONE step for the agent: prefer in_progress, else first pending. blocked/completed are never touched.
+function autoCompleteStep(stepMap: Map<string, PlanStep>, agentRole: string, timestamp?: number): void {
+  const mine = Array.from(stepMap.values()).filter((s) => canonicalRole(s.agent) === agentRole);
+  const target = mine.find((s) => s.status === 'in_progress') ?? mine.find((s) => s.status === 'pending');
+  if (target) {
+    target.status = 'completed';
+    target.timestamp = timestamp;
+  }
 }
 
 export function derivePlanState(conversation: ConversationTurn[]): PlanState {
@@ -80,8 +98,9 @@ export function derivePlanState(conversation: ConversationTurn[]): PlanState {
     }
   }
 
-  // Process turns arriving on or after the plan turn index
-  for (let i = planTurnIndex; i < conversation.length; i++) {
+  // Process only turns strictly AFTER the plan turn: the plan-establishing turn (esp. a worker-authored
+  // fallback plan) must never complete its own step.
+  for (let i = planTurnIndex + 1; i < conversation.length; i++) {
     const t = conversation[i];
     if (t.action === 'plan_step' && t.taskForAgent) {
       const tf = t.taskForAgent as { step_id?: string; status?: string; test_evidence?: string | Record<string, unknown> };
@@ -98,20 +117,13 @@ export function derivePlanState(conversation: ConversationTurn[]): PlanState {
         existing.timestamp = t.timestamp;
       }
     } else if (
-      (t.action === 'execute' || (!isOrchestratorPlan(t) && t.action === 'plan')) &&
-      t.actor
+      (t.action === 'execute' || (t.action === 'plan' && !isOrchestratorPlan(t))) &&
+      t.actor &&
+      !isFailedTurn(t)
     ) {
-      // Agent completion turn: marks first uncompleted step assigned to this agent as completed
       const actorRole = canonicalRole(t.actor);
       if (actorRole && !ORCHESTRATOR_ROLES.has(actorRole)) {
-        for (const step of stepMap.values()) {
-          const stepRole = canonicalRole(step.agent);
-          if (stepRole === actorRole && (step.status === 'pending' || step.status === 'in_progress')) {
-            step.status = 'completed';
-            step.timestamp = t.timestamp;
-            break;
-          }
-        }
+        autoCompleteStep(stepMap, actorRole, t.timestamp);
       }
     }
   }
