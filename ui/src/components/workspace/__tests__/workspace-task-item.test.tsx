@@ -1,3 +1,7 @@
+// BlackBoard/ui/src/components/workspace/__tests__/workspace-task-item.test.tsx
+// @ai-rules:
+// 1. [Pattern]: Unit tests for WorkspaceTaskItem rendering, selection, and context menu triggers.
+// 2. [Contract]: Verifies unconditional preventDefault and event payload propagation on contextmenu.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceTaskItem from '../WorkspaceTaskItem';
@@ -231,6 +235,27 @@ describe('WorkspaceTaskItem operational visibility parity', () => {
     expect(copyBtn.className).toContain('group-hover:opacity-100');
     expect(copyBtn.className).toContain('group-focus-within:opacity-100');
     expect(copyBtn.className).not.toMatch(/(^|\s)focus-within:/);
+  });
+
+  describe('context menu', () => {
+    it('fires onContextMenu when right-clicked on the task row with mouse event and event object', () => {
+      const onContextMenu = vi.fn();
+      const evt = makeEvent({ id: 'evt-ctx-test' });
+      render(
+        <WorkspaceTaskItem
+          evt={evt}
+          isSelected={false}
+          onSelect={vi.fn()}
+          onContextMenu={onContextMenu}
+        />
+      );
+
+      const row = screen.getByTitle('evt-ctx-test');
+      fireEvent.contextMenu(row, { clientX: 120, clientY: 240 });
+
+      expect(onContextMenu).toHaveBeenCalledTimes(1);
+      expect(onContextMenu).toHaveBeenCalledWith(expect.any(Object), evt);
+    });
   });
 });
 });

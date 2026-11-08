@@ -19,8 +19,8 @@ export interface CopyButtonProps {
 
 /** Strips C0/DEL/C1 controls, line/paragraph separators and bidi controls from clipboard text. */
 // eslint-disable-next-line no-control-regex
-const CLIPBOARD_UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
-const sanitizeClipboardText = (text: string): string => text.replace(CLIPBOARD_UNSAFE_CHARS, '');
+export const CLIPBOARD_UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+export const sanitizeClipboardText = (text: string): string => text.replace(CLIPBOARD_UNSAFE_CHARS, '');
 
 export function CopyButton({ text, label = 'Copy Event ID', className = '', iconSize = 12 }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);

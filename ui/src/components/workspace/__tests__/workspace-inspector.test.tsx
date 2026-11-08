@@ -1,8 +1,13 @@
+// BlackBoard/ui/src/components/workspace/__tests__/workspace-inspector.test.tsx
+// @ai-rules:
+// 1. [Pattern]: Unit tests for WorkspaceInspector tabs, state indicators, and floating stream integration.
+// 2. [Contract]: Verifies active stream badge rendering and onOpenStream floating window triggers.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceInspector from '../WorkspaceInspector';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as OpsStateContext from '../../../contexts/OpsStateContext';
+import * as ActiveStreamsContextModule from '../../../contexts/ActiveStreamsContext';
 import * as queueHook from '../../../hooks/useQueue';
 import { DOMAIN_COLORS } from '../../../constants/colors';
 
@@ -15,9 +20,20 @@ const rgb = (hex: string) => {
 
 // Mock child tabs
 vi.mock('../../PlanProgress', () => ({
-  default: ({ conversation }: { conversation: unknown[] }) => (
-    <div data-testid="plan-progress">Plan with {conversation?.length || 0} turns</div>
+  default: ({ conversation, onOpenStream }: { conversation: unknown[]; onOpenStream?: (role: string) => void }) => (
+    <div data-testid="plan-progress">
+      <span>Plan with {conversation?.length || 0} turns</span>
+      {onOpenStream && (
+        <button
+          data-testid="mock-stream-trigger"
+          onClick={() => onOpenStream('developer')}
+        >
+          Trigger Dev Activity
+        </button>
+      )}
+    </div>
   ),
+  canonicalRole: (role?: string) => (role || '').trim().toLowerCase(),
   usePlanState: (conversation: unknown[]) => {
     const hasPlan = Array.isArray(conversation) && (conversation as { action?: string }[]).some((t) => t.action === 'plan');
     return {
@@ -113,6 +129,10 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
       connected: true,
       send: vi.fn(),
     } as never);
+
+    vi.spyOn(ActiveStreamsContextModule, 'useActiveStreamsSafe').mockReturnValue({
+      activeStreams: {},
+    });
   });
 
   const renderComponent = (props: {
@@ -362,5 +382,63 @@ describe('WorkspaceInspector (T-8 & Tabs)', () => {
     const aside = container.querySelector('aside');
     expect(aside).not.toBeNull();
     expect(aside!.className).not.toContain('select-none');
+  });
+
+  describe('ambient activity beacon and floating stream window', () => {
+    it('shows the ambient activity beacon on Plan tab when an active agent stream exists', () => {
+      vi.spyOn(ActiveStreamsContextModule, 'useActiveStreamsSafe').mockReturnValue({
+        activeStreams: {
+          'developer:evt-123': {
+            actor: 'developer',
+            eventId: 'evt-123',
+            isActive: true,
+            messages: ['Running tests...'],
+          },
+        },
+      });
+
+      renderComponent({ selectedEventId: 'evt-123' });
+
+      expect(screen.getByTestId('plan-tab-activity-beacon')).toBeInTheDocument();
+    });
+
+    it('opens hoisted FloatingWindow on openStream, persists it across tab switches, and closes it', () => {
+      vi.spyOn(ActiveStreamsContextModule, 'useActiveStreamsSafe').mockReturnValue({
+        activeStreams: {
+          'developer:evt-123': {
+            actor: 'developer',
+            eventId: 'evt-123',
+            isActive: true,
+            messages: ['Compiling typescript...'],
+          },
+        },
+      });
+
+      renderComponent({ selectedEventId: 'evt-123' });
+
+      // Initially no floating window
+      expect(screen.queryByTestId('floating-window')).not.toBeInTheDocument();
+
+      // Trigger open stream from child component
+      const streamBtn = screen.getByTestId('mock-stream-trigger');
+      fireEvent.click(streamBtn);
+
+      // Floating window is mounted
+      expect(screen.getByTestId('floating-window')).toBeInTheDocument();
+      expect(screen.getByText('developer')).toBeInTheDocument();
+
+      // Switch to Diffs tab
+      const diffsTab = screen.getByRole('button', { name: /^Diffs/ });
+      fireEvent.click(diffsTab);
+      expect(screen.getByTestId('workspace-diff-viewer')).toBeInTheDocument();
+
+      // Floating window persists across tab switch!
+      expect(screen.getByTestId('floating-window')).toBeInTheDocument();
+
+      // Close floating window via close button
+      const closeBtn = screen.getByRole('button', { name: 'Close' });
+      fireEvent.click(closeBtn);
+      expect(screen.queryByTestId('floating-window')).not.toBeInTheDocument();
+    });
   });
 });

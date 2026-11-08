@@ -3,21 +3,26 @@
 // 1. [Constraint]: Derive conversation/diffs inside useMemo keyed on eventDoc?.conversation; never create a fresh [] before the memo.
 // 2. [Pattern]: Hooks run before the isOpen early return.
 // 3. [Gotcha]: DOMAIN_COLORS is indexed via Object.hasOwn on the lowercased domain so prototype keys and unknown domains fall back to casual.
+// 4. [Pattern]: Hoists FloatingWindow for agent message streams across tab transitions (Plan <-> Swarm <-> Logs).
+// 5. [Pattern]: Ambient activity beacon in Plan tab header when agents are active for selectedEventId.
 /**
  * Collapsible & resizable right sidebar for Agent Workspace.
  * Hosts Plan execution, Diff viewer, Swarm topology, Live Logs tabs, and Session Telemetry.
  */
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { ListTodo, GitCompare, Users, Terminal, X, ChevronDown, ChevronRight, Zap, Pencil } from 'lucide-react';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useEventDocument } from '../../hooks/useQueue';
+import { useOpsControlSafe } from '../../contexts/OpsStateContext';
+import { useActiveStreamsSafe } from '../../contexts/ActiveStreamsContext';
 import { updateEventTitle } from '../../api/client';
-import PlanProgress, { usePlanState } from '../PlanProgress';
+import PlanProgress, { usePlanState, canonicalRole } from '../PlanProgress';
 import WorkspaceDiffViewer from './WorkspaceDiffViewer';
 import WorkspaceSwarmPanel from './WorkspaceSwarmPanel';
 import ActivityStream from '../ActivityStream';
 import SourceIcon from '../SourceIcon';
 import CiContextCard from '../CiContextCard';
+import FloatingWindow from './FloatingWindow';
 import { extractDiffsFromConversation } from './diffParser';
 import { STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colors';
 import { formatTokenCount } from '../../utils/formatTokens';
@@ -87,11 +92,15 @@ function SessionTokenUsageMini({ usage, isLive }: { usage: TokenUsageDict; isLiv
 export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }: WorkspaceInspectorProps) {
   const [activeTab, setActiveTab] = useState<TabType>('plan');
   const [isOverviewOpen, setIsOverviewOpen] = useState(true);
+  const [floatingTarget, setFloatingTarget] = useState<{ agentName: string; eventId: string } | null>(null);
 
   const { size: width, isResizing, startResize, panelRef } = useResizablePanel({
     direction: 'horizontal', anchor: 'right', min: 300, max: 700, defaultSize: 420,
     storageKey: 'darwin:workspaceInspectorWidth', enabled: isOpen,
   });
+
+  const opsControl = useOpsControlSafe();
+  const { activeStreams } = useActiveStreamsSafe();
 
   const { data: eventDoc } = useEventDocument(selectedEventId);
   const rawConversation = eventDoc?.conversation as ConversationTurn[] | undefined;
@@ -106,6 +115,63 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
     : DOMAIN_COLORS.casual;
   const statusColor = STATUS_COLORS[eventDoc?.status || 'active'] || { bg: '#1e293b', text: '#94a3b8' };
   const userTrigger = eventEvidence?.triggered_by || eventDoc?.created_by_email;
+
+  // Auto-close floating stream window if selected event changes or closes
+  useEffect(() => {
+    if (floatingTarget && floatingTarget.eventId !== selectedEventId) {
+      setFloatingTarget(null);
+    }
+  }, [selectedEventId, floatingTarget]);
+
+  // Compute active agent roles for selectedEventId
+  const activeAgentRoles = useMemo(() => {
+    const roles = new Set<string>();
+    if (!selectedEventId) return roles;
+
+    // 1. From activeStreams
+    if (activeStreams) {
+      Object.values(activeStreams).forEach((stream) => {
+        if (
+          stream &&
+          stream.eventId === selectedEventId &&
+          (stream.isActive || (stream.messages && stream.messages.length > 0))
+        ) {
+          const r = canonicalRole(stream.actor);
+          if (r) roles.add(r);
+        }
+      });
+    }
+
+    // 2. From opsControl.agents
+    if (opsControl?.agents) {
+      opsControl.agents.forEach((agent) => {
+        if (agent.bound_event_id === selectedEventId && agent.busy) {
+          const rawRole = agent.current_role || agent.role || agent.agent_id || '';
+          const r = canonicalRole(rawRole);
+          if (r) roles.add(r);
+        }
+      });
+    }
+
+    return roles;
+  }, [selectedEventId, activeStreams, opsControl?.agents]);
+
+  // Resolve messages for floatingTarget (case-insensitive stream key matching)
+  const floatingMessages = useMemo(() => {
+    if (!floatingTarget || !activeStreams) return [];
+    const targetAgent = canonicalRole(floatingTarget.agentName);
+    const targetEvent = (floatingTarget.eventId || '').toLowerCase();
+
+    const streamKey = Object.keys(activeStreams).find((k) => {
+      const [agentPart, eventPart] = k.split(':');
+      return (
+        canonicalRole(agentPart) === targetAgent &&
+        (eventPart || '').toLowerCase() === targetEvent
+      );
+    });
+
+    return streamKey ? activeStreams[streamKey]?.messages || [] : [];
+  }, [floatingTarget, activeStreams]);
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -164,7 +230,17 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
             }`}
           >
             <ListTodo size={13} />
-            <span>Plan{hasPlan && ` (${planSteps.filter(s => s.status === 'completed').length}/${planSteps.length})`}</span>
+            <span>
+              Plan
+              {hasPlan && ` (${planSteps.filter(s => s.status === 'completed' || s.status === 'green_verified').length}/${planSteps.length})`}
+            </span>
+            {activeAgentRoles.size > 0 && (
+              <span
+                data-testid="plan-tab-activity-beacon"
+                className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-0.5"
+                title="Active agent working on plan"
+              />
+            )}
           </button>
           <button
             onClick={() => setActiveTab('diffs')}
@@ -327,7 +403,15 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
       <div className="flex-1 overflow-y-auto min-h-0">
         {activeTab === 'plan' && (
           hasPlan ? (
-            <PlanProgress conversation={conversation} />
+            <PlanProgress
+              conversation={conversation}
+              activeAgentRoles={activeAgentRoles}
+              onOpenStream={(agentRole) => {
+                if (selectedEventId) {
+                  setFloatingTarget({ agentName: agentRole, eventId: selectedEventId });
+                }
+              }}
+            />
           ) : (
             <div className="p-8 text-center text-text-muted text-xs space-y-2">
               <ListTodo size={24} className="mx-auto mb-2 opacity-40 text-text-muted" />
@@ -342,7 +426,16 @@ export default function WorkspaceInspector({ isOpen, onClose, selectedEventId }:
         {activeTab === 'swarm' && <WorkspaceSwarmPanel selectedEventId={selectedEventId} />}
         {activeTab === 'logs' && <ActivityStream />}
       </div>
+
+      {/* Hoisted Floating Window for live agent stream */}
+      {floatingTarget && (
+        <FloatingWindow
+          agentName={floatingTarget.agentName}
+          eventId={floatingTarget.eventId}
+          messages={floatingMessages}
+          onClose={() => setFloatingTarget(null)}
+        />
+      )}
     </aside>
   );
 }
-

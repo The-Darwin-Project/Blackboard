@@ -1,3 +1,7 @@
+// BlackBoard/ui/src/components/workspace/__tests__/workspace-sessions-hub.test.tsx
+// @ai-rules:
+// 1. [Pattern]: Tests WorkspaceSessionsHub filtering, search, selection, and context menu parity.
+// 2. [Constraint]: Clears localStorage in both beforeEach and afterEach to prevent test pollution.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceSessionsHub from '../WorkspaceSessionsHub';
@@ -76,6 +80,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
 
   const mockSelectEvent = vi.fn();
   const mockDeselectEvent = vi.fn();
+  const mockSend = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -126,7 +131,7 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       autoHotspot: false,
       toggleAutoHotspot: vi.fn(),
       connected: true,
-      send: vi.fn(),
+      send: mockSend,
     } as never);
   });
 
@@ -828,6 +833,58 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
 
       // My Tasks mode should not show project dropdown
       expect(screen.queryByRole('combobox')).toBeNull();
+    });
+  });
+
+  describe('Context Menu Parity (Operational Center actions)', () => {
+    it('opens ContextMenu on right click of a task card in Global view and displays event menu items', () => {
+      localStorage.setItem('darwin:workspaceScope', 'all');
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      // Find the card for evt-1
+      const taskCard = screen.getByTitle('evt-1');
+      expect(taskCard).toBeInTheDocument();
+
+      // Right click to open context menu
+      fireEvent.contextMenu(taskCard, { clientX: 250, clientY: 180 });
+
+      // ContextMenu should now be mounted with items (e.g. Open Chat, Open Plan, Copy Event ID)
+      expect(screen.getByText('Open Chat')).toBeInTheDocument();
+      expect(screen.getByText('Open Plan')).toBeInTheDocument();
+      expect(screen.getByText('Copy Event ID')).toBeInTheDocument();
+    });
+
+    it('opens ContextMenu on right click of a task card in My Tasks view', () => {
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      const taskCard = screen.getByTitle('evt-1');
+      fireEvent.contextMenu(taskCard, { clientX: 200, clientY: 150 });
+
+      expect(screen.getByText('Open Chat')).toBeInTheDocument();
+      expect(screen.getByText('Copy Event ID')).toBeInTheDocument();
+    });
+
+    it('executes menu action when clicked from ContextMenu and invokes selectEvent and send', () => {
+      localStorage.setItem('darwin:workspaceScope', 'all');
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      // Right click evt-1
+      const taskCard1 = screen.getByTitle('evt-1');
+      fireEvent.contextMenu(taskCard1, { clientX: 250, clientY: 180 });
+
+      const openChatItem = screen.getByText('Open Chat');
+      expect(openChatItem).toBeInTheDocument();
+      fireEvent.click(openChatItem);
+      expect(mockSelectEvent).toHaveBeenCalledWith('evt-1');
+
+      // Right click evt-2 (status: 'waiting_approval')
+      const taskCard2 = screen.getByTitle('evt-2');
+      fireEvent.contextMenu(taskCard2, { clientX: 260, clientY: 190 });
+
+      const approveItem = screen.getByText('Approve Plan');
+      expect(approveItem).toBeInTheDocument();
+      fireEvent.click(approveItem);
+      expect(mockSend).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-2' });
     });
   });
 });

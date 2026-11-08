@@ -23,9 +23,15 @@ interface WorkspaceTaskItemProps {
   evt: ActiveEvent;
   isSelected: boolean;
   onSelect: (id: string) => void;
+  onContextMenu?: (e: MouseEvent<HTMLDivElement>, evt: ActiveEvent) => void;
 }
 
-export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: WorkspaceTaskItemProps) {
+export default function WorkspaceTaskItem({
+  evt,
+  isSelected,
+  onSelect,
+  onContextMenu,
+}: WorkspaceTaskItemProps) {
   const domain: string = evt.evidence?.brain_domain || evt.evidence?.domain || 'casual';
   const domainKey = domain.toLowerCase();
   const dc = Object.hasOwn(DOMAIN_COLORS, domainKey)
@@ -53,6 +59,10 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
       role="button"
       tabIndex={0}
       onClick={() => onSelect(evt.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu?.(e, evt);
+      }}
       onKeyDown={handleKeyDown}
       title={evt.id}
       className={`group w-full text-left p-2.5 rounded-lg border transition-all flex flex-col gap-1.5 cursor-pointer select-none ${
