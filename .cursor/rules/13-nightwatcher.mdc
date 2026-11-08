@@ -104,7 +104,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
 | `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` | Max output tokens per LLM turn |
-| `LLM_THINKING_NIGHTWATCHER` | `high` | Thinking budget for complex clustering |
+| `LLM_THINKING_NIGHTWATCHER` | `medium` | Thinking budget for complex clustering |
 
 ## Two Shifts Per Day
 

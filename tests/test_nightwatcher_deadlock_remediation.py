@@ -396,11 +396,78 @@ async def test_t4_handle_report_incident_tolerates_explicit_null_summary():
 
 
 # ==============================================================================
+# T-3 & T-4: Analysis loop progress reminder and terminal handover directive
+# ==============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_condition", ["set_phase_report", "text_nudges_exhausted", "rounds_exhausted"])
+async def test_t3_analysis_loop_handover_injected_on_all_exit_paths(exit_condition):
+    """T-3: All 3 exit paths from _run_analysis_loop inject the terminal handover user turn."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    escs = [make_escalation("evt-1")]
+
+    if exit_condition == "set_phase_report":
+        adapter.generate = AsyncMock(side_effect=[
+            fc("set_phase", {"phase": "investigate"}),
+            fc("set_phase", {"phase": "report"}),
+        ])
+    elif exit_condition == "text_nudges_exhausted":
+        adapter.generate = AsyncMock(return_value=MockResponse(text="chatting..."))
+    elif exit_condition == "rounds_exhausted":
+        adapter.generate = AsyncMock(return_value=fc("get_event_report", {"event_id": "evt-1"}))
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    assert contents[-1]["role"] == "user"
+    handover_text = contents[-1]["parts"][0]["text"]
+    assert "Proceeding to REPORT phase" in handover_text
+    assert "declare_clusters" in handover_text
+
+
+@pytest.mark.asyncio
+async def test_t4_analysis_loop_progress_reminder_injected_at_round_19_in_review_phase():
+    """T-4: At round >= 19 (0-indexed 19, i.e. 20th round) in 'review' phase, inject progress reminder exactly once."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    escs = [make_escalation("evt-1")]
+
+    responses = [fc("get_event_report", {"event_id": "evt-1"})] * 22
+    responses.append(fc("set_phase", {"phase": "investigate"}))
+    responses.append(fc("set_phase", {"phase": "report"}))
+    adapter.generate = AsyncMock(side_effect=responses)
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    reminder_turns = [
+        c for c in contents
+        if c.get("role") == "user" and any("Notice: Analysis round" in p.get("text", "") for p in c.get("parts", []))
+    ]
+    assert len(reminder_turns) == 1
+    assert "Notice: Analysis round 20/30" in reminder_turns[0]["parts"][0]["text"]
+
+
+# ==============================================================================
 # T-5: Auto-reconcile wiring (_run_clustering_agent) + validator behaviour
 # ==============================================================================
 
 @pytest.mark.asyncio
 async def test_t5_auto_reconcile_enabled_only_on_final_attempt():
+    """T-5b: Even if LLM tool call validation fails across all retries, post-loop fallback establishes clusters without RuntimeError."""
     ctx = make_ctx([make_escalation("evt-1")])
     adapter = AsyncMock()
     adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", {"clusters": []})] * (MAX_DECLARE_RETRIES + 1))
@@ -408,12 +475,13 @@ async def test_t5_auto_reconcile_enabled_only_on_final_attempt():
 
     with patch("src.observers.nightwatcher_tools._handle_declare_clusters",
                new=AsyncMock(return_value="Cluster plan validation failed: x")) as handler:
-        with pytest.raises(RuntimeError, match="cluster declaration failed"):
-            await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "high")
+        await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "high")
 
     flags = [c.kwargs["auto_reconcile"] for c in handler.call_args_list]
     assert flags == [False] * MAX_DECLARE_RETRIES + [True]
     assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+    assert len(ctx.declared_clusters) >= 1
+    assert ctx.declared_clusters[0]["auto_reconciled"] is True
 
 
 @pytest.mark.asyncio
@@ -458,14 +526,93 @@ async def test_t5_incomplete_plan_rejected_with_feedback_until_final_attempt_the
 
 @pytest.mark.asyncio
 async def test_t5_no_tool_call_consumes_an_attempt_and_nudges():
+    """T-5a: when LLM emits text without tool calls across all retries, post-loop fallback establishes clusters without RuntimeError."""
     ctx = make_ctx([make_escalation("evt-1")])
     adapter = AsyncMock()
     adapter.generate = AsyncMock(return_value=MockResponse(text="thinking..."))
     contents: list = []
-    with pytest.raises(RuntimeError):
-        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
+    await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
     assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
     assert any("must call declare_clusters" in c["parts"][0]["text"] for c in contents if c["role"] == "user")
+    assert len(ctx.declared_clusters) == 1
+    assert ctx.declared_clusters[0]["auto_reconciled"] is True
+
+
+@pytest.mark.asyncio
+async def test_t5c_empty_manifest_raises_runtime_error_when_retries_exhaust():
+    """T-5c: Empty manifest edge case cannot be reconciled into fallback clusters; raises RuntimeError."""
+    ctx = make_ctx([])
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=MockResponse(text="thinking..."))
+    contents: list = []
+    with pytest.raises(RuntimeError, match="cluster declaration failed"):
+        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", contents, 0.3, 8192, "high")
+    assert adapter.generate.await_count == MAX_DECLARE_RETRIES + 1
+
+
+# ==============================================================================
+# VMER-2272: Thinking level default, Helm lint verification, and handover alternation
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_vmer_2272_thinking_level_defaults_to_medium():
+    """T-6: LLM_THINKING_NIGHTWATCHER defaults to 'medium' across analysis and clustering steps when unset."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("set_phase", {"phase": "investigate"}))
+    escs = [make_escalation("evt-1")]
+
+    with patch.dict("os.environ", {}, clear=False):
+        import os
+        os.environ.pop("LLM_THINKING_NIGHTWATCHER", None)
+        obs._get_adapter = AsyncMock(return_value=adapter)
+        contents, ctx = await obs._run_analysis_loop(
+            escs, [e.model_dump_json() for e in escs], "SYSTEM",
+            "ws", "we", "2026-01-01", "morning", time.time(), 1,
+        )
+
+    assert adapter.generate.called
+    kwargs = adapter.generate.call_args[1]
+    assert kwargs.get("thinking_level") == "medium"
+
+
+def test_vmer_2272_helm_lint_succeeds():
+    """T-7: Helm chart lints cleanly with zero errors."""
+    import subprocess
+    from pathlib import Path
+    helm_dir = Path(__file__).resolve().parent.parent / "helm"
+    res = subprocess.run(["helm", "lint", str(helm_dir)], capture_output=True, text=True)
+    assert res.returncode == 0, f"helm lint failed:\n{res.stdout}\n{res.stderr}"
+    assert "0 chart(s) failed" in res.stdout
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_handover_preserves_model_turn_on_set_phase_report():
+    """Handover Exit Path 1 (set_phase report) preserves model turn before user handover turn."""
+    obs = make_observer()
+    obs._archivist.get_memory = AsyncMock(return_value=None)
+    obs.blackboard.get_report = AsyncMock(return_value=None)
+    obs.blackboard.refresh_inflight_ttl = AsyncMock()
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[
+        fc("set_phase", {"phase": "investigate"}),
+        fc("set_phase", {"phase": "report"}),
+    ])
+    escs = [make_escalation("evt-1")]
+
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    contents, ctx = await obs._run_analysis_loop(
+        escs, [e.model_dump_json() for e in escs], "SYSTEM",
+        "ws", "we", "2026-01-01", "morning", time.time(), 1,
+    )
+
+    # Last turn is handover user prompt, preceding turn is model set_phase('report')
+    assert contents[-1]["role"] == "user"
+    assert "Proceeding to REPORT phase" in contents[-1]["parts"][0]["text"]
+    assert contents[-2]["role"] == "model"
 
 
 # ==============================================================================

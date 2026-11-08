@@ -97,17 +97,27 @@ def validate_cluster_plan(
     ``reconcile_cluster_plan`` to materialise a fallback cluster for them).
     Unknown and duplicate event IDs are ALWAYS rejected, regardless of the flag.
     """
+    if clusters is None:
+        clusters = []
+    if not isinstance(clusters, list):
+        return False, "Clusters must be a list of cluster objects."
     if not clusters:
+        if auto_reconcile:
+            return True, ""
         return False, "No clusters declared. You must create at least one cluster."
     all_assigned: set[str] = set()
     for i, c in enumerate(clusters):
-        events = c.get("events", [])
-        if not events:
+        if not isinstance(c, dict):
+            return False, f"Cluster {i + 1} is not a valid object."
+        events = c.get("events")
+        if not isinstance(events, (list, tuple, set)) or not events:
             return False, f"Cluster {i + 1} has no events. Every cluster must contain at least one event."
         platform = c.get("platform", "")
         if VALID_PLATFORMS and platform not in VALID_PLATFORMS:
             return False, f"Cluster {i + 1} has invalid platform '{platform}'. Must be one of: {', '.join(sorted(VALID_PLATFORMS))}"
         for eid in events:
+            if not isinstance(eid, str):
+                return False, f"Cluster {i + 1} contains non-string event ID."
             if eid in all_assigned:
                 return False, f"Event {eid} appears in multiple clusters. Each event must be in exactly one cluster."
             if eid not in manifest_ids:
@@ -160,6 +170,8 @@ def reconcile_cluster_plan(
     so downstream report builders render it correctly. It is NOT a correlation claim:
     the events share no established root cause and are only grouped to avoid dropping them.
     """
+    if clusters is None:
+        clusters = []
     result = copy.deepcopy(clusters)  # deep: nested "events" lists must not alias the caller's
     assigned = {eid for c in clusters for eid in c.get("events", [])}
     missing = manifest_ids - assigned
@@ -421,7 +433,9 @@ async def _handle_search_existing_incidents(args: dict, ctx: NightwatcherContext
 
 
 async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext, auto_reconcile: bool = False) -> str:
-    clusters = args.get("clusters", [])
+    clusters = args.get("clusters") or []
+    if not isinstance(clusters, list):
+        return "Cluster plan validation failed: clusters must be a list of cluster objects."
     ok, error = validate_cluster_plan(clusters, ctx.manifest_ids, auto_reconcile=auto_reconcile)
     if not ok:
         return f"Cluster plan validation failed: {error}"

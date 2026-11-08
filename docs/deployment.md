@@ -206,6 +206,8 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) | `1800` |
 | `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
+| `LLM_THINKING_NIGHTWATCHER` | Nightwatcher LLM thinking level (`none`, `low`, `medium`, `high`) | `medium` |
+| `LLM_MAX_TOKENS_NIGHTWATCHER` | Nightwatcher LLM max output tokens for cart steps | `16000` |
 
 #### Nightwatcher backlog runbook
 

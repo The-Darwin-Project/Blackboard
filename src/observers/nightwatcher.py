@@ -13,7 +13,7 @@
 #     One ShiftReport per sweep: batches are merged cumulatively into the same date:window key.
 # 11. [Constraint]: On quota/generic failure, events already in ctx.created_incidents are COMMITTED (Jira write is not
 #     idempotent); only the uncommitted remainder is restaged. Never restage a member whose incident exists.
-# 12. [Constraint]: auto_reconcile is enabled ONLY on the final declare_clusters attempt (_run_clustering_agent).
+# 12. [Constraint]: auto_reconcile is enabled on the final declare_clusters attempt AND as an emergency fallback if all retries fail. Manifest events are never dropped.
 # 13. [Constraint]: The cart commits each cluster's members to Jira-done IMMEDIATELY after its incident is created (not at the end),
 #     so a crash/SIGTERM/CancelledError later in the sweep cannot make requeue_inflight() re-file an existing incident.
 # 14. [Gotcha]: INFLIGHT_TTL EXPIREs (deletes) the inflight SET after 1h -- it never requeues. Anything stranded there is lost unless
@@ -95,7 +95,17 @@ def _env_float(name: str, default: float, minimum: float = 0.0, maximum: Optiona
         return maximum
     return value
 
-from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
+from .nightwatcher_tools import (
+    NightwatcherContext,
+    execute_tool,
+    get_phase_tools,
+    validate_cluster_plan,
+    build_report_tool,
+    build_extend_tool,
+    build_summary_tool,
+    _handle_write_incident,
+    _handle_extend_incident,
+)
 from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
 
 
@@ -524,10 +534,40 @@ class NightwatcherObserver:
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
         analysis_max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER_ANALYSIS", "16384"))
-        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "medium")
         text_nudge_count = 0
+        review_nudge_sent = False
 
-        for _ in range(MAX_ANALYSIS_ROUNDS):
+        def _finalize_analysis_handover():
+            contents.append({
+                "role": "user",
+                "parts": [{
+                    "text": (
+                        "Analysis phase complete. Proceeding to REPORT phase. "
+                        "You must now group all manifest events into incident clusters using declare_clusters."
+                    )
+                }],
+            })
+            return contents, ctx
+
+        for round_idx in range(MAX_ANALYSIS_ROUNDS):
+            if round_idx >= 19 and current_phase in ("review", "investigate") and not review_nudge_sent:
+                review_nudge_sent = True
+                action_prompt = (
+                    "advance to investigate via set_phase('investigate')."
+                    if current_phase == "review"
+                    else "advance to report via set_phase('report')."
+                )
+                contents.append({
+                    "role": "user",
+                    "parts": [{
+                        "text": (
+                            f"Notice: Analysis round {round_idx + 1}/{MAX_ANALYSIS_ROUNDS}. "
+                            f"You have used 2/3 of your analysis budget. "
+                            f"Complete your {current_phase} and {action_prompt}"
+                        )
+                    }],
+                })
             if hasattr(self.blackboard, "refresh_inflight_ttl"):
                 await self.blackboard.refresh_inflight_ttl()
             tools = get_phase_tools(current_phase)
@@ -536,7 +576,7 @@ class NightwatcherObserver:
                 tools=tools, temperature=temperature,
                 max_output_tokens=analysis_max_tokens, thinking_level=thinking,
             )
-            from src.agents.llm import record_token_usage
+            from ..agents.llm import record_token_usage
             record_token_usage("nightwatcher", response.usage)
             if response.function_call:
                 name = response.function_call.name
@@ -550,7 +590,8 @@ class NightwatcherObserver:
                         current_phase = new_phase
                         logger.info("Nightwatcher phase: %s -> %s (%s)", phases[cur_idx], new_phase, args.get("reasoning", ""))
                         if new_phase == "report":
-                            return contents, ctx
+                            contents.append({"role": "model", "parts": response.raw_parts or [{"text": "set_phase('report')"}]})
+                            return _finalize_analysis_handover()
                         tool_result = f"Phase: {current_phase.upper()}"
                     else:
                         tool_result = (
@@ -572,10 +613,11 @@ class NightwatcherObserver:
                         "You have finished your analysis. Call set_phase('report') to proceed to the report phase."}]})
                 else:
                     logger.warning("Nightwatcher: forcing transition to report phase after %d nudges", text_nudge_count)
-                    return contents, ctx
+                    contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
+                    return _finalize_analysis_handover()
 
         logger.warning("Nightwatcher: MAX_ANALYSIS_ROUNDS exhausted, forcing transition to report phase")
-        return contents, ctx
+        return _finalize_analysis_handover()
 
     async def _run_clustering_agent(self, adapter, ctx, system_prompt, contents,
                                     temperature, max_tokens, thinking) -> None:
@@ -588,7 +630,7 @@ class NightwatcherObserver:
         """
         from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
         from .nightwatcher_tools import _handle_declare_clusters
-        from src.agents.llm import record_token_usage
+        from ..agents.llm import record_token_usage
         for attempt in range(MAX_DECLARE_RETRIES + 1):
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
@@ -597,10 +639,14 @@ class NightwatcherObserver:
             )
             record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
-                result = await _handle_declare_clusters(
-                    response.function_call.args, ctx,
-                    auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
-                )
+                try:
+                    result = await _handle_declare_clusters(
+                        response.function_call.args or {}, ctx,
+                        auto_reconcile=(attempt == MAX_DECLARE_RETRIES),
+                    )
+                except Exception as exc:
+                    logger.warning("Nightwatcher: error processing declare_clusters on attempt %d: %s", attempt + 1, exc)
+                    result = f"Cluster plan validation failed: {exc}"
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": result}]})
                 if ctx.declared_clusters:
@@ -608,9 +654,35 @@ class NightwatcherObserver:
                     return
                 logger.warning("Nightwatcher: cluster plan rejected on attempt %d: %s", attempt + 1, result[:200])
             else:
+                sanitized_text = (response.text or "").replace("\n", " ").replace("\r", " ").strip()[:200]
+                logger.warning(
+                    "Nightwatcher: cluster declaration attempt %d/%d emitted no valid tool call (text len=%d, parts=%d): %s",
+                    attempt + 1, MAX_DECLARE_RETRIES + 1,
+                    len(response.text or ""), len(response.raw_parts or []),
+                    sanitized_text,
+                )
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text":
                     "You must call declare_clusters with your cluster plan. Every manifest event must be assigned."}]})
+        if not ctx.declared_clusters:
+            logger.warning(
+                "Nightwatcher: cluster declaration exhausted %d retries; triggering emergency auto-reconciliation fallback",
+                MAX_DECLARE_RETRIES + 1,
+            )
+            if hasattr(self, "_notify_ops"):
+                await self._notify_ops(
+                    f"Nightwatcher: cluster declaration exhausted all {MAX_DECLARE_RETRIES + 1} retries; "
+                    f"triggered emergency auto-reconciliation fallback for {len(ctx.manifest_ids)} event(s)."
+                )
+            from .nightwatcher_tools import reconcile_cluster_plan
+            ctx.declared_clusters = reconcile_cluster_plan([], ctx.manifest_ids, ctx.escalations_by_id)
+            if ctx.declared_clusters:
+                logger.info(
+                    "Nightwatcher: emergency fallback cluster plan established with %d cluster(s)",
+                    len(ctx.declared_clusters),
+                )
+                return
+
         raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
 
     async def _run_report_cart(self, ctx, contents, json_members, escalations,
@@ -625,7 +697,7 @@ class NightwatcherObserver:
         adapter = await self._get_adapter()
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
-        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "medium")
 
         # Step 1: Declare clusters
         await self._run_clustering_agent(
@@ -682,7 +754,7 @@ class NightwatcherObserver:
                     tools=report_tools, temperature=temperature,
                     max_output_tokens=max_tokens, thinking_level=thinking,
                 )
-                from src.agents.llm import record_token_usage
+                from ..agents.llm import record_token_usage
                 record_token_usage("nightwatcher", response.usage)
                 if response.function_call and response.function_call.name == expected_tool:
                     if is_extend:
@@ -735,7 +807,7 @@ class NightwatcherObserver:
             tools=summary_tools, temperature=temperature,
             max_output_tokens=max_tokens, thinking_level=thinking,
         )
-        from src.agents.llm import record_token_usage
+        from ..agents.llm import record_token_usage
         record_token_usage("nightwatcher", response.usage)
         if response.function_call and response.function_call.name == "post_shift_summary":
             from .nightwatcher_tools import _handle_post_shift_summary

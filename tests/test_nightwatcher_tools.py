@@ -416,6 +416,18 @@ class TestPostShiftSummary:
 # =========================================================================
 
 class TestValidateClusterPlan:
+    def test_empty_clusters_with_auto_reconcile_succeeds(self):
+        """T-1: empty clusters list is permitted when auto_reconcile=True."""
+        ok, error = validate_cluster_plan([], {"evt-1", "evt-2"}, auto_reconcile=True)
+        assert ok is True
+        assert error == ""
+
+    def test_empty_clusters_without_auto_reconcile_fails(self):
+        """T-2: empty clusters list is rejected when auto_reconcile=False."""
+        ok, error = validate_cluster_plan([], {"evt-1", "evt-2"}, auto_reconcile=False)
+        assert ok is False
+        assert error == "No clusters declared. You must create at least one cluster."
+
     def test_happy_path(self):
         """All events covered, no overlaps."""
         clusters = [
