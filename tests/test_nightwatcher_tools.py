@@ -882,3 +882,51 @@ class TestVmer2272SalvageClusterPlan:
         assert salvage_cluster_plan(clusters, self.IDS)[0]["platform"] == "bogus"      # no allow-list -> untouched
         monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])
         assert salvage_cluster_plan(clusters, self.IDS)[0]["platform"] == "gitlab"     # deterministic fallback
+
+    def test_non_iterable_or_missing_events_are_dropped_without_raising(self):
+        """QE mutation kill (S03): a cluster whose ``events`` is None/int/absent must be skipped, never raise."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        src = [
+            {"events": None, "root_cause": "none"},
+            {"events": 5, "root_cause": "int"},
+            {"root_cause": "missing"},
+            {"events": ("evt-1",), "root_cause": "tuple-ok"},
+        ]
+        out = salvage_cluster_plan(src, self.IDS)
+        assert [(c["root_cause"], c["events"]) for c in out] == [("tuple-ok", ["evt-1"])]
+
+    def test_unhashable_event_ids_are_stripped_not_raised(self):
+        """QE mutation kill (S07): list/dict IDs would raise TypeError on set membership; they must be stripped."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        out = salvage_cluster_plan([{"events": [["evt-1"], {"k": "v"}, None, "evt-2"], "root_cause": "u"}], self.IDS)
+        assert [(c["root_cause"], c["events"]) for c in out] == [("u", ["evt-2"])]
+
+    def test_nested_fields_are_deep_copied(self):
+        """QE mutation kill (S09): non-event nested fields (services, extends metadata) must not alias the input."""
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        src = [{"events": ["evt-1"], "root_cause": "r", "services": ["a"], "meta": {"k": ["v"]}}]
+        snapshot = copy.deepcopy(src)
+        out = salvage_cluster_plan(src, self.IDS)
+        assert out[0]["services"] is not src[0]["services"] and out[0]["meta"] is not src[0]["meta"]
+        out[0]["services"].append("zzz")
+        out[0]["meta"]["k"].append("zzz")
+        assert src == snapshot
+
+    def test_valid_platform_is_never_overwritten(self, monkeypatch):
+        """QE mutation kill (S12): a VALID platform must survive even when it differs from the deterministic fallback."""
+        from src.observers import nightwatcher_tools as nt
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])      # fallback with no hints would be "gitlab"
+        out = salvage_cluster_plan([{"events": ["evt-1"], "platform": "kargo"}], self.IDS)
+        assert out[0]["platform"] == "kargo"
+
+    def test_coerced_platform_is_derived_from_the_clusters_own_events(self, monkeypatch):
+        """QE mutation kill (S13/S14): coercion uses the escalations of THIS cluster's events, not the global default."""
+        from types import SimpleNamespace
+        from src.observers import nightwatcher_tools as nt
+        from src.observers.nightwatcher_tools import salvage_cluster_plan
+        monkeypatch.setattr(nt, "VALID_PLATFORMS", ["gitlab", "kargo"])
+        esc = {"evt-1": SimpleNamespace(platform="kargo"), "evt-2": SimpleNamespace(platform="gitlab"),
+               "evt-3": SimpleNamespace(platform="gitlab")}
+        out = salvage_cluster_plan([{"events": ["evt-1"], "platform": "bogus"}], self.IDS, esc)
+        assert out[0]["platform"] == "kargo"                                  # not "gitlab" (sorted default / other events)

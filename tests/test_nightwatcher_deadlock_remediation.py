@@ -2055,3 +2055,139 @@ async def test_vmer_2272_r_nudge_guard_branches():
     contents2, _ = await obs._run_analysis_loop(
         escs, [e.model_dump_json() for e in escs], "SYSTEM", "ws", "we", "2026-01-01", "morning", time.time(), 1)
     assert not any("Notice: Analysis round" in p["text"] for c in contents2 for p in c["parts"])
+
+
+# ==============================================================================
+# VMER-2272 QE mutation-kill tests (labels S..X; each kills a surviving single-point mutant)
+# ==============================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", [TypeError("t"), ValueError("v"), KeyError("k")], ids=["TypeError", "ValueError", "KeyError"])
+async def test_vmer_2272_s_each_narrowed_exception_type_is_retried_not_propagated(exc):
+    """VMER-2272-S: every member of (TypeError, ValueError, KeyError) is a retryable payload error."""
+    ctx = make_ctx([make_escalation("evt-1")])
+    good = fc("declare_clusters", {"clusters": [{"events": ["evt-1"], "platform": "kargo", "root_cause": "rc", "services": ["s"]}]})
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", {"clusters": []}), good])
+    real = nw_tools._handle_declare_clusters
+    calls = {"n": 0}
+
+    async def flaky(args, c, auto_reconcile=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return await real(args, c, auto_reconcile=auto_reconcile)
+
+    with patch("src.observers.nightwatcher_tools._handle_declare_clusters", new=flaky):
+        await make_observer()._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    assert ctx.degraded_plan is False and len(ctx.declared_clusters) == 1
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_t_fallback_keeps_last_list_plan_when_later_attempts_are_non_list():
+    """VMER-2272-T: a later malformed (missing / non-list) clusters payload must not erase an earlier salvageable plan."""
+    monkeypatch_plan = {"clusters": [{"events": ["evt-1", "evt-ghost"], "platform": "kargo", "root_cause": "rcKeep", "services": ["a"]}]}
+    # NOTE: the FINAL attempt runs with auto_reconcile=True and would ACCEPT an empty plan ({} / []), so the last attempt
+    # must be a non-list payload to reach the emergency fallback.
+    later = [fc("declare_clusters", {}), fc("declare_clusters", {"clusters": "oops"})]
+    assert MAX_DECLARE_RETRIES + 1 == 1 + len(later)                # guard: script covers every attempt exactly
+    escs = [make_escalation(f"evt-{i}") for i in (1, 2)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=[fc("declare_clusters", monkeypatch_plan), *later])
+    await make_observer()._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    by_root = {c["root_cause"]: c for c in ctx.declared_clusters}
+    assert by_root["rcKeep"]["events"] == ["evt-1"]
+    assert ctx.degraded_plan is True
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_u_fallback_notification_reports_salvaged_and_reconciled_counts(monkeypatch):
+    """VMER-2272-U: the ops message states exactly how many events were salvaged vs auto-reconciled."""
+    monkeypatch.setattr(nw_tools, "VALID_PLATFORMS", ["kargo", "gitlab"])
+    escs = [make_escalation(f"evt-{i}", platform="gitlab") for i in (1, 2, 3)]
+    ctx = make_ctx(escs)
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(return_value=fc("declare_clusters", _rejected_plan_args()))
+    obs = make_observer()
+    await obs._run_clustering_agent(adapter, ctx, "SYS", [], 0.3, 8192, "medium")
+    msg = obs._slack_notify.call_args[0][0]
+    assert "2 event(s) salvaged" in msg and "1 auto-reconciled" in msg
+
+
+def test_vmer_2272_v_fallback_notify_timeout_is_a_sane_bound():
+    """VMER-2272-V: the notify bound must be finite and short (it blocks the sweep's critical path)."""
+    assert 0 < nw.FALLBACK_NOTIFY_TIMEOUT_S <= 30
+
+
+def _degraded_three_event_obs(*, degraded: bool):
+    """One lease of 3 events -> exactly 1 incident. degraded=True forces the emergency fallback; False accepts a real plan."""
+    obs = make_observer()
+    escs = [make_escalation(f"evt-b{i}", service="svc", platform="Konflux") for i in (1, 2, 3)]
+    bb = obs.blackboard
+    bb.lease_pending_escalations = AsyncMock(side_effect=[(escs, [e.model_dump_json() for e in escs]), ([], [])])
+    bb.count_pending_escalations = AsyncMock(side_effect=[0, 0])
+    for name in ("commit_inflight", "restage_orphans", "requeue_inflight", "persist_shift_report", "clear_escalation_flag"):
+        setattr(bb, name, AsyncMock())
+    if degraded:
+        declare = [fc("declare_clusters", {"clusters": "not-a-list"})] * (MAX_DECLARE_RETRIES + 1)
+    else:
+        declare = [fc("declare_clusters", {"clusters": [{"events": [e.event_id for e in escs], "root_cause": "rc",
+                                                          "platform": "Konflux", "services": ["svc"]}]})]
+    responses = [
+        fc("set_phase", {"phase": "investigate"}), fc("set_phase", {"phase": "report"}), *declare,
+        fc("write_incident", {"summary": "one", "description": "d", "priority": "Normal", "status": "New"}),
+        fc("post_shift_summary", {"summary": "done"}),
+    ]
+    adapter = AsyncMock()
+    adapter.generate = AsyncMock(side_effect=responses)
+    obs._get_adapter = AsyncMock(return_value=adapter)
+    obs._incident_adapter.create_incident = AsyncMock(return_value={"issue_key": "VMER-1", "issue_url": "u"})
+    obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
+    return obs
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_w_degraded_batch_claims_no_noise_reduction_but_healthy_one_does(fast_batches):
+    """VMER-2272-W: 3 events -> 1 incident. Healthy = 66.7% reduction; degraded must report 0 (non-vacuous: 1 pending would give 0 anyway)."""
+    healthy = _degraded_three_event_obs(degraded=False)
+    await healthy._sweep()
+    hm = healthy.blackboard.persist_shift_report.call_args[0][0].metrics
+    assert hm["escalation_count"] == 3 and hm["incident_count"] == 1
+    assert hm["noise_reduction_pct"] == pytest.approx(66.7) and hm["degraded_plan_count"] == 0
+
+    degraded = _degraded_three_event_obs(degraded=True)
+    await degraded._sweep()
+    dm = degraded.blackboard.persist_shift_report.call_args[0][0].metrics
+    assert dm["escalation_count"] == 3 and dm["incident_count"] == 1
+    assert dm["noise_reduction_pct"] == 0 and dm["degraded_plan_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_vmer_2272_x_failure_settle_report_carries_degraded_count():
+    """VMER-2272-X: a batch that degraded and THEN failed (quota) must still flag degraded_plan_count in the persisted report."""
+    esc = make_escalation("evt-1")
+    obs, _raw = _sweep_obs([esc], raise_in_cart=QuotaExhaustedError("q"), created=[incident("evt-1")])
+    inner = obs._run_analysis_loop
+
+    async def degraded_analysis(*a, **kw):
+        contents, ctx = await inner(*a, **kw)
+        ctx.degraded_plan = True
+        return contents, ctx
+
+    obs._run_analysis_loop = degraded_analysis
+    await obs._sweep()
+    report = obs.blackboard.persist_shift_report.call_args[0][0]
+    assert report.status == "quota_exhausted" and report.metrics["degraded_plan_count"] == 1
+
+    obs2, _ = _sweep_obs([esc], raise_in_cart=QuotaExhaustedError("q"), created=[incident("evt-1")])
+    await obs2._sweep()
+    assert obs2.blackboard.persist_shift_report.call_args[0][0].metrics["degraded_plan_count"] == 0
+
+
+def test_vmer_2272_x2_merge_reports_sums_degraded_counts_from_both_sides():
+    """VMER-2272-X2: both operands contribute (kills 'key dropped from the sum tuple', which keeps only prior's value)."""
+    mk = lambda **m: ShiftReport(shift_date="d", window="morning", window_start="a", window_end="b",
+                                 metrics={"incident_count": 1, "escalation_count": 1, **m})
+    assert NightwatcherObserver._merge_reports(mk(degraded_plan_count=1), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 2
+    assert NightwatcherObserver._merge_reports(mk(), mk(degraded_plan_count=1)).metrics["degraded_plan_count"] == 1
