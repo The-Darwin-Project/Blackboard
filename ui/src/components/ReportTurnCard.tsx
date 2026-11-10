@@ -6,20 +6,25 @@
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import { getCodeString } from 'rehype-rewrite';
 import MermaidBlock from './MermaidBlock';
-import { ACTOR_COLORS } from '../constants/colors';
+import { ACTOR_COLORS, ACTOR_LABELS } from '../constants/colors';
 import type { ParsedTurn } from '../utils/parseReport';
 
 export default function ReportTurnCard({ turn }: { turn: ParsedTurn }) {
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
+  const label = ACTOR_LABELS[turn.actor] ?? turn.actor;
 
   return (
-    <div style={{
+    <div data-testid="report-turn-card" style={{
+      background: 'rgba(15, 23, 42, 0.55)',
+      border: '1px solid rgba(51, 65, 85, 0.4)',
       borderLeft: `3px solid ${color}`,
-      paddingLeft: 14,
+      borderRadius: 8,
+      padding: '10px 14px',
       marginBottom: 16,
+      boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
     }}>
       {/* Turn header row */}
-      <div style={{
+      <div data-testid="report-turn-header" style={{
         display: 'flex',
         flexWrap: 'wrap',
         alignItems: 'center',
@@ -34,7 +39,7 @@ export default function ReportTurnCard({ turn }: { turn: ParsedTurn }) {
           fontSize: 12,
           fontWeight: 600,
         }}>
-          {turn.actor}
+          {label}
         </span>
         <span style={{ fontSize: 12, color: '#94a3b8' }}>
           {turn.action}
@@ -68,6 +73,7 @@ export default function ReportTurnCard({ turn }: { turn: ParsedTurn }) {
             fontSize: 13,
             lineHeight: 1.65,
             color: '#e2e8f0',
+            overflowX: 'auto',
           }}
           wrapperElement={{ 'data-color-mode': 'dark' }}
           components={{
