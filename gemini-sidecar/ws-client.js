@@ -29,6 +29,7 @@ const {
   DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE,
   EVENT_ID, EPHEMERAL, IDLE_TIMEOUT_MS,
   CLI_429_MAX_RETRIES, CLI_429_INITIAL_DELAY_MS, CLI_429_BACKOFF_MULTIPLIER,
+  resolveTimeoutMs,
 } = require('./config');
 const { wsSend } = require('./ws-utils');
 const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
@@ -43,13 +44,15 @@ let _isWaking = false;
 let _catalogSynced = false;
 
 function killChild(child) {
-  child.kill('SIGTERM');
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  try { child.kill('SIGTERM'); } catch (_) {}
   const t = setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) {
-      try { child.kill('SIGKILL'); } catch {}
+      try { child.kill('SIGKILL'); } catch (_) {}
     }
   }, 5000);
-  child.on('exit', () => clearTimeout(t));
+  if (t.unref) t.unref();
+  child.once('exit', () => clearTimeout(t));
 }
 
 function sendMsg(ws, taskId, data) {
@@ -172,10 +175,10 @@ function startWSClient(brainUrl) {
 
   function cleanupActiveTask() {
     const task = state.getCurrentTask();
-    if (!task?.child) return;
+    if (!task) return;
     console.log(`[${new Date().toISOString()}] Killing orphan for ${task.eventId} (disconnect)`);
     if (task.timer) clearTimeout(task.timer);
-    killChild(task.child);
+    if (task.child) killChild(task.child);
     state.clearCurrentTask();
   }
 
@@ -251,18 +254,19 @@ async function handleTask(ws, msg) {
   }
 
   const mode = msg.mode || '';
+  const roleTimeoutMs = resolveTimeoutMs(role || AGENT_ROLE);
   const timeoutSec = mode.includes('implement')
-    ? parseInt(process.env.TASK_TIMEOUT_IMPLEMENT) || 1800
-    : parseInt(process.env.TASK_TIMEOUT_DEFAULT) || 600;
+    ? (parseInt(process.env.TASK_TIMEOUT_IMPLEMENT) || Math.round(roleTimeoutMs / 1000))
+    : (parseInt(process.env.TASK_TIMEOUT_DEFAULT) || Math.round(roleTimeoutMs / 1000));
 
   function resetTimer() {
     const task = state.getCurrentTask();
     if (task?.timer) clearTimeout(task.timer);
     const timer = setTimeout(() => {
       const t = state.getCurrentTask();
-      if (!t?.child || t.taskId !== taskId) return;
+      if (!t || t.taskId !== taskId) return;
       console.log(`[${new Date().toISOString()}] Task ${taskId} timed out (${timeoutSec}s)`);
-      killChild(t.child);
+      if (t.child) killChild(t.child);
       sendMsg(ws, taskId, {
         type: 'error', event_id: eventId, retryable: true,
         error: `Task timed out after ${timeoutSec}s`,
@@ -282,6 +286,9 @@ async function handleTask(ws, msg) {
         ws.send(JSON.stringify(obj));
         if (obj.type === 'progress') resetTimer();
       } catch (e) { ws.send(raw); }
+    },
+    onActivity() {
+      resetTimer();
     },
   };
 
@@ -350,6 +357,7 @@ async function handleTask(ws, msg) {
       }
 
       if (result.status !== 'failed') break;
+      if (result.timedOut) break;
       if (!is429Error(result.stderr)) break;
       if (state.getCallbackResult()) {
         result = { ...result, status: 'success', output: state.getCallbackResult(), source: 'callback' };
@@ -390,10 +398,10 @@ async function handleTask(ws, msg) {
 
 function handleCancel(msg) {
   const task = state.getCurrentTask();
-  if (!task?.child || task.taskId !== msg.task_id) return;
+  if (!task || task.taskId !== msg.task_id) return;
   console.log(`[${new Date().toISOString()}] Cancelling task ${msg.task_id}`);
   if (task.timer) clearTimeout(task.timer);
-  killChild(task.child);
+  if (task.child) killChild(task.child);
   sendMsg(task.ws, msg.task_id, {
     type: 'result', event_id: task.eventId,
     output: 'Cancelled by Brain', source: 'cancel',

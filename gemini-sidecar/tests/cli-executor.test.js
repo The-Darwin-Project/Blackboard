@@ -628,3 +628,239 @@ describe('Scenario T-6: Farley ATDD Developer Claude Deny Settings & Validator',
     });
 });
 
+/**
+ * Farley ATDD 4-Layer Model for Sliding-Window Inactivity Watchdog (VMER-2321)
+ * Layer 4: SUT - cli-executor.js (executeCLI / executeCLIStreaming)
+ * Layer 3: Protocol Driver - InactivityWatchdogDriver
+ * Layer 2: DSL - InactivityWatchdogDSL
+ * Layer 1: Acceptance Scenarios - T-20 through T-24
+ */
+class InactivityWatchdogDriver {
+    constructor(mod) {
+        this.mod = mod;
+        this.activityCount = 0;
+        this.killedSignals = [];
+    }
+
+    createMockChild() {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.killed = false;
+        child.signals = [];
+        child.kill = (sig = 'SIGTERM') => {
+            child.killed = true;
+            child.signals.push(sig);
+            this.killedSignals.push(sig);
+            setImmediate(() => {
+                child.emit('close', null, sig);
+            });
+            return true;
+        };
+        return child;
+    }
+
+    createWsProxy() {
+        return {
+            send: () => {},
+            onActivity: () => {
+                this.activityCount++;
+            },
+        };
+    }
+}
+
+class InactivityWatchdogDSL {
+    constructor(driver) {
+        this.driver = driver;
+    }
+
+    givenActiveStreamingProcess(t, { chunkIntervalMs, chunkCount, finalOutput = '{"ok":true}' }) {
+        let childInstance;
+        t.mock.method(cp, 'spawn', (cmd, args, opts) => {
+            childInstance = this.driver.createMockChild();
+            childInstance.spawnOpts = opts;
+            let count = 0;
+            const timer = setInterval(() => {
+                count++;
+                if (count <= chunkCount) {
+                    childInstance.stdout.emit('data', Buffer.from(`chunk-${count}\n`));
+                } else {
+                    clearInterval(timer);
+                    childInstance.stdout.emit('data', Buffer.from(finalOutput));
+                    childInstance.emit('close', 0, null);
+                }
+            }, chunkIntervalMs);
+            return childInstance;
+        });
+        return () => childInstance;
+    }
+
+    givenSilentProcess(t) {
+        let childInstance;
+        t.mock.method(cp, 'spawn', (cmd, args, opts) => {
+            childInstance = this.driver.createMockChild();
+            childInstance.spawnOpts = opts;
+            return childInstance;
+        });
+        return () => childInstance;
+    }
+
+    givenPartialOutputThenHang(t, partialText) {
+        let childInstance;
+        t.mock.method(cp, 'spawn', (cmd, args, opts) => {
+            childInstance = this.driver.createMockChild();
+            childInstance.spawnOpts = opts;
+            setTimeout(() => {
+                childInstance.stdout.emit('data', Buffer.from(partialText));
+            }, 5);
+            return childInstance;
+        });
+        return () => childInstance;
+    }
+
+    givenErroringProcess(t) {
+        let childInstance;
+        t.mock.method(cp, 'spawn', (cmd, args, opts) => {
+            childInstance = this.driver.createMockChild();
+            childInstance.spawnOpts = opts;
+            setTimeout(() => {
+                childInstance.emit('error', new Error('spawn ENOENT'));
+            }, 5);
+            return childInstance;
+        });
+        return () => childInstance;
+    }
+
+    async whenExecutingStreaming(wsProxy, options = {}) {
+        return this.driver.mod.executeCLIStreaming(wsProxy, 'evt-watchdog-test', 'test prompt', options);
+    }
+
+    async whenExecuting(options = {}) {
+        return this.driver.mod.executeCLI('test prompt', options);
+    }
+
+    thenProcessCompletedSuccessfully(result, getChild) {
+        const child = getChild();
+        assert.equal(result.status, 'success', `Expected status success, got: ${result.status}`);
+        assert.equal(child.killed, false, 'Expected child process not to be killed');
+        assert.equal(child.spawnOpts.timeout, undefined, 'Expected spawn options not to have static timeout');
+    }
+
+    thenProcessTimedOut(result, getChild) {
+        const child = getChild();
+        assert.equal(result.status, 'failed', `Expected status failed, got: ${result.status}`);
+        assert.equal(result.timedOut, true, 'Expected result.timedOut to be true');
+        assert.ok(child.killed, 'Expected child process to be killed by watchdog');
+        assert.ok(child.signals.includes('SIGTERM'), `Expected SIGTERM signal, got: ${child.signals.join(',')}`);
+    }
+
+    thenTimeoutErrorMessageAndStaleStdoutSuppression(result) {
+        assert.equal(result.status, 'failed');
+        assert.equal(result.timedOut, true);
+        assert.match(result.output, /Task execution timed out: no output received/i);
+        assert.equal(result.stdout, '', `Expected stale stdout to be suppressed, got: ${result.stdout}`);
+    }
+
+    thenActivityCallbackInvoked(minCount = 1) {
+        assert.ok(
+            this.driver.activityCount >= minCount,
+            `Expected onActivity to be called >= ${minCount} times, got: ${this.driver.activityCount}`
+        );
+    }
+}
+
+describe('Scenario T-20..T-24: Farley ATDD Sliding-Window Inactivity Watchdog & Heartbeat', () => {
+    it('T-20: Heartbeat keeps active streaming process alive past inactivity window', async (t) => {
+        // Set short inactivity timeout: 25ms.
+        // Process emits chunks at 10ms, 20ms, 30ms (total duration 40ms > 25ms).
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', TIMEOUT_MS: '25' });
+        try {
+            const driver = new InactivityWatchdogDriver(mod);
+            const dsl = new InactivityWatchdogDSL(driver);
+            const wsProxy = driver.createWsProxy();
+
+            const getChild = dsl.givenActiveStreamingProcess(t, {
+                chunkIntervalMs: 10,
+                chunkCount: 3,
+                finalOutput: '{"status":"ok"}',
+            });
+
+            const result = await dsl.whenExecutingStreaming(wsProxy);
+            dsl.thenProcessCompletedSuccessfully(result, getChild);
+        } finally {
+            restore();
+        }
+    });
+
+    it('T-21: Genuine inactivity triggers timeout, kills child with SIGTERM and reports failure', async (t) => {
+        // Inactivity timeout: 20ms. Silent process hangs.
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', TIMEOUT_MS: '20' });
+        try {
+            const driver = new InactivityWatchdogDriver(mod);
+            const dsl = new InactivityWatchdogDSL(driver);
+            const wsProxy = driver.createWsProxy();
+
+            const getChild = dsl.givenSilentProcess(t);
+            const result = await dsl.whenExecutingStreaming(wsProxy);
+
+            dsl.thenProcessTimedOut(result, getChild);
+        } finally {
+            restore();
+        }
+    });
+
+    it('T-22: Stale stdout is suppressed and explicit inactivity message is returned on timeout', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', TIMEOUT_MS: '20' });
+        try {
+            const driver = new InactivityWatchdogDriver(mod);
+            const dsl = new InactivityWatchdogDSL(driver);
+            const wsProxy = driver.createWsProxy();
+
+            dsl.givenPartialOutputThenHang(t, 'Turn 1: only 9 of 123 mutants had finished');
+            const result = await dsl.whenExecutingStreaming(wsProxy);
+
+            dsl.thenTimeoutErrorMessageAndStaleStdoutSuppression(result);
+        } finally {
+            restore();
+        }
+    });
+
+    it('T-23: Clean watchdog teardown on process exit or spawn error', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', TIMEOUT_MS: '100' });
+        try {
+            const driver = new InactivityWatchdogDriver(mod);
+            const dsl = new InactivityWatchdogDSL(driver);
+            const wsProxy = driver.createWsProxy();
+
+            dsl.givenErroringProcess(t);
+            await assert.rejects(async () => {
+                await dsl.whenExecutingStreaming(wsProxy);
+            }, /spawn ENOENT/);
+        } finally {
+            restore();
+        }
+    });
+
+    it('T-24: Dual-timer sync via wsProxy.onActivity on raw stdout data chunks', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'claude', TIMEOUT_MS: '100' });
+        try {
+            const driver = new InactivityWatchdogDriver(mod);
+            const dsl = new InactivityWatchdogDSL(driver);
+            const wsProxy = driver.createWsProxy();
+
+            dsl.givenActiveStreamingProcess(t, {
+                chunkIntervalMs: 5,
+                chunkCount: 3,
+                finalOutput: '{"done":true}',
+            });
+
+            await dsl.whenExecutingStreaming(wsProxy);
+            dsl.thenActivityCallbackInvoked(3);
+        } finally {
+            restore();
+        }
+    });
+});
+
+

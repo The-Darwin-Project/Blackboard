@@ -21,15 +21,18 @@
 //    durations/counts use parseInt(...,10) and must be positive finite (else the default). See parseWatermarks/parsePositiveInt.
 
 const PORT = process.env.PORT || 9090;
+// Inactivity timeout ceilings per role (sliding window): maximum silence duration (ms)
+// allowed between stdout/stderr data chunks before the watchdog terminates a hung CLI process.
+// As long as the process actively emits output, the timeout resets and execution continues.
 const ROLE_TIMEOUTS = {
-    architect: 1800000,       // 30 min
-    sysadmin: 1800000,        // 30 min
-    developer: 1800000,       // 30 min
-    qe: 1800000,              // 30 min
-    security_analyst: 1800000, // 30 min
-    code_reviewer: 2700000,   // 45 min -- fans out to 6 sequential/concurrent subagent delegations before merging, unlike single-pass roles
-    explorer: 1800000,        // 30 min -- parity with other roles per user request
-    default: 1800000,         // 30 min
+    architect: 1800000,       // 30 min silence threshold
+    sysadmin: 1800000,        // 30 min silence threshold
+    developer: 1800000,       // 30 min silence threshold
+    qe: 1800000,              // 30 min silence threshold
+    security_analyst: 1800000, // 30 min silence threshold
+    code_reviewer: 2700000,   // 45 min silence threshold -- fans out to 6 sequential/concurrent subagent delegations before merging, unlike single-pass roles
+    explorer: 1800000,        // 30 min silence threshold -- parity with other roles per user request
+    default: 1800000,         // 30 min silence threshold
 };
 // explicit TIMEOUT_MS env var always wins (operator override), then the role-specific ceiling,
 // then the default. See ai-rule 2 above for why this MUST be called per-task, never cached.

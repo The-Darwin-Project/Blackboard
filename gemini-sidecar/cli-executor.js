@@ -299,11 +299,18 @@ async function requestFindings(workDir, autoApprove, model, role, workStyle) {
         return null;
     }
     return new Promise((resolve) => {
-        const timeout = setTimeout(() => resolve(null), 60000);
-        const child = spawn(binary, args, {
+        let child = null;
+        const timeout = setTimeout(() => {
+            if (child) {
+                try { child.kill('SIGKILL'); } catch (_) {}
+            }
+            resolve(null);
+        }, 60000);
+        if (timeout.unref) timeout.unref();
+
+        child = spawn(binary, args, {
             env: spawnEnv(workStyle),
             cwd: workDir,
-            timeout: 60000,
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         child.on('close', () => {
@@ -399,6 +406,58 @@ async function withTaskStorage(cwd, label, fn) {
     }
 }
 
+/**
+ * Creates a sliding-window inactivity watchdog for a spawned child process.
+ * Resets whenever stdout/stderr emits data or on external activity signal.
+ * If no output is received within timeoutMs, sends SIGTERM, then SIGKILL after 10s grace.
+ */
+function createInactivityWatchdog(child, timeoutMs, onTimeout) {
+    if (!timeoutMs || timeoutMs <= 0) {
+        return { reset: () => {}, clear: () => {} };
+    }
+
+    let timer = null;
+    let fallbackKillTimer = null;
+
+    const clear = () => {
+        if (timer) {
+            clearTimeout(timer);
+            timer = null;
+        }
+        if (fallbackKillTimer) {
+            clearTimeout(fallbackKillTimer);
+            fallbackKillTimer = null;
+        }
+    };
+
+    const reset = () => {
+        if (child._timedOut) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            child._timedOut = true;
+            if (typeof onTimeout === 'function') {
+                try { onTimeout(child); } catch (_) {}
+            }
+            try {
+                child.kill('SIGTERM');
+            } catch (err) {
+                console.error(`[watchdog] Failed to send SIGTERM to child: ${err.message}`);
+            }
+            fallbackKillTimer = setTimeout(() => {
+                try {
+                    child.kill('SIGKILL');
+                } catch (_) {}
+            }, 10000);
+            if (fallbackKillTimer.unref) fallbackKillTimer.unref();
+        }, timeoutMs);
+        if (timer.unref) timer.unref();
+    };
+
+    reset();
+
+    return { reset, clear };
+}
+
 async function executeCLI(prompt, options = {}) {
     const agentCli = options.agentCli || AGENT_CLI;
     if (agentCli === 'agy') {
@@ -435,12 +494,13 @@ async function executeCLI(prompt, options = {}) {
         prepareResultsDir(workDir);
         const watch = watchResultsDir(workDir);
 
+        const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
         const child = spawn(binary, args, {
             env: spawnEnv(options.workStyle),
             cwd: workDir,
-            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
+        const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         let stdout = '';
         let stderr = '';
@@ -448,6 +508,8 @@ async function executeCLI(prompt, options = {}) {
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
+            watchdog.reset();
+            (options.ws?.onActivity || options.onActivity)?.();
             const text = data.toString();
             stdout += text;
             lineBuffer += text;
@@ -463,9 +525,14 @@ async function executeCLI(prompt, options = {}) {
             }
         });
 
-        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        child.stderr.on('data', (data) => {
+            watchdog.reset();
+            (options.ws?.onActivity || options.onActivity)?.();
+            stderr += data.toString();
+        });
 
         child.on('close', (code, signal) => {
+            watchdog.clear();
             watch.close();
 
             if (lineBuffer.trim()) {
@@ -484,6 +551,20 @@ async function executeCLI(prompt, options = {}) {
             }
 
             const usedModel = resolveModel(options, AGENT_CLI);
+
+            if (child._timedOut) {
+                resolve({
+                    status: 'failed',
+                    timedOut: true,
+                    exitCode: code ?? 143,
+                    output: `Task execution timed out: no output received for ${Math.max(1, Math.round(timeoutMs / 60000))} minutes`,
+                    stderr,
+                    stdout: '',
+                    source: 'stdout',
+                    usedModel,
+                });
+                return;
+            }
 
             if (code === 0) {
                 try {
@@ -522,6 +603,7 @@ async function executeCLI(prompt, options = {}) {
         });
 
         child.on('error', (err) => {
+            watchdog.clear();
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
@@ -560,12 +642,13 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         prepareResultsDir(workDir);
         const watch = watchResultsDir(workDir);
 
+        const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
         const child = spawn(binary, args, {
             env: spawnEnv(options.workStyle),
             cwd: workDir,
-            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
+        const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         // Only mutate the existing task object in place when it's the SAME logical call
         // (e.g. the is400SessionError retry-without-session recursion below, which shares
@@ -594,6 +677,8 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
+            watchdog.reset();
+            ws?.onActivity?.();
             const text = data.toString();
             stdout += text;
             lineBuffer += text;
@@ -617,9 +702,14 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             }
         });
 
-        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        child.stderr.on('data', (data) => {
+            watchdog.reset();
+            ws?.onActivity?.();
+            stderr += data.toString();
+        });
 
         child.on('close', (code, signal) => {
+            watchdog.clear();
             watch.close();
             const capturedSessionId = state.getCurrentTask()?.sessionId || null;
 
@@ -641,6 +731,21 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             }
             if (stderr) {
                 console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stderr: ${stderr}`);
+            }
+
+            if (child._timedOut) {
+                resolve({
+                    status: 'failed',
+                    timedOut: true,
+                    sessionId: capturedSessionId,
+                    exitCode: code ?? 143,
+                    output: `Task execution timed out: no output received for ${Math.max(1, Math.round(timeoutMs / 60000))} minutes`,
+                    stderr,
+                    stdout: '',
+                    source: 'stdout',
+                    usedModel: resolveModel(options, AGENT_CLI),
+                });
+                return;
             }
 
             if (code === 0) {
@@ -690,6 +795,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         });
 
         child.on('error', (err) => {
+            watchdog.clear();
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
@@ -778,4 +884,5 @@ module.exports = {
     resolveModel,
     withTaskStorage,
     settingsFileForRole,
+    createInactivityWatchdog,
 };
