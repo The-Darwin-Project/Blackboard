@@ -1,0 +1,145 @@
+diff --git a/ui/src/components/workspace/WorkspaceSessionsHub.tsx b/ui/src/components/workspace/WorkspaceSessionsHub.tsx
+index 0e50e0e3..e931490c 100644
+--- a/ui/src/components/workspace/WorkspaceSessionsHub.tsx
++++ b/ui/src/components/workspace/WorkspaceSessionsHub.tsx
+@@ -26,6 +26,8 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
+ import { useOpsControl } from '../../contexts/OpsStateContext';
+ import { useAuth } from '../../contexts/AuthContext';
+ import WorkspaceTaskItem from './WorkspaceTaskItem';
++import ContextMenu, { type ContextMenuItem } from '../ops/ContextMenu';
++import { eventMenuItems } from '../ops/sidebarMenus';
+ import type { ActiveEvent } from '../../api/types';
+ 
+ const EMPTY_EVENTS: ActiveEvent[] = [];
+@@ -113,6 +115,9 @@ export default function WorkspaceSessionsHub({
+   const [deferredOpen, setDeferredOpen] = useState(true);
+   const [closedOpen, setClosedOpen] = useState(false); // Default collapsed per design
+ 
++  // ContextMenu state for right click actions
++  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
++
+   // Distinct projects derived from all active + closed + waiting_approval events
+   const availableProjects = useMemo(() => {
+     const set = new Set<string>();
+@@ -225,6 +230,15 @@ export default function WorkspaceSessionsHub({
+     }
+   };
+ 
++  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>, evt: ActiveEvent) => {
++    e.preventDefault();
++    setCtxMenu({
++      x: e.clientX,
++      y: e.clientY,
++      items: eventMenuItems(evt, handleSelect, opsControl.send, opsControl.connected),
++    });
++  };
++
+   const { size: width, isResizing, startResize, panelRef } = useResizablePanel({
+     direction: 'horizontal', min: 240, max: 480, defaultSize: 300,
+     storageKey: 'darwin:workspaceSessionsWidth', enabled: isOpen,
+@@ -331,6 +345,7 @@ export default function WorkspaceSessionsHub({
+                       evt={evt}
+                       isSelected={evt.id === selectedEventId}
+                       onSelect={handleSelect}
++                      onContextMenu={handleContextMenu}
+                     />
+                   ))
+                 )}
+@@ -367,6 +382,7 @@ export default function WorkspaceSessionsHub({
+                     evt={evt}
+                     isSelected={evt.id === selectedEventId}
+                     onSelect={handleSelect}
++                    onContextMenu={handleContextMenu}
+                   />
+                 ))
+               )}
+@@ -402,6 +418,7 @@ export default function WorkspaceSessionsHub({
+                     evt={evt}
+                     isSelected={evt.id === selectedEventId}
+                     onSelect={handleSelect}
++                    onContextMenu={handleContextMenu}
+                   />
+                 ))
+               )}
+@@ -437,6 +454,7 @@ export default function WorkspaceSessionsHub({
+                     evt={evt}
+                     isSelected={evt.id === selectedEventId}
+                     onSelect={handleSelect}
++                    onContextMenu={handleContextMenu}
+                   />
+                 ))
+               )}
+@@ -449,6 +467,16 @@ export default function WorkspaceSessionsHub({
+       <div className={`absolute top-0 right-0 w-1.5 h-full cursor-col-resize group ${isResizing ? 'bg-accent/40' : ''}`} onMouseDown={startResize}>
+         <div className={`w-px h-full mx-auto transition-colors ${isResizing ? 'bg-accent' : 'bg-transparent group-hover:bg-accent/40'}`} />
+       </div>
++
++      {/* Context Menu */}
++      {ctxMenu && (
++        <ContextMenu
++          x={ctxMenu.x}
++          y={ctxMenu.y}
++          items={ctxMenu.items}
++          onClose={() => setCtxMenu(null)}
++        />
++      )}
+     </aside>
+   );
+ }
+diff --git a/ui/src/components/workspace/WorkspaceTaskItem.tsx b/ui/src/components/workspace/WorkspaceTaskItem.tsx
+index 9e29791f..8a7f5ab0 100644
+--- a/ui/src/components/workspace/WorkspaceTaskItem.tsx
++++ b/ui/src/components/workspace/WorkspaceTaskItem.tsx
+@@ -23,9 +23,15 @@ interface WorkspaceTaskItemProps {
+   evt: ActiveEvent;
+   isSelected: boolean;
+   onSelect: (id: string) => void;
++  onContextMenu?: (e: MouseEvent<HTMLDivElement>, evt: ActiveEvent) => void;
+ }
+ 
+-export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: WorkspaceTaskItemProps) {
++export default function WorkspaceTaskItem({
++  evt,
++  isSelected,
++  onSelect,
++  onContextMenu,
++}: WorkspaceTaskItemProps) {
+   const domain: string = evt.evidence?.brain_domain || evt.evidence?.domain || 'casual';
+   const domainKey = domain.toLowerCase();
+   const dc = Object.hasOwn(DOMAIN_COLORS, domainKey)
+@@ -53,6 +59,12 @@ export default function WorkspaceTaskItem({ evt, isSelected, onSelect }: Workspa
+       role="button"
+       tabIndex={0}
+       onClick={() => onSelect(evt.id)}
++      onContextMenu={(e) => {
++        if (onContextMenu) {
++          e.preventDefault();
++          onContextMenu(e, evt);
++        }
++      }}
+       onKeyDown={handleKeyDown}
+       title={evt.id}
+       className={`group w-full text-left p-2.5 rounded-lg border transition-all flex flex-col gap-1.5 cursor-pointer select-none ${
+diff --git a/ui/src/contexts/ActiveStreamsContext.tsx b/ui/src/contexts/ActiveStreamsContext.tsx
+index b43e5f23..149306a6 100644
+--- a/ui/src/contexts/ActiveStreamsContext.tsx
++++ b/ui/src/contexts/ActiveStreamsContext.tsx
+@@ -22,12 +22,18 @@ interface ActiveStreamsState {
+ 
+ const ActiveStreamsContext = createContext<ActiveStreamsState | null>(null);
+ 
++const DEFAULT_ACTIVE_STREAMS: ActiveStreamsState = { activeStreams: {} };
++
+ export function useActiveStreams(): ActiveStreamsState {
+   const ctx = useContext(ActiveStreamsContext);
+   if (!ctx) throw new Error('useActiveStreams must be used within ActiveStreamsProvider');
+   return ctx;
+ }
+ 
++export function useActiveStreamsSafe(): ActiveStreamsState {
++  return useContext(ActiveStreamsContext) ?? DEFAULT_ACTIVE_STREAMS;
++}
++
+ export function ActiveStreamsProvider({ children }: { children: ReactNode }) {
+   const [activeStreams, setActiveStreams] = useState<Streams>({});
+   const { data: activeEvents } = useActiveEvents();
