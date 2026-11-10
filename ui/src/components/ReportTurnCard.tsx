@@ -14,7 +14,7 @@ export default function ReportTurnCard({ turn }: { turn: ParsedTurn }) {
   const label = ACTOR_LABELS[turn.actor] ?? turn.actor;
 
   return (
-    <div style={{
+    <div data-testid="report-turn-card" style={{
       background: 'rgba(15, 23, 42, 0.55)',
       border: '1px solid rgba(51, 65, 85, 0.4)',
       borderLeft: `3px solid ${color}`,
@@ -24,7 +24,7 @@ export default function ReportTurnCard({ turn }: { turn: ParsedTurn }) {
       boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
     }}>
       {/* Turn header row */}
-      <div style={{
+      <div data-testid="report-turn-header" style={{
         display: 'flex',
         flexWrap: 'wrap',
         alignItems: 'center',

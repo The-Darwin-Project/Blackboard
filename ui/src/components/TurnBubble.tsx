@@ -310,7 +310,7 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
         boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
       }}
     >
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+      <div data-testid="turn-bubble-header" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
         <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
           {turn.user_name ? `${ACTOR_LABELS[turn.actor] ?? turn.actor} (${turn.user_name})` : (ACTOR_LABELS[turn.actor] ?? turn.actor)}
         </span>
