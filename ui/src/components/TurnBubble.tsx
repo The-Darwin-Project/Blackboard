@@ -133,7 +133,7 @@ function ResultViewer({ result }: { result: string }) {
       <div style={{ position: 'relative', maxHeight: expanded ? undefined : 160, overflow: 'hidden' }}>
         <MarkdownPreview source={result} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0', lineHeight: 1.6 }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />
         {!expanded && (
-          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(transparent, #0f172a)', pointerEvents: 'none' }} />
+          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(transparent, rgba(15, 23, 42, 0.85))', pointerEvents: 'none' }} />
         )}
       </div>
       <button onClick={() => setExpanded(!expanded)} style={{ background: '#1e3a5f', border: '1px solid #2563eb44', borderRadius: 6, color: '#93c5fd', fontSize: 11, padding: '3px 10px', cursor: 'pointer', fontWeight: 500, marginTop: 6 }}>
@@ -295,15 +295,27 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
   );
 
   return (
-    <div style={{ ...(isHuman ? { borderRight: `3px solid ${color}`, paddingRight: 12, marginLeft: 'auto', maxWidth: '85%', textAlign: 'right' as const } : { borderLeft: `3px solid ${color}`, paddingLeft: 12 }), marginBottom: 12 }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, ...(isHuman ? { justifyContent: 'flex-end' } : {}) }}>
-        {isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
-        {isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
-        <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
-        <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
-        <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{turn.user_name ? `${ACTOR_LABELS[turn.actor] ?? turn.actor} (${turn.user_name})` : (ACTOR_LABELS[turn.actor] ?? turn.actor)}</span>
+    <div
+      data-testid="turn-bubble-card"
+      style={{
+        width: '100%',
+        textAlign: 'left',
+        marginLeft: 0,
+        background: isHuman ? 'rgba(236, 72, 153, 0.05)' : 'rgba(15, 23, 42, 0.55)',
+        border: '1px solid rgba(51, 65, 85, 0.4)',
+        borderLeft: `3px solid ${color}`,
+        borderRadius: 8,
+        padding: '10px 14px',
+        marginBottom: 12,
+        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)',
+      }}
+    >
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
+          {turn.user_name ? `${ACTOR_LABELS[turn.actor] ?? turn.actor} (${turn.user_name})` : (ACTOR_LABELS[turn.actor] ?? turn.actor)}
+        </span>
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
-        {!isHuman && recallApplied && <span title="Decision informed by RECALL (lesson memory)" style={{ fontSize: 10, color: '#a78bfa', background: 'rgba(168, 85, 247, 0.15)', padding: '1px 6px', borderRadius: 8, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}>🧠 RECALL</span>}
+        <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
         {!isHuman && isTamperingDenied && (
           <span
             title="Tool use denied by Tampering Guard: test setpoint is immutable during atdd_green work_style"
@@ -323,47 +335,61 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
             🛑 TAMPERING BLOCKED
           </span>
         )}
-        {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
-        {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
-        {hasFloatingView && onViewReport && (
-          <button onClick={() => {
-            const content = isPlanTurn
-              ? `# Plan by ${turn.actor}\n\n${turn.thoughts ? `> ${turn.thoughts}\n\n---\n\n` : ''}${turn.plan || turn.result || ''}${turn.selectedAgents ? `\n\n---\n\n**Assigned agents:** ${turn.selectedAgents.join(', ')}` : ''}`
-              : isApprovalTurn
-              ? `# Approval Request\n\n**${turn.actor}** — turn ${turn.turn}\n\n---\n\n${turn.thoughts || ''}\n\n---\n\n> **Action required:** Review the plan and approve or reject.`
-              : `# ${turn.actor} — ${turn.action}\n\n**Turn ${turn.turn}**\n\n---\n\n${turn.thoughts ? `## Analysis\n\n${turn.thoughts}\n\n` : ''}## Result\n\n${turn.result || ''}`;
-            const filename = isPlanTurn ? `${turn.actor} — Plan (turn ${turn.turn})` : isApprovalTurn ? `brain — Approval Request (turn ${turn.turn})` : `${turn.actor} — ${turn.action} (turn ${turn.turn})`;
-            onViewReport(content, filename);
-          }} title="Open in floating viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
-            View <span style={{ fontSize: 9 }}>↗</span>
-          </button>
+        {!isHuman && recallApplied && (
+          <span title="Decision informed by RECALL (lesson memory)" style={{ fontSize: 10, color: '#a78bfa', background: 'rgba(168, 85, 247, 0.15)', padding: '1px 6px', borderRadius: 8, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            🧠 RECALL
+          </span>
         )}
+        {isHuman && <StatusCheck status={turn.status} />}
+        {attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+          {hasFloatingView && onViewReport && (
+            <button
+              onClick={() => {
+                const content = isPlanTurn
+                  ? `# Plan by ${turn.actor}\n\n${turn.thoughts ? `> ${turn.thoughts}\n\n---\n\n` : ''}${turn.plan || turn.result || ''}${turn.selectedAgents ? `\n\n---\n\n**Assigned agents:** ${turn.selectedAgents.join(', ')}` : ''}`
+                  : isApprovalTurn
+                  ? `# Approval Request\n\n**${turn.actor}** — turn ${turn.turn}\n\n---\n\n${turn.thoughts || ''}\n\n---\n\n> **Action required:** Review the plan and approve or reject.`
+                  : `# ${turn.actor} — ${turn.action}\n\n**Turn ${turn.turn}**\n\n---\n\n${turn.thoughts ? `## Analysis\n\n${turn.thoughts}\n\n` : ''}## Result\n\n${turn.result || ''}`;
+                const filename = isPlanTurn ? `${turn.actor} — Plan (turn ${turn.turn})` : isApprovalTurn ? `brain — Approval Request (turn ${turn.turn})` : `${turn.actor} — ${turn.action} (turn ${turn.turn})`;
+                onViewReport(content, filename);
+              }}
+              title="Open in floating viewer"
+              style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+            >
+              View <span style={{ fontSize: 9 }}>↗</span>
+            </button>
+          )}
+        </div>
       </div>
-      {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
-      {turn.image && (
-        <img
-          src={turn.image}
-          alt="User attachment"
-          style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }}
-          onClick={(e) => {
-            const src = (e.target as HTMLImageElement).src;
-            if (src && (src.startsWith('data:image/') || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://'))) {
-              window.open(src, '_blank', 'noopener,noreferrer');
-            }
-          }}
-        />
-      )}
-      {turn.result && (
-        turn.actor === 'developer' && turn.result.includes('## Developer Result') && turn.result.includes('## QE Assessment') ? (
-          <HuddleResultViewer result={turn.result} />
-        ) : turn.action === 'execute' && turn.result.length > 500 ? (
-          <ResultViewer result={turn.result} />
-        ) : (
-          <MarkdownPreview source={turn.result} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#4ade80' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
-        )
-      )}
-      {turn.plan && <MarkdownPreview source={turn.plan} style={{ background: '#1e1e2e', padding: 12, borderRadius: 8, fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />}
-      {turn.evidence && <MarkdownPreview source={turn.evidence} style={{ margin: '4px 0', fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
+      <div data-testid="turn-bubble-body" style={{ overflowX: 'auto' }}>
+        {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
+        {turn.image && (
+          <img
+            src={turn.image}
+            alt="User attachment"
+            style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', marginLeft: 0, display: 'block' }}
+            onClick={(e) => {
+              const src = (e.target as HTMLImageElement).src;
+              if (src && (src.startsWith('data:image/') || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://'))) {
+                window.open(src, '_blank', 'noopener,noreferrer');
+              }
+            }}
+          />
+        )}
+        {turn.result && (
+          turn.actor === 'developer' && turn.result.includes('## Developer Result') && turn.result.includes('## QE Assessment') ? (
+            <HuddleResultViewer result={turn.result} />
+          ) : turn.action === 'execute' && turn.result.length > 500 ? (
+            <ResultViewer result={turn.result} />
+          ) : (
+            <MarkdownPreview source={turn.result} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#4ade80' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
+          )
+        )}
+        {turn.plan && <MarkdownPreview source={turn.plan} style={{ background: '#1e1e2e', padding: 12, borderRadius: 8, fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />}
+        {turn.evidence && <MarkdownPreview source={turn.evidence} style={{ margin: '4px 0', fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
+      </div>
       {turn.pendingApproval && eventId && (
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button onClick={() => approveEvent(eventId).then(() => onStatusChange?.())} style={{ background: '#22c55e', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Approve</button>

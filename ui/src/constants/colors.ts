@@ -27,6 +27,7 @@ export const ACTOR_LABELS: Record<string, string> = {
   brain: 'FRIDAY',
   jarvis: 'JARVIS',
   dispatcher: 'Dispatcher',
+  user: 'User',
 };
 
 export const DOMAIN_COLORS = {
