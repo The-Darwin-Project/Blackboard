@@ -2,13 +2,16 @@
 // @ai-rules:
 // 1. [Constraint]: Pure constants and env-derived values only. No side effects at load time. The single exception is
 //    AGENT_CLI validation, which throws at load (fail-fast on an unsupported runtime).
-// 2. [Pattern]: resolveTimeoutMs(role) derives a per-task CLI timeout from ROLE_TIMEOUTS.
+// 2. [Pattern]: resolveTimeoutMs(role) derives a per-task SLIDING INACTIVITY window from ROLE_TIMEOUTS (max silence
+//    between CLI output chunks; reset on activity). It is NOT a total runtime cap: the absolute per-task wall-clock
+//    ceiling is MAX_TASK_WALL_MS (default 50min, aligned with Brain's DISPATCH_TIMEOUT_S=3000 in src/agents/dispatch.py),
+//    enforced by cli-executor.js's createInactivityWatchdog and never extended by activity.
 //    There is deliberately NO module-level TIMEOUT_MS constant: ephemeral roles get their role
 //    per-task via a WS message field (see ws-server.js msg.role), NOT via AGENT_ROLE, which stays
 //    "" for them at process start. A load-time snapshot of AGENT_ROLE would silently pin every
 //    ephemeral dispatch to ROLE_TIMEOUTS.default regardless of the role's own entry -- this was a
 //    real, shipped bug (code_reviewer's 45min entry was dead) before resolveTimeoutMs existed. All
-//    consumers (currently only cli-executor.js's two spawn() call sites) MUST call
+//    consumers (cli-executor.js's two spawn() call sites AND ws-client.js's per-task backstop timer) MUST call
 //    resolveTimeoutMs(options.role || AGENT_ROLE) at the point of use, never cache the result.
 // 3. [Pattern]: AGENT_CLI routes CLI selection (claude|agy); AGENT_EFFORT_LEVEL controls Claude adaptive reasoning depth.
 // 4. [Pattern]: stripAnsi cleans PTY output for Brain/LLM consumption.
@@ -21,9 +24,31 @@
 //    durations/counts use parseInt(...,10) and must be positive finite (else the default). See parseWatermarks/parsePositiveInt.
 
 const PORT = process.env.PORT || 9090;
-// Inactivity timeout ceilings per role (sliding window): maximum silence duration (ms)
-// allowed between stdout/stderr data chunks before the watchdog terminates a hung CLI process.
-// As long as the process actively emits output, the timeout resets and execution continues.
+
+// Largest delay Node timers accept (2^31-1 ms ~ 24.8 days); larger values overflow and fire after 1ms.
+const MAX_TIMER_MS = 2147483647;
+
+/**
+ * Strict positive-integer env parser for timer values: digits only (rejects '', '-5', '1e3', '25abc', 'NaN'),
+ * > 0, clamped to MAX_TIMER_MS. Anything else yields `fallback`, so a bad value can never disable or overflow a timer.
+ */
+function parseTimerMs(raw, fallback) {
+  const s = String(raw ?? '').trim();
+  if (!/^\d+$/.test(s)) return fallback;
+  const n = Number.parseInt(s, 10);
+  if (!Number.isSafeInteger(n) || n <= 0) return fallback;
+  return Math.min(n, MAX_TIMER_MS);
+}
+
+// Hard per-task wall-clock ceiling (ms), measured from CLI spawn and NEVER extended by output activity. Default 50 min,
+// aligned with Brain's DISPATCH_TIMEOUT_S = 3000 (src/agents/dispatch.py) so the sidecar terminates a runaway
+// task no later than Brain gives up on it. Override with MAX_TASK_WALL_MS (positive integer ms, clamped to MAX_TIMER_MS).
+const DEFAULT_MAX_TASK_WALL_MS = 3000000;
+const MAX_TASK_WALL_MS = parseTimerMs(process.env.MAX_TASK_WALL_MS, DEFAULT_MAX_TASK_WALL_MS);
+
+// Inactivity timeout windows per role (sliding): maximum silence duration (ms) allowed between
+// stdout/stderr data chunks before the watchdog terminates a hung CLI process. As long as the process
+// emits output, the window resets -- but the total runtime is always bounded by MAX_TASK_WALL_MS.
 const ROLE_TIMEOUTS = {
     architect: 1800000,       // 30 min silence threshold
     sysadmin: 1800000,        // 30 min silence threshold
@@ -34,10 +59,11 @@ const ROLE_TIMEOUTS = {
     explorer: 1800000,        // 30 min silence threshold -- parity with other roles per user request
     default: 1800000,         // 30 min silence threshold
 };
-// explicit TIMEOUT_MS env var always wins (operator override), then the role-specific ceiling,
-// then the default. See ai-rule 2 above for why this MUST be called per-task, never cached.
+// A valid TIMEOUT_MS env var (positive integer, clamped to MAX_TIMER_MS) always wins (operator override), then the
+// role-specific inactivity window, then the default. Invalid values (negative, NaN, junk) are ignored.
+// See ai-rule 2 above for why this MUST be called per-task, never cached.
 function resolveTimeoutMs(role) {
-    return parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[role || 'default'] || ROLE_TIMEOUTS.default;
+    return parseTimerMs(process.env.TIMEOUT_MS, 0) || ROLE_TIMEOUTS[role || 'default'] || ROLE_TIMEOUTS.default;
 }
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
@@ -128,6 +154,9 @@ function resolveStorageRoot(candidateCwd) {
 module.exports = {
   PORT,
   ROLE_TIMEOUTS,
+  MAX_TIMER_MS,
+  MAX_TASK_WALL_MS,
+  parseTimerMs,
   resolveTimeoutMs,
   FINDINGS_FRESHNESS_MS,
   DEFAULT_WORK_DIR,

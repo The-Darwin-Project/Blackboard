@@ -2,7 +2,10 @@
 // @ai-rules:
 // 1. [Pattern]: Sidecar connects TO Brain as WS client. Persistent connection with reconnect backoff.
 // 2. [Pattern]: All outgoing messages include task_id for Queue correlation on Brain side.
-// 3. [Pattern]: Per-task timeout timer resets on progress. SIGTERM/SIGKILL on expiry.
+// 3. [Pattern]: Per-task timer is an OUTER SAFETY BACKSTOP, not the primary timeout. cli-executor.js's watchdog (sliding inactivity window
+//    from config.resolveTimeoutMs -- consumed by BOTH cli-executor.js and this file -- bounded by the hard MAX_TASK_WALL_MS ceiling) fires first
+//    and resolves result.timedOut. This timer resets on activity (bound to its own taskId) and expires at computeBackstopMs(timeoutSec) =
+//    window + BACKSTOP_GRACE_MS (capped at MAX_TASK_WALL_MS + grace), so it never races the watchdog or clears currentTask before it returns.
 // 4. [Pattern]: Reconnect backoff: 1s, 2s, 4s, 8s, max 30s. Re-register after reconnect.
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId + mode (fixes pre-existing bug from legacy mode).
 //    Also includes model/effort/role (per-task overrides) -- read from the WS task msg, default '' / AGENT_ROLE.
@@ -13,6 +16,8 @@
 // 10. [Pattern]: Role-gated pre-warm: security_analyst downloads vuln DBs (trivy, grype) before CLI spawn. MUST use async exec (not execSync). Non-blocking on failure.
 // 11. [Gotcha]: Pong handler MUST fire before `await handleTask` -- ws library delivers messages sequentially. If pong is after the await, it's gated behind handleTask completion (pre-warm ~77s), causing Brain heartbeat timeout disconnect.
 // 12. [Pattern]: Squad idle/terminate sentinels: idle -> per-role /data/workspace/.idle-<role>; Brain `terminate` -> /data/workspace/.terminate (whole squad pod). squad-keeper (tekton-eventlistener.yaml) exits on .terminate or when all roles are idle.
+// 13. [Constraint]: The ephemeral idle timer (IDLE_TIMEOUT_MS) is PAUSED while any task is in flight: handleTask clears it on entry and re-arms it
+//    in finally (ref-counted via _activeTasks); the timer callback also refuses to exit while a task is active. Never process.exit from it mid-task.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -29,7 +34,7 @@ const {
   DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE,
   EVENT_ID, EPHEMERAL, IDLE_TIMEOUT_MS,
   CLI_429_MAX_RETRIES, CLI_429_INITIAL_DELAY_MS, CLI_429_BACKOFF_MULTIPLIER,
-  resolveTimeoutMs,
+  resolveTimeoutMs, parsePositiveInt, MAX_TASK_WALL_MS, MAX_TIMER_MS,
 } = require('./config');
 const { wsSend } = require('./ws-utils');
 const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
@@ -42,6 +47,41 @@ const BACKOFF_MAX = 30000;
 let _activeWs = null;
 let _isWaking = false;
 let _catalogSynced = false;
+let _idleTimer = null;
+let _activeTasks = 0; // handleTask invocations in flight (covers setup before state.currentTask is set)
+
+// Outer backstop grace: must exceed cli-executor's watchdog SIGTERM->SIGKILL escalation (10s) so the watchdog's
+// result.timedOut path always resolves first and this timer only fires if the executor itself is wedged.
+const BACKSTOP_GRACE_MS = 15000;
+
+/** Backstop delay (ms) for a per-task inactivity window of `timeoutSec`: window + grace, capped at MAX_TASK_WALL_MS + grace. */
+function computeBackstopMs(timeoutSec) {
+  const windowMs = Math.max(1, Number(timeoutSec) || 0) * 1000;
+  return Math.min(windowMs + BACKSTOP_GRACE_MS, MAX_TASK_WALL_MS + BACKSTOP_GRACE_MS, MAX_TIMER_MS);
+}
+
+function clearIdleTimer() {
+  if (_idleTimer) { clearTimeout(_idleTimer); _idleTimer = null; }
+}
+
+// Arms the ephemeral idle-exit timer. Never exits while a task is active: the callback re-arms instead.
+function resetIdleTimer() {
+  if (!EPHEMERAL) return;
+  clearIdleTimer();
+  _idleTimer = setTimeout(() => {
+    _idleTimer = null;
+    if (_activeTasks > 0 || state.getCurrentTask()) {
+      resetIdleTimer();
+      return;
+    }
+    console.log(`[${new Date().toISOString()}] Idle timeout (${IDLE_TIMEOUT_MS}ms) -- ephemeral agent exiting`);
+    signalIdleExit();
+    if (_activeWs) try { _activeWs.close(); } catch {}
+    process.exit(0);
+  }, IDLE_TIMEOUT_MS);
+  // The WS client / HTTP server keep the loop alive in production; this timer must not pin a bare process (e.g. a unit-test runner).
+  if (_idleTimer.unref) _idleTimer.unref();
+}
 
 function killChild(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -75,18 +115,6 @@ function startWSClient(brainUrl) {
     : `${AGENT_ROLE}-${os.hostname()}`;
   let backoff = BACKOFF_MIN;
   let reconnectTimer = null;
-  let _idleTimer = null;
-
-  function resetIdleTimer() {
-    if (!EPHEMERAL) return;
-    if (_idleTimer) clearTimeout(_idleTimer);
-    _idleTimer = setTimeout(() => {
-      console.log(`[${new Date().toISOString()}] Idle timeout (${IDLE_TIMEOUT_MS}ms) -- ephemeral agent exiting`);
-      signalIdleExit();
-      if (_activeWs) try { _activeWs.close(); } catch {}
-      process.exit(0);
-    }, IDLE_TIMEOUT_MS);
-  }
 
   function connect() {
     const ws = new WebSocket(brainUrl);
@@ -115,7 +143,7 @@ function startWSClient(brainUrl) {
       try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
       // Pong must fire immediately -- never gated behind awaited handlers
       if (msg.type === 'ping') { wsSend(ws, { type: 'pong' }); return; }
-      if (msg.type === 'task') { resetIdleTimer(); await handleTask(ws, msg); }
+      if (msg.type === 'task') await handleTask(ws, msg); // handleTask pauses/re-arms the idle timer itself
       else if (msg.type === 'cancel') handleCancel(msg);
       else if (msg.type === 'terminate') {
         console.log(`[${new Date().toISOString()}] Terminate received for ${msg.event_id || 'unknown'}`);
@@ -185,7 +213,19 @@ function startWSClient(brainUrl) {
   connect();
 }
 
+// Pauses the ephemeral idle-exit timer for the whole handling window (setup + CLI run) and re-arms it afterwards.
 async function handleTask(ws, msg) {
+  _activeTasks++;
+  clearIdleTimer();
+  try {
+    await runTask(ws, msg);
+  } finally {
+    _activeTasks--;
+    if (_activeTasks === 0) resetIdleTimer();
+  }
+}
+
+async function runTask(ws, msg) {
   const taskId = msg.task_id;
   const eventId = msg.event_id || 'unknown';
   const prompt = msg.prompt;
@@ -256,24 +296,31 @@ async function handleTask(ws, msg) {
   const mode = msg.mode || '';
   const roleTimeoutMs = resolveTimeoutMs(role || AGENT_ROLE);
   const timeoutSec = mode.includes('implement')
-    ? (parseInt(process.env.TASK_TIMEOUT_IMPLEMENT) || Math.round(roleTimeoutMs / 1000))
-    : (parseInt(process.env.TASK_TIMEOUT_DEFAULT) || Math.round(roleTimeoutMs / 1000));
+    ? (parsePositiveInt(process.env.TASK_TIMEOUT_IMPLEMENT, 0) || Math.round(roleTimeoutMs / 1000))
+    : (parsePositiveInt(process.env.TASK_TIMEOUT_DEFAULT, 0) || Math.round(roleTimeoutMs / 1000));
+  const backstopMs = computeBackstopMs(timeoutSec);
 
+  // Outer safety backstop (see ai-rule 3). Bound to THIS task: a stale chunk from a previous/cancelled task's
+  // child must never reset or leak a timer onto whatever task is current now.
+  let backstopTimer = null; // local handle: guarantees teardown in finally even if the task object was already dropped
   function resetTimer() {
     const task = state.getCurrentTask();
-    if (task?.timer) clearTimeout(task.timer);
+    if (!task || task.taskId !== taskId) return;
+    if (task.timer) clearTimeout(task.timer);
+    if (backstopTimer) clearTimeout(backstopTimer);
     const timer = setTimeout(() => {
       const t = state.getCurrentTask();
       if (!t || t.taskId !== taskId) return;
-      console.log(`[${new Date().toISOString()}] Task ${taskId} timed out (${timeoutSec}s)`);
+      console.log(`[${new Date().toISOString()}] Task ${taskId} backstop timer fired (${backstopMs}ms) -- executor watchdog did not resolve`);
       if (t.child) killChild(t.child);
       sendMsg(ws, taskId, {
         type: 'error', event_id: eventId, retryable: true,
         error: `Task timed out after ${timeoutSec}s`,
       });
       state.clearCurrentTask();
-    }, timeoutSec * 1000);
-    if (task) task.timer = timer;
+    }, backstopMs);
+    backstopTimer = timer;
+    task.timer = timer;
   }
 
   const wsProxy = {
@@ -322,6 +369,13 @@ async function handleTask(ws, msg) {
       }
     }
 
+    // A cancel/disconnect during the pre-warm await clears currentTask (child is still null, so nothing was killed).
+    // Never spawn a CLI for a task that is no longer current -- it would run as an orphan.
+    if (state.getCurrentTask()?.taskId !== taskId) {
+      console.log(`[${new Date().toISOString()}] Task ${taskId} no longer current after pre-warm (cancelled?) -- not spawning CLI`);
+      return;
+    }
+
     let result;
     let retryDelay = CLI_429_INITIAL_DELAY_MS;
     let retriesTaken = 0;
@@ -336,6 +390,10 @@ async function handleTask(ws, msg) {
         });
         await new Promise(r => setTimeout(r, retryDelay));
         retryDelay *= CLI_429_BACKOFF_MULTIPLIER;
+        if (state.getCurrentTask()?.taskId !== taskId) {
+          console.log(`[${new Date().toISOString()}] Task ${taskId} no longer current after 429 backoff (cancelled?) -- not retrying`);
+          return;
+        }
 
         prepareResultsDir(workDir);
         state.resetCallbackResult();
@@ -392,6 +450,7 @@ async function handleTask(ws, msg) {
       state.clearCurrentTask();
     }
   } finally {
+    if (backstopTimer) { clearTimeout(backstopTimer); backstopTimer = null; }
     restoreAllSkills();
   }
 }
@@ -419,6 +478,7 @@ function tryWake(from, content, eventId) {
   if (!resolvedEventId) return;
 
   _isWaking = true;
+  clearIdleTimer(); // waking = work is imminent; handleTask also pauses/re-arms
   const wakeTaskMode = 'implement';
   const syntheticMsg = {
     type: 'task',
@@ -443,4 +503,4 @@ function tryWake(from, content, eventId) {
     .finally(() => { _isWaking = false; });
 }
 
-module.exports = { startWSClient, tryWake, handleTask };
+module.exports = { startWSClient, tryWake, handleTask, resetIdleTimer, clearIdleTimer, computeBackstopMs, BACKSTOP_GRACE_MS };
