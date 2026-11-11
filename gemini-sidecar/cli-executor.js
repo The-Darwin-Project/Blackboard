@@ -26,13 +26,21 @@
 //     task (so a concurrent or in-flight storage sweep never reclaims the live workspace), runs the 70%-watermark fast-path
 //     check bounded by STORAGE_PRETASK_TIMEOUT_MS (default 5s; a slow CephFS call can never stall a task), and unpins in a finally.
 //     The storage root comes from config.resolveStorageRoot() -- never re-inline a DEFAULT_WORK_DIR fallback chain here.
+// 14. [Pattern]: createInactivityWatchdog enforces TWO limits: a sliding inactivity window (resolveTimeoutMs, reset on output) AND an
+//     absolute wall-clock ceiling (MAX_TASK_WALL_MS, a fixed timer armed once at creation -- reset() can never extend it).
+//     This watchdog is the PRIMARY timeout: its result.timedOut path must resolve before ws-client.js's outer backstop timer
+//     (which carries a +15s grace). Both timeouts go SIGTERM -> SIGKILL after WATCHDOG_KILL_GRACE_MS.
+// 15. [Gotcha]: a timed-out run never returns an empty result: buildTimeoutResult salvages state callback result / cached findings into
+//     `output` (alongside the diagnostic) and keeps a stdout tail in `stdout` (diagnostic only -- ws-client forwards `output`).
+//     A child that exits code 0 / no signal after the watchdog fired is a CLEAN exit and is never downgraded to a failure.
+//     The child 'error' handler must NOT clear the watchdog once it has fired (that would cancel the pending SIGKILL escalation).
 
 const cp = require('child_process');
 const spawn = (...args) => cp.spawn(...args);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS, STORAGE_PRETASK_TIMEOUT_MS, resolveStorageRoot } = require('./config');
+const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, MAX_TASK_WALL_MS, MAX_TIMER_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS, STORAGE_PRETASK_TIMEOUT_MS, resolveStorageRoot } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
@@ -299,11 +307,18 @@ async function requestFindings(workDir, autoApprove, model, role, workStyle) {
         return null;
     }
     return new Promise((resolve) => {
-        const timeout = setTimeout(() => resolve(null), 60000);
-        const child = spawn(binary, args, {
+        let child = null;
+        const timeout = setTimeout(() => {
+            if (child) {
+                try { child.kill('SIGKILL'); } catch (_) {}
+            }
+            resolve(null);
+        }, 60000);
+        if (timeout.unref) timeout.unref();
+
+        child = spawn(binary, args, {
             env: spawnEnv(workStyle),
             cwd: workDir,
-            timeout: 60000,
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         child.on('close', () => {
@@ -399,6 +414,121 @@ async function withTaskStorage(cwd, label, fn) {
     }
 }
 
+const WATCHDOG_KILL_GRACE_MS = 10000; // SIGTERM -> SIGKILL escalation delay
+const TIMEOUT_STDOUT_TAIL_CHARS = 3000;
+
+/**
+ * Creates an inactivity + wall-clock watchdog for a spawned child process.
+ *  - Sliding inactivity window (`timeoutMs`): re-armed by reset() whenever stdout/stderr emits data or on external activity.
+ *  - Hard wall-clock ceiling (`maxWallMs`, default MAX_TASK_WALL_MS): a fixed timer armed ONCE at creation. reset() never touches
+ *    it, so continuous activity can never extend a task past creation + maxWallMs.
+ * When either limit is reached: marks child._timedOut / child._timeoutReason ('inactivity' | 'wall'), calls onTimeout(child, reason),
+ * sends SIGTERM, then SIGKILL after WATCHDOG_KILL_GRACE_MS. A non-positive/invalid limit disables that limit only.
+ * clear() stops every timer (including a pending SIGKILL) and makes later reset() calls no-ops.
+ */
+function createInactivityWatchdog(child, timeoutMs, onTimeout, maxWallMs = MAX_TASK_WALL_MS) {
+    const validMs = (v) => (Number.isFinite(v) && v > 0 ? Math.min(v, MAX_TIMER_MS) : 0);
+    const inactivityMs = validMs(timeoutMs);
+    const wallMs = validMs(maxWallMs);
+    if (!inactivityMs && !wallMs) {
+        return { reset: () => {}, clear: () => {} };
+    }
+
+    let inactivityTimer = null;
+    let wallTimer = null;
+    let killTimer = null;
+    let cleared = false;
+
+    const clearLimitTimers = () => {
+        if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
+        if (wallTimer) { clearTimeout(wallTimer); wallTimer = null; }
+    };
+
+    const clear = () => {
+        cleared = true;
+        clearLimitTimers();
+        if (killTimer) { clearTimeout(killTimer); killTimer = null; }
+    };
+
+    const fire = (reason) => {
+        if (cleared || child._timedOut) return;
+        clearLimitTimers();
+        child._timedOut = true;
+        child._timeoutReason = reason;
+        if (typeof onTimeout === 'function') {
+            try { onTimeout(child, reason); } catch (_) {}
+        }
+        try {
+            child.kill('SIGTERM');
+        } catch (err) {
+            console.error(`[watchdog] Failed to send SIGTERM to child: ${err.message}`);
+        }
+        killTimer = setTimeout(() => {
+            killTimer = null;
+            if (child.exitCode != null || child.signalCode != null) return;
+            try {
+                child.kill('SIGKILL');
+            } catch (_) {}
+        }, WATCHDOG_KILL_GRACE_MS);
+        if (killTimer.unref) killTimer.unref();
+    };
+
+    const reset = () => {
+        if (cleared || child._timedOut || !inactivityMs) return;
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => fire('inactivity'), inactivityMs);
+        if (inactivityTimer.unref) inactivityTimer.unref();
+    };
+
+    if (wallMs) {
+        wallTimer = setTimeout(() => fire('wall'), wallMs);
+        if (wallTimer.unref) wallTimer.unref();
+    }
+    reset();
+
+    return { reset, clear };
+}
+
+/**
+ * Builds the result for a watchdog-terminated run (inactivity or wall-clock). Never returns an empty result:
+ * a callback result / cached findings the agent produced before hanging are salvaged into `output` (after the
+ * diagnostic), and the stdout tail is kept in `stdout` for diagnostics. `stdout` is deliberately NOT promoted to
+ * `output`: stale partial progress text must not be mistaken for the task's final report.
+ */
+function buildTimeoutResult({ child, code, timeoutMs, stderr, effectiveOutput, watch, usedModel, sessionId }) {
+    const toMinutes = (ms) => Math.max(1, Math.round(ms / 60000));
+    const diagnostic = child._timeoutReason === 'wall'
+        ? `Task execution timed out: exceeded maximum wall-clock time of ${toMinutes(MAX_TASK_WALL_MS)} minutes`
+        : `Task execution timed out: no output received for ${toMinutes(timeoutMs)} minutes`;
+
+    const callbackResult = state.getCallbackResult();
+    state.resetCallbackResult();
+    const findings = watch?.cachedFindings?.content;
+    const salvaged = (callbackResult && callbackResult.length > 0 ? callbackResult : '')
+        || (findings && findings.length > 0 ? findings : '');
+    const salvageSource = callbackResult && callbackResult.length > 0 ? 'callback' : 'findings';
+
+    const text = effectiveOutput || '';
+    const stdoutTail = text.length > TIMEOUT_STDOUT_TAIL_CHARS
+        ? `[...truncated...]\n${text.slice(-TIMEOUT_STDOUT_TAIL_CHARS)}`
+        : text;
+
+    const result = {
+        status: 'failed',
+        timedOut: true,
+        timeoutReason: child._timeoutReason || 'inactivity',
+        exitCode: code ?? 143,
+        output: salvaged ? `${diagnostic}\n\n--- Partial result salvaged before timeout ---\n${salvaged}` : diagnostic,
+        partialOutput: salvaged || null,
+        stderr,
+        stdout: stdoutTail,
+        source: salvaged ? salvageSource : 'stdout',
+        usedModel,
+    };
+    if (sessionId !== undefined) result.sessionId = sessionId;
+    return result;
+}
+
 async function executeCLI(prompt, options = {}) {
     const agentCli = options.agentCli || AGENT_CLI;
     if (agentCli === 'agy') {
@@ -435,12 +565,13 @@ async function executeCLI(prompt, options = {}) {
         prepareResultsDir(workDir);
         const watch = watchResultsDir(workDir);
 
+        const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
         const child = spawn(binary, args, {
             env: spawnEnv(options.workStyle),
             cwd: workDir,
-            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
+        const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         let stdout = '';
         let stderr = '';
@@ -448,6 +579,8 @@ async function executeCLI(prompt, options = {}) {
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
+            watchdog.reset();
+            (options.ws?.onActivity || options.onActivity)?.();
             const text = data.toString();
             stdout += text;
             lineBuffer += text;
@@ -463,9 +596,14 @@ async function executeCLI(prompt, options = {}) {
             }
         });
 
-        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        child.stderr.on('data', (data) => {
+            watchdog.reset();
+            (options.ws?.onActivity || options.onActivity)?.();
+            stderr += data.toString();
+        });
 
         child.on('close', (code, signal) => {
+            watchdog.clear();
             watch.close();
 
             if (lineBuffer.trim()) {
@@ -484,6 +622,12 @@ async function executeCLI(prompt, options = {}) {
             }
 
             const usedModel = resolveModel(options, AGENT_CLI);
+
+            // A child that exited 0 with no signal finished cleanly (it won the race against SIGTERM) -- never downgrade it.
+            if (child._timedOut && !(code === 0 && !signal)) {
+                resolve(buildTimeoutResult({ child, code, timeoutMs, stderr, effectiveOutput, watch, usedModel }));
+                return;
+            }
 
             if (code === 0) {
                 try {
@@ -522,6 +666,9 @@ async function executeCLI(prompt, options = {}) {
         });
 
         child.on('error', (err) => {
+            // Once the watchdog has fired, keep it: clearing would cancel the pending SIGKILL escalation before 'close'.
+            if (!child._timedOut) watchdog.clear();
+            watch.close();
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
@@ -560,12 +707,13 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         prepareResultsDir(workDir);
         const watch = watchResultsDir(workDir);
 
+        const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
         const child = spawn(binary, args, {
             env: spawnEnv(options.workStyle),
             cwd: workDir,
-            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
+        const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         // Only mutate the existing task object in place when it's the SAME logical call
         // (e.g. the is400SessionError retry-without-session recursion below, which shares
@@ -594,6 +742,8 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         let streamTextAccum = '';
 
         child.stdout.on('data', (data) => {
+            watchdog.reset();
+            ws?.onActivity?.();
             const text = data.toString();
             stdout += text;
             lineBuffer += text;
@@ -617,9 +767,14 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             }
         });
 
-        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        child.stderr.on('data', (data) => {
+            watchdog.reset();
+            ws?.onActivity?.();
+            stderr += data.toString();
+        });
 
         child.on('close', (code, signal) => {
+            watchdog.clear();
             watch.close();
             const capturedSessionId = state.getCurrentTask()?.sessionId || null;
 
@@ -641,6 +796,14 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             }
             if (stderr) {
                 console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stderr: ${stderr}`);
+            }
+
+            if (child._timedOut && !(code === 0 && !signal)) {
+                resolve(buildTimeoutResult({
+                    child, code, timeoutMs, stderr, effectiveOutput, watch, sessionId: capturedSessionId,
+                    usedModel: resolveModel(options, AGENT_CLI),
+                }));
+                return;
             }
 
             if (code === 0) {
@@ -690,6 +853,9 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         });
 
         child.on('error', (err) => {
+            // Once the watchdog has fired, keep it: clearing would cancel the pending SIGKILL escalation before 'close'.
+            if (!child._timedOut) watchdog.clear();
+            watch.close();
             console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
             reject(err);
         });
@@ -778,4 +944,7 @@ module.exports = {
     resolveModel,
     withTaskStorage,
     settingsFileForRole,
+    createInactivityWatchdog,
+    buildTimeoutResult,
+    WATCHDOG_KILL_GRACE_MS,
 };
