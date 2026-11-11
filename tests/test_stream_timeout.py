@@ -499,3 +499,66 @@ class TestStreamTimeout:
         assert len(error_turns) == 0
         assert sdk_stream.aclose_called is True
 
+    # --- Repetition collapse & CASUAL thinking level unit tests ---
+
+    def test_repetition_collapse_micro_and_macro(self):
+        """_detect_repetition_collapse catches micro tokens, macro paragraphs, and runaway text."""
+        from src.agents.brain import Brain
+
+        # Normal text (no collapse)
+        normal = "Here is some architecture documentation. " * 10 + "Different topic here. " * 8
+        assert Brain._detect_repetition_collapse(normal) is None
+
+        # Short text < 1000 chars ignored
+        assert Brain._detect_repetition_collapse("abc" * 100) is None
+
+        # Micro-repetition (short token repeated >= 5 times in 300 char tail)
+        micro = "Intro text " * 20 + "abcdefghi" * 100
+        assert Brain._detect_repetition_collapse(micro) is not None
+
+        # Macro-repetition (paragraph sentence repeated >= 3 times in 1200 char tail)
+        macro_sentence = "Thinking Process: 1. User greeting needs conversational acknowledgement and prompt. "
+        macro = "Header text\n" + macro_sentence * 16
+        assert Brain._detect_repetition_collapse(macro) is not None
+
+        # Runaway length limit
+        runaway = "x" * 32001
+        assert Brain._detect_repetition_collapse(runaway) == "RUNAWAY_LENGTH_LIMIT"
+
+    def test_resolve_llm_params_casual_domain_clamps_thinking_low(self):
+        """CASUAL domain clamps thinking_level to low regardless of phase defaults."""
+        from src.agents.brain import Brain
+        brain = _make_brain()
+        # Restore real method over test mock
+        brain._resolve_llm_params = Brain._resolve_llm_params.__get__(brain, Brain)
+
+        # Non-casual domain preserves phase thinking level (high from always phase)
+        thinking_comp, _, _ = brain._resolve_llm_params(["always"], domain="COMPLICATED")
+        assert thinking_comp == "high"
+
+        # CASUAL domain forces low thinking level
+        thinking_casual, _, _ = brain._resolve_llm_params(["always"], domain="CASUAL")
+        assert thinking_casual == "low"
+
+        # Lowercase / stripped domain still works
+        thinking_casual_lower, _, _ = brain._resolve_llm_params(["always"], domain=" casual ")
+        assert thinking_casual_lower == "low"
+
+    @pytest.mark.asyncio
+    async def test_thought_repetition_collapse_aborts_stream(self):
+        """Thought repetition collapse stops the stream and calls aclose."""
+        repeating_thought = "Thinking about user greeting again and again. " * 30
+        stream = MockStream([
+            _Chunk(text=repeating_thought, is_thought=True),
+            _Chunk(text="never read", is_thought=False),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", event)
+
+        assert stream._yielded == 1, "thought collapse must abort after the first chunk"
+        assert stream.aclose_called, "aclose() must be called when stream is abandoned due to thought collapse"
+
+

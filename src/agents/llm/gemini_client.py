@@ -306,12 +306,13 @@ class GeminiAdapter:
         from google import genai
         from google.genai.types import HttpOptions, HttpRetryOptions
 
+        http_timeout_ms = int(float(os.getenv("LLM_HTTP_TIMEOUT_SEC", "240")) * 1000)
         self._client = genai.Client(
             vertexai=True,
             project=project,
             location=location,
             http_options=HttpOptions(
-                timeout=180 * 1000,
+                timeout=http_timeout_ms,
                 retry_options=HttpRetryOptions(
                     attempts=5,
                     initial_delay=1.0,
