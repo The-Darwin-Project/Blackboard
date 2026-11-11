@@ -23,7 +23,14 @@
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
 #     with models that don't clear thought history.
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
-#     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
+#     SDK-level retries handle 502/503 before Brain's own retry layer. HttpOptions.timeout is in MILLISECONDS
+#     (SDK converts to seconds); value comes from LLM_HTTP_TIMEOUT_SEC (default 240s) via parse_timeout_env
+#     (rejects empty/malformed/nan/inf/<=0 with a warning + default). In the async aiohttp stream path it becomes
+#     ClientTimeout(total=...) -- a wall-clock cap on the WHOLE streamed request -- and the SDK also sends an
+#     X-Server-Timeout header; under the httpx fallback it is a per-phase (read/connect/...) timeout. The adapter is
+#     shared by Brain, event_namer, aligner, archivist and headhunter, so the value applies to all of them.
+#     Ordering invariant: LLM_STREAM_DRAIN_TIMEOUT_SEC (15s) << LLM_STREAM_CHUNK_TIMEOUT_SEC (180s, Brain per-chunk
+#     wait_for) < LLM_HTTP_TIMEOUT_SEC (240s); warn_on_timeout_misordering logs once if violated.
 # 14. [Gotcha]: After the first function_calls chunk, keep consuming the stream (single loop) to capture terminal
 #     usage_metadata, thought parts and grounding. The call is held and emitted once in the final done chunk. Drain
 #     errors, unreadable trailing chunks (_read_candidates / function_calls parse) and DRAIN_TIMEOUT_S expiry must NOT
@@ -294,11 +301,65 @@ def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
         return default
 
 
+DEFAULT_CHUNK_TIMEOUT_S: float = 180.0
+DEFAULT_HTTP_TIMEOUT_S: float = 240.0
+DEFAULT_DRAIN_TIMEOUT_S: float = 15.0
+_MAX_TIMEOUT_ENV_S: float = 3600.0
+_TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = set()
+_TIMEOUT_ORDER_WARNED: set[tuple[float, float, float]] = set()
+
+
+def parse_timeout_env(name: str, raw: str | None, default: float, max_value: float = _MAX_TIMEOUT_ENV_S) -> float:
+    """Parse and validate a timeout env var given in seconds.
+
+    Accepts a finite float in (0.0, max_value]. Unset/blank returns ``default`` silently; empty-after-set,
+    malformed, NaN/Inf, non-positive or too-large values log a warning (once per name/value) and return ``default``.
+    """
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        val = float("nan")
+    if math.isnan(val) or math.isinf(val) or val <= 0.0 or val > max_value:
+        key = (name, raw)
+        if key not in _TIMEOUT_ENV_WARNED:
+            _TIMEOUT_ENV_WARNED.add(key)
+            logger.warning("Invalid %s=%r; using default %.1fs", name, raw, default)
+        return default
+    return val
+
+
+def warn_on_timeout_misordering(drain_s: float, chunk_s: float, http_s: float) -> bool:
+    """Warn (once per value triple) when DRAIN >= CHUNK or CHUNK >= HTTP. Returns True if misordered."""
+    bad = False
+    key = (drain_s, chunk_s, http_s)
+    if drain_s >= chunk_s:
+        bad = True
+        if key not in _TIMEOUT_ORDER_WARNED:
+            logger.warning(
+                "LLM_STREAM_DRAIN_TIMEOUT_SEC (%.1fs) >= LLM_STREAM_CHUNK_TIMEOUT_SEC (%.1fs): "
+                "the post-tool-call drain should be much shorter than the per-chunk timeout",
+                drain_s, chunk_s,
+            )
+    if chunk_s >= http_s:
+        bad = True
+        if key not in _TIMEOUT_ORDER_WARNED:
+            logger.warning(
+                "LLM_STREAM_CHUNK_TIMEOUT_SEC (%.1fs) >= LLM_HTTP_TIMEOUT_SEC (%.1fs): the HTTP client timeout "
+                "will fire before Brain's per-chunk timeout, so chunk-timeout retry handling is bypassed",
+                chunk_s, http_s,
+            )
+    if bad:
+        _TIMEOUT_ORDER_WARNED.add(key)
+    return bad
+
+
 class GeminiAdapter:
     """Vertex AI Gemini adapter implementing LLMPort."""
 
     # Max seconds to wait for the stream tail after a function_call chunk (terminal usage_metadata).
-    DRAIN_TIMEOUT_S: float = _parse_drain_timeout(os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=15.0)
+    DRAIN_TIMEOUT_S: float = _parse_drain_timeout(os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=DEFAULT_DRAIN_TIMEOUT_S)
     # Bound on closing the SDK stream in generate_stream's finally (same value as Brain's _ACLOSE_TIMEOUT).
     ACLOSE_TIMEOUT_S: float = 5.0
 
@@ -306,12 +367,18 @@ class GeminiAdapter:
         from google import genai
         from google.genai.types import HttpOptions, HttpRetryOptions
 
+        http_timeout_s = parse_timeout_env("LLM_HTTP_TIMEOUT_SEC", os.getenv("LLM_HTTP_TIMEOUT_SEC"), DEFAULT_HTTP_TIMEOUT_S)
+        chunk_timeout_s = parse_timeout_env(
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC", os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC"), DEFAULT_CHUNK_TIMEOUT_S,
+        )
+        warn_on_timeout_misordering(self.DRAIN_TIMEOUT_S, chunk_timeout_s, http_timeout_s)
+        http_timeout_ms = int(http_timeout_s * 1000)  # google-genai HttpOptions.timeout is milliseconds
         self._client = genai.Client(
             vertexai=True,
             project=project,
             location=location,
             http_options=HttpOptions(
-                timeout=180 * 1000,
+                timeout=http_timeout_ms,
                 retry_options=HttpRetryOptions(
                     attempts=5,
                     initial_delay=1.0,

@@ -6,6 +6,8 @@
 # 4. [Gotcha]: LLM_STREAM_CHUNK_TIMEOUT_SEC=2 for fast tests. asyncio.sleep patched for retry/backoff speed.
 # 5. [Invariant]: 3-level nesting: OUTER Exception > MIDDLE TimeoutError > INNER StopAsyncIteration.
 # 6. [Pattern]: _ACLOSE_TIMEOUT patched to 0.1s in test_10 for fast cleanup hang tests.
+# 7. [Pattern]: TestRepetitionDetector (pure, no I/O), TestCollapseStreamHandling (collapse via _process_with_llm),
+#    TestCasualClamp and TestTimeoutEnvValidation extend this file. Warn-once sets in gemini_client are reset via monkeypatch.
 """Verify per-chunk stream timeout guard in _process_with_llm.
 
 Tests cover:
@@ -499,3 +501,688 @@ class TestStreamTimeout:
         assert len(error_turns) == 0
         assert sdk_stream.aclose_called is True
 
+    # --- Repetition collapse & CASUAL thinking level unit tests ---
+
+    def test_repetition_collapse_micro_and_macro(self):
+        """_detect_repetition_collapse catches micro tokens, macro paragraphs, and runaway text."""
+        from src.agents.brain import Brain
+
+        # Normal text (no collapse)
+        normal = "Here is some architecture documentation. " * 10 + "Different topic here. " * 8
+        assert Brain._detect_repetition_collapse(normal) is None
+
+        # Short text <= 2000 chars ignored
+        assert Brain._detect_repetition_collapse("abc" * 500) is None
+
+        # Micro-repetition (short token repeated back-to-back at the tail)
+        micro = "Intro text " * 120 + "abcdefghi" * 100
+        assert Brain._detect_repetition_collapse(micro) is not None
+
+        # Macro-repetition (paragraph sentence repeated back-to-back at the tail)
+        macro_sentence = "Thinking Process: 1. User greeting needs conversational acknowledgement and prompt. "
+        macro = "Header text\n" + macro_sentence * 30
+        assert Brain._detect_repetition_collapse(macro) is not None
+
+        # Runaway length limit
+        runaway = "x" * 32001
+        collapse = Brain._detect_repetition_collapse(runaway)
+        assert collapse is not None and collapse.kind == "runaway" and collapse.token == ""
+
+    def test_resolve_llm_params_casual_domain_clamps_thinking_low(self):
+        """CASUAL domain clamps thinking_level to low regardless of phase defaults."""
+        from src.agents.brain import Brain
+        brain = _make_brain()
+        # Restore real method over test mock
+        brain._resolve_llm_params = Brain._resolve_llm_params.__get__(brain, Brain)
+
+        # Non-casual domain preserves phase thinking level (high from always phase)
+        thinking_comp, _, _ = brain._resolve_llm_params(["always"], domain="COMPLICATED")
+        assert thinking_comp == "high"
+
+        # CASUAL domain forces low thinking level
+        thinking_casual, _, _ = brain._resolve_llm_params(["always"], domain="CASUAL")
+        assert thinking_casual == "low"
+
+        # Lowercase / stripped domain still works
+        thinking_casual_lower, _, _ = brain._resolve_llm_params(["always"], domain=" casual ")
+        assert thinking_casual_lower == "low"
+
+    @pytest.mark.asyncio
+    async def test_thought_repetition_collapse_aborts_stream(self):
+        """Thought repetition collapse stops the stream and calls aclose."""
+        repeating_thought = "Thinking about user greeting again and again. " * 60
+        stream = MockStream([
+            _Chunk(text=repeating_thought, is_thought=True),
+            _Chunk(text="never read", is_thought=False),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", event)
+
+        assert stream._yielded == 1, "thought collapse must abort after the first chunk"
+        assert stream.aclose_called, "aclose() must be called when stream is abandoned due to thought collapse"
+
+
+# ---------------------------------------------------------------------------
+# Repetition detector (pure function)
+# ---------------------------------------------------------------------------
+
+def _varied(n: int) -> str:
+    """Non-repeating filler text of exactly n chars."""
+    return "".join(f"w{i} " for i in range(n))[:n]
+
+
+_FALSE_POSITIVE_CORPUS = {
+    "prose": " ".join(f"Sentence {i} explains topic {i * 7} and why it matters here." for i in range(80)),
+    "bullets": "\n".join(f"- Item {i}: check service-{i} status and report" for i in range(120)),
+    "numbered": "\n".join(f"{i}. Run step {i} then verify output {i * 3}" for i in range(1, 120)),
+    "table": "| id | name | value |\n|----|------|-------|\n"
+    + "\n".join(f"| {i} | node-{i} | {i * 11} |" for i in range(150)),
+    "hr_dividers": "\n---\n".join(f"Section {i}: " + "details " * 5 + str(i) for i in range(60)),
+    "indented_code": "\n".join(f"        value_{i} = compute({i}, {i + 1})" for i in range(100)) + "\n" + " " * 400,
+    "yaml": "\n".join(f"  key_{i}: value_{i}\n    image: repo/app:{i}" for i in range(100)),
+    "json": "{" + ",".join(f'"k{i}": {{"id": {i}, "ok": true}}' for i in range(120)) + "}",
+    "log_lines": "\n".join(f"2026-11-11T10:{i % 60:02d}:00Z INFO worker-{i} processed batch {i}" for i in range(60)),
+    "non_contiguous_hits": "".join(f"status ok node {i}; " for i in range(200)),
+    "trailing_rules": _varied(2500) + "\n---\n" * 80,
+    "trailing_table_sep": _varied(2500) + "\n|---|---|---|---|---|---|---|---|---|" * 12,
+    "trailing_whitespace": _varied(2500) + " " * 400,
+}
+
+
+class TestRepetitionDetector:
+    """Brain._detect_repetition_collapse: no false positives on structured text, reliable on real loops."""
+
+    @pytest.mark.parametrize("name", sorted(_FALSE_POSITIVE_CORPUS))
+    def test_structured_text_is_not_a_collapse(self, name):
+        text = _FALSE_POSITIVE_CORPUS[name]
+        assert len(text) > 2000, f"{name} corpus must exceed the scan threshold"
+        assert Brain._detect_repetition_collapse(text) is None
+
+    def test_scan_threshold_boundary(self):
+        assert Brain._detect_repetition_collapse("x" * 2000) is None
+        hit = Brain._detect_repetition_collapse("x" * 2001)
+        assert hit is not None and hit.kind == "micro"
+
+    def test_runaway_cap_boundary_and_kind(self):
+        assert Brain._detect_repetition_collapse(_varied(32000)) is None
+        hit = Brain._detect_repetition_collapse(_varied(32001))
+        assert hit is not None and hit.kind == "runaway" and hit.token == ""
+        assert Brain._detect_repetition_collapse(_varied(5000), max_chars=5000) is None
+        assert Brain._detect_repetition_collapse(_varied(5001), max_chars=5000).kind == "runaway"
+
+    @pytest.mark.parametrize("tail", ["x" * 2500, "spin " * 600, "testing " * 400, "qwerty zxcvb" * 8])
+    def test_genuine_micro_loops_trigger(self, tail):
+        text = _varied(2000) + tail if len(tail) < 2000 else tail
+        hit = Brain._detect_repetition_collapse(text)
+        assert hit is not None and hit.kind == "micro" and hit.token
+
+    def test_micro_needs_eight_contiguous_repeats(self):
+        assert Brain._detect_repetition_collapse(_varied(2500) + "qwerty zxcvb" * 7) is None
+        assert Brain._detect_repetition_collapse(_varied(2500) + "qwerty zxcvb" * 8).kind == "micro"
+
+    def test_micro_ignores_head_prefix_and_noncontiguous_hits(self):
+        # Token present 6x in the 300-char tail but separated by changing content -> not a loop.
+        tail = "".join(f"abcdefghi-{i} " for i in range(25))
+        assert Brain._detect_repetition_collapse(_varied(2500) + tail) is None
+
+    def test_macro_sentence_loop_triggers_and_is_macro(self):
+        sentence = "Thinking Process: 1. User greeting needs conversational acknowledgement and prompt. "
+        hit = Brain._detect_repetition_collapse("Header text\n" + sentence * 30)
+        assert hit is not None and hit.kind == "macro"
+
+    def test_macro_repeat_thresholds_by_phrase_length(self):
+        short = "The deployment pipeline finished and the report was sent. "  # 58 chars -> needs 4x
+        assert 38 <= len(short) < 80
+        assert Brain._detect_repetition_collapse(_varied(2500) + short * 3) is None
+        assert Brain._detect_repetition_collapse(_varied(2500) + short * 4).kind == "macro"
+        long = "The deployment pipeline finished successfully and the full report was sent to the maintainers. "
+        assert len(long) >= 80
+        assert Brain._detect_repetition_collapse(_varied(2500) + long * 2) is None
+        assert Brain._detect_repetition_collapse(_varied(2500) + long * 3).kind == "macro"
+
+    def test_repeated_yaml_keys_with_changing_values_do_not_fire(self):
+        text = _varied(2500) + "".join(f"name: svc\nimage: app:{i}\nreplicas: {i}\n" for i in range(40))
+        assert Brain._detect_repetition_collapse(text) is None
+
+    @pytest.mark.parametrize("token,expected", [
+        ("   ", True), ("\n---\n", True), ("|---|---|", True), ("____", True), ("```", True), ("......", True),
+        ("a---", False), ("abcd", False), ("|a|", False),
+    ])
+    def test_is_formatting_token(self, token, expected):
+        assert Brain._is_formatting_token(token) is expected
+
+    def test_truncate_collapsed_thoughts(self):
+        short = "short thought"
+        assert Brain._truncate_collapsed_thoughts(short) == short
+        out = Brain._truncate_collapsed_thoughts("t" * 40000)
+        assert len(out) < 2100 and out.startswith("t" * 2000) and "truncated" in out
+
+
+class TestRunawayCapResolution:
+    def test_defaults_and_token_scaling(self, monkeypatch):
+        monkeypatch.delenv("LLM_STREAM_RUNAWAY_MAX_CHARS", raising=False)
+        assert Brain._resolve_runaway_max_chars(None) == 32000
+        assert Brain._resolve_runaway_max_chars(2048) == 32000
+        assert Brain._resolve_runaway_max_chars(65000) == 260000
+        assert Brain._resolve_runaway_max_chars("not-an-int") == 32000
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "50000")
+        assert Brain._resolve_runaway_max_chars(65000) == 50000
+
+    @pytest.mark.parametrize("bad", ["abc", "nan", "1e5", "-5", "0", "2000", "99999999999"])
+    def test_invalid_env_falls_back_with_warning(self, monkeypatch, caplog, bad):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", bad)
+        with caplog.at_level("WARNING", logger="src.agents.brain"):
+            assert Brain._resolve_runaway_max_chars(2048) == 32000
+        assert "LLM_STREAM_RUNAWAY_MAX_CHARS" in caplog.text
+
+    def test_blank_env_is_default_without_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "  ")
+        with caplog.at_level("WARNING", logger="src.agents.brain"):
+            assert Brain._resolve_runaway_max_chars(2048) == 32000
+        assert "LLM_STREAM_RUNAWAY_MAX_CHARS" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Collapse handling through _process_with_llm
+# ---------------------------------------------------------------------------
+
+def _turn_actions(brain: Brain) -> list[str]:
+    actions = []
+    for call in brain._append_and_broadcast.call_args_list:
+        turn = call[0][1] if len(call[0]) > 1 else call.kwargs.get("turn")
+        actions.append(getattr(turn, "action", None))
+    return actions
+
+
+class TestCollapseStreamHandling:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "2")
+        monkeypatch.delenv("LLM_STREAM_RUNAWAY_MAX_CHARS", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_text_collapse_closes_stream_and_records_error(self):
+        stream = MockStream([_Chunk(text="abcdefghi" * 300), _Chunk(text="never read")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        with _gate_patch(), _gate_ctx_patch():
+            result = await brain._process_with_llm("evt-test", _make_event())
+
+        assert result is False
+        assert stream._yielded == 1 and stream.aclose_called
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1, "collapse without output must record exactly one diagnostic error turn"
+        assert "repetition loop" in errors[0].thoughts and "text" in errors[0].thoughts
+        assert "response" not in _turn_actions(brain) and "thoughts" not in _turn_actions(brain)
+        assert brain._adapter.generate_stream.call_count == 1, "collapse must not silently re-scan inside one call"
+
+    @pytest.mark.asyncio
+    async def test_thought_collapse_records_error_and_does_not_persist_thoughts(self):
+        stream = MockStream([
+            _Chunk(text="Thinking about the greeting again and again. " * 60, is_thought=True),
+            _Chunk(text="never read"),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        with _gate_patch(), _gate_ctx_patch():
+            result = await brain._process_with_llm("evt-test", _make_event())
+
+        assert result is False
+        assert stream._yielded == 1 and stream.aclose_called
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1 and "thought" in errors[0].thoughts
+        assert "thoughts" not in _turn_actions(brain), "looping thoughts must not be persisted/replayed"
+        assert "evt-test" not in brain._reasoning_by_event
+
+    @pytest.mark.asyncio
+    async def test_collapse_preserves_usage_and_function_call_on_same_chunk(self):
+        usage = object()
+        fc = MagicMock()
+        fc.name = "close_event"
+        fc.args = {"reason": "done"}
+        looping = "Thinking about the greeting again and again. " * 800  # ~35k chars of looping thoughts
+        stream = MockStream([
+            _Chunk(text=looping, is_thought=True, usage=usage, function_call=fc),
+            _Chunk(text="never read"),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        seen = {}
+
+        async def _fake_execute(event_id, name, args, **kw):
+            seen["name"], seen["args"] = name, args
+            seen["reasoning"] = brain._reasoning_by_event.get(event_id)
+            return False
+
+        brain._execute_function_call = AsyncMock(side_effect=_fake_execute)
+        with _gate_patch(), _gate_ctx_patch(), patch("src.agents.llm.record_token_usage") as record:
+            await brain._process_with_llm("evt-test", _make_event())
+
+        assert stream._yielded == 1 and stream.aclose_called
+        record.assert_called_once_with("brain", usage, "evt-test")
+        assert seen["name"] == "close_event" and seen["args"] == {"reason": "done"}
+        assert seen["reasoning"] is not None and len(seen["reasoning"]) < 2100, "looping thoughts must be truncated"
+        assert _get_error_turns(brain) == [], "a valid function_call must not be discarded as an error"
+
+    @pytest.mark.asyncio
+    async def test_text_collapse_still_records_usage(self):
+        usage = object()
+        stream = MockStream([_Chunk(text="abcdefghi" * 300, usage=usage)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        with _gate_patch(), _gate_ctx_patch(), patch("src.agents.llm.record_token_usage") as record:
+            await brain._process_with_llm("evt-test", _make_event())
+        record.assert_called_once_with("brain", usage, "evt-test")
+
+    @pytest.mark.asyncio
+    async def test_runaway_text_is_reported_as_length_not_token(self, monkeypatch, caplog):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "3000")
+        stream = MockStream([_Chunk(text=_varied(3500))])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        with _gate_patch(), _gate_ctx_patch(), caplog.at_level("WARNING", logger="src.agents.brain"):
+            await brain._process_with_llm("evt-test", _make_event())
+
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1 and "runaway ceiling" in errors[0].thoughts
+        assert "RUNAWAY_LENGTH_LIMIT" not in caplog.text and "token=" not in caplog.text
+        assert "Runaway text output" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_high_token_budget_scales_runaway_ceiling(self):
+        """40k chars of varied thinking is valid when max_output_tokens=20000 (cap = 80k chars)."""
+        stream = MockStream([_Chunk(text=_varied(40000), is_thought=True), _Chunk(text="Final answer.")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._resolve_llm_params = MagicMock(return_value=("high", 0.7, 20000))
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+
+        assert _get_error_turns(brain) == []
+        assert stream._yielded == 2 and not stream.aclose_called
+        assert "response" in _turn_actions(brain)
+
+    @pytest.mark.asyncio
+    async def test_normal_markdown_stream_is_not_aborted(self):
+        text = _FALSE_POSITIVE_CORPUS["bullets"] + "\n---\n" + _FALSE_POSITIVE_CORPUS["numbered"]
+        stream = MockStream([_Chunk(text=text[i:i + 500]) for i in range(0, len(text), 500)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        assert _get_error_turns(brain) == []
+        assert stream._yielded == len(stream._chunks) and not stream.aclose_called
+
+
+# ---------------------------------------------------------------------------
+# CASUAL thinking clamp
+# ---------------------------------------------------------------------------
+
+class TestCasualClamp:
+    @pytest.mark.parametrize("level,domain,expected", [
+        ("high", "casual", "low"), ("high", "CASUAL", "low"), ("high", "  Casual ", "low"),
+        ("medium", "casual", "low"), ("low", "casual", "low"),
+        ("minimal", "casual", "minimal"), ("none", "casual", "none"),
+        ("high", "complicated", "high"), ("high", None, "high"), ("high", "", "high"),
+    ])
+    def test_clamp_helper(self, level, domain, expected):
+        assert Brain._clamp_casual_thinking(level, domain) == expected
+
+    def test_clamp_helper_accepts_enum(self):
+        import enum
+
+        class Domain(enum.Enum):
+            CASUAL = "CASUAL"
+            COMPLICATED = "complicated"
+
+        assert Brain._clamp_casual_thinking("high", Domain.CASUAL) == "low"
+        assert Brain._clamp_casual_thinking("high", Domain.COMPLICATED) == "high"
+
+    @pytest.mark.parametrize("domain", ["casual", "CASUAL", " Casual "])
+    def test_resolve_with_loader_clamps_down_only(self, domain):
+        brain = _make_brain()
+        brain._resolve_llm_params = Brain._resolve_llm_params.__get__(brain, Brain)
+        brain.max_output_tokens = 16384
+        brain._skill_loader.get_phase_meta = MagicMock(return_value={"thinking_level": "high", "priority": 10})
+        assert brain._resolve_llm_params(["dispatch"], domain=domain)[0] == "low"
+        assert brain._resolve_llm_params(["dispatch"], domain="complicated")[0] == "high"
+        assert brain._resolve_llm_params(["dispatch"])[0] == "high"
+        brain._skill_loader.get_phase_meta = MagicMock(return_value={"thinking_level": "minimal", "priority": 10})
+        assert brain._resolve_llm_params(["dispatch"], domain=domain)[0] == "minimal"
+
+    @pytest.mark.parametrize("domain,expected", [("casual", "low"), ("CASUAL", "low"), ("complicated", "high")])
+    def test_resolve_without_loader(self, domain, expected):
+        brain = _make_brain()
+        brain._resolve_llm_params = Brain._resolve_llm_params.__get__(brain, Brain)
+        brain.max_output_tokens = 16384
+        brain._skill_loader = None
+        assert brain._resolve_llm_params(["dispatch"], domain=domain)[0] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flags,expected", [
+        ({"event_domain": "casual"}, "casual"),
+        ({"event_domain": "complicated"}, "complicated"),
+        ({}, None),
+    ])
+    async def test_process_with_llm_passes_context_flag_domain(self, flags, expected, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "2")
+        stream = MockStream([_Chunk(text="hi")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._extract_context_flags = AsyncMock(return_value=dict(flags))
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        assert brain._resolve_llm_params.call_args.kwargs["domain"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Timeout env validation + ordering
+# ---------------------------------------------------------------------------
+
+class TestTimeoutEnvValidation:
+    @pytest.fixture(autouse=True)
+    def _fresh_warn_state(self, monkeypatch):
+        from src.agents.llm import gemini_client
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ENV_WARNED", set())
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ORDER_WARNED", set())
+
+    def test_parse_timeout_env_valid_and_unset(self, caplog):
+        from src.agents.llm.gemini_client import parse_timeout_env
+        with caplog.at_level("WARNING"):
+            assert parse_timeout_env("X", None, 240.0) == 240.0
+            assert parse_timeout_env("X", "", 240.0) == 240.0
+            assert parse_timeout_env("X", "   ", 240.0) == 240.0
+            assert parse_timeout_env("X", "12.5", 240.0) == 12.5
+            assert parse_timeout_env("X", "3600", 240.0) == 3600.0
+        assert caplog.text == ""
+
+    @pytest.mark.parametrize("bad", ["abc", "nan", "NaN", "inf", "-inf", "0", "-5", "0.0", "3600.1", "1e9", "12s"])
+    def test_parse_timeout_env_invalid_falls_back_and_warns_once(self, bad, caplog):
+        from src.agents.llm.gemini_client import parse_timeout_env
+        with caplog.at_level("WARNING"):
+            assert parse_timeout_env("LLM_HTTP_TIMEOUT_SEC", bad, 240.0) == 240.0
+            assert parse_timeout_env("LLM_HTTP_TIMEOUT_SEC", bad, 240.0) == 240.0
+        assert caplog.text.count("Invalid LLM_HTTP_TIMEOUT_SEC") == 1
+
+    def test_ordering_warnings(self, caplog):
+        from src.agents.llm.gemini_client import warn_on_timeout_misordering as check
+        with caplog.at_level("WARNING"):
+            assert check(15.0, 180.0, 240.0) is False
+        assert caplog.text == ""
+        with caplog.at_level("WARNING"):
+            assert check(200.0, 180.0, 240.0) is True
+            assert "DRAIN_TIMEOUT_SEC" in caplog.text
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert check(15.0, 240.0, 240.0) is True
+            assert check(15.0, 300.0, 240.0) is True
+        assert "CHUNK_TIMEOUT_SEC" in caplog.text and "HTTP_TIMEOUT_SEC" in caplog.text
+
+    @pytest.mark.parametrize("env,expected_ms", [
+        (None, 240000), ("90", 90000), ("12.5", 12500), ("nan", 240000), ("inf", 240000),
+        ("-1", 240000), ("0", 240000), ("junk", 240000), ("", 240000),
+    ])
+    def test_adapter_http_timeout_ms(self, monkeypatch, env, expected_ms):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        if env is None:
+            monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
+        else:
+            monkeypatch.setenv("LLM_HTTP_TIMEOUT_SEC", env)
+        with patch("google.genai.Client") as client_cls:
+            GeminiAdapter("proj", "global", "model")
+        assert client_cls.call_args.kwargs["http_options"].timeout == expected_ms
+
+    def test_adapter_warns_when_chunk_not_below_http(self, monkeypatch, caplog):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        monkeypatch.setenv("LLM_HTTP_TIMEOUT_SEC", "100")
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "180")
+        with patch("google.genai.Client"), caplog.at_level("WARNING"):
+            GeminiAdapter("proj", "global", "model")
+        assert "LLM_STREAM_CHUNK_TIMEOUT_SEC (180.0s) >= LLM_HTTP_TIMEOUT_SEC (100.0s)" in caplog.text
+
+    def test_adapter_default_ordering_is_silent(self, monkeypatch, caplog):
+        from src.agents.llm.gemini_client import GeminiAdapter
+        for var in ("LLM_HTTP_TIMEOUT_SEC", "LLM_STREAM_CHUNK_TIMEOUT_SEC"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(GeminiAdapter, "DRAIN_TIMEOUT_S", 15.0)
+        with patch("google.genai.Client"), caplog.at_level("WARNING"):
+            GeminiAdapter("proj", "global", "model")
+        assert "TIMEOUT_SEC" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("env,expected", [(None, 180.0), ("nan", 180.0), ("0", 180.0), ("-3", 180.0), ("7.5", 7.5)])
+    async def test_brain_chunk_timeout_parsing(self, monkeypatch, env, expected):
+        if env is None:
+            monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        else:
+            monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", env)
+        stream = MockStream([_Chunk(text="hi")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        real_wait_for = asyncio.wait_for
+        timeouts = []
+
+        async def _spy(aw, timeout=None):
+            timeouts.append(timeout)
+            return await real_wait_for(aw, timeout=timeout)
+
+        with _gate_patch(), _gate_ctx_patch(), patch("src.agents.brain.asyncio.wait_for", _spy):
+            await brain._process_with_llm("evt-test", _make_event())
+        assert timeouts[0] == expected
+
+
+# ---------------------------------------------------------------------------
+# QE boundary hardening: exact thresholds of the repetition guard, collapse metadata, clamp and timeout helpers
+# ---------------------------------------------------------------------------
+
+def _tok(n: int) -> str:
+    """Aperiodic n-char token (no internal period, never formatting-only)."""
+    import string
+    return (string.ascii_letters + string.digits)[:n]
+
+
+class TestRepetitionBoundaryHardening:
+    """Pin every numeric bound of Brain._detect_repetition_collapse (micro 4-37 x8, macro 38-200 x4/<80 x3/>=80)."""
+
+    def test_micro_min_token_length_is_four(self):
+        hit = Brain._detect_repetition_collapse(_varied(2500) + "abcd" * 8)
+        assert hit is not None and hit.kind == "micro" and hit.token == "abcd"
+        # A 3-char unit is below the documented 4-char floor and must not fire after only 8 repeats.
+        assert Brain._detect_repetition_collapse(_varied(2500) + "abc" * 8) is None
+
+    def test_micro_max_token_length_is_37(self):
+        tok = _tok(37)
+        hit = Brain._detect_repetition_collapse(_varied(2500) + tok * 8)
+        assert hit is not None and hit.kind == "micro" and hit.token == tok
+        assert Brain._detect_repetition_collapse(_varied(2500) + tok * 7) is None
+
+    def test_macro_min_phrase_length_is_38(self):
+        phrase = _tok(38)
+        assert Brain._detect_repetition_collapse(_varied(2500) + phrase * 3) is None
+        hit = Brain._detect_repetition_collapse(_varied(2500) + phrase * 4)
+        assert hit is not None and hit.kind == "macro" and hit.token == phrase
+
+    def test_macro_repeat_threshold_flips_exactly_at_80_chars(self):
+        p79, p80 = _varied(79), _varied(80)
+        assert len(p79) == 79 and len(p80) == 80
+        # 79 chars (< 80): 4x required
+        assert Brain._detect_repetition_collapse(_varied(2500) + p79 * 3) is None
+        assert Brain._detect_repetition_collapse(_varied(2500) + p79 * 4).kind == "macro"
+        # 80 chars (>= 80): 3x required
+        assert Brain._detect_repetition_collapse(_varied(2500) + p80 * 2) is None
+        assert Brain._detect_repetition_collapse(_varied(2500) + p80 * 3).kind == "macro"
+
+    def test_macro_max_phrase_length_is_200(self):
+        p200, p201 = _varied(200), _varied(201)
+        hit = Brain._detect_repetition_collapse(_varied(2500) + p200 * 3)
+        assert hit is not None and hit.kind == "macro" and len(hit.token) == 200
+        assert Brain._detect_repetition_collapse(_varied(2500) + p201 * 3) is None
+
+    def test_micro_loop_that_ended_earlier_is_not_a_tail_loop(self):
+        tok = "qwerty zxcvb"
+        text = _varied(2500) + tok * 8 + " and then the answer moved on to other things " + tok
+        assert Brain._detect_repetition_collapse(text) is None
+
+    def test_macro_loop_that_ended_earlier_is_not_a_tail_loop(self):
+        short = "The deployment pipeline finished and the report was sent. "
+        text = _varied(2500) + short * 4 + "Meanwhile the situation changed completely today. " + short
+        assert Brain._detect_repetition_collapse(text) is None
+
+    @pytest.mark.parametrize("fmt", ["#", "─", "│", "`", ">", "*", "=", "~", "+", "_", "."])
+    def test_trailing_formatting_runs_are_not_loops(self, fmt):
+        assert Brain._detect_repetition_collapse(_varied(2500) + fmt * 400) is None
+        assert Brain._is_formatting_token(fmt * 5) is True
+
+
+class TestRunawayEnvBoundaries:
+    def test_env_upper_bound_is_inclusive_ten_million(self, monkeypatch, caplog):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "10000000")
+        assert Brain._resolve_runaway_max_chars(2048) == 10_000_000
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "10000001")
+        with caplog.at_level("WARNING", logger="src.agents.brain"):
+            assert Brain._resolve_runaway_max_chars(2048) == 32000
+        assert "LLM_STREAM_RUNAWAY_MAX_CHARS" in caplog.text
+
+    def test_env_lower_bound_is_exclusive_2000(self, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "2001")
+        assert Brain._resolve_runaway_max_chars(2048) == 2001
+        monkeypatch.setenv("LLM_STREAM_RUNAWAY_MAX_CHARS", "2000")
+        assert Brain._resolve_runaway_max_chars(2048) == 32000
+
+    def test_truncate_keeps_exactly_the_2000_char_head(self):
+        exact = "H" * 2000
+        assert Brain._truncate_collapsed_thoughts(exact) == exact
+        out = Brain._truncate_collapsed_thoughts("H" * 2000 + "T" * 5000)
+        assert out.startswith("H" * 2000 + "\n[...") and "T" not in out
+        assert Brain._truncate_collapsed_thoughts("H" * 2000 + "T") .count("T") == 0
+
+
+class TestCollapseMetadataAndWiring:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "2")
+        monkeypatch.delenv("LLM_STREAM_RUNAWAY_MAX_CHARS", raising=False)
+
+    @staticmethod
+    def _fc():
+        fc = MagicMock()
+        fc.name = "close_event"
+        fc.args = {"reason": "done"}
+        return fc
+
+    @pytest.mark.asyncio
+    async def test_collapse_chunk_preserves_raw_parts_and_grounding(self):
+        raw = [{"functionCall": {"name": "close_event", "args": {"reason": "done"}}}]
+        grounding = {"chunks": [{"title": "T", "uri": "https://example.com"}], "queries": ["q"]}
+        stream = MockStream([
+            _Chunk(text="Thinking about the greeting again and again. " * 60, is_thought=True,
+                   function_call=self._fc(), raw_parts=raw, grounding_metadata=grounding),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._normalize_response_parts = MagicMock(return_value=None)
+        brain._resolve_grounding_urls = AsyncMock(return_value=[{"title": "T", "uri": "https://example.com"}])
+        brain._execute_function_call = AsyncMock(return_value=False)
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        brain._normalize_response_parts.assert_called_once_with(raw)
+        brain._resolve_grounding_urls.assert_awaited_once_with(grounding["chunks"])
+
+    @pytest.mark.asyncio
+    async def test_text_collapse_with_function_call_does_not_persist_looping_text(self):
+        looping = "abcdefghi" * 300
+        stream = MockStream([_Chunk(text=looping, function_call=self._fc())])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._execute_function_call = AsyncMock(return_value=False)
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        for call in brain._append_and_broadcast.call_args_list:
+            turn = call[0][1] if len(call[0]) > 1 else call.kwargs.get("turn")
+            assert "abcdefghi" not in (getattr(turn, "thoughts", None) or "")
+
+    @pytest.mark.asyncio
+    async def test_thought_collapse_keeps_previously_streamed_text(self):
+        stream = MockStream([
+            _Chunk(text="Visible answer part one."),
+            _Chunk(text="Thinking about the greeting again and again. " * 60, is_thought=True, function_call=self._fc()),
+        ])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._execute_function_call = AsyncMock(return_value=False)
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        persisted = []
+        for call in brain._append_and_broadcast.call_args_list:
+            turn = call[0][1] if len(call[0]) > 1 else call.kwargs.get("turn")
+            persisted.append(getattr(turn, "thoughts", None) or "")
+        assert any("Visible answer part one." in t for t in persisted)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunk", [
+        _Chunk(text="abcdefghi" * 300),
+        _Chunk(text="Thinking about the greeting again and again. " * 60, is_thought=True),
+    ])
+    async def test_collapse_clears_stale_reasoning_and_does_not_broadcast_looping_chunk(self, chunk):
+        stream = MockStream([chunk])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._reasoning_by_event["evt-test"] = "stale reasoning from an earlier call"
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        assert "evt-test" not in brain._reasoning_by_event
+        payloads = [c.args[0] for c in brain._broadcast.call_args_list]
+        streamed = [p for p in payloads if p["type"] == "brain_thinking" and p.get("text")]
+        assert streamed == [], "the collapsing chunk must not be streamed to the UI"
+        assert [p["type"] for p in payloads].count("brain_thinking_done") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flags,expected", [({"event_domain": "casual"}, "casual"), ({}, "")])
+    async def test_reflex_pair_receives_event_domain(self, flags, expected):
+        stream = MockStream([_Chunk(text="hi")])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._extract_context_flags = AsyncMock(return_value=dict(flags))
+        brain._create_reflex_pair = MagicMock(return_value=(None, None))
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-test", _make_event())
+        assert brain._create_reflex_pair.call_args.kwargs["event_domain"] == expected
+
+
+class TestClampAndTimeoutBoundaries:
+    @pytest.fixture(autouse=True)
+    def _fresh_warn_state(self, monkeypatch):
+        from src.agents.llm import gemini_client
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ENV_WARNED", set())
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ORDER_WARNED", set())
+
+    @pytest.mark.parametrize("level", ["MINIMAL", " minimal ", "None", "LOW", " Low "])
+    def test_clamp_preserves_low_levels_verbatim_regardless_of_case_and_whitespace(self, level):
+        assert Brain._clamp_casual_thinking(level, "casual") == level
+
+    def test_parse_timeout_env_rejects_inf_even_with_unbounded_max(self):
+        from src.agents.llm.gemini_client import parse_timeout_env
+        assert parse_timeout_env("X", "inf", 5.0, max_value=float("inf")) == 5.0
+        assert parse_timeout_env("X", "nan", 5.0, max_value=float("inf")) == 5.0
+
+    def test_ordering_drain_equal_to_chunk_is_misordered(self, caplog):
+        from src.agents.llm.gemini_client import warn_on_timeout_misordering as check
+        with caplog.at_level("WARNING"):
+            assert check(180.0, 180.0, 240.0) is True
+        assert "LLM_STREAM_DRAIN_TIMEOUT_SEC" in caplog.text
+
+    def test_ordering_warns_once_per_value_triple(self, caplog):
+        from src.agents.llm.gemini_client import warn_on_timeout_misordering as check
+        with caplog.at_level("WARNING"):
+            assert check(200.0, 180.0, 240.0) is True
+            assert check(200.0, 180.0, 240.0) is True
+            assert check(15.0, 300.0, 240.0) is True
+            assert check(15.0, 300.0, 240.0) is True
+        assert caplog.text.count("LLM_STREAM_DRAIN_TIMEOUT_SEC") == 1
+        assert caplog.text.count("LLM_HTTP_TIMEOUT_SEC") == 1
+
+    def test_default_drain_timeout_is_15s_when_env_unset(self):
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        env = {k: v for k, v in os.environ.items() if k != "LLM_STREAM_DRAIN_TIMEOUT_SEC"}
+        root = Path(__file__).resolve().parent.parent
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from src.agents.llm.gemini_client import GeminiAdapter as G; print(G.DRAIN_TIMEOUT_S)"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=120,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip().splitlines()[-1] == "15.0"
