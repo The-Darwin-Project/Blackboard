@@ -509,16 +509,16 @@ class TestStreamTimeout:
         normal = "Here is some architecture documentation. " * 10 + "Different topic here. " * 8
         assert Brain._detect_repetition_collapse(normal) is None
 
-        # Short text < 1000 chars ignored
-        assert Brain._detect_repetition_collapse("abc" * 100) is None
+        # Short text <= 2000 chars ignored
+        assert Brain._detect_repetition_collapse("abc" * 500) is None
 
         # Micro-repetition (short token repeated >= 5 times in 300 char tail)
-        micro = "Intro text " * 20 + "abcdefghi" * 100
+        micro = "Intro text " * 120 + "abcdefghi" * 100
         assert Brain._detect_repetition_collapse(micro) is not None
 
         # Macro-repetition (paragraph sentence repeated >= 3 times in 1200 char tail)
         macro_sentence = "Thinking Process: 1. User greeting needs conversational acknowledgement and prompt. "
-        macro = "Header text\n" + macro_sentence * 16
+        macro = "Header text\n" + macro_sentence * 30
         assert Brain._detect_repetition_collapse(macro) is not None
 
         # Runaway length limit
@@ -547,7 +547,7 @@ class TestStreamTimeout:
     @pytest.mark.asyncio
     async def test_thought_repetition_collapse_aborts_stream(self):
         """Thought repetition collapse stops the stream and calls aclose."""
-        repeating_thought = "Thinking about user greeting again and again. " * 30
+        repeating_thought = "Thinking about user greeting again and again. " * 60
         stream = MockStream([
             _Chunk(text=repeating_thought, is_thought=True),
             _Chunk(text="never read", is_thought=False),

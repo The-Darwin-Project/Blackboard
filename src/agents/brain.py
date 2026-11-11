@@ -2439,7 +2439,7 @@ class Brain:
         3. Macro-loops (40-200 char phrases repeating >= 3 times in 1200-char tail).
         """
         text_len = len(text)
-        if text_len < 1000:
+        if text_len <= 2000:
             return None
 
         # 1. Hard runaway guard
