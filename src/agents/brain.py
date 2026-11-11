@@ -2570,8 +2570,10 @@ class Brain:
     def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
         """Legacy adaptive thinking -- fallback when progressive skills are disabled.
 
-        Gemini 4 Carbon (and Gemini 3.1 Pro) supports 'low', 'medium', and 'high'.
-        Use 'high' for analysis, 'low' for mechanical routing.
+        Only emits 'high' (analysis) and 'low' (mechanical routing); the value is forwarded to the adapter
+        as thinking_level. Which levels a model accepts is model-specific (Gemini accepts low/medium/high on
+        the models this Brain targets), and adapters that do not map thinking_level (e.g. ClaudeAdapter)
+        ignore it.
         Returns (thinking_level, temperature).
         """
         if not event.conversation or len(event.conversation) <= 1:

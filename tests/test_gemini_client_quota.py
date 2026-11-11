@@ -6,6 +6,9 @@
 #    PRIORITY_HIGH=0, PRIORITY_NORMAL=1). Never copy the heuristic into the test.
 # 4. [Pattern]: TestCallSyntaxLinearTime / TestHoldbackOverflowNeverLeaks / TestFallbackAllowlist / TestCallSyntaxLogHygiene guard PR #309:
 #    linear-time [!call: scanning, discard-not-flush on holdback overflow, fail-closed tool allowlist, no raw model text in logs.
+# 5. [Pattern]: TestUnaryMaxOutputTokensCeiling spies on real_adapter._build_config (5th positional arg) to pin the unary 32768 clamp +
+#    warning vs the unclamped 65000 stream path. TestBrainDefaultModelMatchesHelm parses brain.py/helm values (no Brain import) so the
+#    default model cannot drift.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -1167,3 +1170,107 @@ class TestCallSyntaxLogHygiene:
         with caplog.at_level(logging.WARNING):
             _extract_call_syntax('[!call:set_phase:["TOPSECRET"]!]', tools=_DECLARED_TOOLS)
         assert "TOPSECRET" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# PR #320 (M1/M2/M3): unary max_output_tokens ceiling is explicit and never silent;
+# generate_stream() keeps the 65000 ceiling; Brain/Helm default model cannot drift.
+# ---------------------------------------------------------------------------
+import logging  # noqa: E402
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import yaml  # noqa: E402
+
+from src.agents.llm.gemini_client import _GEMINI_UNARY_MAX_OUTPUT_TOKENS  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_CLAMP_LOGGER = "src.agents.llm.gemini_client"
+
+
+def _clamp_warnings(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING and "clamped" in r.getMessage()]
+
+
+def _passed_max_tokens(adapter):
+    """max_output_tokens (5th positional arg) of the single _build_config call."""
+    adapter._build_config.assert_called_once()
+    return adapter._build_config.call_args.args[4]
+
+
+class TestUnaryMaxOutputTokensCeiling:
+    def test_constant_is_32768(self):
+        assert _GEMINI_UNARY_MAX_OUTPUT_TOKENS == 32768
+
+    @pytest.mark.asyncio
+    async def test_default_uses_ceiling_without_warning(self, real_adapter, caplog):
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await real_adapter.generate("sys", "hello")
+
+        assert _passed_max_tokens(real_adapter) == _GEMINI_UNARY_MAX_OUTPUT_TOKENS == 32768
+        assert _clamp_warnings(caplog) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [8192, 32768])
+    async def test_values_at_or_below_ceiling_pass_through(self, real_adapter, caplog, requested):
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await real_adapter.generate("sys", "hello", max_output_tokens=requested)
+
+        assert _passed_max_tokens(real_adapter) == requested
+        assert _clamp_warnings(caplog) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [32769, 65000])
+    async def test_values_above_ceiling_are_clamped_with_warning(self, real_adapter, caplog, requested):
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await real_adapter.generate("sys", "hello", max_output_tokens=requested)
+
+        assert _passed_max_tokens(real_adapter) == 32768
+        warnings = _clamp_warnings(caplog)
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "gemini-2.5-flash" in msg
+        assert f"requested={requested}" in msg
+        assert "clamped=32768" in msg
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [None, 0, -1])
+    async def test_invalid_values_fall_back_to_ceiling_with_warning(self, real_adapter, caplog, bad):
+        real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
+
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await real_adapter.generate("sys", "hello", max_output_tokens=bad)
+
+        assert _passed_max_tokens(real_adapter) == 32768
+        assert any("invalid max_output_tokens" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_stream_passes_65000_through_unclamped(self, real_adapter, caplog):
+        async def stream():
+            yield _chunk(parts=[_part("hi")], text="hi", usage=_usage(total=90))
+
+        _set_stream(real_adapter, stream)
+
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            _ = [c async for c in real_adapter.generate_stream("sys", "hello", max_output_tokens=65000)]
+
+        assert _passed_max_tokens(real_adapter) == 65000
+        assert _clamp_warnings(caplog) == []
+
+
+class TestBrainDefaultModelMatchesHelm:
+    def test_brain_fallback_model_matches_helm_values(self):
+        brain_src = (_REPO_ROOT / "src" / "agents" / "brain.py").read_text()
+        m = re.search(r'os\.getenv\(\s*"LLM_MODEL_BRAIN"\s*,\s*"([^"]+)"\s*\)', brain_src)
+        assert m, "Brain LLM_MODEL_BRAIN fallback not found in src/agents/brain.py"
+
+        values = yaml.safe_load((_REPO_ROOT / "helm" / "values.yaml").read_text())
+        helm_model = values["gcp"]["llm"]["brain"]["model"]
+
+        assert m.group(1) == helm_model == "gemini-4-carbon"
