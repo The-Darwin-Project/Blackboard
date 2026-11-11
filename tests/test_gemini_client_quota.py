@@ -1213,7 +1213,7 @@ class TestUnaryMaxOutputTokensCeiling:
         assert _clamp_warnings(caplog) == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("requested", [8192, 32768])
+    @pytest.mark.parametrize("requested", [1, 8192, 32768])
     async def test_values_at_or_below_ceiling_pass_through(self, real_adapter, caplog, requested):
         real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
 
@@ -1240,7 +1240,7 @@ class TestUnaryMaxOutputTokensCeiling:
         assert "clamped=32768" in msg
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bad", [None, 0, -1])
+    @pytest.mark.parametrize("bad", [None, 0, -1, True, False, 1.5, "100"])
     async def test_invalid_values_fall_back_to_ceiling_with_warning(self, real_adapter, caplog, bad):
         real_adapter._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage()))
 
@@ -1262,6 +1262,17 @@ class TestUnaryMaxOutputTokensCeiling:
 
         assert _passed_max_tokens(real_adapter) == 65000
         assert _clamp_warnings(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_stream_default_is_65000(self, real_adapter):
+        async def stream():
+            yield _chunk(parts=[_part("hi")], text="hi", usage=_usage(total=90))
+
+        _set_stream(real_adapter, stream)
+
+        _ = [c async for c in real_adapter.generate_stream("sys", "hello")]
+
+        assert _passed_max_tokens(real_adapter) == 65000
 
 
 class TestBrainDefaultModelMatchesHelm:
