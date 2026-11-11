@@ -27,6 +27,14 @@
 #     aclose, 5s) in a finally on EVERY exit where it was not fully consumed (stream_exhausted False): timeout,
 #     repetition-collapse break, error, cancel. Normal completion never calls aclose.
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
+#     Timeout ordering invariant: LLM_STREAM_DRAIN_TIMEOUT_SEC (15s, adapter post-tool-call drain) << LLM_STREAM_CHUNK_TIMEOUT_SEC
+#     (180s default, this wait_for) < LLM_HTTP_TIMEOUT_SEC (240s default, SDK HttpOptions, whole-request cap on the async stream path).
+#     Chunk/HTTP timeouts are parsed by gemini_client.parse_timeout_env (invalid/nan/inf/<=0 -> warning + default).
+#     Repetition guard: _detect_repetition_collapse runs on BOTH accumulated text and thoughts (len > 2000) and returns a
+#     RepetitionCollapse(kind, token): 'runaway' (len > max(32000, max_output_tokens*4) or LLM_STREAM_RUNAWAY_MAX_CHARS),
+#     'micro' (4-37 char token contiguous >= 8x at the tail) or 'macro' (38-200 char phrase contiguous 4x/3x at the tail);
+#     formatting-only tokens are ignored. On collapse the chunk's function_call/usage are still consumed, looping thoughts
+#     are truncated, the stream is aclose()d, and with no function_call an explicit error turn is written (no silent False).
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 13b. [Pattern]: ReconcileScheduler (src/scheduling/) replaces monolithic event loop. start_event_loop() is a
 #     thin facade that wires QueueTrigger (BRPOP), ResyncTrigger (5s scan), StalenessGuard (jarvis 120s, chat 5400s).
@@ -260,7 +268,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypedDict
 
 import httpx
 
@@ -282,6 +290,7 @@ from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
+from .llm.gemini_client import DEFAULT_CHUNK_TIMEOUT_S, parse_timeout_env
 from .llm.types import derive_llm_priority, sanitize_call_syntax
 
 
@@ -902,6 +911,41 @@ class _BrainToolContext:
 
 
 _ACLOSE_TIMEOUT = 5.0
+
+# --- Stream repetition-collapse guard (see Brain._detect_repetition_collapse) ---
+# Output at or below this many chars is never scanned (short answers may legitimately repeat).
+_REPETITION_MIN_CHARS = 2000
+# Micro loop: a 4-37 char token repeated back-to-back >= 8 times at the very end of the text.
+_MICRO_TAIL_CHARS = 300
+_MICRO_MIN_TOKEN_LEN = 4
+_MICRO_MAX_TOKEN_LEN = 37  # 37 * 8 = 296 <= _MICRO_TAIL_CHARS
+_MICRO_MIN_REPEATS = 8
+# Macro loop: a 38-200 char phrase repeated back-to-back at the end (>= 4x below 80 chars, >= 3x from 80 chars).
+_MACRO_TAIL_CHARS = 1200
+_MACRO_MIN_PHRASE_LEN = _MICRO_MAX_TOKEN_LEN + 1
+_MACRO_MAX_PHRASE_LEN = 200
+_MACRO_LONG_PHRASE_LEN = 80
+_MACRO_MIN_REPEATS_SHORT = 4
+_MACRO_MIN_REPEATS_LONG = 3
+# Tokens made only of these chars (whitespace, markdown rules/tables/quotes/fences, dot leaders) are formatting, never loops.
+_FORMATTING_CHARS = " \t\r\n-_|=*#>`~+.\u2500\u2502"
+# Runaway ceiling (chars) per accumulator: max(default, max_output_tokens * 4); LLM_STREAM_RUNAWAY_MAX_CHARS overrides.
+_RUNAWAY_DEFAULT_MAX_CHARS = 32000
+_RUNAWAY_CHARS_PER_TOKEN = 4
+_RUNAWAY_MAX_CHARS_ENV = "LLM_STREAM_RUNAWAY_MAX_CHARS"
+_RUNAWAY_MAX_CHARS_ENV_LIMIT = 10_000_000
+# Looping thoughts kept after a collapse (head only) so they are not replayed into later prompts.
+_COLLAPSED_THOUGHTS_KEEP_CHARS = 2000
+
+# Thinking levels that are already at or below "low" (never raised by the CASUAL clamp).
+_THINKING_AT_OR_BELOW_LOW = frozenset({"none", "minimal", "low"})
+
+
+class RepetitionCollapse(NamedTuple):
+    """Result of Brain._detect_repetition_collapse. ``kind`` is 'runaway', 'micro' or 'macro'."""
+
+    kind: str
+    token: str  # repeating unit; "" for 'runaway' (a pure length cutoff, not a repetition)
 
 # Conversation compression safety net: when estimated prompt tokens exceed this budget,
 # _compress_contents prunes oldest turns from the front, keeping the last ~200K tokens.
@@ -1809,8 +1853,9 @@ class Brain:
             active_phases = self._match_phases(event, context_flags)
 
             system_prompt = await self._build_system_prompt(event, active_phases, context_flags, graph_recall=graph_recall)
-            event_domain = context_flags.get("event_domain") or getattr(event, "domain", None)
-            thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases, domain=event_domain)
+            thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(
+                active_phases, domain=context_flags.get("event_domain"),
+            )
             if event.source == "jarvis":
                 call_temp = max(call_temp, 1.7)
             elif event.source in ("chat", "slack"):
@@ -1921,8 +1966,14 @@ class Brain:
         raw_parts = None
         last_grounding = None
 
-        chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "180"))
+        chunk_timeout = parse_timeout_env(
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC", os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC"), DEFAULT_CHUNK_TIMEOUT_S,
+        )
+        runaway_max_chars = self._resolve_runaway_max_chars(phase_max_tokens)
         timeout_retries = 0
+        collapse: RepetitionCollapse | None = None
+        collapse_source = ""
+        collapse_chars = 0
 
         # Priority is stable for the whole call (including retries): derive once, outside the retry loop.
         llm_priority = derive_llm_priority(event)
@@ -1935,6 +1986,8 @@ class Brain:
                 function_call = None
                 raw_parts = None
                 last_grounding = None
+                collapse = None
+                collapse_source = ""
                 reflex_chunker, reflex_searcher = self._create_reflex_pair(
                     event_id,
                     event_domain=context_flags.get("event_domain") or "",
@@ -1965,43 +2018,45 @@ class Brain:
                             if chunk.text:
                                 if chunk.is_thought:
                                     accumulated_thoughts += chunk.text
-                                    thought_collapse = self._detect_repetition_collapse(accumulated_thoughts)
-                                    if thought_collapse:
-                                        logger.warning(
-                                            "Thought repetition collapse detected for %s — aborting stream (%d chars, token=%r)",
-                                            event_id, len(accumulated_thoughts), thought_collapse[:20],
-                                        )
-                                        break
-                                    if reflex_chunker:
-                                        window = reflex_chunker.feed(chunk.text)
-                                        if window and reflex_searcher:
-                                            reflex_searcher.fire(window)
-                                    now = time.time()
-                                    if (
-                                        now - last_thinking_pulse_time >= _THINKING_PULSE_INTERVAL_S
-                                        or (len(accumulated_thoughts) - last_thinking_pulse_len) >= _THINKING_PULSE_CHAR_DELTA
-                                    ):
-                                        last_thinking_pulse_time = now
-                                        last_thinking_pulse_len = await self._emit_thinking_pulse(
-                                            event_id, accumulated_thoughts, last_thinking_pulse_len,
-                                        )
+                                    collapse = self._detect_repetition_collapse(
+                                        accumulated_thoughts, max_chars=runaway_max_chars,
+                                    )
+                                    if collapse:
+                                        collapse_source = "thought"
+                                        collapse_chars = len(accumulated_thoughts)
+                                        accumulated_thoughts = self._truncate_collapsed_thoughts(accumulated_thoughts)
+                                    else:
+                                        if reflex_chunker:
+                                            window = reflex_chunker.feed(chunk.text)
+                                            if window and reflex_searcher:
+                                                reflex_searcher.fire(window)
+                                        now = time.time()
+                                        if (
+                                            now - last_thinking_pulse_time >= _THINKING_PULSE_INTERVAL_S
+                                            or (len(accumulated_thoughts) - last_thinking_pulse_len) >= _THINKING_PULSE_CHAR_DELTA
+                                        ):
+                                            last_thinking_pulse_time = now
+                                            last_thinking_pulse_len = await self._emit_thinking_pulse(
+                                                event_id, accumulated_thoughts, last_thinking_pulse_len,
+                                            )
                                 else:
                                     accumulated_text += chunk.text
-                                    collapse_token = self._detect_repetition_collapse(accumulated_text)
-                                    if collapse_token:
-                                        logger.warning(
-                                            "Repetition collapse detected for %s — aborting stream (%d chars, token=%r)",
-                                            event_id, len(accumulated_text), collapse_token[:20],
-                                        )
-                                        accumulated_text = ""
-                                        break
-                                await self._broadcast({
-                                    "type": "brain_thinking",
-                                    "event_id": event_id,
-                                    "text": chunk.text,
-                                    "accumulated": accumulated_thoughts + accumulated_text,
-                                    "is_thought": chunk.is_thought,
-                                })
+                                    collapse = self._detect_repetition_collapse(
+                                        accumulated_text, max_chars=runaway_max_chars,
+                                    )
+                                    if collapse:
+                                        collapse_source = "text"
+                                        collapse_chars = len(accumulated_text)
+                                if not collapse:
+                                    await self._broadcast({
+                                        "type": "brain_thinking",
+                                        "event_id": event_id,
+                                        "text": chunk.text,
+                                        "accumulated": accumulated_thoughts + accumulated_text,
+                                        "is_thought": chunk.is_thought,
+                                    })
+                            # Chunk metadata is consumed BEFORE honouring a collapse abort so a valid
+                            # function_call / usage carried on the same chunk is never dropped.
                             if chunk.function_call:
                                 function_call = chunk.function_call
                             if chunk.raw_parts:
@@ -2011,6 +2066,21 @@ class Brain:
                             if chunk.usage:
                                 from .llm import record_token_usage
                                 record_token_usage("brain", chunk.usage, event_id)
+                            if collapse:
+                                if collapse.kind == "runaway":
+                                    logger.warning(
+                                        "Runaway %s output for %s — aborting stream (%d chars > %d-char ceiling)",
+                                        collapse_source, event_id, collapse_chars, runaway_max_chars,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "%s repetition collapse (%s) detected for %s — aborting stream (%d chars, token=%r)",
+                                        collapse_source.capitalize(), collapse.kind, event_id, collapse_chars,
+                                        collapse.token[:20],
+                                    )
+                                if collapse_source == "text":
+                                    accumulated_text = ""
+                                break
                         last_error = None
                         break
                     except asyncio.TimeoutError:
@@ -2062,6 +2132,23 @@ class Brain:
         finally:
             # Clear thinking indicator ONCE after the loop exits
             await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+
+        # Collapse abort without a tool call: the partial output is unusable and must not be persisted or
+        # replayed. Record an explicit diagnostic turn (once) instead of returning False with no error state.
+        if collapse is not None and not function_call:
+            self._reasoning_by_event.pop(event_id, None)
+            if collapse.kind == "runaway":
+                detail = f"{collapse_source} exceeded the {runaway_max_chars}-char runaway ceiling"
+            else:
+                detail = f"{collapse_source} entered a {collapse.kind} repetition loop ({len(collapse.token)}-char unit)"
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="error",
+                thoughts=f"LLM stream aborted: {detail}; no tool call or valid output was produced",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return False
 
         # If all retries failed with no output, write error turn
         if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
@@ -2430,42 +2517,79 @@ class Brain:
         return False
 
     @staticmethod
-    def _detect_repetition_collapse(text: str) -> str | None:
-        """Detect micro or macro repetition collapse in streaming text or thoughts.
+    def _is_formatting_token(token: str) -> bool:
+        """True if ``token`` is only whitespace / markdown rule, table, quote, fence or dot-leader characters."""
+        return not token.strip(_FORMATTING_CHARS)
 
-        Checks:
-        1. Hard runaway length guard (> 32,000 chars without stream termination).
-        2. Micro-loops (9-30 char tokens repeating >= 5 times in 300-char tail).
-        3. Macro-loops (40-200 char phrases repeating >= 3 times in 1200-char tail).
+    @staticmethod
+    def _detect_repetition_collapse(
+        text: str, max_chars: int = _RUNAWAY_DEFAULT_MAX_CHARS,
+    ) -> RepetitionCollapse | None:
+        """Detect a degenerate streaming loop in accumulated text or thoughts.
+
+        Only text longer than _REPETITION_MIN_CHARS is scanned. Checks, in order:
+        1. runaway: len(text) > ``max_chars`` (kind='runaway', token='' -- a length cutoff, not a repetition).
+        2. micro: the text ENDS with a 4-37 char token repeated back-to-back >= 8 times.
+        3. macro: the text ENDS with a 38-200 char phrase repeated back-to-back (>= 4x if < 80 chars, else >= 3x).
+        Repetition must be contiguous at the tail and non-formatting, so bullet/numbered lists, tables, ``---`` rules,
+        indented code and similar-but-different log/YAML lines never trigger.
         """
         text_len = len(text)
-        if text_len <= 2000:
+        if text_len <= _REPETITION_MIN_CHARS:
             return None
 
-        # 1. Hard runaway guard
-        if text_len > 32000:
-            return "RUNAWAY_LENGTH_LIMIT"
+        if text_len > max_chars:
+            return RepetitionCollapse("runaway", "")
 
-        # 2. Micro-repetition (short loops: 9-30 chars)
-        tail_micro = text[-300:]
-        for L in (9, 12, 15, 20, 30):
-            token = tail_micro[-L:]
-            if token and tail_micro.count(token) >= 5:
-                return token
-            token_head = tail_micro[:L]
-            if token_head and tail_micro.count(token_head) >= 5:
-                return token_head
+        tail_micro = text[-_MICRO_TAIL_CHARS:]
+        for length in range(_MICRO_MIN_TOKEN_LEN, _MICRO_MAX_TOKEN_LEN + 1):
+            token = tail_micro[-length:]
+            if Brain._is_formatting_token(token):
+                continue
+            if tail_micro.endswith(token * _MICRO_MIN_REPEATS):
+                return RepetitionCollapse("micro", token)
 
-        # 3. Macro-repetition (sentence/paragraph loops: 40-200 chars)
-        if text_len >= 1200:
-            tail_macro = text[-1200:]
-            for L in (40, 60, 80, 120, 200):
-                if len(tail_macro) >= L * 2:
-                    token = tail_macro[-L:]
-                    if token and tail_macro.count(token) >= 3:
-                        return token
+        tail_macro = text[-_MACRO_TAIL_CHARS:]
+        for length in range(_MACRO_MIN_PHRASE_LEN, _MACRO_MAX_PHRASE_LEN + 1):
+            phrase = tail_macro[-length:]
+            if Brain._is_formatting_token(phrase):
+                continue
+            repeats = _MACRO_MIN_REPEATS_SHORT if length < _MACRO_LONG_PHRASE_LEN else _MACRO_MIN_REPEATS_LONG
+            if tail_macro.endswith(phrase * repeats):
+                return RepetitionCollapse("macro", phrase)
 
         return None
+
+    @staticmethod
+    def _resolve_runaway_max_chars(phase_max_tokens: int | None = None) -> int:
+        """Runaway char ceiling: LLM_STREAM_RUNAWAY_MAX_CHARS if valid, else max(32000, max_output_tokens * 4)."""
+        default = _RUNAWAY_DEFAULT_MAX_CHARS
+        try:
+            if phase_max_tokens:
+                default = max(default, int(phase_max_tokens) * _RUNAWAY_CHARS_PER_TOKEN)
+        except (TypeError, ValueError):
+            pass
+        raw = os.getenv(_RUNAWAY_MAX_CHARS_ENV)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            val = int(raw.strip())
+        except ValueError:
+            val = 0
+        if not (_REPETITION_MIN_CHARS < val <= _RUNAWAY_MAX_CHARS_ENV_LIMIT):
+            logger.warning(
+                "Invalid %s=%r (need an integer in (%d, %d]); using %d",
+                _RUNAWAY_MAX_CHARS_ENV, raw, _REPETITION_MIN_CHARS, _RUNAWAY_MAX_CHARS_ENV_LIMIT, default,
+            )
+            return default
+        return val
+
+    @staticmethod
+    def _truncate_collapsed_thoughts(thoughts: str) -> str:
+        """Keep only the head of looping thoughts so they are not replayed into later prompts."""
+        if len(thoughts) <= _COLLAPSED_THOUGHTS_KEEP_CHARS:
+            return thoughts
+        return thoughts[:_COLLAPSED_THOUGHTS_KEEP_CHARS] + "\n[...thoughts truncated: repetition collapse]"
 
     def _create_reflex_pair(self, event_id: str, event_domain: str = "", event_service: str = ""):
         """Create (SentenceChunker, ReflexSearcher) or (None, None).
@@ -2537,17 +2661,30 @@ class Brain:
                 deduped.append(c)
         return deduped
 
+    @staticmethod
+    def _clamp_casual_thinking(thinking_level: str, domain: Any) -> str:
+        """Clamp thinking_level down to 'low' for the CASUAL domain (greetings, status check-ins, small talk).
+
+        Conversational events need no deep reasoning; 'low' avoids TTFT prefill spikes and reasoning collapse.
+        ``domain`` may be a str or an Enum (case/whitespace-insensitive). Levels already <= low are unchanged.
+        """
+        raw = getattr(domain, "value", domain)
+        if not raw or str(raw).strip().lower() != "casual":
+            return thinking_level
+        if str(thinking_level).strip().lower() in _THINKING_AT_OR_BELOW_LOW:
+            return thinking_level
+        return "low"
+
     def _resolve_llm_params(self, active_phases: list[str], domain: str | None = None) -> tuple[str, float, int]:
         """Resolve thinking_level + temperature + max_output_tokens from phase metadata.
 
         Most specific phase wins (lowest priority number).
         Falls back to legacy heuristic if loader unavailable.
-        CASUAL domain forces thinking_level='low' to eliminate prefill stalls and repetition spirals on chat.
+        CASUAL domain clamps thinking_level down to 'low' (never raises it) via _clamp_casual_thinking.
         """
         fallback_temp = getattr(self, "temperature", 1.0)
         if not self._skill_loader:
-            best_thinking = "low" if domain and str(domain).strip().upper() == "CASUAL" else "high"
-            return best_thinking, fallback_temp, self.max_output_tokens
+            return self._clamp_casual_thinking("high", domain), fallback_temp, self.max_output_tokens
 
         best_priority = float("inf")
         best_thinking = "high"
@@ -2564,11 +2701,7 @@ class Brain:
                     best_temp = meta.get("temperature", fallback_temp)
                     best_tokens = meta.get("max_output_tokens", self.max_output_tokens)
 
-        # CASUAL domain tuning: conversational, non-problem interactions (greetings, status checks,
-        # small talk) do not require deep analytical reasoning. Clamping thinking_level to "low"
-        # avoids TTFT prefill latency spikes and reasoning collapse.
-        if domain and str(domain).strip().upper() == "CASUAL":
-            best_thinking = "low"
+        best_thinking = self._clamp_casual_thinking(best_thinking, domain)
 
         try:
             best_temp = float(best_temp) if best_temp is not None else fallback_temp
