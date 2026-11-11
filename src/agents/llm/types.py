@@ -226,7 +226,12 @@ def process_stream_call_syntax_buffer(buffer: str) -> tuple[str, str]:
 # =============================================================================
 
 class LLMPort(Protocol):
-    """Hexagonal port -- adapters implement this for each LLM provider."""
+    """Hexagonal port -- adapters implement this for each LLM provider.
+
+    max_output_tokens: generate_stream() keeps the 65000 ceiling. Adapters MAY clamp it on the unary generate()
+    path to the model/endpoint limit (GeminiAdapter.generate() clamps to 32768 and logs a warning), so callers
+    needing more than that should use generate_stream().
+    """
 
     async def generate(
         self,

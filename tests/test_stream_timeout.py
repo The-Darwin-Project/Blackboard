@@ -465,7 +465,7 @@ class TestStreamTimeout:
         sdk_stream = HangingSDKStream()
 
         adapter = GeminiAdapter.__new__(GeminiAdapter)
-        adapter._model_name = "gemini-4-argon"
+        adapter._model_name = "gemini-4-carbon"
         adapter._tracker = None
         adapter._estimate_tokens = lambda contents: 50
         adapter._convert_contents = lambda contents: contents

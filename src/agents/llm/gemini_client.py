@@ -38,6 +38,10 @@
 #     _extract_call_syntax enforces the tool allowlist fail-closed whenever tools is not None (tools=[] allows nothing),
 #     walks every tag (first declared + JSON-object wins) and never lets raw syntax into returned text. On streaming
 #     holdback overflow the fragment is discarded, later text is suppressed, and the fallback call is NOT executed.
+# 17. [Constraint]: Output-token ceilings differ per path. generate() (unary generate_content) clamps max_output_tokens to
+#     _GEMINI_UNARY_MAX_OUTPUT_TOKENS (32768) and logs a WARNING naming model/requested/clamped whenever it clamps, so truncation is
+#     never silent. generate_stream() keeps the 65000 default and does NOT clamp. _build_config always sets include_thoughts=True and
+#     thinking tokens draw from the same max_output_tokens budget, so a low cap can truncate visible output.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -69,6 +73,10 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Unary generate_content output-token ceiling. generate_stream() is NOT subject to this cap (65000 default).
+# Thinking tokens (include_thoughts=True) are counted against max_output_tokens.
+_GEMINI_UNARY_MAX_OUTPUT_TOKENS = 32768
 
 # Synthetic turn texts used to keep the Gemini wire protocol valid (strict user/model alternation).
 _SYNTHETIC_BRIDGE_TEXT = "Acknowledged."
@@ -543,11 +551,30 @@ class GeminiAdapter:
         tools: list[dict] | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
-        max_output_tokens: int = 65000,
+        max_output_tokens: int = _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
+        """Blocking generateContent call.
+
+        max_output_tokens is clamped to _GEMINI_UNARY_MAX_OUTPUT_TOKENS (32768) on this unary path (a WARNING is
+        logged when a larger value is requested); generate_stream() allows up to 65000 unclamped. Because
+        include_thoughts=True, thinking tokens draw from this same budget.
+        """
+        if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens <= 0:
+            logger.warning(
+                "Gemini generate(): invalid max_output_tokens=%r for model %s; using default %d",
+                max_output_tokens, self._model_name, _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
+            )
+            max_output_tokens = _GEMINI_UNARY_MAX_OUTPUT_TOKENS
+        elif max_output_tokens > _GEMINI_UNARY_MAX_OUTPUT_TOKENS:
+            logger.warning(
+                "Gemini generate(): max_output_tokens clamped for model %s (requested=%d, clamped=%d); "
+                "use generate_stream() for larger outputs",
+                self._model_name, max_output_tokens, _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
+            )
+            max_output_tokens = _GEMINI_UNARY_MAX_OUTPUT_TOKENS
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
