@@ -152,7 +152,7 @@ class TestGeminiGenerateStreamUsageDrain:
         from src.agents.llm.types import FunctionCall
 
         adapter = GeminiAdapter.__new__(GeminiAdapter)
-        adapter._model_name = "gemini-4-argon"
+        adapter._model_name = "gemini-4-carbon"
         adapter._tracker = None
         adapter._is_thought_part = lambda part: getattr(part, "thought", False)
         adapter._estimate_tokens = lambda contents: 50
@@ -245,7 +245,7 @@ class TestGeminiGenerateStreamDrainHardening:
         from src.agents.llm.gemini_client import GeminiAdapter
 
         adapter = GeminiAdapter.__new__(GeminiAdapter)
-        adapter._model_name = "gemini-4-argon"
+        adapter._model_name = "gemini-4-carbon"
         adapter._tracker = tracker
         adapter._estimate_tokens = lambda contents: 50
         adapter._convert_contents = lambda contents: contents
@@ -786,7 +786,7 @@ class TestGeminiStreamReservationPaths:
         from src.agents.llm.gemini_client import GeminiAdapter
 
         adapter = GeminiAdapter.__new__(GeminiAdapter)
-        adapter._model_name = "gemini-4-argon"
+        adapter._model_name = "gemini-4-carbon"
         adapter._tracker = tracker
         adapter._estimate_tokens = lambda contents: 50
         adapter._convert_contents = lambda contents: contents

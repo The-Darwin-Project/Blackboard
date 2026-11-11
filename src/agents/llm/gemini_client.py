@@ -543,11 +543,12 @@ class GeminiAdapter:
         tools: list[dict] | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
-        max_output_tokens: int = 65000,
+        max_output_tokens: int = 32768,
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
+        max_output_tokens = min(max_output_tokens, 32768)
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)

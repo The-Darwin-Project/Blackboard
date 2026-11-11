@@ -69,7 +69,7 @@ async def main():
 
     project = os.getenv("GCP_PROJECT", "")
     location = os.getenv("GCP_LOCATION", "global")
-    model = os.getenv("LLM_MODEL_BRAIN", "gemini-4-argon")
+    model = os.getenv("LLM_MODEL_BRAIN", "gemini-4-carbon")
 
     print(f"Project: {project} | Location: {location} | Model: {model}")
 
