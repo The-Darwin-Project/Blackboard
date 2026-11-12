@@ -12,10 +12,13 @@ Phase 3.5:  After deduplication, asserts no duplicate content + gated/ metadata 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
 import yaml
+
+from tests.test_skill_ci_gating_probes import _TOOL_NAMES
 
 SKILLS_DIR = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
 
@@ -421,4 +424,101 @@ class TestWaitingApprovalDedupRepollProbe:
             full_path = SKILLS_DIR / path
             lines = full_path.read_text().splitlines()
             assert len(lines) <= 100, f"{path} exceeded modularity ceiling: {len(lines)} lines"
+
+
+class TestGemini4PhaseBudgetsAndSelfAuditSkillsProbe:
+    """Gemini 4 phase YAML budgets and section-scoped self-audit skill probes (#322, #323, #324).
+
+    T-10: All 12 _phase.yaml budgets are 65536 and intermediate/_phase.yaml description updated.
+    T-11: Section-scoped after-escalation and field-note conciseness contracts + hygiene checks.
+    T-12: Cross-source BrainSkillLoader hygiene + JARVIS incremental inspection & passive sticky notes.
+    """
+
+    _TOOL_RE = re.compile(
+        r"\b(" + "|".join(sorted(map(re.escape, _TOOL_NAMES), key=len, reverse=True)) + r")\b"
+    )
+
+    def test_all_12_phase_yaml_budgets_are_65536(self, loader):
+        """T-10: Every _phase.yaml sets max_output_tokens == 65536 and intermediate description aligns."""
+        phase_yamls = sorted(SKILLS_DIR.glob("*/_phase.yaml"))
+        assert len(phase_yamls) == 12
+
+        for yaml_path in phase_yamls:
+            phase = yaml_path.parent.name
+            meta = loader.get_phase_meta(phase)
+            assert meta["max_output_tokens"] == 65536, (
+                f"{phase}/_phase.yaml expected max_output_tokens=65536, got {meta.get('max_output_tokens')}"
+            )
+
+        intermediate_desc = loader.get_phase_meta("intermediate")["description"]
+        assert "Normalized token limit: 65536." in intermediate_desc
+        assert "defer_event" in intermediate_desc
+
+    def test_after_escalation_and_field_note_conciseness_contracts(self, loader):
+        """T-11: Section-scoped contracts for always/09-phase-lifecycle.md and always/10-observations.md."""
+        tool_re = self._TOOL_RE
+
+        esc_sec = _section(_skill(loader, "always/09-phase-lifecycle.md"), "## After Escalation")
+        esc_lower = esc_sec.lower()
+        assert "single-delivery" in esc_lower
+        assert "automated check-in" in esc_lower
+        assert "live repository or promotion state" in esc_lower
+        assert set(tool_re.findall(esc_sec)) == set()
+
+        obs_sec = _section(_skill(loader, "always/10-observations.md"), "### Note vs Other Tools")
+        obs_lower = obs_sec.lower()
+        assert "triage context" in obs_lower
+        assert "compact, self-contained insight" in obs_lower
+        assert "shared token capacity" in obs_lower
+        assert set(tool_re.findall(obs_sec)) - {"record_observation", "take_note"} == set()
+
+        added_obs = obs_sec.split("Sticky notes bridge two specific consecutive events.", 1)[1]
+        assert added_obs.strip() != ""
+        assert set(tool_re.findall(added_obs)) == set()
+
+        for md_path in sorted(SKILLS_DIR.rglob("*.md")):
+            text = md_path.read_text(encoding="utf-8")
+            assert "32768" not in text, f"Hardcoded 32768 literal in {md_path.relative_to(SKILLS_DIR)}"
+            assert "defers=0" not in text, f"Internal defers=0 syntax in {md_path.relative_to(SKILLS_DIR)}"
+
+    def test_jarvis_incremental_inspection_and_passive_sticky_notes(self, loader):
+        """T-12: Cross-source tool-map hygiene and section-scoped contracts for source/jarvis.md."""
+        tool_re = self._TOOL_RE
+
+        assert loader.get_tool_skills("post_sticky_note") == ["source/jarvis.md"]
+        assert loader.get_tool_skills("wait_for_jarvis") == ["source/jarvis.md"]
+        assert "source/jarvis.md" not in loader.get_tool_skills("inspect_event")
+        assert "source/jarvis.md" not in loader.get_tool_skills("lookup_journal")
+        assert '<skill id="source/jarvis.md" />' in loader.build_skill_refs(
+            "inspect_event", event_source="jarvis"
+        )
+        assert '<skill id="source/jarvis.md" />' in loader.build_skill_refs(
+            "lookup_journal", event_source="jarvis"
+        )
+        assert "source/jarvis.md" not in loader.build_skill_refs(
+            "lookup_journal", event_source="headhunter"
+        )
+
+        jarvis_body = _skill(loader, "source/jarvis.md")
+        proto_sec = _section(jarvis_body, "## Protocol")
+        sticky_sec = _section(jarvis_body, "## Sticky Notes")
+
+        proto_lower = proto_sec.lower()
+        assert "ops journal" in proto_lower
+        assert "incrementally" in proto_lower
+        assert "prior diagnosis" in proto_lower
+
+        sticky_lower = sticky_sec.lower()
+        assert "passive" in sticky_lower
+        assert "unscheduled stalled event" in sticky_lower
+        assert "zero active deferrals" in sticky_lower
+
+        assert set(tool_re.findall(jarvis_body)) - {"wait_for_jarvis", "hold_watch"} == set()
+        proto_steps_1_to_4 = proto_sec.split("5. **Send your assessment to JARVIS.**", 1)[0]
+        assert set(tool_re.findall(proto_steps_1_to_4)) == set()
+
+        added_sticky = sticky_sec.split("that event.", 1)[1]
+        assert added_sticky.strip() != ""
+        assert set(tool_re.findall(added_sticky)) == set()
+
 

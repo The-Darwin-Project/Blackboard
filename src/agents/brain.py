@@ -21,15 +21,13 @@
 # 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
 #     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
 #     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
-# 12b. [Pattern]: Per-chunk stream timeout: asyncio.wait_for(anext(it), timeout=LLM_STREAM_CHUNK_TIMEOUT_SEC).
-#     On timeout: retry once (dedicated timeout_retries counter, independent from transient retries). On
-#     exhaustion: clear all accumulators, write timeout-specific error turn. The stream is closed (bounded
-#     aclose, 5s) in a finally on EVERY exit where it was not fully consumed (stream_exhausted False): timeout,
-#     repetition-collapse break, error, cancel. Normal completion never calls aclose.
+# 12b. [Pattern]: Adaptive two-phase + total stream timeout in _process_with_llm via resolve_stream_timeouts() (.llm):
+#     Phase 1 (TTFB, chunk_idx==0): LLM_STREAM_TTFB_TIMEOUT_SEC (35s default); Phase 2 (sliding inter-chunk):
+#     LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC (30s default); Hard cap: LLM_STREAM_TOTAL_TIMEOUT_SEC (180s default).
+#     Legacy LLM_STREAM_CHUNK_TIMEOUT_SEC seeds TTFB + inter-chunk defaults when set. TTFB/inter-chunk timeouts retry
+#     once (timeout_retries); LLMStreamTotalTimeoutError aborts immediately with zero retries. Stream closed (bounded
+#     aclose, 5s) in finally whenever stream_exhausted is False; normal completion never calls aclose.
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
-#     Timeout ordering invariant: LLM_STREAM_DRAIN_TIMEOUT_SEC (15s, adapter post-tool-call drain) << LLM_STREAM_CHUNK_TIMEOUT_SEC
-#     (180s default, this wait_for) < LLM_HTTP_TIMEOUT_SEC (240s default, SDK HttpOptions, whole-request cap on the async stream path).
-#     Chunk/HTTP timeouts are parsed by gemini_client.parse_timeout_env (invalid/nan/inf/<=0 -> warning + default).
 #     Repetition guard: _detect_repetition_collapse runs on BOTH accumulated text and thoughts (len > 2000) and returns a
 #     RepetitionCollapse(kind, token): 'runaway' (len > max(32000, max_output_tokens*4) or LLM_STREAM_RUNAWAY_MAX_CHARS),
 #     'micro' (4-37 char token contiguous >= 8x at the tail) or 'macro' (38-200 char phrase contiguous 4x/3x at the tail);
@@ -261,8 +259,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -289,9 +289,17 @@ from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
+from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
-from .llm.gemini_client import DEFAULT_CHUNK_TIMEOUT_S, parse_timeout_env
-from .llm.types import derive_llm_priority, sanitize_call_syntax
+from .llm import (
+    LLMStreamInterChunkTimeoutError,
+    LLMStreamTimeoutError,
+    LLMStreamTotalTimeoutError,
+    LLMStreamTTFBTimeoutError,
+    derive_llm_priority,
+    resolve_stream_timeouts,
+    sanitize_call_syntax,
+)
 
 
 class ContextFlags(TypedDict, total=False):
@@ -375,8 +383,22 @@ _BRAIN_TOOL_NAMES: frozenset[str] = frozenset()
 
 def _init_tool_names() -> frozenset[str]:
     """Lazy-load tool names from BRAIN_TOOL_SCHEMAS."""
-    from .llm.types import BRAIN_TOOL_SCHEMAS
+    from .llm import BRAIN_TOOL_SCHEMAS
     return frozenset(t["name"] for t in BRAIN_TOOL_SCHEMAS)
+
+
+def _parse_positive_int_env(name: str, raw: Any, default: int) -> int:
+    """Parse a positive integer env var, logging and falling back on invalid values."""
+    try:
+        if isinstance(raw, bool) or raw is None or not str(raw).strip():
+            raise ValueError("empty or bool")
+        val = int(str(raw).strip())
+        if val <= 0:
+            raise ValueError("non-positive")
+        return val
+    except (ValueError, TypeError, OverflowError):
+        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
 
 
 def _strip_tool_names(text: str) -> str:
@@ -1085,7 +1107,9 @@ class Brain:
         self.provider = os.getenv("LLM_PROVIDER", "gemini")
         self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
         self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-4-carbon")
-        self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
+        self.max_output_tokens = _parse_positive_int_env(
+            "LLM_MAX_TOKENS_BRAIN", os.getenv("LLM_MAX_TOKENS_BRAIN", "65536"), 65536
+        )
         # CLI stdout is not bounded by an LLM's maxOutputTokens -- this is the
         # only configurable ceiling on agent result turn size (Goal 1, truncation-search-destroy).
         self._agent_result_max = int(os.getenv("AGENT_RESULT_MAX_CHARS", "100000"))
@@ -1966,9 +1990,9 @@ class Brain:
         raw_parts = None
         last_grounding = None
 
-        chunk_timeout = parse_timeout_env(
-            "LLM_STREAM_CHUNK_TIMEOUT_SEC", os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC"), DEFAULT_CHUNK_TIMEOUT_S,
-        )
+        ttfb_timeout, inter_chunk_timeout, total_timeout = resolve_stream_timeouts()
+        last_wait_budget = ttfb_timeout
+        timeout_phase = "ttfb"
         runaway_max_chars = self._resolve_runaway_max_chars(phase_max_tokens)
         timeout_retries = 0
         collapse: RepetitionCollapse | None = None
@@ -1997,24 +2021,92 @@ class Brain:
                 try:
                     stream = None
                     stream_exhausted = False
+                    preacquired = None
                     try:
-                        stream = self._adapter.generate_stream(
-                            system_prompt=system_prompt,
-                            contents=prompt,
-                            tools=active_tools,
-                            temperature=call_temp,
-                            max_output_tokens=phase_max_tokens,
-                            thinking_level=thinking_level,
-                            priority=llm_priority,
-                        )
+                        acquire_fn = getattr(self._adapter, "acquire_stream_reservation", None)
+                        stream_kwargs: dict[str, Any] = {
+                            "system_prompt": system_prompt,
+                            "contents": prompt,
+                            "tools": active_tools,
+                            "temperature": call_temp,
+                            "max_output_tokens": phase_max_tokens,
+                            "thinking_level": thinking_level,
+                            "priority": llm_priority,
+                        }
+                        if getattr(self._adapter, "_tracker", None) is not None and inspect.iscoroutinefunction(acquire_fn):
+                            preacquired = await acquire_fn(prompt, priority=llm_priority)
+                            stream_kwargs["_preacquired"] = preacquired
+                        stream = self._adapter.generate_stream(**stream_kwargs)
                         it = stream.__aiter__()
+                        stream_start = time.monotonic()
+                        chunk_idx = 0
+                        done_seen = False
+                        last_ws_thought_time: float | None = None
                         last_thinking_pulse_time = time.time()
                         while True:
+                            if done_seen:
+                                curr_task = asyncio.current_task()
+                                pre_cancels = (
+                                    curr_task.cancelling() if curr_task and hasattr(curr_task, "cancelling") else 0
+                                )
+                                try:
+                                    await asyncio.wait_for(anext(it), timeout=_ACLOSE_TIMEOUT)
+                                    if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                                        raise asyncio.CancelledError()
+                                except StopAsyncIteration:
+                                    stream_exhausted = True
+                                except (asyncio.TimeoutError, TimeoutError):
+                                    if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                                        raise asyncio.CancelledError() from None
+                                    logger.warning("Stream teardown timed out after done chunk for %s", event_id)
+                                break
+
+                            elapsed = 0.0 if chunk_idx == 0 else (time.monotonic() - stream_start)
+                            remaining_total = total_timeout - elapsed
+                            if remaining_total <= 0:
+                                timeout_phase = "total"
+                                last_wait_budget = total_timeout
+                                raise LLMStreamTotalTimeoutError(
+                                    f"LLM stream exceeded total timeout ({total_timeout}s) for {event_id}"
+                                )
+                            is_ttfb = chunk_idx == 0
+                            phase_timeout = ttfb_timeout if is_ttfb else inter_chunk_timeout
+                            wait_budget = min(phase_timeout, remaining_total)
+                            if is_ttfb:
+                                timeout_phase = "ttfb"
+                                last_wait_budget = wait_budget
+                            elif remaining_total <= phase_timeout:
+                                timeout_phase = "total"
+                                last_wait_budget = total_timeout
+                            else:
+                                timeout_phase = "inter-chunk"
+                                last_wait_budget = phase_timeout
+                            curr_task = asyncio.current_task()
+                            pre_cancels = (
+                                curr_task.cancelling() if curr_task and hasattr(curr_task, "cancelling") else 0
+                            )
                             try:
-                                chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
+                                chunk = await asyncio.wait_for(anext(it), timeout=wait_budget)
                             except StopAsyncIteration:
                                 stream_exhausted = True
                                 break
+                            except asyncio.TimeoutError as te:
+                                if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                                    raise asyncio.CancelledError() from None
+                                if timeout_phase == "total":
+                                    raise LLMStreamTotalTimeoutError(
+                                        f"LLM stream exceeded total timeout ({total_timeout}s) for {event_id}"
+                                    ) from te
+                                if timeout_phase == "ttfb":
+                                    raise LLMStreamTTFBTimeoutError(
+                                        f"LLM stream TTFB timed out after {last_wait_budget}s for {event_id}"
+                                    ) from te
+                                raise LLMStreamInterChunkTimeoutError(
+                                    f"LLM stream inter-chunk timed out after {last_wait_budget}s for {event_id}"
+                                ) from te
+                            if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                                raise asyncio.CancelledError()
+                            chunk_idx += 1
                             if chunk.text:
                                 if chunk.is_thought:
                                     accumulated_thoughts += chunk.text
@@ -2048,13 +2140,25 @@ class Brain:
                                         collapse_source = "text"
                                         collapse_chars = len(accumulated_text)
                                 if not collapse:
-                                    await self._broadcast({
-                                        "type": "brain_thinking",
-                                        "event_id": event_id,
-                                        "text": chunk.text,
-                                        "accumulated": accumulated_thoughts + accumulated_text,
-                                        "is_thought": chunk.is_thought,
-                                    })
+                                    if chunk.is_thought:
+                                        now_mono = time.monotonic()
+                                        if last_ws_thought_time is None or (now_mono - last_ws_thought_time) >= 0.15:
+                                            last_ws_thought_time = now_mono
+                                            await self._broadcast({
+                                                "type": "brain_thinking",
+                                                "event_id": event_id,
+                                                "text": chunk.text,
+                                                "accumulated": "",
+                                                "is_thought": True,
+                                            })
+                                    else:
+                                        await self._broadcast({
+                                            "type": "brain_thinking",
+                                            "event_id": event_id,
+                                            "text": chunk.text,
+                                            "accumulated": accumulated_text[-32768:],
+                                            "is_thought": False,
+                                        })
                             # Chunk metadata is consumed BEFORE honouring a collapse abort so a valid
                             # function_call / usage carried on the same chunk is never dropped.
                             if chunk.function_call:
@@ -2064,8 +2168,9 @@ class Brain:
                             if chunk.grounding_metadata:
                                 last_grounding = chunk.grounding_metadata
                             if chunk.usage:
-                                from .llm import record_token_usage
-                                record_token_usage("brain", chunk.usage, event_id)
+                                _llm_pkg.record_token_usage("brain", chunk.usage, event_id)
+                            if chunk.done:
+                                done_seen = True
                             if collapse:
                                 if collapse.kind == "runaway":
                                     logger.warning(
@@ -2084,9 +2189,15 @@ class Brain:
                         last_error = None
                         break
                     except asyncio.TimeoutError:
-                        logger.warning(f"Brain LLM stream timed out for {event_id} after {chunk_timeout}s (attempt {attempt+1})")
+                        logger.warning(
+                            f"Brain LLM stream ({timeout_phase}) timed out for {event_id} after {last_wait_budget}s (attempt {attempt+1})"
+                        )
                         raise
                     finally:
+                        if preacquired and preacquired[1] is not None and not preacquired[2]:
+                            tracker = getattr(self._adapter, "_tracker", None)
+                            if tracker and hasattr(tracker, "rollback"):
+                                tracker.rollback(preacquired[1])
                         # Any exit where the stream was not fully consumed (timeout, repetition-collapse break,
                         # error, cancel): close it so the SDK response/quota is released while we still hold the ref.
                         if stream is not None and not stream_exhausted and hasattr(stream, 'aclose'):
@@ -2097,9 +2208,9 @@ class Brain:
                 except Exception as e:
                     last_error = e
                     if isinstance(e, asyncio.TimeoutError):
-                        if timeout_retries < 1 and attempt < max_retries:
+                        if not isinstance(e, LLMStreamTotalTimeoutError) and timeout_retries < 1 and attempt < max_retries:
                             timeout_retries += 1
-                            logger.warning(f"Brain LLM stream timeout for {event_id}, retrying once")
+                            logger.warning(f"Brain LLM stream ({timeout_phase}) timeout for {event_id}, retrying once")
                             await asyncio.sleep(5)
                             continue
                         accumulated_text = ""
@@ -2107,7 +2218,7 @@ class Brain:
                         function_call = None
                         raw_parts = None
                         last_grounding = None
-                        logger.error(f"Brain LLM stream timeout for {event_id} after retry — giving up")
+                        logger.error(f"Brain LLM stream ({timeout_phase}) timeout for {event_id} — giving up")
                         break
                     if attempt < max_retries and self._is_transient(e):
                         is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
@@ -2155,7 +2266,7 @@ class Brain:
             self._reasoning_by_event.pop(event_id, None)
             is_timeout = isinstance(last_error, asyncio.TimeoutError)
             error_text = (
-                f"LLM stream timed out (no chunks for {chunk_timeout}s) after {attempt + 1} attempts"
+                f"LLM stream ({timeout_phase}) timed out (budget {last_wait_budget}s) after {attempt + 1} attempts"
                 if is_timeout
                 else f"LLM call failed after {attempt + 1} attempts: {_sanitize_error_text(last_error)}"
             )
@@ -2193,6 +2304,9 @@ class Brain:
             p for p in (captured_parts or []) if p.get("functionCall")
         ]
         if _THOUGHT_SIG_V2 and len(function_calls) > 1:
+            batch_fcs = function_calls[:_MAX_BATCH_SIZE]
+            batch_size = len(batch_fcs)
+            is_terminal = any(fc["functionCall"]["name"] in _CYCLE_ENDING_TOOLS for fc in batch_fcs)
             # Flush text before batch
             clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
             if clean_accumulated and not response_emitted:
@@ -2217,9 +2331,6 @@ class Brain:
                         thoughts=clean_accumulated,
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
-
-            batch_fcs = function_calls[:_MAX_BATCH_SIZE]
-            batch_size = len(batch_fcs)
 
             # H2 fix: positional truncation of captured_parts to executed FCs only
             if len(function_calls) > _MAX_BATCH_SIZE:
@@ -2354,6 +2465,26 @@ class Brain:
 
         # Process the final result (single-FC path)
         if function_call:
+            if captured_parts and len(function_calls) > 1:
+                sibling_sig = next(
+                    (p.get("thought_signature") for p in captured_parts if p.get("thought_signature")),
+                    None,
+                )
+                fc_seen = False
+                filtered_single = []
+                for p in captured_parts:
+                    if p.get("functionCall"):
+                        if not fc_seen:
+                            kept = (
+                                {**p, "thought_signature": sibling_sig}
+                                if (sibling_sig and not p.get("thought_signature"))
+                                else p
+                            )
+                            filtered_single.append(kept)
+                            fc_seen = True
+                    else:
+                        filtered_single.append(p)
+                captured_parts = filtered_single
             # Flush text response before executing tool (mixed text + function call)
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
@@ -2562,19 +2693,24 @@ class Brain:
 
     @staticmethod
     def _resolve_runaway_max_chars(phase_max_tokens: int | None = None) -> int:
-        """Runaway char ceiling: LLM_STREAM_RUNAWAY_MAX_CHARS if valid, else max(32000, max_output_tokens * 4)."""
+        """Runaway char ceiling: LLM_STREAM_RUNAWAY_MAX_CHARS if valid, else bounded max(32000, max_output_tokens * 4)."""
         default = _RUNAWAY_DEFAULT_MAX_CHARS
-        try:
-            if phase_max_tokens:
-                default = max(default, int(phase_max_tokens) * _RUNAWAY_CHARS_PER_TOKEN)
-        except (TypeError, ValueError):
-            pass
+        if phase_max_tokens is not None and not isinstance(phase_max_tokens, bool):
+            try:
+                parsed = int(phase_max_tokens)
+                if parsed > 0:
+                    default = min(
+                        max(default, parsed * _RUNAWAY_CHARS_PER_TOKEN),
+                        _RUNAWAY_MAX_CHARS_ENV_LIMIT,
+                    )
+            except (TypeError, ValueError, OverflowError):
+                pass
         raw = os.getenv(_RUNAWAY_MAX_CHARS_ENV)
         if raw is None or not raw.strip():
             return default
         try:
             val = int(raw.strip())
-        except ValueError:
+        except (ValueError, TypeError, OverflowError):
             val = 0
         if not (_REPETITION_MIN_CHARS < val <= _RUNAWAY_MAX_CHARS_ENV_LIMIT):
             logger.warning(
@@ -2625,7 +2761,7 @@ class Brain:
     @staticmethod
     def _is_transient(e: Exception) -> bool:
         """Check if exception is a transient rate-limit or availability error."""
-        from .llm.quota_tracker import QuotaExhaustedError, RequestExceedsBurstError
+        from .llm import QuotaExhaustedError, RequestExceedsBurstError
         if isinstance(e, RequestExceedsBurstError):
             return False  # Payload larger than the whole bucket: retrying can never succeed
         if isinstance(e, QuotaExhaustedError):
@@ -2675,6 +2811,28 @@ class Brain:
             return thinking_level
         return "low"
 
+    def _clamp_model_max_tokens(self, tokens: int) -> int:
+        """Clamp resolved phase max_output_tokens to known model-family ceilings so runaway_max_chars stays aligned."""
+        model_lower = (getattr(self, "model_name", "") or "").lower()
+        if any(pat in model_lower for pat in ("gemini-1.5", "gemini-2.0")):
+            return min(tokens, 8192)
+        if any(pat in model_lower for pat in ("claude-3-5", "claude-3.5")):
+            return min(tokens, 8192)
+        if any(pat in model_lower for pat in ("claude-3-7", "claude-3.7")):
+            return min(tokens, 64000)
+        if any(pat in model_lower for pat in ("claude-3-haiku", "claude-3-opus", "claude-3-sonnet", "claude-3.0")):
+            return min(tokens, 4096)
+        if any(pat in model_lower for pat in ("opus-4-5", "opus-4.5", "opus-4-6", "opus-4.6")):
+            return min(tokens, 64000)
+        if any(
+            pat in model_lower
+            for pat in ("claude-opus-4", "opus-4-0", "opus-4.0", "opus-4-1", "opus-4.1", "opus-4@", "opus-4-20")
+        ):
+            return min(tokens, 32000)
+        if any(pat in model_lower for pat in ("claude-4", "sonnet-4", "haiku-4", "opus-4")):
+            return min(tokens, 64000)
+        return tokens
+
     def _resolve_llm_params(self, active_phases: list[str], domain: str | None = None) -> tuple[str, float, int]:
         """Resolve thinking_level + temperature + max_output_tokens from phase metadata.
 
@@ -2683,8 +2841,14 @@ class Brain:
         CASUAL domain clamps thinking_level down to 'low' (never raises it) via _clamp_casual_thinking.
         """
         fallback_temp = getattr(self, "temperature", 1.0)
+        is_gemini_4 = (
+            getattr(self, "provider", "gemini") == "gemini"
+            and "gemini-4" in (getattr(self, "model_name", "") or "").lower()
+        )
         if not self._skill_loader:
-            return self._clamp_casual_thinking("high", domain), fallback_temp, self.max_output_tokens
+            fallback_tokens = max(self.max_output_tokens, 65536) if is_gemini_4 else self.max_output_tokens
+            fallback_tokens = self._clamp_model_max_tokens(fallback_tokens)
+            return self._clamp_casual_thinking("high", domain), fallback_temp, fallback_tokens
 
         best_priority = float("inf")
         best_thinking = "high"
@@ -2703,16 +2867,27 @@ class Brain:
 
         best_thinking = self._clamp_casual_thinking(best_thinking, domain)
 
-        try:
-            best_temp = float(best_temp) if best_temp is not None else fallback_temp
-        except (ValueError, TypeError):
+        if best_temp is None or isinstance(best_temp, bool):
             best_temp = fallback_temp
+        else:
+            try:
+                parsed_temp = float(best_temp)
+                best_temp = parsed_temp if math.isfinite(parsed_temp) else fallback_temp
+            except (ValueError, TypeError, OverflowError):
+                best_temp = fallback_temp
 
-        try:
-            best_tokens = int(best_tokens) if best_tokens is not None else self.max_output_tokens
-        except (ValueError, TypeError):
+        if best_tokens is None or isinstance(best_tokens, bool):
             best_tokens = self.max_output_tokens
+        else:
+            try:
+                parsed_tokens = int(best_tokens)
+                best_tokens = parsed_tokens if parsed_tokens > 0 else self.max_output_tokens
+            except (ValueError, TypeError, OverflowError):
+                best_tokens = self.max_output_tokens
         best_tokens = max(best_tokens, 8192)
+        if is_gemini_4:
+            best_tokens = max(best_tokens, 65536)
+        best_tokens = self._clamp_model_max_tokens(best_tokens)
         logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp}, tokens={best_tokens} (priority={best_priority})")
         return best_thinking, best_temp, best_tokens
 

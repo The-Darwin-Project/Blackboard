@@ -6,6 +6,9 @@
 # 4. [Boundary]: _build_contents stays in brain.py (needs self.blackboard, self._skill_loader).
 # 5. [Batch]: build_single_function_response returns ONE dict (not list) for multi-FR assembly.
 #    compress_contents uses FC/FR count parity for atomic pruning of batch pairs.
+# 6. [Constraint]: _get_part_sig validates snake_case and camelCase keys independently (rejecting bool and blank str).
+#    _apply_sibling_signature propagates standalone carrier signatures onto unsigned FCs or the last thought=True part
+#    without mutating caller dicts or emitting empty {} dicts; turn_to_parts filters thought=True and empty "" text.
 """Pure-function helpers for conversation content building and compression.
 
 Extracted from brain.py for modularity. These have zero dependencies on
@@ -25,44 +28,119 @@ if TYPE_CHECKING:
 _CONTENT_BUDGET = int(os.environ.get("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 
 
-def _apply_sibling_signature(parts: list[dict]) -> list[dict]:
-    """Copy thought_signature onto any functionCall part missing one.
+def _valid_sig(val) -> str | bytes | None:
+    """Validate a single thought signature value (rejecting bool and whitespace-only strings)."""
+    if not val or isinstance(val, bool) or not isinstance(val, (str, bytes, bytearray)):
+        return None
+    if isinstance(val, str) and not val.strip():
+        return None
+    return bytes(val) if isinstance(val, bytearray) else val
 
-    Source is the first sibling part in the same list that carries a
-    thought_signature. Returns the parts unchanged (same list) if no sig
-    is found or nothing needs fixing up; otherwise returns a new list
-    with only the affected entries replaced (shallow copies).
+
+def _get_part_sig(p: dict) -> str | bytes | None:
+    """Read a non-empty thought signature (snake_case or camelCase) from a part dict."""
+    s = _valid_sig(p.get("thought_signature"))
+    if s is not None:
+        return s
+    return _valid_sig(p.get("thoughtSignature"))
+
+
+def _is_empty_carrier_dict(p: dict) -> bool:
+    """True when ``p`` is a standalone empty-text thought-signature carrier dict."""
+    return (
+        _get_part_sig(p) is not None
+        and not p.get("thought")
+        and not p.get("functionCall")
+        and not p.get("function_call")
+        and not p.get("text")
+        and "bytes" not in p
+        and not p.get("inline_data")
+        and not p.get("file_data")
+        and not p.get("executable_code")
+        and not p.get("code_execution_result")
+        and not p.get("functionResponse")
+        and not p.get("function_response")
+    )
+
+
+def _apply_sibling_signature(parts: list[dict]) -> list[dict]:
+    """Copy thought_signature onto unsigned functionCall (or trailing thought) parts.
+
+    Source is the first sibling part in the same list that carries a valid
+    thought_signature or thoughtSignature. Normalizes camelCase ``thoughtSignature``
+    to ``thought_signature`` on shallow copies without mutating caller dicts in place,
+    and omits parts that become empty ``{}`` after stripping invalid signature keys.
     """
     sig = None
     for p in parts:
-        if p.get("thought_signature"):
-            sig = p["thought_signature"]
+        s = _get_part_sig(p)
+        if s is not None:
+            sig = s
             break
-    if not sig:
+    has_camel_or_bad = any(
+        "thoughtSignature" in p or ("thought_signature" in p and _valid_sig(p.get("thought_signature")) is None)
+        for p in parts
+    )
+    if sig is None and not has_camel_or_bad:
         return parts
-    fixed = list(parts)
-    for i, p in enumerate(fixed):
-        if p.get("functionCall") and not p.get("thought_signature"):
-            fixed[i] = {**p, "thought_signature": sig}
-    return fixed
+
+    has_fc = any(p.get("functionCall") for p in parts)
+    last_thought_idx = -1
+    if sig is not None and not has_fc:
+        non_carrier_has_sig = any(
+            _get_part_sig(p) is not None
+            for p in parts
+            if not _is_empty_carrier_dict(p)
+        )
+        if not non_carrier_has_sig:
+            for idx, p in enumerate(parts):
+                if p.get("thought"):
+                    last_thought_idx = idx
+
+    fixed: list[dict] = []
+    changed = False
+    for idx, p in enumerate(parts):
+        p_has_camel_or_bad = (
+            "thoughtSignature" in p
+            or ("thought_signature" in p and _valid_sig(p.get("thought_signature")) is None)
+        )
+        p_sig = _get_part_sig(p)
+        needs_sig = bool(
+            sig is not None
+            and p_sig is None
+            and (p.get("functionCall") or idx == last_thought_idx)
+        )
+        if p_has_camel_or_bad or needs_sig:
+            new_p = {k: v for k, v in p.items() if k not in ("thoughtSignature", "thought_signature")}
+            effective_sig = p_sig if p_sig is not None else (sig if needs_sig else None)
+            if effective_sig is not None:
+                new_p["thought_signature"] = effective_sig
+            if new_p:
+                fixed.append(new_p)
+            changed = True
+        else:
+            fixed.append(p)
+    return fixed if changed else parts
 
 
 def extract_model_parts(response_parts: list[dict] | None) -> list[dict]:
     """Extract model-role parts from response_parts for native FC replay.
 
     Preserves thought parts + functionCall + thought_signature.
-    Sibling-sig defense: if a functionCall lacks thought_signature,
-    copy from a sibling part in the same response.
+    Retains standalone signature carriers during sibling-signature propagation
+    so unsigned functionCall parts inherit the signature before empty carriers
+    are stripped.
     """
     if not response_parts:
         return []
-    model_parts = [
-        p for p in response_parts
-        if p.get("functionCall") or p.get("thought")
-    ]
-    if not model_parts:
+    if not any(p.get("functionCall") or p.get("thought") for p in response_parts):
         return []
-    return _apply_sibling_signature(model_parts)
+    candidates = [
+        p for p in response_parts
+        if p.get("functionCall") or p.get("thought") or _get_part_sig(p)
+    ]
+    signed = _apply_sibling_signature(candidates)
+    return [p for p in signed if p.get("functionCall") or p.get("thought")]
 
 
 def build_function_response(turn: "ConversationTurn", skill_prefix: str = "") -> list[dict]:
@@ -137,7 +215,8 @@ def estimate_msg_tokens(msg: dict) -> int:
         fr = part.get("functionResponse")
         if fr:
             chars += len(str(fr.get("response", {}))) + len(fr.get("name", ""))
-        chars += len(str(part.get("thought_signature", "")))
+        sig = _get_part_sig(part) or ""
+        chars += len(str(sig))
     return chars
 
 
@@ -225,7 +304,7 @@ def compress_contents(contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -
 
 
 def normalize_response_parts(raw_parts: list) -> list[dict]:
-    """Normalize SDK Part objects to plain dicts for Redis storage.
+    """Normalize SDK Part objects or plain dicts to plain dicts for Redis storage.
 
     Handles camelCase vs snake_case thought_signature across SDK versions.
     """
@@ -234,19 +313,40 @@ def normalize_response_parts(raw_parts: list) -> list[dict]:
     preserved = []
     for part in raw_parts:
         p: dict = {}
-        if hasattr(part, 'text') and part.text:
-            p['text'] = str(part.text)
-        if hasattr(part, 'thought') and part.thought:
-            p['thought'] = True
-        if hasattr(part, 'function_call') and part.function_call:
-            fc = part.function_call
-            args = {}
-            if fc.args:
-                args = {str(k): str(v) if isinstance(v, bytes) else v for k, v in dict(fc.args).items()}
-            p['functionCall'] = {"name": str(fc.name), "args": args}
-        sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
-        if sig:
-            p['thought_signature'] = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else str(sig)
+        if isinstance(part, dict):
+            if part.get("text"):
+                p["text"] = str(part["text"])
+            if part.get("thought"):
+                p["thought"] = True
+            fc = part.get("functionCall") or part.get("function_call")
+            if fc:
+                raw_args = fc.get("args") if isinstance(fc, dict) else getattr(fc, "args", None)
+                fc_name = fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", "")
+                args = {}
+                if raw_args:
+                    args = {str(k): str(v) if isinstance(v, bytes) else v for k, v in dict(raw_args).items()}
+                p["functionCall"] = {"name": str(fc_name), "args": args}
+            sig = _get_part_sig(part)
+        else:
+            if hasattr(part, 'text') and part.text:
+                p['text'] = str(part.text)
+            if hasattr(part, 'thought') and part.thought:
+                p['thought'] = True
+            if hasattr(part, 'function_call') and part.function_call:
+                fc = part.function_call
+                args = {}
+                if fc.args:
+                    args = {str(k): str(v) if isinstance(v, bytes) else v for k, v in dict(fc.args).items()}
+                p['functionCall'] = {"name": str(fc.name), "args": args}
+            sig = _valid_sig(getattr(part, 'thought_signature', None))
+            if sig is None:
+                sig = _valid_sig(getattr(part, 'thoughtSignature', None))
+        if sig is not None:
+            p['thought_signature'] = (
+                base64.b64encode(bytes(sig)).decode('ascii')
+                if isinstance(sig, (bytes, bytearray))
+                else str(sig)
+            )
         if p:
             preserved.append(p)
     return preserved or [{"text": ""}]
@@ -282,19 +382,26 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
         # pass) still gets it from a sibling part -- this raw passthrough
         # is also what a later FC-dedup pass may leave standing as the
         # final record for this turn.
-        return _apply_sibling_signature(list(turn.response_parts))
+        signed = _apply_sibling_signature(list(turn.response_parts))
+        non_carriers = [p for p in signed if not _is_empty_carrier_dict(p)]
+        return non_carriers if non_carriers else signed
 
     if turn.actor == "brain" and turn.action == "response":
         text = turn.thoughts or ""
         if not text and turn.response_parts:
-            text = "".join(p.get("text", "") for p in turn.response_parts if "text" in p)
+            text = "".join(
+                p.get("text", "") for p in turn.response_parts if "text" in p and not p.get("thought")
+            )
         if turn.evidence:
             text = f"{text}\n{turn.evidence}" if text else turn.evidence
+        if not text:
+            return []
         parts: list[dict] = [{"text": text}]
         if turn.response_parts:
             for rp in turn.response_parts:
-                if rp.get("thought_signature"):
-                    parts[0]["thought_signature"] = rp["thought_signature"]
+                sig = _get_part_sig(rp)
+                if sig:
+                    parts[0]["thought_signature"] = sig
                     break
         return parts
 

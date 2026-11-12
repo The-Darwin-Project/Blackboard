@@ -162,7 +162,7 @@ gcp:
     brain:
       model: "gemini-4-carbon" # If provider=claude, set to "claude-opus-5-5". Rollback: "gemini-4-argon"
       temperature: "1.5"
-      maxOutputTokens: "65000"
+      maxOutputTokens: "65536"
     aligner:
       model: "gemini-3.8-flash"
       temperature: "0.3"

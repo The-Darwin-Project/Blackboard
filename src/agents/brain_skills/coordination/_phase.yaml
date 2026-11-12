@@ -1,5 +1,5 @@
 thinking_level: "low"
 temperature: 1.0
 priority: 25
-max_output_tokens: 8192
+max_output_tokens: 65536
 description: "Coordination skills for huddle replies, PR gate, and quality review. Active when agents huddle."
