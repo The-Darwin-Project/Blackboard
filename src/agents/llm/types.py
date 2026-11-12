@@ -1,7 +1,7 @@
 # src/agents/llm/types.py
 # @ai-rules:
 # 1. [Constraint]: All tool schemas are plain dicts (provider-agnostic). No google.genai or anthropic imports.
-# 2. [Pattern]: LLMPort protocol defines generate() (blocking) and generate_stream() (async iterator).
+# 2. [Pattern]: LLMPort protocol defines generate() (blocking) and generate_stream() (sync method returning AsyncIterator).
 # 3. [Gotcha]: Anthropic uses "input_schema" key; Gemini uses "parameters_json_schema". Adapters convert.
 # 4. [Constraint]: BRAIN_TOOL_SCHEMAS must stay in sync with _execute_function_call() in brain.py.
 # 5. [Pattern]: NIGHTWATCHER write_incident.description includes link guidance (MR URLs, pipeline IDs, Slack threads).
@@ -16,6 +16,9 @@
 #    reintroduce a lazy `(.*?)` + `\s*` regex over model text -- it backtracks super-linearly on unterminated input.
 # 10. [Gotcha]: Holdback overflow (> MAX_STREAM_CALL_SYNTAX_BUFFER unterminated tail) DISCARDS the fragment; it must
 #    never be flushed to the stream. Streaming callers use split_stream_call_syntax and stop accumulating on overflow.
+# 11. [Pattern]: Stream/HTTP timeout constants and env resolvers (DEFAULT_STREAM_*_TIMEOUT_S, DEFAULT_HTTP_TIMEOUT_S,
+#    parse_timeout_env, resolve_stream_timeouts, warn_on_timeout_misordering) live here so importing src.agents.llm
+#    never eagerly loads google-genai / gemini_client. Warn-once sets delegate to gemini_client when loaded.
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -24,8 +27,12 @@ from this module and never touch SDK-specific types directly.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+import os
 import re
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
@@ -222,15 +229,137 @@ def process_stream_call_syntax_buffer(buffer: str) -> tuple[str, str]:
 
 
 # =============================================================================
-# Port Protocol
+# Stream Timeout Hierarchy & Port Protocol
 # =============================================================================
+
+class LLMStreamTimeoutError(asyncio.TimeoutError):
+    """Base exception for adaptive LLM stream timeouts."""
+
+
+class LLMStreamTTFBTimeoutError(LLMStreamTimeoutError):
+    """Stream stalled waiting for the first chunk (Time-To-First-Byte)."""
+
+
+class LLMStreamInterChunkTimeoutError(LLMStreamTimeoutError):
+    """Stream stalled between consecutive chunks."""
+
+
+class LLMStreamTotalTimeoutError(LLMStreamTimeoutError):
+    """Stream exceeded the total wall-clock timeout ceiling (non-retryable)."""
+
+
+DEFAULT_STREAM_TTFB_TIMEOUT_S: float = 35.0
+DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S: float = 30.0
+DEFAULT_STREAM_TOTAL_TIMEOUT_S: float = 180.0
+DEFAULT_CHUNK_TIMEOUT_S: float = 180.0
+DEFAULT_HTTP_TIMEOUT_S: float = 240.0
+DEFAULT_DRAIN_TIMEOUT_S: float = 15.0
+_MAX_TIMEOUT_ENV_S: float = 3600.0
+_TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = set()
+_TIMEOUT_ORDER_WARNED: set[tuple[float, float, float]] = set()
+_TIMEOUT_LOGGER_NAME = "src.agents.llm.gemini_client"
+
+
+def _get_timeout_env_warned() -> set:
+    gc = sys.modules.get(_TIMEOUT_LOGGER_NAME)
+    if gc is not None and hasattr(gc, "_TIMEOUT_ENV_WARNED"):
+        return gc._TIMEOUT_ENV_WARNED
+    return _TIMEOUT_ENV_WARNED
+
+
+def _get_timeout_order_warned() -> set:
+    gc = sys.modules.get(_TIMEOUT_LOGGER_NAME)
+    if gc is not None and hasattr(gc, "_TIMEOUT_ORDER_WARNED"):
+        return gc._TIMEOUT_ORDER_WARNED
+    return _TIMEOUT_ORDER_WARNED
+
+
+def parse_timeout_env(name: str, raw: str | None, default: float, max_value: float = _MAX_TIMEOUT_ENV_S) -> float:
+    """Parse and validate a timeout env var given in seconds.
+
+    Accepts a finite float in (0.0, max_value]. Unset/blank returns ``default`` silently; empty-after-set,
+    malformed, NaN/Inf, non-positive or too-large values log a warning (once per name/value) and return ``default``.
+    """
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        val = float("nan")
+    if math.isnan(val) or math.isinf(val) or val <= 0.0 or val > max_value:
+        key = (name, raw)
+        warned = _get_timeout_env_warned()
+        if key not in warned:
+            warned.add(key)
+            logging.getLogger(_TIMEOUT_LOGGER_NAME).warning(
+                "Invalid %s=%r; using default %.1fs", name, raw, default
+            )
+        return default
+    return val
+
+
+def resolve_stream_timeouts() -> tuple[float, float, float]:
+    """Resolve (ttfb_timeout_s, inter_chunk_timeout_s, total_timeout_s) from environment."""
+    raw_legacy = os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC")
+    if raw_legacy is not None and raw_legacy.strip():
+        ttfb_default = parse_timeout_env("LLM_STREAM_CHUNK_TIMEOUT_SEC", raw_legacy, DEFAULT_STREAM_TTFB_TIMEOUT_S)
+        inter_default = parse_timeout_env(
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC", raw_legacy, DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S
+        )
+    else:
+        ttfb_default = DEFAULT_STREAM_TTFB_TIMEOUT_S
+        inter_default = DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S
+
+    ttfb_s = parse_timeout_env("LLM_STREAM_TTFB_TIMEOUT_SEC", os.getenv("LLM_STREAM_TTFB_TIMEOUT_SEC"), ttfb_default)
+    inter_chunk_s = parse_timeout_env(
+        "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", os.getenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC"), inter_default
+    )
+    total_default = max(DEFAULT_STREAM_TOTAL_TIMEOUT_S, ttfb_s, inter_chunk_s)
+    total_s = parse_timeout_env(
+        "LLM_STREAM_TOTAL_TIMEOUT_SEC", os.getenv("LLM_STREAM_TOTAL_TIMEOUT_SEC"), total_default
+    )
+    return ttfb_s, inter_chunk_s, total_s
+
+
+def warn_on_timeout_misordering(
+    drain_s: float,
+    chunk_s: float,
+    http_s: float,
+    *,
+    chunk_label: str = "LLM_STREAM_CHUNK_TIMEOUT_SEC",
+) -> bool:
+    """Warn (once per value triple) when DRAIN >= CHUNK or CHUNK >= HTTP. Returns True if misordered."""
+    bad = False
+    warned = _get_timeout_order_warned()
+    tlog = logging.getLogger(_TIMEOUT_LOGGER_NAME)
+    key = (drain_s, chunk_s, http_s)
+    if drain_s >= chunk_s:
+        bad = True
+        if key not in warned:
+            tlog.warning(
+                "LLM_STREAM_DRAIN_TIMEOUT_SEC (%.1fs) >= %s (%.1fs): "
+                "the post-tool-call drain should be much shorter than the per-chunk timeout",
+                drain_s, chunk_label, chunk_s,
+            )
+    if chunk_s >= http_s:
+        bad = True
+        if key not in warned:
+            tlog.warning(
+                "%s (%.1fs) >= LLM_HTTP_TIMEOUT_SEC (%.1fs): the HTTP client timeout "
+                "will fire before Brain's stream timeout, so stream-timeout retry handling is bypassed",
+                chunk_label, chunk_s, http_s,
+            )
+    if bad:
+        warned.add(key)
+    return bad
+
 
 class LLMPort(Protocol):
     """Hexagonal port -- adapters implement this for each LLM provider.
 
-    max_output_tokens: generate_stream() keeps the 65000 ceiling. Adapters MAY clamp it on the unary generate()
-    path to the model/endpoint limit (GeminiAdapter.generate() clamps to 32768 and logs a warning), so callers
-    needing more than that should use generate_stream().
+    max_output_tokens: generate_stream() keeps the 65000 parameter default. Adapters clamp
+    generate() to the model ceiling (GeminiAdapter.generate() streams up to 65536 on Gemini 4
+    and clamps unary generate_content to 32768 on earlier Gemini models with a warning).
     """
 
     async def generate(
@@ -246,7 +375,7 @@ class LLMPort(Protocol):
         priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse: ...
 
-    async def generate_stream(
+    def generate_stream(
         self,
         system_prompt: str,
         contents: str | list,

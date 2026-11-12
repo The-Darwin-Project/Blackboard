@@ -8,6 +8,9 @@
 # 6. [Pattern]: _ACLOSE_TIMEOUT patched to 0.1s in test_10 for fast cleanup hang tests.
 # 7. [Pattern]: TestRepetitionDetector (pure, no I/O), TestCollapseStreamHandling (collapse via _process_with_llm),
 #    TestCasualClamp and TestTimeoutEnvValidation extend this file. Warn-once sets in gemini_client are reset via monkeypatch.
+# 8. [Pattern]: TestAdaptiveTwoPhaseStreamTimeouts pins T-6/T-7/T-9 and CR-02/CR-03/CR-09/CR-10/CR-11/CR-12 (direct async
+#    generator return from GeminiAdapter.generate_stream, quota pre-acquisition outside TTFB, post-done total-timeout safety,
+#    external task.cancel() propagation, bounded WS brain_thinking broadcasts, and lazy src.agents.llm import boundary).
 """Verify per-chunk stream timeout guard in _process_with_llm.
 
 Tests cover:
@@ -947,8 +950,17 @@ class TestTimeoutEnvValidation:
         assert "TIMEOUT_SEC" not in caplog.text
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("env,expected", [(None, 180.0), ("nan", 180.0), ("0", 180.0), ("-3", 180.0), ("7.5", 7.5)])
+    @pytest.mark.parametrize(
+        "env,expected",
+        [(None, 35.0), ("nan", 35.0), ("0", 35.0), ("-3", 35.0), ("7.5", 7.5), ("200", 200.0)],
+    )
     async def test_brain_chunk_timeout_parsing(self, monkeypatch, env, expected):
+        for var in (
+            "LLM_STREAM_TTFB_TIMEOUT_SEC",
+            "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TOTAL_TIMEOUT_SEC",
+        ):
+            monkeypatch.delenv(var, raising=False)
         if env is None:
             monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
         else:
@@ -1186,3 +1198,648 @@ class TestClampAndTimeoutBoundaries:
         )
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip().splitlines()[-1] == "15.0"
+
+
+# ---------------------------------------------------------------------------
+# Gemini 4 Runtime Resilience: T-5, T-6, T-7, T-9
+# ---------------------------------------------------------------------------
+
+
+class TestGemini4ThinkingLevelNormalization:
+    """T-5: Gemini 4 normalizes thinking_level in GeminiAdapter._build_config and omits thinking_budget,
+    while preserving gemini-3.8-flash passthrough and Brain lowercase contracts.
+    """
+
+    @pytest.mark.parametrize(
+        "raw_level,expected",
+        [
+            ("minimal", "LOW"),
+            ("MINIMAL", "LOW"),
+            (" minimal ", "LOW"),
+            ("none", "LOW"),
+            ("NONE", "LOW"),
+            ("low", "LOW"),
+            ("medium", "MEDIUM"),
+            ("high", "HIGH"),
+        ],
+    )
+    def test_t5_gemini4_normalizes_thinking_levels_and_omits_budget(self, raw_level: str, expected: str):
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level=raw_level)
+
+        assert cfg.thinking_config is not None
+        assert cfg.thinking_config.thinking_level == expected
+        assert cfg.thinking_config.thinking_budget is None
+        assert "thinking_budget" not in cfg.thinking_config.model_dump(exclude_none=True)
+
+    def test_t5_gemini4_empty_omits_thinking_level_and_unknown_warns_to_low(self, caplog):
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+
+        empty_cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="")
+        assert empty_cfg.thinking_config is not None
+        assert empty_cfg.thinking_config.thinking_level is None
+        assert empty_cfg.thinking_config.thinking_budget is None
+
+        with caplog.at_level("WARNING", logger="src.agents.llm.gemini_client"):
+            unknown_cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="ultra")
+        assert unknown_cfg.thinking_config.thinking_level == "LOW"
+        assert unknown_cfg.thinking_config.thinking_budget is None
+        assert any("ultra" in r.getMessage().lower() for r in caplog.records)
+
+    def test_t5_non_gemini4_passes_minimal_through_and_brain_keeps_lowercase(self):
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-3.8-flash"
+
+        with patch("google.genai.types.ThinkingConfig", wraps=types.ThinkingConfig) as tc_spy:
+            cfg_lower = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="minimal")
+            assert tc_spy.call_args.kwargs.get("thinking_level") == "minimal"
+            assert cfg_lower.thinking_config.thinking_level == "MINIMAL"
+
+            cfg_upper = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="MINIMAL")
+            assert tc_spy.call_args.kwargs.get("thinking_level") == "MINIMAL"
+            assert cfg_upper.thinking_config.thinking_level == "MINIMAL"
+
+        assert Brain._clamp_casual_thinking("high", "casual") == "low"
+        assert Brain._clamp_casual_thinking("minimal", "casual") == "minimal"
+
+        brain = _make_brain()
+        brain._resolve_llm_params = Brain._resolve_llm_params.__get__(brain, Brain)
+        brain._skill_loader.get_phase_meta = MagicMock(return_value={"thinking_level": "minimal", "priority": 10})
+        assert brain._resolve_llm_params(["dispatch"], domain="casual")[0] == "minimal"
+        assert brain._resolve_llm_params(["dispatch"], domain="complicated")[0] == "minimal"
+
+
+class TestAdaptiveTwoPhaseStreamTimeouts:
+    """T-6, T-7, T-9: Two-phase adaptive TTFB + sliding inter-chunk + hard total stream timeouts."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_timeout_env(self, monkeypatch):
+        from src.agents.llm import gemini_client
+
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ENV_WARNED", set())
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ORDER_WARNED", set())
+        for var in (
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TTFB_TIMEOUT_SEC",
+            "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TOTAL_TIMEOUT_SEC",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_t6_resolve_stream_timeouts_defaults_nan_and_overrides(self, monkeypatch, caplog):
+        from src.agents.llm import resolve_stream_timeouts
+
+        assert resolve_stream_timeouts() == (35.0, 30.0, 180.0)
+
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "nan")
+        with caplog.at_level("WARNING", logger="src.agents.llm.gemini_client"):
+            assert resolve_stream_timeouts() == (35.0, 30.0, 180.0)
+        assert caplog.text.count("Invalid LLM_STREAM_CHUNK_TIMEOUT_SEC") == 1
+
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "200")
+        assert resolve_stream_timeouts() == (200.0, 200.0, 200.0)
+
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "12")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "8")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "90")
+        assert resolve_stream_timeouts() == (12.0, 8.0, 90.0)
+
+    def test_t6_timeout_hierarchy_exports_line_budget_and_brain_import_boundary(self):
+        from pathlib import Path
+        import src.agents.llm as llm_pkg
+        from src.agents.llm import (
+            LLMStreamInterChunkTimeoutError,
+            LLMStreamTimeoutError,
+            LLMStreamTotalTimeoutError,
+            LLMStreamTTFBTimeoutError,
+            resolve_stream_timeouts,
+        )
+
+        assert issubclass(LLMStreamTimeoutError, asyncio.TimeoutError)
+        assert issubclass(LLMStreamTTFBTimeoutError, LLMStreamTimeoutError)
+        assert issubclass(LLMStreamInterChunkTimeoutError, LLMStreamTimeoutError)
+        assert issubclass(LLMStreamTotalTimeoutError, LLMStreamTimeoutError)
+        assert callable(resolve_stream_timeouts)
+
+        for sym in (
+            "LLMStreamTimeoutError",
+            "LLMStreamTTFBTimeoutError",
+            "LLMStreamInterChunkTimeoutError",
+            "LLMStreamTotalTimeoutError",
+            "resolve_stream_timeouts",
+        ):
+            assert sym in llm_pkg.__all__, f"{sym} missing from src.agents.llm.__all__"
+
+        repo_root = Path(__file__).resolve().parent.parent
+        init_lines = (repo_root / "src" / "agents" / "llm" / "__init__.py").read_text().splitlines()
+        assert len(init_lines) <= 100, f"src/agents/llm/__init__.py exceeds 100-line budget ({len(init_lines)} lines)"
+
+        brain_src = (repo_root / "src" / "agents" / "brain.py").read_text()
+        assert "from .llm.gemini_client import" not in brain_src
+
+    @pytest.mark.asyncio
+    async def test_t6_chunk0_ttfb_stall_raises_ttfb_timeout_retries_once_and_records_ttfb_turn(self, monkeypatch):
+        import sys
+        from src.agents.llm import LLMStreamTTFBTimeoutError
+
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.02")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        active_excs = []
+
+        class ExcCaptureStream(MockStream):
+            async def aclose(self):
+                active_excs.append(sys.exc_info()[1])
+                await super().aclose()
+
+        call_count = 0
+
+        def _factory(**kw):
+            nonlocal call_count
+            call_count += 1
+            return ExcCaptureStream([], hang_after=0)
+
+        brain = _make_brain(stream_factory=_factory)
+        with _gate_patch(), _gate_ctx_patch(), _sleep_patch:
+            result = await asyncio.wait_for(brain._process_with_llm("evt-test", _make_event()), timeout=0.6)
+
+        assert result is False
+        assert call_count == 2
+        assert len(active_excs) == 2
+        assert all(isinstance(exc, LLMStreamTTFBTimeoutError) for exc in active_excs)
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1
+        assert "timed out" in errors[0].thoughts
+        assert "ttfb" in errors[0].thoughts.lower()
+
+    @pytest.mark.asyncio
+    async def test_t6_chunk0_when_ttfb_equals_total_timeout_classifies_as_ttfb_and_retries(self, monkeypatch):
+        import sys
+        from src.agents.llm import LLMStreamTotalTimeoutError, LLMStreamTTFBTimeoutError
+
+        # Legacy LLM_STREAM_CHUNK_TIMEOUT_SEC="200" sets ttfb_timeout == total_timeout == 200.0
+        monkeypatch.setenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "200")
+
+        active_excs = []
+
+        class ExcCaptureStream(MockStream):
+            async def aclose(self):
+                active_excs.append(sys.exc_info()[1])
+                await super().aclose()
+
+        call_count = 0
+
+        def _factory(**kw):
+            nonlocal call_count
+            call_count += 1
+            return ExcCaptureStream([], hang_after=0)
+
+        real_wait_for = asyncio.wait_for
+        seen_budgets = []
+
+        async def _fast_timeout_on_200(aw, timeout=None):
+            seen_budgets.append(timeout)
+            if timeout == 200.0:
+                if hasattr(aw, "close"):
+                    aw.close()
+                raise asyncio.TimeoutError()
+            return await real_wait_for(aw, timeout=timeout)
+
+        # Simulate slight monotonic clock advance between stream_start and Chunk-0 check (S3-1)
+        mono_tick = [1000.0]
+
+        def _fake_monotonic():
+            mono_tick[0] += 0.005
+            return mono_tick[0]
+
+        brain = _make_brain(stream_factory=_factory)
+        with (
+            _gate_patch(),
+            _gate_ctx_patch(),
+            _sleep_patch,
+            patch("src.agents.brain.asyncio.wait_for", _fast_timeout_on_200),
+            patch("src.agents.brain.time.monotonic", _fake_monotonic),
+        ):
+            result = await brain._process_with_llm("evt-test", _make_event())
+
+        assert result is False
+        assert seen_budgets[0] == 200.0
+        assert call_count == 2, "Chunk-0 timeout with ttfb == total must classify as TTFB and retry once"
+        assert len(active_excs) == 2
+        assert all(
+            isinstance(exc, LLMStreamTTFBTimeoutError) and not isinstance(exc, LLMStreamTotalTimeoutError)
+            for exc in active_excs
+        )
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1
+        assert "timed out" in errors[0].thoughts
+        assert "ttfb" in errors[0].thoughts.lower()
+
+    @pytest.mark.asyncio
+    async def test_t7_inter_chunk_stall_after_thought_heartbeat_retries_and_closes_sdk_stream(self, monkeypatch):
+        from google.genai import types
+        from src.agents.llm import LLMStreamInterChunkTimeoutError
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.08")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        created_sdk_streams = []
+
+        class SpySDKStream:
+            def __init__(self):
+                self._idx = 0
+                self.aclose_called = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    from types import SimpleNamespace
+
+                    return SimpleNamespace(
+                        candidates=[
+                            SimpleNamespace(
+                                content=SimpleNamespace(parts=[types.Part(thought=True, text="heartbeat")]),
+                                grounding_metadata=None,
+                            )
+                        ],
+                        text=None,
+                        function_calls=[],
+                        usage_metadata=None,
+                    )
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.aclose_called = True
+
+        def _make_sdk_stream(**kw):
+            s = SpySDKStream()
+            created_sdk_streams.append(s)
+            return s
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        adapter._tracker = None
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        adapter.set_search_enabled = MagicMock()
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(side_effect=_make_sdk_stream)
+
+        import inspect
+
+        raw_gen = adapter.generate_stream("sys", "probe")
+        assert inspect.isasyncgen(raw_gen), "generate_stream must return _stream_chunks async generator directly"
+        await raw_gen.aclose()
+        created_sdk_streams.clear()
+
+        brain = _make_brain()
+        brain._adapter = adapter
+        with (
+            _gate_patch(),
+            _gate_ctx_patch(),
+            _sleep_patch,
+            patch("src.agents.brain.LLMStreamInterChunkTimeoutError", wraps=LLMStreamInterChunkTimeoutError) as inter_err_spy,
+        ):
+            result = await asyncio.wait_for(brain._process_with_llm("evt-test", _make_event()), timeout=0.6)
+
+        assert result is False
+        assert len(created_sdk_streams) == 2, "Inter-chunk timeout must retry once"
+        assert all(s.aclose_called for s in created_sdk_streams), "gen.aclose() must close _stream_chunks and SDK stream"
+        assert inter_err_spy.call_count == 2
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1
+        assert "timed out" in errors[0].thoughts
+        assert "inter-chunk" in errors[0].thoughts.lower()
+
+    @pytest.mark.asyncio
+    async def test_t9_slow_drip_exceeding_total_timeout_aborts_immediately_without_retry(self, monkeypatch):
+        import sys
+        from src.agents.llm import LLMStreamTotalTimeoutError
+
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.08")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.08")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.05")
+
+        class DripStream:
+            def __init__(self):
+                self.yielded = 0
+                self.aclose_called = False
+                self.active_exc = None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0.02)
+                self.yielded += 1
+                return _Chunk(text=f"drip-{self.yielded} ", is_thought=True)
+
+            async def aclose(self):
+                self.aclose_called = True
+                self.active_exc = sys.exc_info()[1]
+
+        created = []
+
+        def _factory(**kw):
+            d = DripStream()
+            created.append(d)
+            return d
+
+        # Keep real asyncio.sleep for DripStream's 0.02s ticks (no retry sleep occurs on total timeout)
+        brain = _make_brain(stream_factory=_factory)
+        with _gate_patch(), _gate_ctx_patch():
+            result = await asyncio.wait_for(brain._process_with_llm("evt-test", _make_event()), timeout=0.6)
+
+        assert result is False
+        assert len(created) == 1, "LLMStreamTotalTimeoutError must abort immediately with ZERO retries"
+        assert created[0].aclose_called is True
+        assert isinstance(created[0].active_exc, LLMStreamTotalTimeoutError)
+        errors = _get_error_turns(brain)
+        assert len(errors) == 1
+        assert "timed out" in errors[0].thoughts
+        assert "total" in errors[0].thoughts.lower()
+        assert "0.05" in errors[0].thoughts
+
+    @pytest.mark.asyncio
+    async def test_cr02_brain_quota_acquire_slower_than_ttfb_succeeds_without_false_ttfb_timeout(self, monkeypatch):
+        from types import SimpleNamespace
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from src.agents.llm.quota_tracker import QuotaTracker
+
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.05")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        tracker = QuotaTracker(tpm_limit=100_000)
+        orig_acquire = tracker.acquire
+
+        async def _slow_acquire(*args, **kwargs):
+            await asyncio.sleep(0.06)  # 2x ttfb_timeout, must NOT count against Chunk-0 timer
+            return await orig_acquire(*args, **kwargs)
+
+        tracker.acquire = AsyncMock(side_effect=_slow_acquire)
+
+        async def _fast_sdk_stream():
+            yield SimpleNamespace(
+                candidates=[SimpleNamespace(content=SimpleNamespace(parts=[types.Part(text="fast reply")]), grounding_metadata=None)],
+                text="fast reply",
+                function_calls=[],
+                usage_metadata=SimpleNamespace(prompt_token_count=20, candidates_token_count=10, total_token_count=30),
+            )
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        adapter._tracker = tracker
+        adapter._estimate_tokens = lambda contents: 30
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _fast_sdk_stream())
+
+        brain = _make_brain()
+        brain._adapter = adapter
+        with _gate_patch(), _gate_ctx_patch():
+            result = await brain._process_with_llm("evt-cr02", _make_event("evt-cr02"))
+
+        assert result is False
+        assert _get_error_turns(brain) == []
+        assert tracker.acquire.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cr03_cr09_post_fc_drain_total_expiry_preserves_fc_and_external_cancel_propagates(self, monkeypatch):
+        from types import SimpleNamespace
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        # 1. CR-03: total_timeout expires during post-FC drain -> rescued done=True FC is preserved & executed!
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.06")
+
+        fc = types.FunctionCall(name="close_event", args={"reason": "done"})
+
+        class ThoughtThenDrainHangStream:
+            def __init__(self):
+                self._idx = 0
+                self.aclose_called = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    return SimpleNamespace(
+                        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[types.Part(thought=True, text="t")]), grounding_metadata=None)],
+                        text=None,
+                        function_calls=[],
+                        usage_metadata=None,
+                    )
+                if self._idx == 1:
+                    self._idx += 1
+                    return SimpleNamespace(
+                        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[types.Part(function_call=fc)]), grounding_metadata=None)],
+                        text=None,
+                        function_calls=[fc],
+                        usage_metadata=None,
+                    )
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.aclose_called = True
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        adapter._tracker = None
+        adapter._estimate_tokens = lambda contents: 20
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: ThoughtThenDrainHangStream())
+
+        brain = _make_brain()
+        brain._adapter = adapter
+        brain._execute_function_call = AsyncMock(return_value=True)
+        with _gate_patch(), _gate_ctx_patch():
+            res = await asyncio.wait_for(brain._process_with_llm("evt-cr03", _make_event("evt-cr03")), timeout=0.6)
+
+        assert res is True
+        brain._execute_function_call.assert_awaited_once()
+        assert brain._execute_function_call.call_args.args[1] == "close_event"
+        assert _get_error_turns(brain) == []
+
+        # 2. CR-09: External task.cancel() during post-FC drain raises CancelledError without calling _execute_function_call
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "5.0")
+        drain_waiting = asyncio.Event()
+
+        class CancelableDrainStream:
+            def __init__(self):
+                self._idx = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    return SimpleNamespace(
+                        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[types.Part(function_call=fc)]), grounding_metadata=None)],
+                        text=None,
+                        function_calls=[fc],
+                        usage_metadata=None,
+                    )
+                drain_waiting.set()
+                await asyncio.Event().wait()
+
+        adapter._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: CancelableDrainStream())
+        brain2 = _make_brain()
+        brain2._adapter = adapter
+        brain2._execute_function_call = AsyncMock(return_value=True)
+
+        with _gate_patch(), _gate_ctx_patch():
+            task = asyncio.create_task(brain2._process_with_llm("evt-cr09", _make_event("evt-cr09")))
+            await asyncio.wait_for(drain_waiting.wait(), timeout=0.5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        brain2._execute_function_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cr03_sliding_window_positive_reset_and_chunk0_short_total_retries_as_ttfb(self, monkeypatch):
+        from src.agents.llm import LLMStreamTTFBTimeoutError
+
+        # 1. Positive sliding-window reset: 4 x 0.02s chunks succeed under ttfb=0.04s, inter=0.04s, total=0.40s
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.05")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.05")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.40")
+
+        class PacedStream:
+            def __aiter__(self):
+                async def _gen():
+                    for i in range(4):
+                        await asyncio.sleep(0.02)
+                        yield _Chunk(text=f"part-{i} ", is_thought=(i < 3))
+                    yield _Chunk(done=True)
+
+                return _gen()
+
+        brain = _make_brain(stream_factory=lambda **kw: PacedStream())
+        with _gate_patch(), _gate_ctx_patch():
+            res = await brain._process_with_llm("evt-paced", _make_event("evt-paced"))
+        assert res is False
+        assert _get_error_turns(brain) == []
+
+        # 2. Chunk-0 timeout when total_timeout < ttfb_timeout still classifies as TTFB and retries once
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.02")
+
+        calls = 0
+
+        def _hang0(**kw):
+            nonlocal calls
+            calls += 1
+            return MockStream([], hang_after=0)
+
+        brain_short = _make_brain(stream_factory=_hang0)
+        with (
+            _gate_patch(),
+            _gate_ctx_patch(),
+            _sleep_patch,
+            patch("src.agents.brain.LLMStreamTTFBTimeoutError", wraps=LLMStreamTTFBTimeoutError) as ttfb_spy,
+        ):
+            await brain_short._process_with_llm("evt-short-total", _make_event("evt-short-total"))
+        assert calls == 2
+        assert ttfb_spy.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cr10_ws_brain_thinking_bounds_payload_and_throttles_thought_chunks(self):
+        vis_a = "".join(f"alpha{i}_" for i in range(3000))
+        vis_b = "".join(f"bravo{i}_" for i in range(3000))
+        chunks = [
+            _Chunk(text="thought-1 ", is_thought=True),
+            _Chunk(text="thought-2 ", is_thought=True),  # back-to-back (< 0.15s) -> throttled
+            _Chunk(text=vis_a, is_thought=False),
+            _Chunk(text=vis_b, is_thought=False),
+            _Chunk(done=True),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        brain._resolve_llm_params = MagicMock(return_value=("low", 0.7, 65536))
+        with _gate_patch(), _gate_ctx_patch():
+            await brain._process_with_llm("evt-ws", _make_event("evt-ws"))
+
+        ws_msgs = [
+            c.args[0]
+            for c in brain._broadcast.call_args_list
+            if c.args[0].get("type") == "brain_thinking"
+        ]
+        thought_msgs = [m for m in ws_msgs if m.get("is_thought") is True and m.get("text")]
+        visible_msgs = [m for m in ws_msgs if m.get("is_thought") is False]
+        assert len(thought_msgs) == 1, "Rapid consecutive thought chunks within 0.15s must be throttled"
+        assert thought_msgs[0]["accumulated"] == "", "is_thought WS frame must not serialize accumulated CoT"
+        assert len(visible_msgs) == 2
+        assert len(visible_msgs[-1]["accumulated"]) == 32768
+        assert "thought-1" not in visible_msgs[-1]["accumulated"]
+
+    def test_cr11_lazy_llm_package_import_ast_boundary_and_misordering_labels(self, monkeypatch, caplog):
+        import ast
+        import subprocess
+        import sys
+        from pathlib import Path
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        repo_root = Path(__file__).resolve().parent.parent
+
+        # 1. Fresh subprocess: importing src.agents.llm must NOT load src.agents.llm.gemini_client
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, src.agents.llm; assert 'src.agents.llm.gemini_client' not in sys.modules",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        # 2. AST check on src/agents/brain.py: zero imports from .llm.gemini_client or .llm.types,
+        #    and zero function-local record_token_usage imports
+        brain_ast = ast.parse((repo_root / "src" / "agents" / "brain.py").read_text())
+        for node in ast.walk(brain_ast):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert node.module not in ("llm.gemini_client", "llm.types", "src.agents.llm.gemini_client", "src.agents.llm.types")
+                for alias in node.names:
+                    assert alias.name != "record_token_usage", "record_token_usage must not be imported inside hot loop"
+
+        # 3. Accurate timeout misordering labels when LLM_STREAM_CHUNK_TIMEOUT_SEC is unset
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "50")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "30")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "40")
+        monkeypatch.setenv("LLM_HTTP_TIMEOUT_SEC", "35")
+        caplog.clear()
+        with patch("google.genai.Client"), caplog.at_level("WARNING", logger="src.agents.llm.gemini_client"):
+            GeminiAdapter("proj", "global", "gemini-4-carbon")
+        assert "LLM_STREAM_TOTAL_TIMEOUT_SEC (40.0s) >= LLM_HTTP_TIMEOUT_SEC (35.0s)" in caplog.text
+        assert "LLM_STREAM_TOTAL_TIMEOUT_SEC (40.0s) < max(" in caplog.text
+

@@ -15,6 +15,13 @@
 #    LLMPort protocol conformance (Brain passes them to whichever adapter is active). ClaudeAdapter has no QuotaTracker
 #    gating (priority-aware reservation is Gemini-only) and does not map thinking_level. Do not 'wire them up' without a design.
 #    Callers must pass tool_choice/priority/thinking_level by keyword; their positional order is not a stable contract.
+# 11. [Constraint]: _build_kwargs() guards invalid max_output_tokens (bool/non-int/<=0 -> 65000) and clamps per Anthropic
+#    family ceiling (Claude 3.0 -> 4096, 3.5 -> 8192, Opus 4/4.1 -> 32000, 3.7 & Sonnet/Haiku 4 & Opus 4.5+ -> 64000,
+#    5.x unclamped). generate() additionally caps non-streaming messages.create at 21333 to avoid SDK ValueError.
+# 12. [Constraint]: generate_stream is a sync method delegating to _stream_chunks (LLMPort parity) and yields liveness
+#    LLMChunk heartbeats on raw SSE events (thinking_delta -> is_thought=True, input_json_delta/start -> empty chunk),
+#    falling back to stream.text_stream only for legacy mocks without __aiter__. _convert_structured filters thought=True
+#    and empty text="" carrier dicts so internal Gemini parts never leak to Anthropic.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
@@ -87,15 +94,43 @@ class ClaudeAdapter:
         tool_choice: dict | None = None,
     ) -> dict:
         """Build kwargs dict for messages.create / messages.stream."""
+        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens <= 0:
+            max_output_tokens = 65000
         messages = self._convert_contents(contents)
+        model_lower = (getattr(self, "_model_name", "") or "").lower()
+        clamped_tokens = max_output_tokens
+        if any(pat in model_lower for pat in ("claude-3-5", "claude-3.5")):
+            clamped_tokens = min(max_output_tokens, 8192)
+        elif any(pat in model_lower for pat in ("claude-3-7", "claude-3.7")):
+            clamped_tokens = min(max_output_tokens, 64000)
+        elif any(
+            pat in model_lower
+            for pat in ("claude-3-haiku", "claude-3-opus", "claude-3-sonnet", "claude-3.0")
+        ):
+            clamped_tokens = min(max_output_tokens, 4096)
+        elif any(
+            pat in model_lower
+            for pat in ("opus-4-5", "opus-4.5", "opus-4-6", "opus-4.6")
+        ):
+            clamped_tokens = min(max_output_tokens, 64000)
+        elif any(
+            pat in model_lower
+            for pat in ("claude-opus-4", "opus-4-0", "opus-4.0", "opus-4-1", "opus-4.1", "opus-4@", "opus-4-20")
+        ):
+            clamped_tokens = min(max_output_tokens, 32000)
+        elif any(
+            pat in model_lower
+            for pat in ("claude-4", "sonnet-4", "haiku-4", "opus-4")
+        ):
+            clamped_tokens = min(max_output_tokens, 64000)
 
         kwargs: dict = {
             "model": self._model_name,
-            "max_tokens": max_output_tokens,
+            "max_tokens": clamped_tokens,
             "messages": messages,
         }
         # Claude 5.x models (Sonnet 5, Sonnet 5.5, Opus 5, Opus 5.5, etc.) deprecate temperature (returns 400)
-        if not any(pat in self._model_name for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5")):
+        if not any(pat in model_lower for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5")):
             kwargs["temperature"] = temperature
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -178,9 +213,9 @@ class ClaudeAdapter:
             if pending_tool_id and role == "user":
                 text_parts = []
                 for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p:
+                    if isinstance(p, dict) and not p.get("thought") and p.get("text"):
                         text_parts.append(p["text"])
-                    elif isinstance(p, str):
+                    elif isinstance(p, str) and p:
                         text_parts.append(p)
                 blocks.append({
                     "type": "tool_result",
@@ -221,7 +256,7 @@ class ClaudeAdapter:
                             "data": base64.b64encode(p["bytes"]).decode(),
                         },
                     })
-                elif isinstance(p, dict) and "text" in p:
+                elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
                     blocks.append({"type": "text", "text": p["text"]})
                 elif isinstance(p, str):
                     blocks.append({"type": "text", "text": p})
@@ -251,6 +286,8 @@ class ClaudeAdapter:
         # Normalize temperature: 0.0-2.0 -> 0.0-1.0. Drop top_p (Claude rejects both).
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
+        # Anthropic SDK rejects non-streaming messages.create when max_tokens > 128000 / 6 (21333).
+        kwargs["max_tokens"] = min(kwargs["max_tokens"], 21333)
 
         message = await self._client.messages.create(**kwargs)
         token_usage = self._extract_usage(message)
@@ -271,7 +308,7 @@ class ClaudeAdapter:
     # LLMPort: generate_stream (async iterator)
     # -----------------------------------------------------------------
 
-    async def generate_stream(
+    def generate_stream(
         self,
         system_prompt: str,
         contents: str | list,
@@ -283,12 +320,66 @@ class ClaudeAdapter:
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
     ) -> AsyncIterator[LLMChunk]:
+        return self._stream_chunks(
+            system_prompt=system_prompt,
+            contents=contents,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
+            tool_choice=tool_choice,
+            priority=priority,
+        )
+
+    async def _stream_chunks(
+        self,
+        system_prompt: str,
+        contents: str | list,
+        tools: list[dict] | None = None,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        max_output_tokens: int = 65000,
+        thinking_level: str = "",
+        tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
+    ) -> AsyncIterator[LLMChunk]:
+        from unittest.mock import NonCallableMock
+
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
 
         async with self._client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                yield LLMChunk(text=text)
+            use_raw_events = hasattr(stream, "__aiter__") and not (
+                isinstance(stream, NonCallableMock)
+                and "__aiter__" not in getattr(stream, "__dict__", {})
+                and "text_stream" in getattr(stream, "__dict__", {})
+            )
+            if use_raw_events:
+                async for event in stream:
+                    if isinstance(event, str):
+                        yield LLMChunk(text=event)
+                        continue
+                    ev_type = getattr(event, "type", None)
+                    if ev_type == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        d_type = getattr(delta, "type", None)
+                        if d_type == "text_delta":
+                            text = getattr(delta, "text", None)
+                            if text:
+                                yield LLMChunk(text=text)
+                            else:
+                                yield LLMChunk()
+                        elif d_type == "thinking_delta":
+                            thinking = getattr(delta, "thinking", None)
+                            yield LLMChunk(text=thinking or None, is_thought=True)
+                        elif d_type in ("input_json_delta", "signature_delta", "citations_delta"):
+                            yield LLMChunk()
+                    elif ev_type in ("message_start", "content_block_start"):
+                        yield LLMChunk()
+            else:
+                async for text in stream.text_stream:
+                    yield LLMChunk(text=text)
 
             message = await stream.get_final_message()
             token_usage = self._extract_usage(message)

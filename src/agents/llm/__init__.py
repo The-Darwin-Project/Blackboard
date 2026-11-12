@@ -1,6 +1,6 @@
 # src/agents/llm/__init__.py
 # @ai-rules:
-# 1. [Pattern]: Lazy imports -- unused SDK is never loaded (anthropic skipped when provider=gemini).
+# 1. [Pattern]: Lazy SDK imports -- unused SDK is never loaded (google.genai/anthropic stay inside adapter methods).
 # 2. [Constraint]: This is the ONLY entry point. Consumers import from .llm, never from .llm.gemini_client.
 # 3. [Pattern]: QuotaTracker is a module-level singleton. Created lazily on first Gemini create_adapter() call.
 # 4. [Constraint]: Claude adapter skips QuotaTracker (separate Anthropic quota via Vertex AI).
@@ -20,31 +20,18 @@ import os
 _logger = logging.getLogger(__name__)
 
 from .types import (
-    BRAIN_TOOL_SCHEMAS,
-    NIGHTWATCHER_TOOL_SCHEMAS,
-    FunctionCall,
-    LLMChunk,
-    LLMPort,
-    LLMResponse,
-    TokenUsage,
+    BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS, FunctionCall, LLMChunk, LLMPort, LLMResponse, TokenUsage,
+    LLMStreamInterChunkTimeoutError, LLMStreamTimeoutError, LLMStreamTotalTimeoutError, LLMStreamTTFBTimeoutError,
+    derive_llm_priority, resolve_stream_timeouts, sanitize_call_syntax,
 )
 from .quota_tracker import QuotaExhaustedError, QuotaTracker, RequestExceedsBurstError
 
 __all__ = [
-    "create_adapter",
-    "get_quota_tracker",
-    "get_token_meter",
-    "record_token_usage",
-    "FunctionCall",
-    "LLMResponse",
-    "LLMChunk",
-    "LLMPort",
-    "TokenUsage",
-    "BRAIN_TOOL_SCHEMAS",
-    "NIGHTWATCHER_TOOL_SCHEMAS",
-    "QuotaTracker",
-    "QuotaExhaustedError",
-    "RequestExceedsBurstError",
+    "create_adapter", "get_quota_tracker", "get_token_meter", "record_token_usage", "resolve_stream_timeouts",
+    "derive_llm_priority", "sanitize_call_syntax", "FunctionCall", "LLMResponse", "LLMChunk", "LLMPort", "TokenUsage",
+    "LLMStreamTimeoutError", "LLMStreamTTFBTimeoutError", "LLMStreamInterChunkTimeoutError", "LLMStreamTotalTimeoutError",
+    "BRAIN_TOOL_SCHEMAS", "NIGHTWATCHER_TOOL_SCHEMAS",
+    "QuotaTracker", "QuotaExhaustedError", "RequestExceedsBurstError",
 ]
 
 _quota_tracker: QuotaTracker | None = None

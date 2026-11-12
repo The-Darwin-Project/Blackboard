@@ -870,3 +870,176 @@ class TestGeminiStreamReservationPaths:
 
         tracker.record.assert_not_called()
         tracker.rollback.assert_not_called()  # rollback is Reservation-only
+
+
+class TestGemini4DrainAndTrailingThoughtSignature:
+    """T-1: Gemini 4 drain & trailing empty-carrier thoughtSignature reassembly onto raw_parts."""
+
+    @staticmethod
+    def _stream_and_collect_parts(chunks_list):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        async def _sdk_stream():
+            for ch in chunks_list:
+                yield ch
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        adapter._tracker = None
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        client = MagicMock()
+        client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _sdk_stream())
+        adapter._client = client
+
+        async def _run():
+            return [c async for c in adapter.generate_stream("sys", "prompt", tools=[{"name": "classify_event"}])]
+
+        return asyncio.run(_run())
+
+    @staticmethod
+    def _has_empty_carrier(parts) -> bool:
+        for p in parts:
+            text = p.get("text") if isinstance(p, dict) else getattr(p, "text", None)
+            fc = p.get("functionCall") if isinstance(p, dict) else getattr(p, "function_call", None)
+            thought = bool(p.get("thought")) if isinstance(p, dict) else (getattr(p, "thought", None) is True)
+            if not text and fc is None and not thought:
+                return True
+        return False
+
+    def test_t1_single_fc_drain_signature_attaches_to_fc_and_strips_empty_carrier(self):
+        from google.genai import types
+        from src.agents.context_parts import normalize_response_parts
+
+        fc = types.FunctionCall(name="classify_event", args={"domain": "complicated"})
+        fc_part = types.Part(function_call=fc, thought_signature=None)
+        drain_carrier = types.Part(text="", thought_signature=b"xyz")
+
+        chunks = self._stream_and_collect_parts([
+            _chunk(parts=[fc_part], function_calls=[fc]),
+            _chunk(parts=[drain_carrier], usage=_usage(total=135)),
+        ])
+
+        done_chunk = chunks[-1]
+        assert done_chunk.done is True
+        assert done_chunk.function_call is not None
+        assert done_chunk.function_call.name == "classify_event"
+        assert fc_part.thought_signature is None, "original SDK Part must be cloned, not mutated in place"
+        assert done_chunk.raw_parts is not None and len(done_chunk.raw_parts) == 1
+        assert not self._has_empty_carrier(done_chunk.raw_parts)
+        assert done_chunk.raw_parts[-1].function_call.name == "classify_event"
+        assert done_chunk.raw_parts[-1].thought_signature == b"xyz"
+
+        normalized = normalize_response_parts(done_chunk.raw_parts)
+        assert normalized[-1]["functionCall"]["name"] == "classify_event"
+        assert normalized[-1]["thought_signature"] == "eHl6"
+
+    def test_t1_text_only_trailing_carrier_preserves_text_and_attaches_signature(self):
+        from google.genai import types
+        from src.agents.context_parts import normalize_response_parts
+
+        hello_part = types.Part(text="hello")
+        trailing_carrier = types.Part(text="", thought_signature=b"xyz")
+
+        chunks = self._stream_and_collect_parts([
+            _chunk(parts=[hello_part], text="hello"),
+            _chunk(parts=[trailing_carrier], text="", usage=_usage(total=60)),
+        ])
+
+        done_chunk = chunks[-1]
+        assert done_chunk.done is True
+        assert hello_part.thought_signature is None
+        assert done_chunk.raw_parts is not None and len(done_chunk.raw_parts) == 1
+        assert not self._has_empty_carrier(done_chunk.raw_parts)
+        assert done_chunk.raw_parts[0].text == "hello"
+        assert done_chunk.raw_parts[0].thought_signature == b"xyz"
+
+        normalized = normalize_response_parts(done_chunk.raw_parts)
+        assert normalized == [{"text": "hello", "thought_signature": "eHl6"}]
+
+    def test_t1_thought_only_stream_with_trailing_carrier_and_dict_is_thought_part(self):
+        from google.genai import types
+        from src.agents.context_parts import normalize_response_parts
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        assert GeminiAdapter._is_thought_part({"thought": True, "text": "..."}) is True
+        assert GeminiAdapter._is_thought_part({"thought": False, "text": "..."}) is False
+        assert GeminiAdapter._is_thought_part({"text": "..."}) is False
+
+        thought_part = types.Part(thought=True, text="thinking")
+        trailing_carrier = types.Part(text="", thought_signature=b"xyz")
+
+        chunks = self._stream_and_collect_parts([
+            _chunk(parts=[thought_part]),
+            _chunk(parts=[trailing_carrier], usage=_usage(total=50)),
+        ])
+
+        done_chunk = chunks[-1]
+        assert done_chunk.done is True
+        assert done_chunk.raw_parts is not None and len(done_chunk.raw_parts) >= 1
+        assert not self._has_empty_carrier(done_chunk.raw_parts)
+        assert done_chunk.raw_parts[-1].thought_signature == b"xyz"
+
+        normalized = normalize_response_parts(done_chunk.raw_parts)
+        assert normalized[-1]["thought_signature"] == "eHl6"
+
+    def test_cr04_text_followed_by_empty_thought_signature_carrier_preserves_hello_part(self):
+        from google.genai import types
+        from src.agents.context_parts import normalize_response_parts
+
+        hello_part = types.Part(text="Hello")
+        thought_sig_carrier = types.Part(thought=True, text="", thought_signature=b"sig")
+
+        chunks = self._stream_and_collect_parts([
+            _chunk(parts=[hello_part], text="Hello"),
+            _chunk(parts=[thought_sig_carrier], text="", usage=_usage(total=45)),
+        ])
+
+        done_chunk = chunks[-1]
+        assert done_chunk.done is True
+        non_thought = [p for p in (done_chunk.raw_parts or []) if not getattr(p, "thought", False)]
+        assert len(non_thought) == 1
+        assert non_thought[0].text == "Hello"
+        assert non_thought[0].thought_signature == b"sig"
+
+        normalized = normalize_response_parts(done_chunk.raw_parts)
+        assert any(p.get("text") == "Hello" and p.get("thought_signature") == "c2ln" for p in normalized)
+
+    def test_cr14_dict_thought_yields_and_sig_v2_parallel_fc_suppresses_dropped_warning(self, monkeypatch, caplog):
+        from google.genai import types
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        # 1. __new__ GeminiAdapter without _model_name/_tracker coerces model_version="" safely
+        bare_ad = GeminiAdapter.__new__(GeminiAdapter)
+        usage = bare_ad._record_usage(_usage(total=40, prompt=20, candidates=20), estimate=20)
+        assert usage is not None and usage.model_version == ""
+
+        # 2. Dict thought part yields LLMChunk(text=..., is_thought=True)
+        chunks_dict = self._stream_and_collect_parts([
+            _chunk(parts=[{"thought": True, "text": "dict thought step"}, {"text": "done"}], text="done"),
+        ])
+        thought_chunks = [c for c in chunks_dict if c.is_thought]
+        assert len(thought_chunks) == 1 and thought_chunks[0].text == "dict thought step"
+
+        # 3. BRAIN_THOUGHT_SIG_V2=true suppresses warning on single-chunk parallel FCs, warns on drain FC
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        fc1 = types.FunctionCall(name="tool_1", args={})
+        fc2 = types.FunctionCall(name="tool_2", args={})
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            self._stream_and_collect_parts([
+                _chunk(parts=[types.Part(function_call=fc1), types.Part(function_call=fc2)], function_calls=[fc1, fc2]),
+            ])
+        assert "additional function_call" not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            self._stream_and_collect_parts([
+                _chunk(parts=[types.Part(function_call=fc1)], function_calls=[fc1]),
+                _chunk(parts=[types.Part(function_call=fc2)], function_calls=[fc2]),
+            ])
+        assert "1 additional function_call" in caplog.text
+

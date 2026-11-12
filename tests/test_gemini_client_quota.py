@@ -8,7 +8,7 @@
 #    linear-time [!call: scanning, discard-not-flush on holdback overflow, fail-closed tool allowlist, no raw model text in logs.
 # 5. [Pattern]: TestUnaryMaxOutputTokensCeiling spies on real_adapter._build_config (5th positional arg) to pin the unary 32768 clamp +
 #    warning vs the unclamped 65000 stream path. TestBrainDefaultModelMatchesHelm parses brain.py/helm values (no Brain import) so the
-#    default model cannot drift.
+#    default model cannot drift. TestGemini4UnaryStreamAndAssemble pins CR-02/CR-03/CR-04/CR-09/CR-14 unary stream-and-assemble contracts.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -1285,3 +1285,356 @@ class TestBrainDefaultModelMatchesHelm:
         helm_model = values["gcp"]["llm"]["brain"]["model"]
 
         assert m.group(1) == helm_model == "gemini-4-carbon"
+
+    def test_t3_brain_fallback_max_tokens_matches_helm_values(self):
+        brain_src = (_REPO_ROOT / "src" / "agents" / "brain.py").read_text()
+        m = re.search(r'os\.getenv\(\s*"LLM_MAX_TOKENS_BRAIN"\s*,\s*"([^"]+)"\s*\)', brain_src)
+        assert m, "Brain LLM_MAX_TOKENS_BRAIN fallback not found in src/agents/brain.py"
+
+        values = yaml.safe_load((_REPO_ROOT / "helm" / "values.yaml").read_text())
+        helm_max_tokens = str(values["gcp"]["llm"]["brain"]["maxOutputTokens"])
+
+        assert m.group(1) == helm_max_tokens == "65536"
+
+
+class TestPerStreamRetryOptionsAndSyncStreamDelegator:
+    """T-6 (Probe 4a): Synchronous generate_stream delegator, per-call HttpRetryOptions(attempts=1),
+    __new__ instance safety, and 6 positional args to _build_config.
+    """
+
+    def test_t6_generate_stream_is_sync_delegator_on_port_and_adapter(self):
+        import inspect
+        from src.agents.llm.types import LLMPort
+
+        assert inspect.iscoroutinefunction(GeminiAdapter.generate_stream) is False
+        assert inspect.iscoroutinefunction(LLMPort.generate_stream) is False
+        assert inspect.signature(GeminiAdapter.generate_stream).parameters["max_output_tokens"].default == 65000
+
+    @pytest.mark.asyncio
+    async def test_t6_per_call_http_retry_attempts_one_on_initialized_and_new_instances(self, monkeypatch):
+        from unittest.mock import patch
+
+        monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+
+        async def _single_chunk_stream():
+            yield _chunk(parts=[_part("ok")], text="ok", usage=_usage(total=42))
+
+        # 1. Initialized GeminiAdapter(...) instance
+        with patch("google.genai.Client"):
+            init_ad = GeminiAdapter("proj", "global", "gemini-4-carbon")
+        init_ad._client = MagicMock()
+        init_ad._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _single_chunk_stream())
+        init_ad._build_config = MagicMock(wraps=init_ad._build_config)
+
+        gen = init_ad.generate_stream("sys", "hello")
+        assert hasattr(gen, "aclose")
+        _ = [c async for c in gen]
+
+        assert len(init_ad._build_config.call_args.args) == 6
+        assert init_ad._build_config.call_args.args[4] == 65000
+        init_cfg = init_ad._client.aio.models.generate_content_stream.call_args.kwargs["config"]
+        assert init_cfg.http_options is not None
+        assert init_cfg.http_options.timeout == 240000
+        assert init_cfg.http_options.retry_options is not None
+        assert init_cfg.http_options.retry_options.attempts == 1
+
+        # 2. GeminiAdapter.__new__(GeminiAdapter) fixture (no __init__ attribute setup)
+        raw_ad = GeminiAdapter.__new__(GeminiAdapter)
+        raw_ad._model_name = "gemini-4-carbon"
+        raw_ad._tracker = None
+        raw_ad._client = MagicMock()
+        raw_ad._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _single_chunk_stream())
+
+        _ = [c async for c in raw_ad.generate_stream("sys", "hello")]
+        raw_cfg = raw_ad._client.aio.models.generate_content_stream.call_args.kwargs["config"]
+        assert raw_cfg.http_options is not None
+        assert raw_cfg.http_options.timeout == 240000
+        assert raw_cfg.http_options.retry_options is not None
+        assert raw_cfg.http_options.retry_options.attempts == 1
+
+
+class TestGemini4UnaryStreamAndAssemble:
+    """T-8: Gemini 4 generate() streams via _stream_chunks(preserve_sdk_retries=True),
+    uses sentinel 65536 default, filters thoughts, sanitizes with warn=False,
+    acquires quota once, and rolls back on mid-stream inter-chunk timeout.
+    """
+
+    @staticmethod
+    def _make_gemini4_spy_adapter(model_name: str = "gemini-4-argon", tracker=None):
+        ad = GeminiAdapter.__new__(GeminiAdapter)
+        ad._model_name = model_name
+        ad._tracker = tracker
+        ad._estimate_tokens = lambda contents: ESTIMATE
+        ad._convert_contents = lambda contents: contents
+        ad._build_config = MagicMock(wraps=ad._build_config)
+        ad._client = MagicMock()
+        return ad
+
+    @pytest.mark.asyncio
+    async def test_t8_gemini4_generate_sentinel_defaults_none_and_clamp_warnings_vs_flash(self, caplog):
+        async def _json_stream():
+            yield _chunk(parts=[_part('{"ok": true}')], text='{"ok": true}', usage=_usage(total=80))
+
+        # 1. Omitted max_output_tokens on Gemini 4 -> silent 65536 (zero warnings)
+        ad_default = self._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad_default, _json_stream)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await ad_default.generate("sys", "hello")
+        assert _passed_max_tokens(ad_default) == 65536
+        assert caplog.records == []
+
+        # 2. Explicit max_output_tokens=None on Gemini 4 -> warns "invalid max_output_tokens" + resolves 65536
+        ad_none = self._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad_none, _json_stream)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await ad_none.generate("sys", "hello", max_output_tokens=None)
+        assert _passed_max_tokens(ad_none) == 65536
+        assert any("invalid max_output_tokens" in r.getMessage() for r in caplog.records)
+
+        # 3. Above ceiling max_output_tokens=100000 on Gemini 4 -> warns "clamped" + resolves 65536
+        ad_clamp = self._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad_clamp, _json_stream)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await ad_clamp.generate("sys", "hello", max_output_tokens=100000)
+        assert _passed_max_tokens(ad_clamp) == 65536
+        warnings = _clamp_warnings(caplog)
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "gemini-4-argon" in msg
+        assert "requested=100000" in msg
+        assert "clamped=65536" in msg
+
+        # 4. gemini-3.8-flash keeps unary generate_content with 32768 default
+        flash_ad = self._make_gemini4_spy_adapter("gemini-3.8-flash")
+        flash_ad._client.aio.models.generate_content = AsyncMock(return_value=_response(_usage(total=70)))
+        flash_ad._client.aio.models.generate_content_stream = AsyncMock()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await flash_ad.generate("sys", "hello")
+        assert _passed_max_tokens(flash_ad) == 32768
+        flash_ad._client.aio.models.generate_content.assert_awaited_once()
+        flash_ad._client.aio.models.generate_content_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_t8_gemini4_generate_streams_with_sdk_retries_filters_thoughts_single_quota_and_warn_false(
+        self, real_tracker
+    ):
+        import json
+        from unittest.mock import patch
+        from google.genai import types
+        from src.agents.llm.types import sanitize_call_syntax as real_sanitize
+
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+        ad = self._make_gemini4_spy_adapter("gemini-4-argon", tracker=real_tracker)
+        ad._client.aio.models.generate_content = AsyncMock()
+
+        thought_part = types.Part(thought=True, text="Internal reasoning {not valid json}")
+        json_text = '{"decision": "approve", "confidence": 98}'
+        visible_part = types.Part(thought=False, text=json_text)
+
+        async def _mixed_stream():
+            yield _chunk(parts=[thought_part], text=None)
+            yield _chunk(parts=[visible_part], text=json_text, usage=_usage(total=150))
+
+        _set_stream(ad, _mixed_stream)
+
+        with patch("src.agents.llm.gemini_client.sanitize_call_syntax", wraps=real_sanitize) as sanitize_spy:
+            resp = await ad.generate("sys", "hello")
+
+        ad._client.aio.models.generate_content.assert_not_called()
+        passed_cfg = ad._client.aio.models.generate_content_stream.call_args.kwargs["config"]
+        assert passed_cfg.http_options is None, "preserve_sdk_retries=True must leave per-call http_options=None"
+
+        assert resp.text is not None
+        assert json.loads(resp.text) == {"decision": "approve", "confidence": 98}
+        assert resp.usage is not None and resp.usage.total_tokens == 150
+        assert real_tracker.acquire.await_count == 1
+        _assert_recorded(real_tracker, 150)
+        assert any(call.kwargs.get("warn") is False for call in sanitize_spy.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_t8_gemini4_generate_mid_stream_stall_raises_inter_chunk_closes_and_rolls_back_quota(
+        self, monkeypatch, real_tracker
+    ):
+        from google.genai import types
+        from src.agents.llm import LLMStreamInterChunkTimeoutError
+
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.08")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+        ad = self._make_gemini4_spy_adapter("gemini-4-argon", tracker=real_tracker)
+
+        class SpyHangingStream:
+            def __init__(self):
+                self._idx = 0
+                self.aclose_awaited = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    return _chunk(parts=[types.Part(thought=True, text="heartbeat")], text=None)
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.aclose_awaited += 1
+
+        spy_stream = SpyHangingStream()
+        ad._client.aio.models.generate_content_stream = AsyncMock(return_value=spy_stream)
+
+        with pytest.raises(LLMStreamInterChunkTimeoutError):
+            await asyncio.wait_for(ad.generate("sys", "hello"), timeout=0.6)
+
+        assert spy_stream.aclose_awaited == 1
+        assert real_tracker.acquire.await_count == 1
+        _assert_released(real_tracker)
+
+    @pytest.mark.asyncio
+    async def test_cr02_quota_acquire_delay_and_unset_ttfb_sdk_retry_do_not_trigger_false_ttfb_timeout(
+        self, monkeypatch, real_tracker
+    ):
+        from unittest.mock import patch
+        from google.genai import types
+
+        # 1. QuotaTracker.acquire sleeps longer than explicit ttfb_timeout (0.03s), wire TTFB is fast -> succeeds!
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.05")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        orig_acquire = real_tracker.acquire
+
+        async def _slow_acquire(*args, **kwargs):
+            await asyncio.sleep(0.06)
+            return await orig_acquire(*args, **kwargs)
+
+        real_tracker.acquire = AsyncMock(side_effect=_slow_acquire)
+        ad = self._make_gemini4_spy_adapter("gemini-4-argon", tracker=real_tracker)
+
+        async def _fast_wire_stream():
+            yield _chunk(parts=[types.Part(text="ok")], text="ok", usage=_usage(total=60))
+
+        _set_stream(ad, _fast_wire_stream)
+        resp = await ad.generate("sys", "hello")
+        assert resp.text == "ok"
+        _assert_recorded(real_tracker, 60)
+
+        # 2. When LLM_STREAM_TTFB_TIMEOUT_SEC & LLM_STREAM_CHUNK_TIMEOUT_SEC are unset, Chunk 0 uses total_timeout
+        #    so SDK HttpRetryOptions(attempts=5) 429 retry sleep > 35s is NOT killed at 35s.
+        monkeypatch.delenv("LLM_STREAM_TTFB_TIMEOUT_SEC", raising=False)
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "120")
+
+        seen_budgets = []
+        real_wait_for = asyncio.wait_for
+
+        async def _spy_wait_for(aw, timeout=None):
+            seen_budgets.append(timeout)
+            return await real_wait_for(aw, timeout=timeout)
+
+        ad_retry = self._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad_retry, _fast_wire_stream)
+        with patch("src.agents.llm.gemini_client.asyncio.wait_for", _spy_wait_for):
+            resp_retry = await ad_retry.generate("sys", "hello")
+        assert resp_retry.text == "ok"
+        assert seen_budgets[0] == 120.0, f"Expected Chunk-0 budget == total_timeout (120.0s), got {seen_budgets[0]}"
+
+    @pytest.mark.asyncio
+    async def test_cr03_cr04_cr09_cr14_gemini4_generate_done_break_multichunk_raw_parts_cancel_and_clamp_msg(
+        self, monkeypatch, caplog
+    ):
+        import time
+        from unittest.mock import patch
+        from google.genai import types
+
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.20")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "1.0")
+
+        # 1. CR-04 + CR-03: Multi-chunk visible text reassembles full text + sig in resp.raw_parts,
+        #    and done=True breaks cleanly even if monotonic clock passes total_timeout right as done arrives.
+        ad = self._make_gemini4_spy_adapter("gemini-4-argon")
+        t_part = types.Part(thought=True, text="plan")
+        p1 = types.Part(text="Hello ")
+        p2 = types.Part(text="world!", thought_signature=b"sig9")
+
+        real_mono = time.monotonic
+        gen_calls = [0]
+
+        def _advancing_mono():
+            import sys
+            if sys._getframe(1).f_code.co_name == "generate":
+                idx = gen_calls[0]
+                gen_calls[0] += 1
+                # Call 0: stream_start=100.0; Call 1..3 (p1, p2, done=True): 100.3, 100.6, 100.9 (<1.0s);
+                # Call 4 (would execute if generate() did not break on done=True): 101.2 (>1.0s).
+                return 100.0 + idx * 0.30
+            return real_mono()
+
+        async def _multi_text_stream():
+            yield _chunk(parts=[t_part], text=None)
+            yield _chunk(parts=[p1], text="Hello ")
+            yield _chunk(parts=[p2], text="world!", usage=_usage(total=88))
+
+        _set_stream(ad, _multi_text_stream)
+        with patch("time.monotonic", _advancing_mono):
+            resp = await ad.generate("sys", "hello")
+
+        assert resp.text == "Hello world!"
+        assert resp.raw_parts is not None
+        non_thought = [p for p in resp.raw_parts if not getattr(p, "thought", False)]
+        assert len(non_thought) == 1
+        assert non_thought[0].text == "Hello world!"
+        assert non_thought[0].thought_signature == b"sig9"
+
+        # 2. CR-09: External task.cancel() during post-FC drain propagates CancelledError
+        ad_cancel = self._make_gemini4_spy_adapter("gemini-4-argon")
+        fc = types.FunctionCall(name="classify_event", args={"domain": "clear"})
+        drain_entered = asyncio.Event()
+
+        class DrainHangStream:
+            def __init__(self):
+                self._idx = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    return _chunk(parts=[types.Part(function_call=fc)], function_calls=[fc])
+                drain_entered.set()
+                await asyncio.Event().wait()
+
+        ad_cancel._client.aio.models.generate_content_stream = AsyncMock(return_value=DrainHangStream())
+        tool_schema = [{"name": "classify_event", "description": "Classify", "input_schema": {"type": "object"}}]
+        gen_task = asyncio.create_task(ad_cancel.generate("sys", "hello", tools=tool_schema))
+        await asyncio.wait_for(drain_entered.wait(), timeout=0.5)
+        gen_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await gen_task
+
+        # 3. CR-14: Gemini 4 clamp warning omits "use generate_stream()", and SDK stream retry attempts cap at 10
+        caplog.clear()
+        _set_stream(ad, _multi_text_stream)
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            await ad.generate("sys", "hello", max_output_tokens=100000)
+        assert "use generate_stream()" not in caplog.text
+
+        monkeypatch.setenv("LLM_STREAM_SDK_RETRY_ATTEMPTS", "999")
+        ad_stream = self._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad_stream, _multi_text_stream)
+        _ = [c async for c in ad_stream.generate_stream("sys", "hello")]
+        cfg = ad_stream._client.aio.models.generate_content_stream.call_args.kwargs["config"]
+        assert cfg.http_options.retry_options.attempts == 10
+

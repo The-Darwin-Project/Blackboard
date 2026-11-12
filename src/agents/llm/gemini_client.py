@@ -8,12 +8,14 @@
 # 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 7. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 8. [Pattern]: _convert_structured owns Gemini wire-protocol shaping; Brain._build_contents stays
-#    provider-agnostic. It sanitizes thought signatures on role: 'user' turns, splits mixed FR/text
+#    provider-agnostic. It sanitizes thought signatures on non-'model' turns, propagates standalone
+#    empty-carrier signatures onto model siblings and drops empty/invalid {} parts, splits mixed FR/text
 #    user turns, merges consecutive same-kind user/model turns (parts validated via types.Content
 #    so no raw dict leaks into Content.parts), inserts a synthetic model "Acknowledged." bridge
 #    between non-mergeable consecutive user turns, and closes a trailing model turn (synthetic
 #    FR + "Proceed." user turn).
-# 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
+# 9. [Pattern]: QuotaTracker integration: acquire_stream_reservation pre-acquires outside stream TTFB timers
+#    (returning mutable [estimate, reservation, handed_off]), and _record_usage records total_token_count post-response.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
 # 11. [Pattern]: Google Search grounding removed from adapter-level state. Web search is now a
 #     function call tool (google_web_search) with an isolated generateContent handler.
@@ -22,33 +24,29 @@
 #     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
 #     with models that don't clear thought history.
-# 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
-#     SDK-level retries handle 502/503 before Brain's own retry layer. HttpOptions.timeout is in MILLISECONDS
-#     (SDK converts to seconds); value comes from LLM_HTTP_TIMEOUT_SEC (default 240s) via parse_timeout_env
-#     (rejects empty/malformed/nan/inf/<=0 with a warning + default). In the async aiohttp stream path it becomes
-#     ClientTimeout(total=...) -- a wall-clock cap on the WHOLE streamed request -- and the SDK also sends an
-#     X-Server-Timeout header; under the httpx fallback it is a per-phase (read/connect/...) timeout. The adapter is
-#     shared by Brain, event_namer, aligner, archivist and headhunter, so the value applies to all of them.
-#     Ordering invariant: LLM_STREAM_DRAIN_TIMEOUT_SEC (15s) << LLM_STREAM_CHUNK_TIMEOUT_SEC (180s, Brain per-chunk
-#     wait_for) < LLM_HTTP_TIMEOUT_SEC (240s); warn_on_timeout_misordering logs once if violated.
+# 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx) for unary calls,
+#     while generate_stream() overrides per-call HttpRetryOptions(attempts=1..10) via _build_config(http_options=...) so Brain
+#     owns stream retry timing (LLM_STREAM_SDK_RETRY_ATTEMPTS override, default 1). HttpOptions.timeout is in MILLISECONDS
+#     from LLM_HTTP_TIMEOUT_SEC (default 240s) via types.parse_timeout_env, with class-level _http_timeout_ms fallback for
+#     __new__ test fixtures. Ordering invariant: DRAIN (15s) << min(TTFB 35s, INTER 30s) and TOTAL (180s) < HTTP (240s);
+#     types.resolve_stream_timeouts resolves (ttfb, inter_chunk, total).
 # 14. [Gotcha]: After the first function_calls chunk, keep consuming the stream (single loop) to capture terminal
-#     usage_metadata, thought parts and grounding. The call is held and emitted once in the final done chunk. Drain
-#     errors, unreadable trailing chunks (_read_candidates / function_calls parse) and DRAIN_TIMEOUT_S expiry must NOT
-#     lose the call (emit it with usage so far); errors before the call still propagate. last_parts is frozen at the
-#     function-call chunk (later parts would displace the thought_signature carrier); later text is dropped and extra
-#     function calls are logged and dropped.
-# 15. [Constraint]: generate_stream records usage inside try before the terminal yield on clean completion, or in the outer
-#     finally on error/early exit; closes the SDK stream in the outer finally on EVERY exit via _close_stream (bounded by
-#     ACLOSE_TIMEOUT_S, failures logged). The SDK nests ~6 async generators with bare `async for` (no aclosing), so nothing
-#     else closes the HTTP response deterministically.
+#     usage_metadata, thought parts, grounding, and trailing thoughtSignature carriers. The call is held and emitted once in
+#     the final done chunk. Drain errors, unreadable trailing chunks, and DRAIN_TIMEOUT_S expiry must NOT lose the call.
+#     last_parts is frozen at the function-call chunk, except trailing thoughtSignature/thought-carrier chunks clone and
+#     attach onto unsigned FC / text / thought parts without mutating SDK Part objects or caller dicts in place.
+# 15. [Constraint]: generate_stream is a sync method returning _stream_chunks directly (so await gen.aclose() reaches the
+#     async generator without wrapper indirection), recording usage before terminal yield or in outer finally, and closing
+#     the SDK stream via _close_stream.
 # 16. [Constraint]: Fallback [!call:...!] text is parsed only via types.scan_call_syntax (linear, no regex backtracking).
 #     _extract_call_syntax enforces the tool allowlist fail-closed whenever tools is not None (tools=[] allows nothing),
 #     walks every tag (first declared + JSON-object wins) and never lets raw syntax into returned text. On streaming
 #     holdback overflow the fragment is discarded, later text is suppressed, and the fallback call is NOT executed.
-# 17. [Constraint]: Output-token ceilings differ per path. generate() (unary generate_content) clamps max_output_tokens to
-#     _GEMINI_UNARY_MAX_OUTPUT_TOKENS (32768) and logs a WARNING naming model/requested/clamped whenever it clamps, so truncation is
-#     never silent. generate_stream() keeps the 65000 default and does NOT clamp. _build_config always sets include_thoughts=True and
-#     thinking tokens draw from the same max_output_tokens budget, so a low cap can truncate visible output.
+# 17. [Constraint]: Output-token ceilings differ by model generation. On Gemini 4, generate() defaults silently to 65536 via
+#     _UNSET_MAX_OUTPUT_TOKENS, pre-acquires quota before stream_start, and streams internally via
+#     _stream_chunks(preserve_sdk_retries=True) using total_timeout on Chunk 0 when TTFB/chunk env vars are unset (preserving
+#     SDK 429/503 backoff), breaking on done=True, propagating external task.cancel(), and reassembling multi-chunk visible
+#     text in raw_parts; on earlier Gemini models, generate() clamps unary generate_content to 32768.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -68,26 +66,144 @@ from typing import Any
 
 from .quota_tracker import Reservation
 from .types import (
+    DEFAULT_CHUNK_TIMEOUT_S,
+    DEFAULT_DRAIN_TIMEOUT_S,
+    DEFAULT_HTTP_TIMEOUT_S,
+    DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S,
+    DEFAULT_STREAM_TOTAL_TIMEOUT_S,
+    DEFAULT_STREAM_TTFB_TIMEOUT_S,
     FunctionCall,
     LLMChunk,
     LLMResponse,
-    TokenUsage,
-    PRIORITY_NORMAL,
+    LLMStreamInterChunkTimeoutError,
+    LLMStreamTotalTimeoutError,
+    LLMStreamTTFBTimeoutError,
     MAX_STREAM_CALL_SYNTAX_BUFFER,
+    PRIORITY_NORMAL,
+    TokenUsage,
+    _MAX_TIMEOUT_ENV_S,
+    parse_timeout_env,
+    resolve_stream_timeouts,
     sanitize_call_syntax,
     scan_call_syntax,
     split_stream_call_syntax,
+    warn_on_timeout_misordering,
 )
 
 logger = logging.getLogger(__name__)
 
-# Unary generate_content output-token ceiling. generate_stream() is NOT subject to this cap (65000 default).
+# Unary generate_content output-token ceiling (non-Gemini-4). Gemini 4 generate() streams up to 65536.
 # Thinking tokens (include_thoughts=True) are counted against max_output_tokens.
 _GEMINI_UNARY_MAX_OUTPUT_TOKENS = 32768
+_GEMINI_4_MAX_OUTPUT_TOKENS = 65536
+_UNSET_MAX_OUTPUT_TOKENS: Any = object()
 
 # Synthetic turn texts used to keep the Gemini wire protocol valid (strict user/model alternation).
 _SYNTHETIC_BRIDGE_TEXT = "Acknowledged."
 _SYNTHETIC_PROCEED_TEXT = "Proceed."
+
+_NON_CARRIER_PART_FIELDS = (
+    "inline_data",
+    "file_data",
+    "executable_code",
+    "code_execution_result",
+    "function_response",
+    "functionResponse",
+)
+
+
+def _decode_sig_bytes(sig: Any) -> bytes | None:
+    """Decode a non-empty thought signature to raw bytes (with UTF-8 fallback)."""
+    if not sig or isinstance(sig, bool) or not isinstance(sig, (bytes, bytearray, str)):
+        return None
+    if isinstance(sig, (bytes, bytearray)):
+        return bytes(sig)
+    if not sig.strip():
+        return None
+    import base64
+    import binascii
+
+    try:
+        return base64.b64decode(sig, validate=True)
+    except (ValueError, binascii.Error):
+        return sig.encode("utf-8")
+
+
+def _extract_part_signature(part: Any) -> bytes | None:
+    """Extract and decode thought_signature / thoughtSignature from a dict or SDK Part."""
+    if isinstance(part, dict):
+        return _decode_sig_bytes(part.get("thought_signature")) or _decode_sig_bytes(part.get("thoughtSignature"))
+    return _decode_sig_bytes(getattr(part, "thought_signature", None)) or _decode_sig_bytes(
+        getattr(part, "thoughtSignature", None)
+    )
+
+
+def _part_has_fc(part: Any) -> bool:
+    """True when ``part`` carries a function_call / functionCall."""
+    if isinstance(part, dict):
+        return bool(part.get("functionCall") or part.get("function_call"))
+    return getattr(part, "function_call", None) is not None or getattr(part, "functionCall", None) is not None
+
+
+def _is_empty_sig_carrier(part: Any) -> bool:
+    """True iff ``part`` is an empty-text non-thought non-FC signature carrier."""
+    if _extract_part_signature(part) is None:
+        return False
+    if GeminiAdapter._is_thought_part(part):
+        return False
+    if _part_has_fc(part):
+        return False
+    if isinstance(part, dict):
+        if "bytes" in part or any(part.get(k) for k in _NON_CARRIER_PART_FIELDS):
+            return False
+        text = part.get("text")
+    else:
+        if any(getattr(part, k, None) for k in _NON_CARRIER_PART_FIELDS):
+            return False
+        text = getattr(part, "text", None)
+    return not text
+
+
+def _clone_part_with_sig(part: Any, sig_bytes: bytes) -> Any:
+    """Clone ``part`` with ``thought_signature=sig_bytes`` without mutating the original."""
+    if isinstance(part, dict):
+        cloned = {k: v for k, v in part.items() if k != "thoughtSignature"}
+        cloned["thought_signature"] = sig_bytes
+        return cloned
+    if hasattr(part, "model_copy"):
+        return part.model_copy(update={"thought_signature": sig_bytes})
+    cloned = copy.copy(part)
+    setattr(cloned, "thought_signature", sig_bytes)
+    return cloned
+
+
+def _attach_signature_to_parts(parts: list, sig_bytes: bytes) -> list:
+    """Clone target part(s) in ``parts`` and attach ``thought_signature=sig_bytes``."""
+    if not parts:
+        return parts
+    if any(_part_has_fc(p) for p in parts):
+        return [
+            _clone_part_with_sig(p, sig_bytes)
+            if (_part_has_fc(p) and _extract_part_signature(p) is None)
+            else p
+            for p in parts
+        ]
+    non_thought_indices = [
+        i for i, p in enumerate(parts)
+        if not GeminiAdapter._is_thought_part(p) and not _is_empty_sig_carrier(p)
+    ]
+    if non_thought_indices:
+        target_idx = non_thought_indices[-1]
+        if _extract_part_signature(parts[target_idx]) is None:
+            updated = list(parts)
+            updated[target_idx] = _clone_part_with_sig(parts[target_idx], sig_bytes)
+            return updated
+        return parts
+    if _extract_part_signature(parts[-1]) is None:
+        updated = list(parts)
+        updated[-1] = _clone_part_with_sig(parts[-1], sig_bytes)
+        return updated
+    return parts
 
 
 def _is_function_response_part(part: Any) -> bool:
@@ -158,16 +274,18 @@ def _coerce_part(part: Any) -> Any:
                 name=fr.get("name") or "tool",
                 response=fr.get("response") or {},
             )
-    if "thought_signature" in part:
-        import base64
-
-        restored = dict(part)
-        sig = restored["thought_signature"]
-        try:
-            restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
-        except Exception:
-            pass
-        return restored
+    if "thoughtSignature" in part or "thought_signature" in part:
+        part = dict(part)
+        sig_snake = part.pop("thought_signature", None)
+        sig_camel = part.pop("thoughtSignature", None)
+        decoded = _decode_sig_bytes(sig_snake) or _decode_sig_bytes(sig_camel)
+        if decoded is not None:
+            part["thought_signature"] = decoded
+            return part
+        if not part or (set(part.keys()) == {"text"} and not part.get("text")):
+            return None
+    if not part:
+        return None
     if "text" in part and len(part) == 1:
         return types.Part.from_text(text=part["text"])
     return part
@@ -301,58 +419,11 @@ def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
         return default
 
 
-DEFAULT_CHUNK_TIMEOUT_S: float = 180.0
-DEFAULT_HTTP_TIMEOUT_S: float = 240.0
-DEFAULT_DRAIN_TIMEOUT_S: float = 15.0
-_MAX_TIMEOUT_ENV_S: float = 3600.0
+DEFAULT_TTFB_TIMEOUT_S: float = DEFAULT_STREAM_TTFB_TIMEOUT_S
+DEFAULT_INTER_CHUNK_TIMEOUT_S: float = DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S
+DEFAULT_TOTAL_TIMEOUT_S: float = DEFAULT_STREAM_TOTAL_TIMEOUT_S
 _TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = set()
 _TIMEOUT_ORDER_WARNED: set[tuple[float, float, float]] = set()
-
-
-def parse_timeout_env(name: str, raw: str | None, default: float, max_value: float = _MAX_TIMEOUT_ENV_S) -> float:
-    """Parse and validate a timeout env var given in seconds.
-
-    Accepts a finite float in (0.0, max_value]. Unset/blank returns ``default`` silently; empty-after-set,
-    malformed, NaN/Inf, non-positive or too-large values log a warning (once per name/value) and return ``default``.
-    """
-    if raw is None or not raw.strip():
-        return default
-    try:
-        val = float(raw)
-    except (ValueError, TypeError):
-        val = float("nan")
-    if math.isnan(val) or math.isinf(val) or val <= 0.0 or val > max_value:
-        key = (name, raw)
-        if key not in _TIMEOUT_ENV_WARNED:
-            _TIMEOUT_ENV_WARNED.add(key)
-            logger.warning("Invalid %s=%r; using default %.1fs", name, raw, default)
-        return default
-    return val
-
-
-def warn_on_timeout_misordering(drain_s: float, chunk_s: float, http_s: float) -> bool:
-    """Warn (once per value triple) when DRAIN >= CHUNK or CHUNK >= HTTP. Returns True if misordered."""
-    bad = False
-    key = (drain_s, chunk_s, http_s)
-    if drain_s >= chunk_s:
-        bad = True
-        if key not in _TIMEOUT_ORDER_WARNED:
-            logger.warning(
-                "LLM_STREAM_DRAIN_TIMEOUT_SEC (%.1fs) >= LLM_STREAM_CHUNK_TIMEOUT_SEC (%.1fs): "
-                "the post-tool-call drain should be much shorter than the per-chunk timeout",
-                drain_s, chunk_s,
-            )
-    if chunk_s >= http_s:
-        bad = True
-        if key not in _TIMEOUT_ORDER_WARNED:
-            logger.warning(
-                "LLM_STREAM_CHUNK_TIMEOUT_SEC (%.1fs) >= LLM_HTTP_TIMEOUT_SEC (%.1fs): the HTTP client timeout "
-                "will fire before Brain's per-chunk timeout, so chunk-timeout retry handling is bypassed",
-                chunk_s, http_s,
-            )
-    if bad:
-        _TIMEOUT_ORDER_WARNED.add(key)
-    return bad
 
 
 class GeminiAdapter:
@@ -362,17 +433,46 @@ class GeminiAdapter:
     DRAIN_TIMEOUT_S: float = _parse_drain_timeout(os.getenv("LLM_STREAM_DRAIN_TIMEOUT_SEC"), default=DEFAULT_DRAIN_TIMEOUT_S)
     # Bound on closing the SDK stream in generate_stream's finally (same value as Brain's _ACLOSE_TIMEOUT).
     ACLOSE_TIMEOUT_S: float = 5.0
+    # Class-level fallbacks for GeminiAdapter.__new__(GeminiAdapter) test fixtures.
+    _http_timeout_ms: int = int(DEFAULT_HTTP_TIMEOUT_S * 1000)
+    _model_name: str = ""
+    _tracker: Any = None
 
     def __init__(self, project: str, location: str, model_name: str, quota_tracker=None):
         from google import genai
         from google.genai.types import HttpOptions, HttpRetryOptions
 
         http_timeout_s = parse_timeout_env("LLM_HTTP_TIMEOUT_SEC", os.getenv("LLM_HTTP_TIMEOUT_SEC"), DEFAULT_HTTP_TIMEOUT_S)
-        chunk_timeout_s = parse_timeout_env(
-            "LLM_STREAM_CHUNK_TIMEOUT_SEC", os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC"), DEFAULT_CHUNK_TIMEOUT_S,
-        )
-        warn_on_timeout_misordering(self.DRAIN_TIMEOUT_S, chunk_timeout_s, http_timeout_s)
+        raw_chunk_env = os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC")
+        if raw_chunk_env is not None and raw_chunk_env.strip():
+            chunk_timeout_s = parse_timeout_env("LLM_STREAM_CHUNK_TIMEOUT_SEC", raw_chunk_env, DEFAULT_CHUNK_TIMEOUT_S)
+            warn_on_timeout_misordering(self.DRAIN_TIMEOUT_S, chunk_timeout_s, http_timeout_s)
+        else:
+            ttfb_s, inter_s, total_s = resolve_stream_timeouts()
+            warn_on_timeout_misordering(
+                self.DRAIN_TIMEOUT_S,
+                min(ttfb_s, inter_s),
+                float("inf"),
+                chunk_label="min(LLM_STREAM_TTFB_TIMEOUT_SEC, LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC)",
+            )
+            warn_on_timeout_misordering(
+                0.0,
+                total_s,
+                http_timeout_s,
+                chunk_label="LLM_STREAM_TOTAL_TIMEOUT_SEC",
+            )
+            max_phase_s = max(ttfb_s, inter_s)
+            if total_s < max_phase_s:
+                phase_key = (-1.0, total_s, max_phase_s)
+                if phase_key not in _TIMEOUT_ORDER_WARNED:
+                    _TIMEOUT_ORDER_WARNED.add(phase_key)
+                    logger.warning(
+                        "LLM_STREAM_TOTAL_TIMEOUT_SEC (%.1fs) < max(LLM_STREAM_TTFB_TIMEOUT_SEC, "
+                        "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC) (%.1fs): total ceiling is shorter than per-phase timeout",
+                        total_s, max_phase_s,
+                    )
         http_timeout_ms = int(http_timeout_s * 1000)  # google-genai HttpOptions.timeout is milliseconds
+        self._http_timeout_ms = http_timeout_ms
         self._client = genai.Client(
             vertexai=True,
             project=project,
@@ -400,6 +500,22 @@ class GeminiAdapter:
     def _estimate_tokens(contents: str | list) -> int:
         """Rough pre-request token estimate (char count / 4)."""
         return max(1, len(str(contents)) // 4)
+
+    async def acquire_stream_reservation(
+        self, contents: str | list, priority: int = PRIORITY_NORMAL
+    ) -> list:
+        """Pre-acquire QuotaTracker reservation outside stream TTFB timers.
+
+        Returns mutable ``[estimate, reservation, handed_off]`` state list.
+        """
+        estimate = self._estimate_tokens(contents)
+        reservation = None
+        tracker = getattr(self, "_tracker", None)
+        if tracker:
+            reservation = await tracker.acquire(
+                estimate, max_wait_seconds=30.0, priority=priority
+            )
+        return [estimate, reservation, False]
 
     def _record_usage(self, usage_metadata, estimate: int, reservation: Reservation | None = None) -> TokenUsage | None:
         """Extract full TokenUsage from usage_metadata and record with QuotaTracker."""
@@ -445,7 +561,7 @@ class GeminiAdapter:
             cached_tokens=cached_t,
             tool_use_tokens=tool_use_t,
             total_tokens=total,
-            model_version=self._model_name,
+            model_version=getattr(self, "_model_name", "") or "",
         )
 
     # -----------------------------------------------------------------
@@ -460,12 +576,37 @@ class GeminiAdapter:
         top_p: float,
         max_output_tokens: int,
         thinking_level: str = "",
+        *,
+        http_options: Any = None,
     ):
         """Build GenerateContentConfig from method args."""
         from google.genai import types
 
+        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens <= 0:
+            max_output_tokens = 65000
+
+        model_lower = (getattr(self, "_model_name", "") or "").lower()
+        if "gemini-4" in model_lower:
+            max_output_tokens = min(max_output_tokens, _GEMINI_4_MAX_OUTPUT_TOKENS)
+        elif any(pat in model_lower for pat in ("gemini-1.5", "gemini-2.0")):
+            max_output_tokens = min(max_output_tokens, 8192)
+
         thinking_kwargs: dict = {"include_thoughts": True}
-        if thinking_level:
+        if "gemini-4" in model_lower:
+            raw_level = (thinking_level or "").strip().upper()
+            if raw_level in ("MINIMAL", "NONE"):
+                thinking_kwargs["thinking_level"] = "LOW"
+            elif raw_level in ("LOW", "MEDIUM", "HIGH"):
+                thinking_kwargs["thinking_level"] = raw_level
+            elif raw_level:
+                logger.warning(
+                    "Gemini 4 unsupported thinking_level=%r for model %s; normalizing to 'LOW'",
+                    thinking_level,
+                    getattr(self, "_model_name", ""),
+                )
+                thinking_kwargs["thinking_level"] = "LOW"
+            thinking_kwargs.pop("thinking_budget", None)
+        elif thinking_level:
             thinking_kwargs["thinking_level"] = thinking_level
 
         kwargs: dict = {
@@ -474,6 +615,8 @@ class GeminiAdapter:
             "max_output_tokens": max_output_tokens,
             "thinking_config": types.ThinkingConfig(**thinking_kwargs),
         }
+        if http_options is not None:
+            kwargs["http_options"] = http_options
         if system_prompt:
             kwargs["system_instruction"] = system_prompt
         if tools is not None:
@@ -557,23 +700,55 @@ class GeminiAdapter:
             # Gemini wire protocol: user turns with functionResponse MUST NOT contain text parts,
             # and consecutive user turns must alternate with model turns or merge cleanly.
             # In addition, thought and thought_signature are strictly valid only on role: "model".
-            if role == "user":
+            if role != "model":
                 sanitized_parts = []
                 for p in raw_parts:
                     cleaned = _strip_user_thought_signature(p)
                     if cleaned is not None:
                         sanitized_parts.append(cleaned)
-                parts = [_coerce_part(p) for p in sanitized_parts]
-                fr_parts = [p for p in parts if _is_function_response_part(p)]
-                non_fr_parts = [p for p in parts if not _is_function_response_part(p)]
-                _append_user_turn(converted, fr_parts, has_fr=True)
-                _append_user_turn(converted, non_fr_parts, has_fr=False)
-            else:
-                parts = [_coerce_part(p) for p in raw_parts]
-                if role == "model" and converted and converted[-1].role == "model":
-                    converted[-1].parts.extend(_validated_parts("model", parts))
+                parts = [
+                    cp for p in sanitized_parts
+                    if (cp := _coerce_part(p)) is not None and cp != {}
+                ]
+                if role == "user":
+                    fr_parts = [p for p in parts if _is_function_response_part(p)]
+                    non_fr_parts = [p for p in parts if not _is_function_response_part(p)]
+                    _append_user_turn(converted, fr_parts, has_fr=True)
+                    _append_user_turn(converted, non_fr_parts, has_fr=False)
                 elif parts:
                     converted.append(types.Content(role=role, parts=parts))
+            else:
+                model_raw = list(raw_parts)
+                if any(_is_empty_sig_carrier(p) for p in model_raw):
+                    carrier_sig = next(
+                        (
+                            s
+                            for p in model_raw
+                            if _is_empty_sig_carrier(p) and (s := _extract_part_signature(p)) is not None
+                        ),
+                        None,
+                    )
+                    non_carriers = [p for p in model_raw if not _is_empty_sig_carrier(p)]
+                    siblings = [
+                        cp for p in non_carriers
+                        if (cp := _coerce_part(p)) is not None and cp != {}
+                    ]
+                    parts = (
+                        _attach_signature_to_parts(siblings, carrier_sig)
+                        if (siblings and carrier_sig is not None)
+                        else siblings
+                    )
+                else:
+                    parts = [
+                        cp for p in model_raw
+                        if (cp := _coerce_part(p)) is not None and cp != {}
+                    ]
+                if not parts:
+                    continue
+                if converted and converted[-1].role == "model":
+                    converted[-1].parts.extend(_validated_parts("model", parts))
+                else:
+                    converted.append(types.Content(role="model", parts=parts))
 
         # Protocol safety net: requests ending with a model turn are rejected by Gemini with 400.
         if converted and converted[-1].role == "model":
@@ -618,31 +793,165 @@ class GeminiAdapter:
         tools: list[dict] | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
-        max_output_tokens: int = _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
+        max_output_tokens: int = _UNSET_MAX_OUTPUT_TOKENS,
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
     ) -> LLMResponse:
-        """Blocking generateContent call.
+        """Blocking generateContent call (streams internally on Gemini 4).
 
-        max_output_tokens is clamped to _GEMINI_UNARY_MAX_OUTPUT_TOKENS (32768) on this unary path (a WARNING is
-        logged when a larger value is requested); generate_stream() allows up to 65000 unclamped. Because
-        include_thoughts=True, thinking tokens draw from this same budget.
+        On Gemini 4, defaults silently to 65536 and streams via _stream_chunks(preserve_sdk_retries=True)
+        with adaptive timeouts so thinking heartbeats prevent HTTP stalls. On earlier Gemini models,
+        clamps unary generate_content to _GEMINI_UNARY_MAX_OUTPUT_TOKENS (32768).
         """
-        if not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens <= 0:
+        model_name = getattr(self, "_model_name", "") or ""
+        is_gemini_4 = "gemini-4" in model_name.lower()
+        ceiling = _GEMINI_4_MAX_OUTPUT_TOKENS if is_gemini_4 else _GEMINI_UNARY_MAX_OUTPUT_TOKENS
+
+        if max_output_tokens is _UNSET_MAX_OUTPUT_TOKENS:
+            resolved_tokens = ceiling
+        elif not isinstance(max_output_tokens, int) or isinstance(max_output_tokens, bool) or max_output_tokens <= 0:
             logger.warning(
                 "Gemini generate(): invalid max_output_tokens=%r for model %s; using default %d",
-                max_output_tokens, self._model_name, _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
+                max_output_tokens, model_name, ceiling,
             )
-            max_output_tokens = _GEMINI_UNARY_MAX_OUTPUT_TOKENS
-        elif max_output_tokens > _GEMINI_UNARY_MAX_OUTPUT_TOKENS:
+            resolved_tokens = ceiling
+        elif max_output_tokens > ceiling:
+            suffix = "" if is_gemini_4 else "; use generate_stream() for larger outputs"
             logger.warning(
-                "Gemini generate(): max_output_tokens clamped for model %s (requested=%d, clamped=%d); "
-                "use generate_stream() for larger outputs",
-                self._model_name, max_output_tokens, _GEMINI_UNARY_MAX_OUTPUT_TOKENS,
+                "Gemini generate(): max_output_tokens clamped for model %s (requested=%d, clamped=%d)%s",
+                model_name, max_output_tokens, ceiling, suffix,
             )
-            max_output_tokens = _GEMINI_UNARY_MAX_OUTPUT_TOKENS
-        config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
+            resolved_tokens = ceiling
+        else:
+            resolved_tokens = max_output_tokens
+
+        if is_gemini_4:
+            import contextlib
+            import time
+            from google.genai import types
+
+            ttfb_timeout, inter_chunk_timeout, total_timeout = resolve_stream_timeouts()
+            explicit_ttfb = bool(
+                (os.getenv("LLM_STREAM_TTFB_TIMEOUT_SEC") or "").strip()
+                or (os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC") or "").strip()
+            )
+            effective_ttfb = ttfb_timeout if explicit_ttfb else total_timeout
+            visible_chunks: list[str] = []
+            done_chunk: LLMChunk | None = None
+            preacquired = await self.acquire_stream_reservation(contents, priority=priority)
+            try:
+                stream_gen = self._stream_chunks(
+                    system_prompt=system_prompt,
+                    contents=contents,
+                    tools=tools,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_output_tokens=resolved_tokens,
+                    thinking_level=thinking_level,
+                    tool_choice=tool_choice,
+                    priority=priority,
+                    preserve_sdk_retries=True,
+                    _preacquired=preacquired,
+                )
+                async with contextlib.aclosing(stream_gen) as stream:
+                    it = stream.__aiter__()
+                    stream_start = time.monotonic()
+                    chunk_idx = 0
+                    while True:
+                        elapsed = 0.0 if chunk_idx == 0 else (time.monotonic() - stream_start)
+                        remaining_total = total_timeout - elapsed
+                        if remaining_total <= 0:
+                            raise LLMStreamTotalTimeoutError(
+                                f"Gemini generate() stream exceeded total timeout ({total_timeout}s) for {model_name}"
+                            )
+                        is_ttfb = chunk_idx == 0
+                        phase_timeout = effective_ttfb if is_ttfb else inter_chunk_timeout
+                        wait_budget = min(phase_timeout, remaining_total)
+                        if is_ttfb:
+                            timeout_phase = "ttfb"
+                            last_wait_budget = wait_budget
+                        elif remaining_total <= phase_timeout:
+                            timeout_phase = "total"
+                            last_wait_budget = total_timeout
+                        else:
+                            timeout_phase = "inter-chunk"
+                            last_wait_budget = phase_timeout
+                        curr_task = asyncio.current_task()
+                        pre_cancels = curr_task.cancelling() if curr_task and hasattr(curr_task, "cancelling") else 0
+                        try:
+                            chunk = await asyncio.wait_for(it.__anext__(), timeout=wait_budget)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError as te:
+                            if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                                raise asyncio.CancelledError() from None
+                            if timeout_phase == "total":
+                                raise LLMStreamTotalTimeoutError(
+                                    f"Gemini generate() stream exceeded total timeout ({total_timeout}s) for {model_name}"
+                                ) from te
+                            if timeout_phase == "ttfb":
+                                raise LLMStreamTTFBTimeoutError(
+                                    f"Gemini generate() stream TTFB timed out after {last_wait_budget}s for {model_name}"
+                                ) from te
+                            raise LLMStreamInterChunkTimeoutError(
+                                f"Gemini generate() stream inter-chunk timed out after {last_wait_budget}s for {model_name}"
+                            ) from te
+                        if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
+                            raise asyncio.CancelledError()
+                        chunk_idx += 1
+                        if chunk.text and not chunk.is_thought:
+                            visible_chunks.append(chunk.text)
+                        if chunk.done:
+                            done_chunk = chunk
+                            break
+            finally:
+                if getattr(self, "_tracker", None) and preacquired[1] is not None and not preacquired[2]:
+                    self._tracker.rollback(preacquired[1])
+
+            visible_text = "".join(visible_chunks) if visible_chunks else None
+            clean_text = sanitize_call_syntax(visible_text, warn=False)
+            assembled_raw_parts = done_chunk.raw_parts if done_chunk else None
+            if (
+                done_chunk is not None
+                and done_chunk.function_call is None
+                and clean_text
+                and assembled_raw_parts is not None
+            ):
+                thoughts_only = [p for p in assembled_raw_parts if self._is_thought_part(p)]
+                other_non_text = [
+                    p
+                    for p in assembled_raw_parts
+                    if not self._is_thought_part(p)
+                    and not _is_empty_sig_carrier(p)
+                    and not (
+                        (isinstance(p, dict) and "text" in p and not _part_has_fc(p))
+                        or (not isinstance(p, dict) and getattr(p, "text", None) is not None and not _part_has_fc(p))
+                    )
+                ]
+                sig_bytes = next(
+                    (
+                        s
+                        for p in reversed(assembled_raw_parts)
+                        if not self._is_thought_part(p) and (s := _extract_part_signature(p)) is not None
+                    ),
+                    None,
+                )
+                if sig_bytes is None:
+                    sig_bytes = next(
+                        (s for p in reversed(thoughts_only) if (s := _extract_part_signature(p)) is not None),
+                        None,
+                    )
+                full_text_part = types.Part(text=clean_text, thought_signature=sig_bytes)
+                assembled_raw_parts = thoughts_only + other_non_text + [full_text_part]
+            return LLMResponse(
+                function_call=done_chunk.function_call if done_chunk else None,
+                text=clean_text,
+                raw_parts=assembled_raw_parts,
+                usage=done_chunk.usage if done_chunk else None,
+            )
+
+        config = self._build_config(system_prompt, tools, temperature, top_p, resolved_tokens, thinking_level)
 
         estimate = self._estimate_tokens(contents)
         reservation = None
@@ -695,8 +1004,10 @@ class GeminiAdapter:
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _is_thought_part(part) -> bool:
-        return hasattr(part, 'thought') and part.thought
+    def _is_thought_part(part: Any) -> bool:
+        if isinstance(part, dict):
+            return bool(part.get("thought"))
+        return getattr(part, "thought", None) is True
 
     def _read_candidates(self, chunk) -> tuple[list | None, list, dict | None]:
         """Parse a chunk's candidates without mutating adapter/stream state.
@@ -742,7 +1053,7 @@ class GeminiAdapter:
         except asyncio.CancelledError as e:
             logger.warning("Gemini stream close failed (%s: %s)", type(e).__name__, e)
 
-    async def generate_stream(
+    def generate_stream(
         self,
         system_prompt: str,
         contents: str | list,
@@ -753,20 +1064,68 @@ class GeminiAdapter:
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
+        *,
+        _preacquired: list | None = None,
     ) -> AsyncIterator[LLMChunk]:
-        config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
+        return self._stream_chunks(
+            system_prompt=system_prompt,
+            contents=contents,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
+            tool_choice=tool_choice,
+            priority=priority,
+            preserve_sdk_retries=False,
+            _preacquired=_preacquired,
+        )
 
-        estimate = self._estimate_tokens(contents)
-        reservation = None
-        if self._tracker:
-            reservation = await self._tracker.acquire(
-                estimate, max_wait_seconds=30.0, priority=priority
-            )
-
+    async def _stream_chunks(
+        self,
+        system_prompt: str,
+        contents: str | list,
+        tools: list[dict] | None = None,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        max_output_tokens: int = 65000,
+        thinking_level: str = "",
+        tool_choice: dict | None = None,
+        priority: int = PRIORITY_NORMAL,
+        *,
+        preserve_sdk_retries: bool = False,
+        _preacquired: list | None = None,
+    ) -> AsyncIterator[LLMChunk]:
         stream_iter = None
         last_usage = None
         reservation_recorded = False
+        estimate = 0
+        reservation = None
+        if _preacquired is not None:
+            estimate, reservation = _preacquired[0], _preacquired[1]
+            _preacquired[2] = True
         try:
+            http_opts = None
+            if not preserve_sdk_retries:
+                from google.genai.types import HttpOptions, HttpRetryOptions
+
+                http_timeout_ms = getattr(self, "_http_timeout_ms", int(DEFAULT_HTTP_TIMEOUT_S * 1000))
+                raw_attempts = os.getenv("LLM_STREAM_SDK_RETRY_ATTEMPTS", "1")
+                try:
+                    stream_attempts = min(max(1, int(raw_attempts)), 10)
+                except (ValueError, TypeError, OverflowError):
+                    stream_attempts = 1
+                http_opts = HttpOptions(
+                    timeout=http_timeout_ms,
+                    retry_options=HttpRetryOptions(attempts=stream_attempts),
+                )
+            config = self._build_config(
+                system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level, http_options=http_opts
+            )
+
+            if _preacquired is None:
+                estimate, reservation, _ = await self.acquire_stream_reservation(contents, priority=priority)
+
             stream = await self._client.aio.models.generate_content_stream(
                 model=self._model_name,
                 contents=self._convert_contents(contents),
@@ -778,9 +1137,11 @@ class GeminiAdapter:
             token_usage: TokenUsage | None = None
             thought_parts: list = []
             last_parts = None
+            trailing_sig_bytes: bytes | None = None
             last_grounding = None
             pending_fc = None
-            dropped_fcs = 0
+            same_chunk_extra_fcs = 0
+            drain_dropped_fcs = 0
             drain_deadline = 0.0
             accumulated_stream_text = ""
             stream_text_buffer = ""
@@ -835,17 +1196,54 @@ class GeminiAdapter:
                 # Frozen once a function call is held: a later chunk's parts would replace the
                 # function_call part (carrier of thought_signature) in raw_parts (@ai-rules 14).
                 if chunk_parts is not None and pending_fc is None:
-                    last_parts = chunk_parts
+                    has_substantive = any(
+                        not self._is_thought_part(p) and not _is_empty_sig_carrier(p)
+                        for p in chunk_parts
+                    )
+                    last_has_substantive = bool(
+                        last_parts
+                        and any(not self._is_thought_part(p) and not _is_empty_sig_carrier(p) for p in last_parts)
+                    )
+                    if not has_substantive and last_has_substantive:
+                        carrier_sig = next(
+                            (s for p in chunk_parts if (s := _extract_part_signature(p)) is not None),
+                            None,
+                        )
+                        if carrier_sig is not None:
+                            trailing_sig_bytes = carrier_sig
+                            last_parts = _attach_signature_to_parts(last_parts, carrier_sig)
+                    else:
+                        if not has_substantive:
+                            carrier_sig = next(
+                                (s for p in chunk_parts if (s := _extract_part_signature(p)) is not None),
+                                None,
+                            )
+                            if carrier_sig is not None:
+                                trailing_sig_bytes = carrier_sig
+                        last_parts = chunk_parts
                 thought_parts.extend(chunk_thoughts)
                 if chunk_grounding is not None:
                     last_grounding = chunk_grounding
                 for part in chunk_thoughts:
-                    if hasattr(part, "text") and part.text:
-                        yield LLMChunk(text=part.text, is_thought=True)
+                    t_text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                    if t_text:
+                        yield LLMChunk(text=t_text, is_thought=True)
 
                 if pending_fc is not None:
-                    # Draining: only usage, thoughts and grounding are kept; text and extra calls are dropped.
-                    dropped_fcs += len(chunk_fcs)
+                    # Draining: capture any trailing thoughtSignature onto last_parts; drop extra text/FCs.
+                    drain_sig = next(
+                        (
+                            s
+                            for p in list(chunk_parts or []) + list(chunk_thoughts or [])
+                            if (s := _extract_part_signature(p)) is not None
+                        ),
+                        None,
+                    )
+                    if drain_sig is not None:
+                        trailing_sig_bytes = drain_sig
+                        if last_parts:
+                            last_parts = _attach_signature_to_parts(last_parts, drain_sig)
+                    drain_dropped_fcs += len(chunk_fcs)
                     continue
 
                 if chunk.text and not call_syntax_overflowed:
@@ -868,7 +1266,7 @@ class GeminiAdapter:
 
                 if chunk_fcs:
                     pending_fc = chunk_fcs[0]
-                    dropped_fcs += len(chunk_fcs) - 1
+                    same_chunk_extra_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + drain_timeout
 
             unterminated_logged = call_syntax_overflowed
@@ -884,11 +1282,37 @@ class GeminiAdapter:
                     yield LLMChunk(text=clean_tail)
                 stream_text_buffer = ""
 
-            if dropped_fcs:
-                logger.warning(f"Gemini stream returned {dropped_fcs} additional function_call(s); only the first is used")
+            _sig_v2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
+            effective_dropped_fcs = drain_dropped_fcs + (0 if _sig_v2 else same_chunk_extra_fcs)
+            if effective_dropped_fcs:
+                logger.warning(
+                    f"Gemini stream returned {effective_dropped_fcs} additional function_call(s); only the first is used"
+                )
             if last_grounding:
                 logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
-            output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+
+            fallback_sig = trailing_sig_bytes
+            if fallback_sig is None:
+                fallback_sig = next(
+                    (
+                        s
+                        for p in list(last_parts or []) + list(thought_parts)
+                        if (s := _extract_part_signature(p)) is not None
+                    ),
+                    None,
+                )
+            non_thought_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+            if fallback_sig is not None and non_thought_parts:
+                non_thought_parts = _attach_signature_to_parts(non_thought_parts, fallback_sig)
+            non_carriers = [p for p in non_thought_parts if not _is_empty_sig_carrier(p)]
+            if non_carriers:
+                output_parts = non_carriers
+            elif thought_parts:
+                output_parts = []
+                if fallback_sig is not None and _extract_part_signature(thought_parts[-1]) is None:
+                    thought_parts = _attach_signature_to_parts(thought_parts, fallback_sig)
+            else:
+                output_parts = non_thought_parts
             all_parts = thought_parts + output_parts
 
             if pending_fc is None and accumulated_stream_text and not call_syntax_overflowed:

@@ -3067,3 +3067,594 @@ class TestStripUserThoughtSignatures:
                 )
 
 
+# ---------------------------------------------------------------------------
+# Gemini 4 Runtime Resilience: T-2, T-3, T-4
+# ---------------------------------------------------------------------------
+
+
+class TestGemini4ParallelMultiFCSignatureAndCoercion:
+    """T-2: Parallel multi-FC thoughtSignature reassembly, non-mutating camelCase coercion,
+    falsy signature fallthrough, UTF-8 fallback, and user-turn signature stripping.
+    """
+
+    @pytest.mark.asyncio
+    async def test_t2_parallel_multi_fc_drain_stream_attaches_signature_to_all_fcs(self):
+        from unittest.mock import MagicMock
+        from google.genai import types
+        from src.agents.context_parts import normalize_response_parts
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        fc1 = types.FunctionCall(name="inspect_event", args={"event_id": "evt-1"})
+        fc2 = types.FunctionCall(name="inspect_event", args={"event_id": "evt-2"})
+        p1 = types.Part(function_call=fc1, thought_signature=None)
+        p2 = types.Part(function_call=fc2, thought_signature=None)
+        drain_carrier = types.Part(text="", thought_signature=b"xyz")
+
+        chunk1 = SimpleNamespace(
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[p1, p2]), grounding_metadata=None)],
+            text=None,
+            function_calls=[fc1, fc2],
+            usage_metadata=None,
+        )
+        chunk2 = SimpleNamespace(
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[drain_carrier]), grounding_metadata=None)],
+            text="",
+            function_calls=[],
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=100, candidates_token_count=30, thoughts_token_count=20, total_token_count=150,
+            ),
+        )
+
+        async def _sdk_stream():
+            yield chunk1
+            yield chunk2
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-carbon"
+        adapter._tracker = None
+        adapter._estimate_tokens = lambda contents: 50
+        adapter._convert_contents = lambda contents: contents
+        adapter._build_config = MagicMock(return_value=None)
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _sdk_stream())
+
+        chunks = [c async for c in adapter.generate_stream("sys", "prompt", tools=[{"name": "inspect_event"}])]
+        done_chunk = chunks[-1]
+
+        assert p1.thought_signature is None and p2.thought_signature is None
+        assert done_chunk.raw_parts is not None
+        assert len(done_chunk.raw_parts) == 2
+        assert all(getattr(p, "function_call", None) is not None for p in done_chunk.raw_parts)
+        assert all(p.thought_signature == b"xyz" for p in done_chunk.raw_parts)
+
+        normalized = normalize_response_parts(done_chunk.raw_parts)
+        assert len(normalized) == 2
+        assert [n["functionCall"]["args"]["event_id"] for n in normalized] == ["evt-1", "evt-2"]
+        assert all(n["thought_signature"] == "eHl6" for n in normalized)
+
+        # Plain dict inputs with camelCase thoughtSignature are also normalized cleanly
+        dict_norm = normalize_response_parts([
+            {"functionCall": {"name": "inspect_event", "args": {"event_id": "evt-3"}}, "thoughtSignature": "eHl6"}
+        ])
+        assert dict_norm == [
+            {"functionCall": {"name": "inspect_event", "args": {"event_id": "evt-3"}}, "thought_signature": "eHl6"}
+        ]
+
+    def test_t2_extract_model_parts_turn_to_parts_and_estimate_tokens_non_mutating_camelcase(self):
+        import copy
+        from src.agents.context_parts import estimate_msg_tokens, extract_model_parts, turn_to_parts
+
+        caller_parts = [
+            {"functionCall": {"name": "tool_a", "args": {"a": 1}}},
+            {"functionCall": {"name": "tool_b", "args": {"b": 2}}},
+            {"text": "", "thoughtSignature": "eHl6"},
+        ]
+        snapshot = copy.deepcopy(caller_parts)
+
+        extracted = extract_model_parts(caller_parts)
+        assert caller_parts == snapshot, "extract_model_parts must not mutate caller dicts in place"
+        assert len(extracted) == 2, "orphan empty-text signature carrier must be stripped once FCs hold the signature"
+        assert [p["functionCall"]["name"] for p in extracted] == ["tool_a", "tool_b"]
+        assert all(p.get("thought_signature") == "eHl6" and "thoughtSignature" not in p for p in extracted)
+
+        turn_fc = _make_turn(actor="brain", action="response", response_parts=caller_parts)
+        fc_parts = turn_to_parts(turn_fc)
+        assert caller_parts == snapshot, "turn_to_parts must not mutate turn.response_parts in place"
+        assert len(fc_parts) == 2
+        assert all(p.get("thought_signature") == "eHl6" and "thoughtSignature" not in p for p in fc_parts)
+
+        turn_resp = _make_turn(
+            actor="brain",
+            action="response",
+            thoughts="Summary ready",
+            response_parts=[{"text": "", "thoughtSignature": "eHl6"}],
+        )
+        resp_parts = turn_to_parts(turn_resp)
+        assert resp_parts == [{"text": "Summary ready", "thought_signature": "eHl6"}]
+
+        base_chars = estimate_msg_tokens({"role": "model", "parts": [{"text": "hi"}]})
+        camel_chars = estimate_msg_tokens({"role": "model", "parts": [{"text": "hi", "thoughtSignature": "eHl6" * 10}]})
+        assert camel_chars == base_chars + 40
+
+    def test_t2_convert_structured_and_coerce_part_camelcase_falsy_fallthrough_utf8_and_user_strip(self):
+        import copy
+        from google.genai import types
+        from src.agents.llm.gemini_client import _coerce_part
+
+        # W5-1: falsy signatures ("", None, False) do not mutate caller dict and fall through to Part.from_text
+        for falsy_part in (
+            {"text": "empty_str", "thoughtSignature": ""},
+            {"text": "none_val", "thought_signature": None},
+            {"text": "false_val", "thoughtSignature": False},
+        ):
+            orig = copy.deepcopy(falsy_part)
+            coerced = _coerce_part(falsy_part)
+            assert falsy_part == orig, "_coerce_part must not mutate caller dict"
+            assert isinstance(coerced, types.Part), f"expected types.Part fallthrough for {orig}, got {type(coerced)}"
+            assert coerced.text == orig["text"]
+            assert coerced.thought_signature is None
+
+        # Non-base64 UTF-8 fallback ("sig_abc")
+        utf8_in = {"text": "legacy_sig", "thoughtSignature": "sig_abc"}
+        utf8_orig = copy.deepcopy(utf8_in)
+        coerced_utf8 = _coerce_part(utf8_in)
+        assert utf8_in == utf8_orig
+        validated_utf8 = types.Content(role="model", parts=[coerced_utf8]).parts[0]
+        assert validated_utf8.thought_signature == b"sig_abc"
+
+        # Full _convert_structured round-trip with parallel multi-FC + camelCase sig + falsy + UTF-8 + user turn
+        contents = [
+            {"role": "user", "parts": [{"text": "run batch", "thoughtSignature": "eHl6"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "tool_a", "args": {"x": 1}}, "thoughtSignature": "eHl6"},
+                    {"functionCall": {"name": "tool_b", "args": {"x": 2}}, "thoughtSignature": "eHl6"},
+                    {"text": "note_empty", "thoughtSignature": ""},
+                    {"text": "note_utf8", "thought_signature": "sig_abc"},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "tool_a", "response": {"result": "ok1"}}, "thoughtSignature": "eHl6"},
+                    {"functionResponse": {"name": "tool_b", "response": {"result": "ok2"}}, "thought_signature": "eHl6"},
+                ],
+            },
+        ]
+        snapshot = copy.deepcopy(contents)
+
+        converted = _gemini_adapter()._convert_structured(contents)
+        assert contents == snapshot, "_convert_structured must not mutate caller contents"
+
+        model_turns = [c for c in converted if c.role == "model"]
+        assert len(model_turns) == 1
+        fc_parts = [p for p in model_turns[0].parts if p.function_call is not None]
+        assert len(fc_parts) == 2
+        assert all(p.thought_signature == b"xyz" for p in fc_parts)
+
+        empty_sig_part = next(p for p in model_turns[0].parts if p.text == "note_empty")
+        assert empty_sig_part.thought_signature is None
+        utf8_part = next(p for p in model_turns[0].parts if p.text == "note_utf8")
+        assert utf8_part.thought_signature == b"sig_abc"
+
+        for user_turn in (c for c in converted if c.role == "user"):
+            for p in user_turn.parts:
+                assert p.thought_signature is None
+
+
+class TestGemini4TokenFloorsAndCeilings:
+    """T-3 & T-4: Provider-safe 65536 token floors in Brain/Helm and model ceilings in GeminiAdapter."""
+
+    @pytest.mark.parametrize("model_name", ["gemini-4-carbon", "gemini-4-argon", "Gemini-4-Carbon"])
+    def test_t3_gemini4_resolve_llm_params_enforces_65536_floor_and_262144_runaway_cap(
+        self, monkeypatch, model_name: str
+    ):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("LLM_STREAM_RUNAWAY_MAX_CHARS", raising=False)
+        bb = AsyncMock()
+        brain = Brain(blackboard=bb)
+        brain.provider = "gemini"
+        brain.model_name = model_name
+
+        # 1. Stale phase metadata (max_output_tokens=8192) still floors to 65536 on Gemini 4
+        mock_loader = MagicMock()
+        mock_loader.get_phase_meta.return_value = {
+            "thinking_level": "high",
+            "temperature": 1.0,
+            "max_output_tokens": 8192,
+            "priority": 30,
+        }
+        brain._skill_loader = mock_loader
+        brain.max_output_tokens = 8192
+        _, _, tokens_with_loader = brain._resolve_llm_params(["dispatch"])
+        assert tokens_with_loader == 65536
+        assert Brain._resolve_runaway_max_chars(tokens_with_loader) == 262144
+
+        # 2. _skill_loader=None also floors to 65536 for both 8192 and 65000
+        brain._skill_loader = None
+        for configured in (8192, 65000):
+            brain.max_output_tokens = configured
+            _, _, tokens_no_loader = brain._resolve_llm_params(["dispatch"])
+            assert tokens_no_loader == 65536
+
+    def test_t3_brain_default_max_tokens_matches_helm_65536_and_stream_sig_stays_65000(self, monkeypatch):
+        import inspect
+        import re
+        from pathlib import Path
+        import yaml
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        monkeypatch.delenv("LLM_MAX_TOKENS_BRAIN", raising=False)
+        brain = Brain(blackboard=AsyncMock())
+        assert brain.max_output_tokens == 65536
+
+        repo_root = Path(__file__).resolve().parent.parent
+        brain_src = (repo_root / "src" / "agents" / "brain.py").read_text()
+        m = re.search(r'os\.getenv\(\s*"LLM_MAX_TOKENS_BRAIN"\s*,\s*"([^"]+)"\s*\)', brain_src)
+        assert m is not None, "LLM_MAX_TOKENS_BRAIN default not found in src/agents/brain.py"
+
+        helm_values = yaml.safe_load((repo_root / "helm" / "values.yaml").read_text())
+        helm_max_tokens = str(helm_values["gcp"]["llm"]["brain"]["maxOutputTokens"])
+        assert m.group(1) == helm_max_tokens == "65536"
+
+        sig = inspect.signature(GeminiAdapter.generate_stream)
+        assert sig.parameters["max_output_tokens"].default == 65000
+
+    def test_t4_non_gemini4_and_claude_resolve_llm_params_do_not_force_65536(self):
+        from unittest.mock import MagicMock
+
+        bb = AsyncMock()
+        brain = Brain(blackboard=bb)
+        mock_loader = MagicMock()
+        mock_loader.get_phase_meta.return_value = {
+            "thinking_level": "high",
+            "temperature": 0.7,
+            "max_output_tokens": 8192,
+            "priority": 30,
+        }
+
+        # gemini-3.8-flash keeps 8192 on both skill-loader and _skill_loader=None paths
+        brain.provider = "gemini"
+        brain.model_name = "gemini-3.8-flash"
+        brain.max_output_tokens = 8192
+        brain._skill_loader = mock_loader
+        assert brain._resolve_llm_params(["dispatch"])[2] == 8192
+        brain._skill_loader = None
+        assert brain._resolve_llm_params(["dispatch"])[2] == 8192
+
+        # provider="claude" never forces 65536 regardless of model_name
+        for claude_model in ("claude-sonnet-4-5", "gemini-4-carbon"):
+            brain.provider = "claude"
+            brain.model_name = claude_model
+            brain.max_output_tokens = 8192
+            brain._skill_loader = mock_loader
+            assert brain._resolve_llm_params(["dispatch"])[2] == 8192
+            brain._skill_loader = None
+            assert brain._resolve_llm_params(["dispatch"])[2] == 8192
+
+    @pytest.mark.parametrize(
+        "model_name,requested,expected",
+        [
+            ("gemini-4-carbon", 100000, 65536),
+            ("gemini-4-carbon", 65536, 65536),
+            ("gemini-1.5-pro", 65536, 8192),
+            ("gemini-2.0-flash", 65536, 8192),
+            ("gemini-1.5-pro", 4096, 4096),
+            ("gemini-3.8-flash", 65536, 65536),
+            ("gemini-2.5-pro", 65536, 65536),
+        ],
+    )
+    def test_t4_gemini_adapter_build_config_clamps_by_model_generation(
+        self, model_name: str, requested: int, expected: int
+    ):
+        adapter = _gemini_adapter()
+        adapter._model_name = model_name
+        cfg = adapter._build_config("sys", None, 1.0, 0.95, requested, thinking_level="")
+        assert cfg.max_output_tokens == expected
+
+    def test_cr13_cr14_cross_provider_runaway_ceilings_and_env_phase_resilience(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("LLM_STREAM_RUNAWAY_MAX_CHARS", raising=False)
+
+        # 1.LLM_MAX_TOKENS_BRAIN="" or malformed falls back to 65536 without crashing Brain.__init__
+        for bad_env in ("", "   ", "not-an-int", "0", "-10"):
+            monkeypatch.setenv("LLM_MAX_TOKENS_BRAIN", bad_env)
+            b = Brain(blackboard=AsyncMock())
+            assert b.max_output_tokens == 65536
+        monkeypatch.delenv("LLM_MAX_TOKENS_BRAIN", raising=False)
+
+        # 2. Cross-provider ceilings in _resolve_llm_params keep runaway_max_chars aligned with wire ceilings
+        brain = Brain(blackboard=AsyncMock())
+        loader = MagicMock()
+        loader.get_phase_meta.return_value = {"thinking_level": "high", "temperature": 0.7, "max_output_tokens": 65536}
+        brain._skill_loader = loader
+
+        expected_ceilings = [
+            ("claude", "claude-3-5-sonnet-20241022", 8192, 32768),
+            ("claude", "claude-3-haiku-20240307", 4096, 32000),
+            ("claude", "claude-opus-4-1", 32000, 128000),
+            ("claude", "claude-sonnet-4-5", 64000, 256000),
+            ("claude", "claude-sonnet-5-5", 65536, 262144),
+            ("gemini", "gemini-1.5-pro", 8192, 32768),
+            ("gemini", "gemini-4-carbon", 65536, 262144),
+        ]
+        for prov, model, exp_tokens, exp_runaway in expected_ceilings:
+            brain.provider = prov
+            brain.model_name = model
+            brain.max_output_tokens = 65536
+            brain._skill_loader = loader
+            _, _, resolved = brain._resolve_llm_params(["dispatch"])
+            assert resolved == exp_tokens, f"{model} with loader: expected {exp_tokens}, got {resolved}"
+            assert Brain._resolve_runaway_max_chars(resolved) == exp_runaway
+            brain._skill_loader = None
+            assert brain._resolve_llm_params(["dispatch"])[2] == exp_tokens
+
+        # 3. Phase metadata resilience against inf / NaN / bool and _resolve_runaway_max_chars overflow safety
+        brain.provider = "gemini"
+        brain.model_name = "gemini-3.8-flash"
+        brain.max_output_tokens = 16384
+        brain.temperature = 0.8
+        loader.get_phase_meta.return_value = {
+            "thinking_level": "low",
+            "temperature": float("inf"),
+            "max_output_tokens": True,
+        }
+        brain._skill_loader = loader
+        _, temp, toks = brain._resolve_llm_params(["dispatch"])
+        assert temp == 0.8
+        assert toks == 16384
+
+        assert Brain._resolve_runaway_max_chars(True) == 32000
+        assert Brain._resolve_runaway_max_chars(float("inf")) == 32000  # type: ignore[arg-type]
+        assert Brain._resolve_runaway_max_chars(10**9) == 10_000_000
+
+        # 4. GeminiAdapter._build_config guards invalid max_output_tokens
+        ad = _gemini_adapter()
+        ad._model_name = "gemini-3.8-flash"
+        for bad in (None, True, False, 0, -5):
+            assert ad._build_config("sys", None, 1.0, 0.95, bad).max_output_tokens == 65000  # type: ignore[arg-type]
+
+
+class TestCR01CR07CR08ParallelFCAndSignatureHardening:
+    """CR-01, CR-07, CR-08: Parallel multi-FC + text terminal check, flag-off FC truncation,
+    thought-only signature preservation, empty {} prevention, and dual-key validation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cr01_parallel_multi_fc_with_visible_text_handles_nonterminal_and_terminal_without_error(
+        self, monkeypatch
+    ):
+        from dataclasses import dataclass
+        from typing import Optional
+        from unittest.mock import MagicMock
+        from src.agents.llm.types import FunctionCall
+
+        @dataclass
+        class _StreamChunk:
+            text: Optional[str] = None
+            function_call: Optional[FunctionCall] = None
+            raw_parts: Optional[list] = None
+            grounding_metadata: Optional[dict] = None
+            usage: Optional[object] = None
+            is_thought: bool = False
+            done: bool = False
+
+        class _SimpleStream:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def __aiter__(self):
+                async def _gen():
+                    for x in self._items:
+                        yield x
+
+                return _gen()
+
+        monkeypatch.setattr("src.agents.brain._THOUGHT_SIG_V2", True)
+
+        for second_tool, expected_action in (("inspect_event", "thoughts"), ("wait_for_user", "response")):
+            bb = MagicMock()
+            ev = _make_event()
+            bb.get_event = AsyncMock(return_value=ev)
+            bb.append_turn = AsyncMock(return_value=1)
+            bb.mark_turn_status = AsyncMock()
+            bb.stamp_event = AsyncMock()
+            bb.redis = MagicMock()
+            bb.redis.get = AsyncMock(return_value=None)
+
+            brain = Brain(blackboard=bb, agents={})
+            fc_parts = [
+                {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}, "thought_signature": "eHl6"},
+                {"functionCall": {"name": second_tool, "args": {}}, "thought_signature": "eHl6"},
+            ]
+            chunks = [
+                _StreamChunk(text="Visible explanation before parallel tools."),
+                _StreamChunk(
+                    function_call=FunctionCall(name="classify_event", args={"domain": "clear"}),
+                    raw_parts=fc_parts,
+                    done=True,
+                ),
+            ]
+            adapter = MagicMock()
+            adapter.generate_stream = MagicMock(return_value=_SimpleStream(chunks))
+            brain._adapter = adapter
+            brain._extract_context_flags = AsyncMock(return_value={"event_domain": "clear"})
+            brain._match_phases = MagicMock(return_value=["dispatch"])
+            brain._build_system_prompt = AsyncMock(return_value="sys")
+            brain._resolve_llm_params = MagicMock(return_value=("low", 0.7, 8192))
+            brain._build_contents = AsyncMock(return_value=[{"role": "user", "parts": [{"text": "hi"}]}])
+            brain._resolve_terminal_prompt = MagicMock(return_value=None)
+            brain._broadcast = AsyncMock()
+            brain._append_and_broadcast = AsyncMock(return_value=1)
+            brain._next_turn_number = AsyncMock(return_value=1)
+            brain._is_event_closed = AsyncMock(return_value=False)
+            brain._emit_executive_pulse = AsyncMock()
+            brain._execute_function_call = AsyncMock(return_value=True)
+
+            with (
+                patch(
+                    "src.agents.tool_gates.evaluate_gates",
+                    return_value=[{"name": "classify_event"}, {"name": second_tool}],
+                ),
+                patch("src.agents.tool_gates.build_gate_context", return_value=MagicMock()),
+            ):
+                res = await brain._process_with_llm("evt-cr01", ev)
+
+            assert res is False
+            assert brain._execute_function_call.await_count == 2
+            emitted_turns = [c.args[1] for c in brain._append_and_broadcast.call_args_list]
+            assert any(t.action == expected_action and "Visible explanation" in (t.thoughts or "") for t in emitted_turns)
+
+    @pytest.mark.asyncio
+    async def test_cr08_flag_off_parallel_multi_fc_truncates_captured_parts_to_first_fc(self, monkeypatch):
+        from dataclasses import dataclass
+        from typing import Optional
+        from unittest.mock import MagicMock
+        from src.agents.llm.types import FunctionCall
+
+        @dataclass
+        class _StreamChunk:
+            text: Optional[str] = None
+            function_call: Optional[FunctionCall] = None
+            raw_parts: Optional[list] = None
+            grounding_metadata: Optional[dict] = None
+            usage: Optional[object] = None
+            is_thought: bool = False
+            done: bool = False
+
+        class _SimpleStream:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def __aiter__(self):
+                async def _gen():
+                    for x in self._items:
+                        yield x
+
+                return _gen()
+
+        monkeypatch.setattr("src.agents.brain._THOUGHT_SIG_V2", False)
+
+        bb = MagicMock()
+        ev = _make_event()
+        bb.get_event = AsyncMock(return_value=ev)
+        bb.redis = MagicMock()
+        bb.redis.get = AsyncMock(return_value=None)
+        brain = Brain(blackboard=bb, agents={})
+
+        fc_parts = [
+            {"thought": True, "text": "plan"},
+            {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}},
+            {"functionCall": {"name": "inspect_event", "args": {"event_id": "evt-2"}}, "thought_signature": "eHl6"},
+        ]
+        chunks = [
+            _StreamChunk(
+                function_call=FunctionCall(name="classify_event", args={"domain": "clear"}),
+                raw_parts=fc_parts,
+                done=True,
+            )
+        ]
+        adapter = MagicMock()
+        adapter.generate_stream = MagicMock(return_value=_SimpleStream(chunks))
+        brain._adapter = adapter
+        brain._extract_context_flags = AsyncMock(return_value={"event_domain": "clear"})
+        brain._match_phases = MagicMock(return_value=["dispatch"])
+        brain._build_system_prompt = AsyncMock(return_value="sys")
+        brain._resolve_llm_params = MagicMock(return_value=("low", 0.7, 8192))
+        brain._build_contents = AsyncMock(return_value=[{"role": "user", "parts": [{"text": "hi"}]}])
+        brain._resolve_terminal_prompt = MagicMock(return_value=None)
+        brain._broadcast = AsyncMock()
+        brain._append_and_broadcast = AsyncMock(return_value=1)
+        brain._next_turn_number = AsyncMock(return_value=1)
+        brain._is_event_closed = AsyncMock(return_value=False)
+        brain._emit_executive_pulse = AsyncMock()
+        brain._execute_function_call = AsyncMock(return_value=True)
+
+        with (
+            patch("src.agents.tool_gates.evaluate_gates", return_value=[{"name": "classify_event"}]),
+            patch("src.agents.tool_gates.build_gate_context", return_value=MagicMock()),
+        ):
+            await brain._process_with_llm("evt-cr08", ev)
+
+        passed_rp = brain._execute_function_call.call_args.kwargs["response_parts"]
+        fcs_in_rp = [p for p in passed_rp if p.get("functionCall")]
+        assert len(fcs_in_rp) == 1
+        assert fcs_in_rp[0]["functionCall"]["name"] == "classify_event"
+        assert fcs_in_rp[0]["thought_signature"] == "eHl6"
+
+    def test_cr07_thought_only_carrier_roundtrip_dual_key_validation_and_zero_empty_dicts(self):
+        from src.agents.context_parts import (
+            _apply_sibling_signature,
+            extract_model_parts,
+            normalize_response_parts,
+            turn_to_parts,
+        )
+        from src.agents.llm.gemini_client import _coerce_part, _is_empty_sig_carrier
+
+        # 1. Thought-only + empty carrier preserves thought_signature on thought part
+        extracted = extract_model_parts([
+            {"thought": True, "text": "thinking"},
+            {"text": "", "thoughtSignature": "eHl6"},
+        ])
+        assert extracted == [{"thought": True, "text": "thinking", "thought_signature": "eHl6"}]
+
+        # 2. Empty/whitespace carrier and dual-key bool+valid signature produce zero {} and preserve "eHl6"
+        dual_parts = [
+            {"thoughtSignature": ""},
+            {"thought_signature": "   "},
+            {"functionCall": {"name": "tool_a", "args": {}}, "thought_signature": True, "thoughtSignature": "eHl6"},
+        ]
+        applied = _apply_sibling_signature(dual_parts)
+        assert {} not in applied
+        assert len(applied) == 1
+        assert applied[0] == {"functionCall": {"name": "tool_a", "args": {}}, "thought_signature": "eHl6"}
+
+        assert _coerce_part({"thoughtSignature": ""}) is None
+        assert _coerce_part({"text": "", "thoughtSignature": "   "}) is None
+        coerced_dual = _coerce_part(
+            {"functionCall": {"name": "tool_a", "args": {}}, "thought_signature": True, "thoughtSignature": "eHl6"}
+        )
+        assert coerced_dual["thought_signature"] == b"xyz"
+
+        # 3. Multimodal/code parts with thought_signature are NOT misclassified as empty carriers
+        assert _is_empty_sig_carrier({"bytes": b"img", "mime_type": "image/png", "thought_signature": b"xyz"}) is False
+        assert _is_empty_sig_carrier({"inline_data": {"data": b"1"}, "thought_signature": b"xyz"}) is False
+
+        # 4. _convert_structured drops empty {} / carrier-only parts and strips sig on non-model roles
+        contents = [
+            {"role": "system", "parts": [{"text": "sys note", "thoughtSignature": "eHl6"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"thoughtSignature": ""},
+                    {"thought": True, "text": "plan"},
+                    {"text": "", "thoughtSignature": "eHl6"},
+                ],
+            },
+            {"role": "user", "parts": [{"text": "go"}]},
+        ]
+        converted = _gemini_adapter()._convert_structured(contents)
+        non_model = [c for c in converted if c.role != "model"]
+        assert all(getattr(p, "thought_signature", None) is None for c in non_model for p in c.parts)
+        model_c = [c for c in converted if c.role == "model"]
+        assert len(model_c) == 1
+        wire_parts = model_c[0].model_dump(exclude_none=True, mode="json")["parts"]
+        assert {} not in wire_parts
+        assert any(p.get("thought") is True for p in wire_parts)
+        assert model_c[0].parts[-1].thought_signature == b"xyz"
+
+        # 5. normalize_response_parts rejects whitespace sigs; turn_to_parts filters thought=True & empty "" text
+        assert normalize_response_parts([{"text": "hi", "thought_signature": "   "}]) == [{"text": "hi"}]
+        thought_only_resp = _make_turn(
+            actor="brain",
+            action="response",
+            thoughts="",
+            response_parts=[{"thought": True, "text": "internal thought"}, {"text": "", "thoughtSignature": "eHl6"}],
+        )
+        assert turn_to_parts(thought_only_resp) == []
+
+
+
