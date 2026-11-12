@@ -219,6 +219,14 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 - **Automated events:** CLOSE. Incident is an offline artifact for business hours.
 - **FRIDAY needs input:** request user approval after escalating. Human responds
   via dashboard or chat. If event closes before reply, follow-up event created.
+- **Interrupted or check-in-resumed escalation:** Stream interruptions, quota backpressure,
+  or automated check-in cascades can leave an automated event in escalation midway through
+  outbound reporting or without a post-wake state measurement. Check conversation history
+  first: when incident staging and maintainer notification are already recorded, advance
+  directly to close so outbound alerts remain single-delivery; when escalation followed an
+  automated check-in cascade without a post-wake external state measurement, refresh live
+  repository or promotion state before staging an incident — if the upstream pipeline or
+  merge already succeeded, complete verification and close.
 
 ## Close Phase Constraint
 

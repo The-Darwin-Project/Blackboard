@@ -79,7 +79,12 @@ steps produces shallow assessments that miss cross-event patterns.
    with their ages, phases, defer counts, total defer time, and last defer reasons.
 
 2. **Consult deep memory.** For each deferred event, check historical pipeline durations
-   and past outcomes for the same service.
+   and past outcomes for the same service. Deep event inspection pulls full target
+   histories — including embedded notebook and tool payloads — into the review context
+   window: check the ops journal for the latest system-review entry before inspecting
+   long-lived stalled events, rely on the prior diagnosis when an idle-exhausted event's
+   turn count, phase, and defer state are unchanged, and inspect target histories
+   incrementally — a single event or pair per turn — rather than batching full transcripts.
 
 3. **Think critically.** For each event listed:
    - Is the defer reason still valid? (e.g., "pipeline running" beyond historical baseline)
@@ -184,6 +189,13 @@ multiple observations. Write them ONCE before your first `hold_watch`.
 
 Notes surface automatically when you next process
 that event.
+
+Sticky notes are passive — they surface only when the target event next executes
+a turn rather than waking an unscheduled event. When a target event has
+exhausted its automated check-ins or holds zero active deferrals and already
+carries notes from a prior review, surface its event identifier directly to
+JARVIS in your assessment as an unscheduled stalled event requiring a system
+wake, directive, or administrative closure rather than leaving duplicate notes.
 
 ## Authority
 

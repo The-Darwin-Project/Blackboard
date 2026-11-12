@@ -130,6 +130,7 @@ same mistake, or miss the same cross-event pattern every time.
 - **Numbers → observation, facts/patterns → note.** If it has a unit (ms, %, count), use `record_observation`. If it is a sentence about how things work, use `take_note`.
 - **Changes future handling → note, changes current event → conversation.** If you discover something that will help on future events, note it. If it only matters right now, say it in the conversation.
 - **Environment-level → note, event-to-event → sticky note.** Field notes are global knowledge. Sticky notes bridge two specific consecutive events.
+- **Concise rule → note, full narrative → conversation.** The active field-note notebook loads into triage context across concurrent events, so verbose multi-section reports dilute signal and consume shared token capacity. Distill each field note to a compact, self-contained insight of a few lines capturing the reusable rule, environment quirk, or cross-event correlation key and incident reference, and keep detailed investigation narratives in the event conversation.
 
 ### Review Before Decisions
 
