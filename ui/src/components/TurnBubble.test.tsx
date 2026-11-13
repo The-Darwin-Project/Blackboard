@@ -4,9 +4,11 @@
 // 2. [Constraint]: createMockTurn defaults to NO result/thoughts -- each scenario sets only what it needs so fixtures never leak into user-turn cases.
 // 3. [Constraint]: ../api/client and ./MarkdownViewer are mocked; Approve/Reject/feedback never hit the network. ACTOR_LABELS has no 'developer' entry, so unmapped actors render raw.
 // 4. [Gotcha]: Global RTL cleanup lives in src/testSetup.ts and only toBeInTheDocument is registered -- no per-file afterEach(cleanup), no jest-dom matchers.
+// 5. [Contract]: VMER-2340 receipt (T-8/T-9/T-9a): every standard actor card (user/developer/brain/jarvis) renders StatusCheck in the right header cluster, after the timestamp and before the "View" button; early-return rows (thoughts/phase/dispatcher/reflex/tool_result/triage/wait/transient error) render none.
+// 6. [Constraint]: Titles Sent/Delivered/Evaluated/Executed with glyphs ✓/✓✓/✓✓/✓✓● and hex #64748b/#64748b/#3b82f6/#22c55e asserted for EVERY matrix row; missing/unknown status falls back to 'Sent'. No `any` -- the `as MessageStatus` casts at the render boundary inject 'unknown' and prototype keys (constructor/toString/__proto__/hasOwnProperty) -- T-8a guards the Object.hasOwn lookup.
 /**
  * 4-Layer Farley ATDD Executable Acceptance Specification
- * Scenarios T-1 through T-9: TurnBubble Actor Bubble Cards and Left Alignment
+ * Scenarios T-1 through T-9a: TurnBubble Actor Bubble Cards, Left Alignment and VMER-2340 delivery receipts
  * Scenarios T-10 onward: hardening coverage added after 6-lens review of PR #318
  *
  * Layer 1: Domain Scenarios (Given/When/Then)
@@ -178,43 +180,115 @@ describe('TurnBubble: Unified Actor Bubble Cards (ATDD T-1 - T-9)', () => {
     expect(screen.getByText(/🛑 TAMPERING BLOCKED/)).toBeInTheDocument();
   });
 
-  it.each([
-    ['developer'],
-    ['jarvis'],
-    ['brain'],
-  ])('T-8: Given an autonomous %s turn, When rendered in TurnBubble, Then it does NOT render message delivery status checks (F-01)', (actor) => {
-    renderTurnBubble({
-      actor,
-      action: 'execute',
-      result: 'Finished command',
-    });
+  // VMER-2340 receipt contract: [label, status, title, glyph, hex color].
+  // 'unknown' simulates a status value the UI does not recognise; 'missing' is an absent status.
+  type StatusInput = MessageStatus | 'unknown' | undefined;
+  const statusReceiptMatrix: [string, StatusInput, string, string, string][] = [
+    ['missing', undefined, 'Sent', '✓', '#64748b'],
+    ['unknown', 'unknown', 'Sent', '✓', '#64748b'],
+    ['sent', 'sent', 'Sent', '✓', '#64748b'],
+    ['delivered', 'delivered', 'Delivered', '✓✓', '#64748b'],
+    ['evaluated', 'evaluated', 'Evaluated', '✓✓', '#3b82f6'],
+    ['processed', 'processed', 'Executed', '✓✓●', '#22c55e'],
+  ];
+  const receiptTitles = ['Sent', 'Delivered', 'Evaluated', 'Executed'];
 
-    expect(screen.queryByTitle('Sent')).toBeNull();
-    expect(screen.queryByTitle('Delivered')).toBeNull();
-    expect(screen.queryByTitle('Read')).toBeNull();
-    expect(screen.queryByTitle('Processed')).toBeNull();
-  });
+  const receiptActors = ['user', 'developer', 'brain', 'jarvis'] as const;
+  const receiptCases = receiptActors.flatMap((actor) =>
+    statusReceiptMatrix.map(([label, status, title, glyph, hex]) => [actor, label, status, title, glyph, hex] as const)
+  );
 
-  it.each<[MessageStatus | undefined, string, string]>([
-    [undefined, 'Sent', '✓'],
-    ['sent', 'Sent', '✓'],
-    ['delivered', 'Delivered', '✓✓'],
-    ['evaluated', 'Read', '✓✓'],
-    ['processed', 'Processed', '✓✓●'],
-  ])('T-9: Given a human message turn with status %s, When rendered, Then it renders the "%s" receipt', (status, title, glyph) => {
-    renderTurnBubble({
-      actor: 'user',
-      action: 'message',
-      thoughts: 'Hello FRIDAY',
-      status,
-    });
+  it.each(receiptCases)(
+    'T-8: Given a %s turn with %s status, When rendered, Then the right header cluster shows the "%s" receipt',
+    (actor, _label, status, title, glyph, hex) => {
+      renderTurnBubble({
+        actor,
+        action: actor === 'user' ? 'message' : 'execute',
+        thoughts: actor === 'user' ? 'Hello FRIDAY' : undefined,
+        result: actor !== 'user' ? 'Finished task' : undefined,
+        status: status as MessageStatus | undefined, // single cast: lets 'unknown' reach the component
+      });
 
-    const receipt = screen.getByTitle(title);
-    expect(receipt.textContent).toBe(glyph);
-    for (const other of ['Sent', 'Delivered', 'Read', 'Processed'].filter((t) => t !== title)) {
-      expect(screen.queryByTitle(other)).toBeNull();
+      const receipt = screen.getByTitle(title);
+      expect(receipt.textContent).toBe(glyph);
+      expect(receipt.style.color).toBe(hexToRgb(hex));
+      for (const other of receiptTitles.filter((t) => t !== title)) {
+        expect(screen.queryByTitle(other)).toBeNull();
+      }
+
+      // Receipt lives in the right header cluster (marginLeft:auto, flexShrink:0), right after the timestamp.
+      const rightCluster = receipt.parentElement;
+      expect(rightCluster).toBeInTheDocument();
+      expect(rightCluster?.style.marginLeft).toBe('auto');
+      expect(rightCluster?.style.flexShrink).toBe('0');
+      expect(screen.getByTestId('turn-bubble-header').contains(rightCluster)).toBe(true);
+
+      const expectedTimeString = new Date(1700000000 * 1000).toLocaleTimeString();
+      expect(receipt.previousElementSibling?.textContent).toBe(expectedTimeString);
     }
+  );
+
+  // Guards the Object.hasOwn lookup: inherited Object.prototype keys must not resolve to a receipt entry.
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'T-8a: Given a turn whose status is the prototype key "%s", When rendered, Then the receipt falls back to "Sent"',
+    (protoKey) => {
+      renderTurnBubble({
+        actor: 'brain',
+        action: 'execute',
+        result: 'Finished task',
+        status: protoKey as MessageStatus, // single cast: injects a prototype key as an unrecognised status
+      });
+
+      const receipt = screen.getByTitle('Sent');
+      expect(receipt.textContent).toBe('✓');
+      expect(receipt.style.color).toBe(hexToRgb('#64748b'));
+      for (const other of receiptTitles.filter((t) => t !== 'Sent')) {
+        expect(screen.queryByTitle(other)).toBeNull();
+      }
+    }
+  );
+
+  it('T-9: Given a report-worthy turn with onViewReport, When rendered, Then the right header cluster orders timestamp, receipt, then the View button', () => {
+    const onViewReport = vi.fn();
+    renderTurnBubble(
+      { actor: 'developer', action: 'execute', result: 'x'.repeat(501), status: 'processed' },
+      { onViewReport }
+    );
+
+    const receipt = screen.getByTitle('Executed');
+    const cluster = receipt.parentElement as HTMLElement;
+    const children = Array.from(cluster.children) as HTMLElement[];
+    expect(children).toHaveLength(3);
+    expect(children[0].textContent).toBe(new Date(1700000000 * 1000).toLocaleTimeString());
+    expect(children[1]).toBe(receipt);
+    expect(children[2].tagName).toBe('BUTTON');
+    expect(children[2].title).toBe('Open in floating viewer');
+    expect(children[2].textContent).toContain('View');
+
+    fireEvent.click(children[2]);
+    expect(onViewReport).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ['thoughts', { actor: 'brain', action: 'thoughts', thoughts: 'Considering options' }],
+    ['phase', { actor: 'brain', action: 'phase', thoughts: 'Phase: verify. Verifying results' }],
+    ['dispatcher', { actor: 'dispatcher', action: 'route', thoughts: 'Routed to developer' }],
+    ['reflex', { actor: 'system', action: 'reflex', thoughts: '2 lesson match' }],
+    ['tool_result', { actor: 'brain', action: 'tool_result', thoughts: 'tool output' }],
+    ['triage', { actor: 'brain', action: 'triage', thoughts: 'triage notes' }],
+    ['wait', { actor: 'brain', action: 'wait', thoughts: 'waiting' }],
+    ['transient error', { actor: 'brain', action: 'error', thoughts: '429 RESOURCE_EXHAUSTED' }],
+  ] as [string, Partial<ConversationTurn>][])(
+    'T-9a: Given a %s row (early-return path) with status processed, When rendered, Then no delivery receipt renders',
+    (_name, overrides) => {
+      renderTurnBubble({ ...overrides, status: 'processed' });
+
+      expect(screen.queryByTestId('turn-bubble-card')).toBeNull();
+      for (const title of receiptTitles) {
+        expect(screen.queryByTitle(title)).toBeNull();
+      }
+    }
+  );
 });
 
 // =============================================================================
