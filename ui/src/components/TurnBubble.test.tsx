@@ -5,7 +5,7 @@
 // 3. [Constraint]: ../api/client and ./MarkdownViewer are mocked; Approve/Reject/feedback never hit the network. ACTOR_LABELS has no 'developer' entry, so unmapped actors render raw.
 // 4. [Gotcha]: Global RTL cleanup lives in src/testSetup.ts and only toBeInTheDocument is registered -- no per-file afterEach(cleanup), no jest-dom matchers.
 // 5. [Contract]: VMER-2340 receipt (T-8/T-9/T-9a): every standard actor card (user/developer/brain/jarvis) renders StatusCheck in the right header cluster, after the timestamp and before the "View" button; early-return rows (thoughts/phase/dispatcher/reflex/tool_result/triage/wait/transient error) render none.
-// 6. [Constraint]: Titles Sent/Delivered/Evaluated/Executed with glyphs ✓/✓✓/✓✓/✓✓● and hex #64748b/#64748b/#3b82f6/#22c55e asserted for EVERY matrix row; missing/unknown status falls back to 'Sent'. No `any` -- the single `as MessageStatus | undefined` cast at the render boundary injects 'unknown'.
+// 6. [Constraint]: Titles Sent/Delivered/Evaluated/Executed with glyphs ✓/✓✓/✓✓/✓✓● and hex #64748b/#64748b/#3b82f6/#22c55e asserted for EVERY matrix row; missing/unknown status falls back to 'Sent'. No `any` -- the `as MessageStatus` casts at the render boundary inject 'unknown' and prototype keys (constructor/toString/__proto__/hasOwnProperty) -- T-8a guards the Object.hasOwn lookup.
 /**
  * 4-Layer Farley ATDD Executable Acceptance Specification
  * Scenarios T-1 through T-9a: TurnBubble Actor Bubble Cards, Left Alignment and VMER-2340 delivery receipts
@@ -225,6 +225,26 @@ describe('TurnBubble: Unified Actor Bubble Cards (ATDD T-1 - T-9)', () => {
 
       const expectedTimeString = new Date(1700000000 * 1000).toLocaleTimeString();
       expect(receipt.previousElementSibling?.textContent).toBe(expectedTimeString);
+    }
+  );
+
+  // Guards the Object.hasOwn lookup: inherited Object.prototype keys must not resolve to a receipt entry.
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'T-8a: Given a turn whose status is the prototype key "%s", When rendered, Then the receipt falls back to "Sent"',
+    (protoKey) => {
+      renderTurnBubble({
+        actor: 'brain',
+        action: 'execute',
+        result: 'Finished task',
+        status: protoKey as MessageStatus, // single cast: injects a prototype key as an unrecognised status
+      });
+
+      const receipt = screen.getByTitle('Sent');
+      expect(receipt.textContent).toBe('✓');
+      expect(receipt.style.color).toBe(hexToRgb('#64748b'));
+      for (const other of receiptTitles.filter((t) => t !== 'Sent')) {
+        expect(screen.queryByTitle(other)).toBeNull();
+      }
     }
   );
 
