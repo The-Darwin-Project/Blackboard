@@ -117,9 +117,10 @@ These blocks control event lifecycle behavior (no external service required):
 | :--- | :--- | :--- |
 | `idleTimeout` | Auto-close stale chat/slack approval threads | `warningSec`, `closeSec` |
 | `brain.reconcileWorkers` | ReconcileScheduler worker pool | `0` = auto-derive from source caps |
-| `brain.streamTtfbTimeoutSec` | Stream TTFB timeout in seconds | `35` |
-| `brain.streamInterChunkTimeoutSec` | Stream inter-chunk timeout in seconds | `30` |
-| `brain.streamTotalTimeoutSec` | Stream total timeout cap in seconds | `180` |
+| `brain.streamTtfbTimeoutSec` | Stream pre-substantive TTFB timeout in seconds | `600` |
+| `brain.streamInterChunkTimeoutSec` | Stream sliding activity/heartbeat timeout in seconds | `60` |
+| `brain.streamTotalTimeoutSec` | Stream outer runaway timeout cap in seconds | `1200` |
+| `brain.httpTimeoutSec` | Gemini SDK HTTP / X-Server-Timeout cap in seconds | `1500` |
 | `brain.streamSdkRetryAttempts` | Stream SDK retry attempts before Brain handling | `1` |
 | `app.maxConcurrentDispatches` | Global WIP cap for local sidecar dispatches | `0` = disabled |
 | `app.agentWsMode` | Sidecar WebSocket direction | `reverse` (production) or `legacy` |

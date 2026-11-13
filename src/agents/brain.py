@@ -21,9 +21,10 @@
 # 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
 #     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
 #     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
-# 12b. [Pattern]: Adaptive two-phase + total stream timeout in _process_with_llm via resolve_stream_timeouts() (.llm):
-#     Phase 1 (TTFB, chunk_idx==0): LLM_STREAM_TTFB_TIMEOUT_SEC (35s default); Phase 2 (sliding inter-chunk):
-#     LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC (30s default); Hard cap: LLM_STREAM_TOTAL_TIMEOUT_SEC (180s default).
+# 12b. [Pattern]: Activity-based two-phase + outer ceiling stream watchdog in _process_with_llm via resolve_stream_timeouts() (.llm):
+#     Phase 1 (pre-substantive TTFB, not substantive_seen): LLM_STREAM_TTFB_TIMEOUT_SEC (600s default); Phase 2 (sliding
+#     activity heartbeat, reset on every chunk including bare LLMChunk() wire heartbeats): LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC
+#     (60s default); Outer runaway sanity ceiling: LLM_STREAM_TOTAL_TIMEOUT_SEC (1200s default, < 1500s HTTP).
 #     Legacy LLM_STREAM_CHUNK_TIMEOUT_SEC seeds TTFB + inter-chunk defaults when set. TTFB/inter-chunk timeouts retry
 #     once (timeout_retries); LLMStreamTotalTimeoutError aborts immediately with zero retries. Stream closed (bounded
 #     aclose, 5s) in finally whenever stream_exhausted is False; normal completion never calls aclose.
@@ -296,6 +297,7 @@ from ..utils.pii_redaction import redact_pii
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 from .llm import (
+    LLMChunk,
     LLMStreamInterChunkTimeoutError,
     LLMStreamTimeoutError,
     LLMStreamTotalTimeoutError,
@@ -2049,6 +2051,10 @@ class Brain:
                     stream = None
                     stream_exhausted = False
                     preacquired = None
+                    chunk_idx = 0
+                    substantive_seen = False
+                    timeout_phase = "ttfb"
+                    last_wait_budget = ttfb_timeout
                     try:
                         acquire_fn = getattr(self._adapter, "acquire_stream_reservation", None)
                         stream_kwargs: dict[str, Any] = {
@@ -2066,7 +2072,6 @@ class Brain:
                         stream = self._adapter.generate_stream(**stream_kwargs)
                         it = stream.__aiter__()
                         stream_start = time.monotonic()
-                        chunk_idx = 0
                         done_seen = False
                         last_ws_thought_time: float | None = None
                         last_thinking_pulse_time = time.time()
@@ -2096,15 +2101,18 @@ class Brain:
                                 raise LLMStreamTotalTimeoutError(
                                     f"LLM stream exceeded total timeout ({total_timeout}s) for {event_id}"
                                 )
-                            is_ttfb = chunk_idx == 0
+                            is_ttfb = not substantive_seen
                             phase_timeout = ttfb_timeout if is_ttfb else inter_chunk_timeout
                             wait_budget = min(phase_timeout, remaining_total)
-                            if is_ttfb:
+                            if chunk_idx == 0:
                                 timeout_phase = "ttfb"
                                 last_wait_budget = wait_budget
                             elif remaining_total <= phase_timeout:
                                 timeout_phase = "total"
                                 last_wait_budget = total_timeout
+                            elif is_ttfb:
+                                timeout_phase = "ttfb"
+                                last_wait_budget = phase_timeout
                             else:
                                 timeout_phase = "inter-chunk"
                                 last_wait_budget = phase_timeout
@@ -2126,7 +2134,7 @@ class Brain:
                                     ) from te
                                 if timeout_phase == "ttfb":
                                     raise LLMStreamTTFBTimeoutError(
-                                        f"LLM stream TTFB timed out after {last_wait_budget}s for {event_id}"
+                                        f"LLM stream TTFB timed out after {last_wait_budget}s (chunks_seen={chunk_idx}) for {event_id}"
                                     ) from te
                                 raise LLMStreamInterChunkTimeoutError(
                                     f"LLM stream inter-chunk timed out after {last_wait_budget}s for {event_id}"
@@ -2134,6 +2142,8 @@ class Brain:
                             if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
                                 raise asyncio.CancelledError()
                             chunk_idx += 1
+                            if LLMChunk.is_chunk_substantive(chunk):
+                                substantive_seen = True
                             if chunk.text:
                                 if chunk.is_thought:
                                     accumulated_thoughts += chunk.text
@@ -2217,7 +2227,7 @@ class Brain:
                         break
                     except asyncio.TimeoutError:
                         logger.warning(
-                            f"Brain LLM stream ({timeout_phase}) timed out for {event_id} after {last_wait_budget}s (attempt {attempt+1})"
+                            f"Brain LLM stream ({timeout_phase}) timed out for {event_id} after {last_wait_budget}s (chunks_seen={chunk_idx}, attempt {attempt+1})"
                         )
                         raise
                     finally:

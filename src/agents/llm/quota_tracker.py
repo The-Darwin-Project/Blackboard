@@ -13,6 +13,8 @@
 #    `== PRIORITY_HIGH` is special; any other value is low priority. Gated callers still honour max_wait_seconds.
 # 8. [Constraint]: _high_priority_waiters is incremented/decremented in a try/finally inside acquire(); the decrement MUST stay
 #    in `finally` (success, timeout, cancellation). An underflow is logged as an error -- it signals a counter-balance bug.
+# 9. [Pattern]: _prune() aligns stale active-reservation eviction dynamically above LLM_HTTP_TIMEOUT_SEC via
+#    max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s) so long Carbon turns (600s-1200s) retain active reservations for record().
 """
 Token-bucket rate limiter for Vertex AI Gemini calls.
 
@@ -27,13 +29,24 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import os
 import time
 from collections import deque
 import uuid
 
-from .types import PRIORITY_HIGH, PRIORITY_NORMAL
+from .types import DEFAULT_HTTP_TIMEOUT_S, PRIORITY_HIGH, PRIORITY_NORMAL, parse_timeout_env
 
 logger = logging.getLogger(__name__)
+
+_MIN_STALE_RESERVATION_TTL_S: float = 1800.0
+
+
+def _stale_reservation_ttl_s() -> float:
+    """Compute stale active-reservation TTL dynamically above LLM_HTTP_TIMEOUT_SEC."""
+    http_timeout_s = parse_timeout_env(
+        "LLM_HTTP_TIMEOUT_SEC", os.getenv("LLM_HTTP_TIMEOUT_SEC"), DEFAULT_HTTP_TIMEOUT_S
+    )
+    return max(_MIN_STALE_RESERVATION_TTL_S, http_timeout_s + 120.0)
 
 __all__ = [
     "PRIORITY_HIGH",
@@ -92,13 +105,13 @@ class QuotaTracker:
         )
 
     def _prune(self) -> int:
-        """Remove entries older than 60s, evict stale reservations (>300s, exceeding 180s HTTP timeout), return window total."""
+        """Remove entries older than 60s, evict stale reservations (>max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s)), return window total."""
         now = time.monotonic()
         cutoff = now - 60.0
         while self._window and self._window[0][0] < cutoff:
             self._window.popleft()
 
-        stale_cutoff = now - 300.0
+        stale_cutoff = now - _stale_reservation_ttl_s()
         stale_ids = [
             res_id
             for res_id, res in self._active_reservations.items()
