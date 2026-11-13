@@ -19,6 +19,9 @@
 # 11. [Pattern]: Stream/HTTP timeout constants and env resolvers (DEFAULT_STREAM_*_TIMEOUT_S, DEFAULT_HTTP_TIMEOUT_S,
 #    parse_timeout_env, resolve_stream_timeouts, warn_on_timeout_misordering) live here so importing src.agents.llm
 #    never eagerly loads google-genai / gemini_client. Warn-once sets delegate to gemini_client when loaded.
+# 12. [Constraint]: Bare LLMChunk() (all fields falsy, is_substantive == False) is an in-band SSE wire-heartbeat across
+#    GeminiAdapter and ClaudeAdapter; raw_parts and done=True are strictly terminal-chunk fields so stream watchdogs can gate
+#    Phase-1 -> Phase-2 transition via LLMChunk.is_substantive / LLMChunk.is_chunk_substantive(chunk).
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -82,6 +85,23 @@ class LLMChunk:
     raw_parts: Optional[list] = None
     grounding_metadata: Optional[dict] = None
     usage: Optional[TokenUsage] = None
+
+    @property
+    def is_substantive(self) -> bool:
+        """True when chunk carries model output or terminal state (not a bare wire heartbeat)."""
+        return bool(self.text or self.function_call or self.raw_parts or self.done)
+
+    @staticmethod
+    def is_chunk_substantive(chunk: object) -> bool:
+        """Single source-of-truth substantive check supporting LLMChunk and duck-typed test stand-ins."""
+        if isinstance(chunk, LLMChunk):
+            return chunk.is_substantive
+        return bool(
+            getattr(chunk, "text", None)
+            or getattr(chunk, "function_call", None)
+            or getattr(chunk, "raw_parts", None)
+            or getattr(chunk, "done", False)
+        )
 
 
 # =============================================================================
@@ -248,11 +268,11 @@ class LLMStreamTotalTimeoutError(LLMStreamTimeoutError):
     """Stream exceeded the total wall-clock timeout ceiling (non-retryable)."""
 
 
-DEFAULT_STREAM_TTFB_TIMEOUT_S: float = 35.0
-DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S: float = 30.0
-DEFAULT_STREAM_TOTAL_TIMEOUT_S: float = 180.0
+DEFAULT_STREAM_TTFB_TIMEOUT_S: float = 600.0
+DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S: float = 60.0
+DEFAULT_STREAM_TOTAL_TIMEOUT_S: float = 1200.0
 DEFAULT_CHUNK_TIMEOUT_S: float = 180.0
-DEFAULT_HTTP_TIMEOUT_S: float = 240.0
+DEFAULT_HTTP_TIMEOUT_S: float = 1500.0
 DEFAULT_DRAIN_TIMEOUT_S: float = 15.0
 _MAX_TIMEOUT_ENV_S: float = 3600.0
 _TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = set()

@@ -27,9 +27,10 @@
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx) for unary calls,
 #     while generate_stream() overrides per-call HttpRetryOptions(attempts=1..10) via _build_config(http_options=...) so Brain
 #     owns stream retry timing (LLM_STREAM_SDK_RETRY_ATTEMPTS override, default 1). HttpOptions.timeout is in MILLISECONDS
-#     from LLM_HTTP_TIMEOUT_SEC (default 240s) via types.parse_timeout_env, with class-level _http_timeout_ms fallback for
-#     __new__ test fixtures. Ordering invariant: DRAIN (15s) << min(TTFB 35s, INTER 30s) and TOTAL (180s) < HTTP (240s);
-#     types.resolve_stream_timeouts resolves (ttfb, inter_chunk, total).
+#     from LLM_HTTP_TIMEOUT_SEC (default 1500s) via types.parse_timeout_env, with class-level _http_timeout_ms fallback for
+#     __new__ test fixtures. Ordering invariant: DRAIN (15s) << min(TTFB 600s, INTER 60s) and TOTAL (1200s) < HTTP (1500s);
+#     types.resolve_stream_timeouts resolves (ttfb, inter_chunk, total). _stream_chunks emits bare LLMChunk() wire heartbeats
+#     on silent pre-FC SSE frames (matching ClaudeAdapter) so every SSE packet resets sliding liveness clocks.
 # 14. [Gotcha]: After the first function_calls chunk, keep consuming the stream (single loop) to capture terminal
 #     usage_metadata, thought parts, grounding, and trailing thoughtSignature carriers. The call is held and emitted once in
 #     the final done chunk. Drain errors, unreadable trailing chunks, and DRAIN_TIMEOUT_S expiry must NOT lose the call.
@@ -44,11 +45,11 @@
 #     holdback overflow the fragment is discarded, later text is suppressed, and the fallback call is NOT executed.
 # 17. [Constraint]: Output-token ceilings differ by model generation. On Gemini 4, generate() defaults silently to 65536 via
 #     _UNSET_MAX_OUTPUT_TOKENS, pre-acquires quota before stream_start, and streams internally via
-#     _stream_chunks(preserve_sdk_retries=True) using total_timeout (180s) on Chunk 0 when TTFB/chunk env vars are unset or
-#     equal DEFAULT_STREAM_TTFB_TIMEOUT_S (35s) (preserving the 5-attempt SDK 429/503 retry window under Helm defaults, while
-#     clamping any non-default override to min(ttfb_timeout, total_timeout)), breaking on done=True, propagating external
-#     task.cancel(), and reassembling multi-chunk visible text in raw_parts; on earlier Gemini models, generate() clamps unary
-#     generate_content to 32768.
+#     _stream_chunks(preserve_sdk_retries=True) using total_timeout (1200s) across pre-substantive Phase 1 when TTFB/chunk
+#     env vars are unset or equal DEFAULT_STREAM_TTFB_TIMEOUT_S (600s) (preserving the 5-attempt SDK 429/503 retry window
+#     under Helm defaults, while clamping any non-default override to min(ttfb_timeout, total_timeout)), breaking on
+#     done=True, propagating external task.cancel(), and reassembling multi-chunk visible text in raw_parts; on earlier
+#     Gemini models, generate() clamps unary generate_content to 32768.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -84,6 +85,8 @@ from .types import (
     PRIORITY_NORMAL,
     TokenUsage,
     _MAX_TIMEOUT_ENV_S,
+    _TIMEOUT_ENV_WARNED as _TYPES_TIMEOUT_ENV_WARNED,
+    _TIMEOUT_ORDER_WARNED as _TYPES_TIMEOUT_ORDER_WARNED,
     parse_timeout_env,
     resolve_stream_timeouts,
     sanitize_call_syntax,
@@ -424,8 +427,8 @@ def _parse_drain_timeout(raw: str | None, default: float = 15.0) -> float:
 DEFAULT_TTFB_TIMEOUT_S: float = DEFAULT_STREAM_TTFB_TIMEOUT_S
 DEFAULT_INTER_CHUNK_TIMEOUT_S: float = DEFAULT_STREAM_INTER_CHUNK_TIMEOUT_S
 DEFAULT_TOTAL_TIMEOUT_S: float = DEFAULT_STREAM_TOTAL_TIMEOUT_S
-_TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = set()
-_TIMEOUT_ORDER_WARNED: set[tuple[float, float, float]] = set()
+_TIMEOUT_ENV_WARNED: set[tuple[str, str | None]] = _TYPES_TIMEOUT_ENV_WARNED
+_TIMEOUT_ORDER_WARNED: set[tuple[float, float, float]] = _TYPES_TIMEOUT_ORDER_WARNED
 
 
 class GeminiAdapter:
@@ -862,6 +865,7 @@ class GeminiAdapter:
                     it = stream.__aiter__()
                     stream_start = time.monotonic()
                     chunk_idx = 0
+                    substantive_seen = False
                     while True:
                         elapsed = 0.0 if chunk_idx == 0 else (time.monotonic() - stream_start)
                         remaining_total = total_timeout - elapsed
@@ -869,15 +873,18 @@ class GeminiAdapter:
                             raise LLMStreamTotalTimeoutError(
                                 f"Gemini generate() stream exceeded total timeout ({total_timeout}s) for {model_name}"
                             )
-                        is_ttfb = chunk_idx == 0
+                        is_ttfb = not substantive_seen
                         phase_timeout = effective_ttfb if is_ttfb else inter_chunk_timeout
                         wait_budget = min(phase_timeout, remaining_total)
-                        if is_ttfb:
+                        if chunk_idx == 0:
                             timeout_phase = "ttfb"
                             last_wait_budget = wait_budget
                         elif remaining_total <= phase_timeout:
                             timeout_phase = "total"
                             last_wait_budget = total_timeout
+                        elif is_ttfb:
+                            timeout_phase = "ttfb"
+                            last_wait_budget = phase_timeout
                         else:
                             timeout_phase = "inter-chunk"
                             last_wait_budget = phase_timeout
@@ -896,7 +903,7 @@ class GeminiAdapter:
                                 ) from te
                             if timeout_phase == "ttfb":
                                 raise LLMStreamTTFBTimeoutError(
-                                    f"Gemini generate() stream TTFB timed out after {last_wait_budget}s for {model_name}"
+                                    f"Gemini generate() stream TTFB timed out after {last_wait_budget}s (chunks_seen={chunk_idx}) for {model_name}"
                                 ) from te
                             raise LLMStreamInterChunkTimeoutError(
                                 f"Gemini generate() stream inter-chunk timed out after {last_wait_budget}s for {model_name}"
@@ -904,6 +911,8 @@ class GeminiAdapter:
                         if curr_task and hasattr(curr_task, "cancelling") and curr_task.cancelling() > pre_cancels:
                             raise asyncio.CancelledError()
                         chunk_idx += 1
+                        if LLMChunk.is_chunk_substantive(chunk):
+                            substantive_seen = True
                         if chunk.text and not chunk.is_thought:
                             visible_chunks.append(chunk.text)
                         if chunk.done:
@@ -1197,6 +1206,7 @@ class GeminiAdapter:
                     )
                     break
 
+                yielded_in_iteration = False
                 # Frozen once a function call is held: a later chunk's parts would replace the
                 # function_call part (carrier of thought_signature) in raw_parts (@ai-rules 14).
                 if chunk_parts is not None and pending_fc is None:
@@ -1231,6 +1241,7 @@ class GeminiAdapter:
                 for part in chunk_thoughts:
                     t_text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
                     if t_text:
+                        yielded_in_iteration = True
                         yield LLMChunk(text=t_text, is_thought=True)
 
                 if pending_fc is not None:
@@ -1266,12 +1277,16 @@ class GeminiAdapter:
                             MAX_STREAM_CALL_SYNTAX_BUFFER,
                         )
                     if to_yield:
+                        yielded_in_iteration = True
                         yield LLMChunk(text=to_yield)
 
                 if chunk_fcs:
                     pending_fc = chunk_fcs[0]
                     same_chunk_extra_fcs += len(chunk_fcs) - 1
                     drain_deadline = loop.time() + drain_timeout
+
+                if not yielded_in_iteration and pending_fc is None:
+                    yield LLMChunk()
 
             unterminated_logged = call_syntax_overflowed
             if stream_text_buffer:

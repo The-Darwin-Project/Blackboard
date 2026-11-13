@@ -1312,18 +1312,27 @@ class TestPerStreamRetryOptionsAndSyncStreamDelegator:
         assert inspect.signature(GeminiAdapter.generate_stream).parameters["max_output_tokens"].default == 65000
 
     @pytest.mark.asyncio
-    async def test_t6_per_call_http_retry_attempts_one_on_initialized_and_new_instances(self, monkeypatch):
+    async def test_t6_per_call_http_retry_attempts_one_on_initialized_and_new_instances(self, monkeypatch, caplog):
+        import logging
         from unittest.mock import patch
 
-        monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
-        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        for var in (
+            "LLM_HTTP_TIMEOUT_SEC",
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TTFB_TIMEOUT_SEC",
+            "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TOTAL_TIMEOUT_SEC",
+        ):
+            monkeypatch.delenv(var, raising=False)
 
         async def _single_chunk_stream():
             yield _chunk(parts=[_part("ok")], text="ok", usage=_usage(total=42))
 
-        # 1. Initialized GeminiAdapter(...) instance
-        with patch("google.genai.Client"):
+        # 1. Initialized GeminiAdapter(...) instance (T-1: 1500s -> 1500000 ms, zero misordering warnings)
+        caplog.clear()
+        with patch("google.genai.Client"), caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
             init_ad = GeminiAdapter("proj", "global", "gemini-4-carbon")
+        assert not any("TIMEOUT_SEC" in r.getMessage() for r in caplog.records)
         init_ad._client = MagicMock()
         init_ad._client.aio.models.generate_content_stream = AsyncMock(side_effect=lambda **kw: _single_chunk_stream())
         init_ad._build_config = MagicMock(wraps=init_ad._build_config)
@@ -1336,7 +1345,7 @@ class TestPerStreamRetryOptionsAndSyncStreamDelegator:
         assert init_ad._build_config.call_args.args[4] == 65000
         init_cfg = init_ad._client.aio.models.generate_content_stream.call_args.kwargs["config"]
         assert init_cfg.http_options is not None
-        assert init_cfg.http_options.timeout == 240000
+        assert init_cfg.http_options.timeout == 1500000
         assert init_cfg.http_options.retry_options is not None
         assert init_cfg.http_options.retry_options.attempts == 1
 
@@ -1350,7 +1359,7 @@ class TestPerStreamRetryOptionsAndSyncStreamDelegator:
         _ = [c async for c in raw_ad.generate_stream("sys", "hello")]
         raw_cfg = raw_ad._client.aio.models.generate_content_stream.call_args.kwargs["config"]
         assert raw_cfg.http_options is not None
-        assert raw_cfg.http_options.timeout == 240000
+        assert raw_cfg.http_options.timeout == 1500000
         assert raw_cfg.http_options.retry_options is not None
         assert raw_cfg.http_options.retry_options.attempts == 1
 
@@ -1661,13 +1670,19 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
         return ad
 
     @staticmethod
-    def render_helm_brain_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    def render_helm_brain_env(
+        overrides: dict[str, str] | None = None,
+        string_overrides: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Driver invoking `helm template darwin helm` to extract the `brain` container env."""
         import subprocess
         cmd = ["helm", "template", "darwin", "helm"]
         if overrides:
             for k, v in overrides.items():
                 cmd.extend(["--set", f"{k}={v}"])
+        if string_overrides:
+            for k, v in string_overrides.items():
+                cmd.extend(["--set-string", f"{k}={v}"])
         proc = subprocess.run(
             cmd,
             cwd=_REPO_ROOT,
@@ -1741,18 +1756,103 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
             assert env[k] == v, f"Expected {k}='{v}', got '{env[k]}'"
 
     # -------------------------------------------------------------------------
-    # Layer 1: Executable Scenarios (T-5, T-6, T-7, T-8)
+    # Layer 1: Executable Scenarios (T-4, T-5, T-6, T-7, T-8, T-9 / T-12)
     # -------------------------------------------------------------------------
     @pytest.mark.asyncio
+    async def test_t4_gemini4_generate_bare_heartbeat_preserves_ttfb_budget_until_substantive_seen(
+        self, monkeypatch, real_tracker
+    ):
+        """T-4: When Chunk 0 is a bare LLMChunk() wire heartbeat (from an initial metadata/empty SSE frame)
+        at 0.01s followed by a 0.06s Carbon deep-thinking pause (> inter_chunk_timeout=0.03s, < ttfb_timeout=0.12s),
+        not substantive_seen preserves the 0.12s TTFB budget in GeminiAdapter.generate().
+        """
+        from google.genai import types
+        from src.agents.llm.types import LLMChunk
+
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.12")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.03")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        async def _heartbeat_then_deep_think_sdk_stream():
+            await asyncio.sleep(0.01)
+            # Silent metadata/empty-candidate SSE frame -> must emit bare LLMChunk() heartbeat
+            yield _chunk(parts=[], text=None)
+            # Deep Carbon thinking pause: 0.06s > inter_chunk_timeout (0.03s), < ttfb_timeout (0.12s)
+            await asyncio.sleep(0.06)
+            yield _chunk(parts=[types.Part(thought=True, text="Deep Carbon reasoning")], text=None)
+            yield _chunk(parts=[types.Part(text='{"status": "ok"}')], text='{"status": "ok"}', usage=_usage(total=95))
+
+        # Verify wire driver emits bare LLMChunk() on Frame 0
+        probe_ad = self._make_gemini4_spy_adapter("gemini-4-carbon")
+        _set_stream(probe_ad, _heartbeat_then_deep_think_sdk_stream)
+        raw_chunks = [c async for c in probe_ad.generate_stream("sys", "hello")]
+        assert raw_chunks[0] == LLMChunk(), f"Expected bare LLMChunk() wire heartbeat on silent SSE frame, got {raw_chunks[0]!r}"
+
+        # Verify GeminiAdapter.generate() preserves 0.12s TTFB across the 0.06s post-heartbeat pause
+        ad = self._make_gemini4_spy_adapter("gemini-4-carbon", tracker=real_tracker)
+        _set_stream(ad, _heartbeat_then_deep_think_sdk_stream)
+        resp = await asyncio.wait_for(ad.generate("sys", "hello"), timeout=0.6)
+        assert resp.text == '{"status": "ok"}'
+        _assert_recorded(real_tracker, 95)
+
+    @pytest.mark.asyncio
+    async def test_t5_post_heartbeat_stall_in_gemini4_generate_raises_ttfb_with_chunks_seen(
+        self, monkeypatch, real_tracker
+    ):
+        """T-5: When Chunk 0 is a bare LLMChunk() heartbeat at 0.005s and the stream then stalls forever
+        before any substantive chunk, GeminiAdapter.generate() classifies the stall as
+        LLMStreamTTFBTimeoutError containing 'chunks_seen=1' (not inter-chunk) and rolls back quota.
+        """
+        from src.agents.llm import LLMStreamInterChunkTimeoutError, LLMStreamTTFBTimeoutError
+
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", "0.04")
+        monkeypatch.setenv("LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC", "0.015")
+        monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", "0.50")
+
+        class _HeartbeatThenHangSDKStream:
+            def __init__(self):
+                self._idx = 0
+                self.aclose_awaited = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx == 0:
+                    self._idx += 1
+                    await asyncio.sleep(0.005)
+                    return _chunk(parts=[], text=None)
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.aclose_awaited += 1
+
+        spy_stream = _HeartbeatThenHangSDKStream()
+        real_tracker.acquire = AsyncMock(wraps=real_tracker.acquire)
+        ad = self._make_gemini4_spy_adapter("gemini-4-carbon", tracker=real_tracker)
+        ad._client.aio.models.generate_content_stream = AsyncMock(return_value=spy_stream)
+
+        with pytest.raises(LLMStreamTTFBTimeoutError, match=r"chunks_seen=1") as exc_info:
+            await asyncio.wait_for(ad.generate("sys", "hello"), timeout=0.6)
+
+        assert not isinstance(exc_info.value, LLMStreamInterChunkTimeoutError)
+        assert spy_stream.aclose_awaited == 1
+        assert real_tracker.acquire.await_count == 1
+        _assert_released(real_tracker)
+
+    @pytest.mark.asyncio
     async def test_t5_gemini4_generate_helm_default_ttfb_preserves_total_timeout(self, monkeypatch):
-        """T-5: Gemini 4 unary GeminiAdapter.generate() with LLM_STREAM_TTFB_TIMEOUT_SEC="35"
-        (matching the Helm default) preserves total_timeout (180.0s) for Chunk 0.
+        """T-5 (Helm Default Parity): Gemini 4 unary GeminiAdapter.generate() with
+        LLM_STREAM_TTFB_TIMEOUT_SEC="600" (matching the Helm default) preserves total_timeout (1200.0s)
+        for Phase 1 pre-substantive TTFB.
         """
         await self.assert_gemini4_generate_chunk0_budget(
             monkeypatch,
-            ttfb_env="35",
-            total_env="180",
-            expected_budget=180.0,
+            ttfb_env="600",
+            total_env="1200",
+            expected_budget=1200.0,
         )
 
     @pytest.mark.asyncio
@@ -1778,30 +1878,35 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
 
     @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
     def test_t7_helm_default_template_renders_brain_stream_timeout_and_sdk_retry_env(self):
-        """T-7: Default helm template darwin helm renders Deployment with LLM_STREAM_TTFB_TIMEOUT_SEC="35",
-        LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC="30", LLM_STREAM_TOTAL_TIMEOUT_SEC="180",
-        LLM_STREAM_SDK_RETRY_ATTEMPTS="1" in the brain container env.
+        """T-7 / T-9: Default helm template darwin helm renders Deployment with
+        LLM_STREAM_TTFB_TIMEOUT_SEC="600", LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC="60",
+        LLM_STREAM_TOTAL_TIMEOUT_SEC="1200", LLM_HTTP_TIMEOUT_SEC="1500",
+        and LLM_STREAM_SDK_RETRY_ATTEMPTS="1" in the brain container env.
         """
         env = self.render_helm_brain_env()
         self.assert_helm_deployment_env_vars(
             env,
             {
-                "LLM_STREAM_TTFB_TIMEOUT_SEC": "35",
-                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "30",
-                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "180",
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "600",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "60",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "1200",
+                "LLM_HTTP_TIMEOUT_SEC": "1500",
                 "LLM_STREAM_SDK_RETRY_ATTEMPTS": "1",
             },
         )
 
     @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
     def test_t8_helm_custom_overrides_reflect_in_brain_env_and_lint_passes(self):
-        """T-8: Custom helm --set overrides reflect in rendered Deployment and helm lint passes."""
+        """T-8 / T-9: Custom helm --set overrides (including brain.httpTimeoutSec=1800)
+        reflect in rendered Deployment and helm lint passes.
+        """
         import subprocess
 
         overrides = {
             "brain.streamTtfbTimeoutSec": "45",
             "brain.streamInterChunkTimeoutSec": "40",
             "brain.streamTotalTimeoutSec": "210",
+            "brain.httpTimeoutSec": "1800",
             "brain.streamSdkRetryAttempts": "2",
         }
         env = self.render_helm_brain_env(overrides=overrides)
@@ -1811,6 +1916,7 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
                 "LLM_STREAM_TTFB_TIMEOUT_SEC": "45",
                 "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "40",
                 "LLM_STREAM_TOTAL_TIMEOUT_SEC": "210",
+                "LLM_HTTP_TIMEOUT_SEC": "1800",
                 "LLM_STREAM_SDK_RETRY_ATTEMPTS": "2",
             },
         )
@@ -1826,18 +1932,31 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
 
     @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
     def test_t12_helm_template_zero_retry_attempts_and_partial_brain_values(self):
-        """T-12: Rendering helm template with --set brain.streamSdkRetryAttempts=0 outputs
-        LLM_STREAM_SDK_RETRY_ATTEMPTS="0" (not omitted due to Go template falsy 0), and
-        helm/values.yaml has descriptive inline '#' comments on all 4 stream* keys.
+        """T-12 / T-9: Rendering helm template with --set brain.streamSdkRetryAttempts=0 outputs
+        LLM_STREAM_SDK_RETRY_ATTEMPTS="0", --set-string brain.httpTimeoutSec="" falls back to "1500",
+        and helm/values.yaml has descriptive inline '#' comments on all 5 timeout/retry keys.
         """
         env = self.render_helm_brain_env(overrides={"brain.streamSdkRetryAttempts": "0"})
         self.assert_helm_deployment_env_vars(
             env,
             {
-                "LLM_STREAM_TTFB_TIMEOUT_SEC": "35",
-                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "30",
-                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "180",
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "600",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "60",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "1200",
+                "LLM_HTTP_TIMEOUT_SEC": "1500",
                 "LLM_STREAM_SDK_RETRY_ATTEMPTS": "0",
+            },
+        )
+
+        env_empty_http = self.render_helm_brain_env(string_overrides={"brain.httpTimeoutSec": ""})
+        self.assert_helm_deployment_env_vars(
+            env_empty_http,
+            {
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "600",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "60",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "1200",
+                "LLM_HTTP_TIMEOUT_SEC": "1500",
+                "LLM_STREAM_SDK_RETRY_ATTEMPTS": "1",
             },
         )
 
@@ -1846,6 +1965,7 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
             "streamTtfbTimeoutSec",
             "streamInterChunkTimeoutSec",
             "streamTotalTimeoutSec",
+            "httpTimeoutSec",
             "streamSdkRetryAttempts",
         ):
             matching_lines = [

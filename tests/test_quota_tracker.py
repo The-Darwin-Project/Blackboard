@@ -119,19 +119,25 @@ class TestQuotaTrackerReservationLifecycle:
             assert res.id not in tracker._active_reservations
 
     @pytest.mark.asyncio
-    async def test_prune_evicts_stale_active_reservations_after_300s(self, tracker):
-        """F-04: Stale active reservations older than 300s (exceeding 180s HTTP timeout) are evicted by _prune."""
+    async def test_prune_evicts_stale_active_reservations_after_default_1800s_ttl(self, tracker, monkeypatch):
+        """F-04: Active reservations survive below the 1800s default TTL (+600s, +1795s) and are evicted at +1805s."""
+        monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
         base_time = 1000.0
         with patch("time.monotonic", return_value=base_time):
             res = await tracker.acquire(estimated_tokens=5000, max_wait_seconds=5.0)
             assert res.id in tracker._active_reservations
 
-        # 305s later, prune runs
-        with patch("time.monotonic", return_value=base_time + 305.0):
-            stats = tracker.get_stats()
+        for offset in (600.0, 1795.0):
+            with patch("time.monotonic", return_value=base_time + offset):
+                stats = tracker.get_stats()
+                assert res.id in tracker._active_reservations
+                assert stats["active_reservations"] == 1
+
+        with patch("time.monotonic", return_value=base_time + 1805.0):
+            stats_evicted = tracker.get_stats()
             assert res.id not in tracker._active_reservations
-            assert stats["active_reservations"] == 0
-            assert stats["total_tokens"] == 0
+            assert stats_evicted["active_reservations"] == 0
+            assert stats_evicted["total_tokens"] == 0
 
     @pytest.mark.asyncio
     async def test_record_ignores_already_finalized_reservation(self, tracker):
@@ -377,6 +383,191 @@ class TestQuotaTrackerPriorityReservation:
 
         with pytest.raises(QuotaExhaustedError):
             await high_task
+
+
+class TestQuotaTrackerDynamicStaleReservationEviction:
+    """Dave Farley 4-Layer ATDD Spec (T-7):
+    Dynamic stale-reservation TTL aligned above LLM_HTTP_TIMEOUT_SEC (max(1800s, HTTP + 120s))
+    and unified warn-once registry across QuotaTracker._prune() and GeminiAdapter.
+    """
+
+    # -------------------------------------------------------------------------
+    # Layer 3: Protocol Drivers & Monotonic Clock Helpers
+    # -------------------------------------------------------------------------
+    @staticmethod
+    async def _acquire_at(qt: QuotaTracker, t0: float, tokens: int = 5000) -> Reservation:
+        with patch("time.monotonic", return_value=t0):
+            return await qt.acquire(estimated_tokens=tokens, max_wait_seconds=5.0)
+
+    @staticmethod
+    def _stats_at(qt: QuotaTracker, t: float) -> dict:
+        with patch("time.monotonic", return_value=t):
+            return qt.get_stats()
+
+    # -------------------------------------------------------------------------
+    # Layer 2: Domain-Specific Language (DSL) Assertions
+    # -------------------------------------------------------------------------
+    @classmethod
+    async def assert_leaked_eviction_threshold(
+        cls,
+        monkeypatch,
+        *,
+        http_env: str | None,
+        survive_offset: float,
+        evict_offset: float,
+    ) -> None:
+        if http_env is None:
+            monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
+        else:
+            monkeypatch.setenv("LLM_HTTP_TIMEOUT_SEC", http_env)
+
+        qt = QuotaTracker(tpm_cap=60000)
+        base = 1000.0
+        res = await cls._acquire_at(qt, base, tokens=5000)
+
+        stats_alive = cls._stats_at(qt, base + survive_offset)
+        assert res.id in qt._active_reservations, (
+            f"Expected reservation to survive at +{survive_offset}s for LLM_HTTP_TIMEOUT_SEC={http_env!r}"
+        )
+        assert stats_alive["active_reservations"] == 1
+
+        stats_evicted = cls._stats_at(qt, base + evict_offset)
+        assert res.id not in qt._active_reservations, (
+            f"Expected reservation to be evicted at +{evict_offset}s for LLM_HTTP_TIMEOUT_SEC={http_env!r}"
+        )
+        assert stats_evicted["active_reservations"] == 0
+        assert stats_evicted["total_tokens"] == 0
+
+    # -------------------------------------------------------------------------
+    # Layer 1: Executable Scenarios (T-7)
+    # -------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_t7_active_carbon_reservation_survives_1200s_and_records_actual_tpm(
+        self, monkeypatch
+    ):
+        """T-7a: Reservation acquired at t=1000.0 survives get_stats()/_prune() at +600s and +1200s,
+        and record(actual_tokens=45000, estimated_tokens=5000, reservation=res) at +1205s records
+        total_tokens == 45000 and tokens_used_60s == 40000.
+        """
+        monkeypatch.delenv("LLM_HTTP_TIMEOUT_SEC", raising=False)
+        qt = QuotaTracker(tpm_cap=60000)
+        base = 1000.0
+        res = await self._acquire_at(qt, base, tokens=5000)
+
+        for offset in (600.0, 1200.0):
+            stats_mid = self._stats_at(qt, base + offset)
+            assert res.id in qt._active_reservations
+            assert stats_mid["active_reservations"] == 1
+
+        with patch("time.monotonic", return_value=base + 1205.0):
+            qt.record(actual_tokens=45000, estimated_tokens=5000, reservation=res)
+            stats_done = qt.get_stats()
+
+        assert res.id not in qt._active_reservations
+        assert stats_done["active_reservations"] == 0
+        assert stats_done["total_tokens"] == 45000
+        assert stats_done["tokens_used_60s"] == 40000
+
+    @pytest.mark.asyncio
+    async def test_t7_leaked_reservation_evicted_at_dynamic_http_thresholds_and_warns_once(
+        self, monkeypatch, caplog
+    ):
+        """T-7b: Leaked reservation eviction honors max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s)
+        across default (1800s), '900' floor (1800s), '2000' (2120s), and malformed 'junk' (1800s warn-once).
+        """
+        import logging
+        from src.agents.llm import gemini_client
+
+        monkeypatch.setattr(gemini_client, "_TIMEOUT_ENV_WARNED", set())
+
+        # 1. Default (unset -> 1500s + 120s < 1800s floor -> 1800s)
+        await self.assert_leaked_eviction_threshold(
+            monkeypatch, http_env=None, survive_offset=1795.0, evict_offset=1805.0
+        )
+
+        # 2. Explicit "900" -> 900s + 120s = 1020s -> clamped up to 1800s floor
+        await self.assert_leaked_eviction_threshold(
+            monkeypatch, http_env="900", survive_offset=1795.0, evict_offset=1805.0
+        )
+
+        # 3. Explicit "2000" -> 2000s + 120s = 2120s (> 1800s floor)
+        await self.assert_leaked_eviction_threshold(
+            monkeypatch, http_env="2000", survive_offset=2115.0, evict_offset=2125.0
+        )
+
+        # 4. Malformed "junk" -> falls back to 1500s default -> 1800s floor; warns once across _prune + GeminiAdapter
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            await self.assert_leaked_eviction_threshold(
+                monkeypatch, http_env="junk", survive_offset=1795.0, evict_offset=1805.0
+            )
+            with patch("google.genai.Client"):
+                gemini_client.GeminiAdapter("proj", "global", "gemini-4-carbon")
+
+        invalid_warnings = [
+            r for r in caplog.records if "Invalid LLM_HTTP_TIMEOUT_SEC" in r.getMessage()
+        ]
+        assert len(invalid_warnings) == 1, (
+            f"Expected exactly 1 invalid LLM_HTTP_TIMEOUT_SEC warning across _prune() and GeminiAdapter, "
+            f"got {len(invalid_warnings)}"
+        )
+
+    def test_t7_pre_import_prune_and_lazy_gemini_client_warn_once_in_fresh_subprocess(self):
+        """T-7c: In a clean interpreter where gemini_client is NOT yet imported, calling
+        QuotaTracker._prune() with LLM_HTTP_TIMEOUT_SEC='junk' and then lazily importing and
+        initializing GeminiAdapter emits the invalid-env warning exactly once (no split-brain set).
+        """
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["LLM_HTTP_TIMEOUT_SEC"] = "junk"
+        for k in (
+            "LLM_STREAM_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TTFB_TIMEOUT_SEC",
+            "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TOTAL_TIMEOUT_SEC",
+        ):
+            env.pop(k, None)
+
+        probe_code = (
+            "import logging, sys\n"
+            "from unittest.mock import patch\n"
+            "records = []\n"
+            "class _ListHandler(logging.Handler):\n"
+            "    def emit(self, record):\n"
+            "        records.append(record.getMessage())\n"
+            "lg = logging.getLogger('src.agents.llm.gemini_client')\n"
+            "lg.setLevel(logging.WARNING)\n"
+            "lg.addHandler(_ListHandler())\n"
+            "from src.agents.llm.quota_tracker import QuotaTracker\n"
+            "assert 'src.agents.llm.gemini_client' not in sys.modules\n"
+            "qt = QuotaTracker(tpm_cap=60000)\n"
+            "qt._prune()\n"
+            "qt._prune()\n"
+            "pre_count = sum('Invalid LLM_HTTP_TIMEOUT_SEC' in m for m in records)\n"
+            "from src.agents.llm.gemini_client import GeminiAdapter\n"
+            "with patch('google.genai.Client'):\n"
+            "    GeminiAdapter('proj', 'global', 'gemini-4-carbon')\n"
+            "qt._prune()\n"
+            "total_count = sum('Invalid LLM_HTTP_TIMEOUT_SEC' in m for m in records)\n"
+            "assert pre_count == 1, f'Expected pre_count==1 after pre-import _prune(), got {pre_count}: {records}'\n"
+            "assert total_count == 1, f'Expected total_count==1 after lazy GeminiAdapter import, got {total_count}: {records}'\n"
+        )
+
+        proc = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"Fresh-interpreter warn-once probe failed:\n{proc.stderr}\n{proc.stdout}"
+
 
 
 
