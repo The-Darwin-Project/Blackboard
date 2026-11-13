@@ -87,14 +87,18 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | (none) |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
-| `LLM_STREAM_CHUNK_TIMEOUT_SEC` | Per-chunk timeout for Brain LLM streaming (`asyncio.wait_for` per chunk; one retry, then an error turn). Finite value in `(0, 3600]`; invalid values log a warning and fall back to the default | `180` |
+| `LLM_STREAM_TTFB_TIMEOUT_SEC` | Time-to-first-byte timeout for Brain LLM streaming (`generate_stream`). On Gemini 4 unary `generate()`, when unset or set to the default `35`, Chunk 0 uses `LLM_STREAM_TOTAL_TIMEOUT_SEC` (`180s`) to preserve the 5-attempt SDK retry window; any non-default value clamps Chunk 0 to `min(ttfb_timeout, total_timeout)`. Finite value in `(0, 3600]` | `35` |
+| `LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC` | Sliding timeout between consecutive stream chunks. Finite value in `(0, 3600]` | `30` |
+| `LLM_STREAM_TOTAL_TIMEOUT_SEC` | Total wall-clock timeout cap for the complete stream (non-retryable). Finite value in `(0, 3600]` | `180` |
+| `LLM_STREAM_SDK_RETRY_ATTEMPTS` | Gemini SDK per-call streaming retry attempts before Brain handles stream failure. Integer `1..10` | `1` |
+| `LLM_STREAM_CHUNK_TIMEOUT_SEC` | Legacy per-chunk timeout for Brain LLM streaming (seeds TTFB and inter-chunk defaults when set). Finite value in `(0, 3600]`; invalid values log a warning and fall back to the default | `180` |
 | `LLM_HTTP_TIMEOUT_SEC` | Gemini SDK `HttpOptions.timeout` (the SDK takes milliseconds; this var is seconds). On the async aiohttp stream path it is `ClientTimeout(total=…)`, a wall-clock cap on the **whole** streamed request (also sent as the `X-Server-Timeout` header); on the httpx fallback it is a per-phase timeout. Applies to every `GeminiAdapter` caller (Brain, event namer, aligner, archivist, headhunter). Finite value in `(0, 3600]`; invalid values warn and fall back | `240` |
 | `LLM_STREAM_DRAIN_TIMEOUT_SEC` | Stream drain timeout for trailing metadata after a function call. Finite value in `(0, 300]` | `15.0` |
 | `LLM_STREAM_RUNAWAY_MAX_CHARS` | Ceiling on accumulated stream text **or** thoughts before the stream is aborted as runaway. Integer in `(2000, 10000000]`. When unset the ceiling is `max(32000, max_output_tokens × 4)` | (scaled) |
 | `QDRANT_URL` | Qdrant vector store | `http://localhost:6333` |
 | `DEBUG` | Enable debug logging | `false` |
 
-**Stream timeout ordering invariant:** `LLM_STREAM_DRAIN_TIMEOUT_SEC` (15s) `<<` `LLM_STREAM_CHUNK_TIMEOUT_SEC` (180s) `<` `LLM_HTTP_TIMEOUT_SEC` (240s). If the HTTP timeout fires first, the SDK error bypasses Brain's chunk-timeout retry handling; a misordered configuration logs a warning once at adapter start-up.
+**Stream timeout ordering invariant:** `LLM_STREAM_DRAIN_TIMEOUT_SEC` (15s) `<<` min(LLM_STREAM_TTFB_TIMEOUT_SEC (35s), LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC (30s)) and `LLM_STREAM_TOTAL_TIMEOUT_SEC` (180s) `<` `LLM_HTTP_TIMEOUT_SEC` (240s). If the HTTP timeout fires first, the SDK error bypasses Brain's chunk-timeout retry handling; a misordered configuration logs a warning once at adapter start-up.
 
 **Repetition guard:** Brain aborts a stream (closing it) when accumulated text or thoughts end in a contiguous repeated token/phrase (formatting-only tokens such as whitespace, `---` rules and table separators are ignored) or exceed the runaway ceiling. If no tool call was produced, an explicit error turn is recorded; looping thoughts are truncated rather than replayed into later prompts.
 

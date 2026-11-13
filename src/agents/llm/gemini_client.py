@@ -44,9 +44,11 @@
 #     holdback overflow the fragment is discarded, later text is suppressed, and the fallback call is NOT executed.
 # 17. [Constraint]: Output-token ceilings differ by model generation. On Gemini 4, generate() defaults silently to 65536 via
 #     _UNSET_MAX_OUTPUT_TOKENS, pre-acquires quota before stream_start, and streams internally via
-#     _stream_chunks(preserve_sdk_retries=True) using total_timeout on Chunk 0 when TTFB/chunk env vars are unset (preserving
-#     SDK 429/503 backoff), breaking on done=True, propagating external task.cancel(), and reassembling multi-chunk visible
-#     text in raw_parts; on earlier Gemini models, generate() clamps unary generate_content to 32768.
+#     _stream_chunks(preserve_sdk_retries=True) using total_timeout (180s) on Chunk 0 when TTFB/chunk env vars are unset or
+#     equal DEFAULT_STREAM_TTFB_TIMEOUT_S (35s) (preserving the 5-attempt SDK 429/503 retry window under Helm defaults, while
+#     clamping any non-default override to min(ttfb_timeout, total_timeout)), breaking on done=True, propagating external
+#     task.cancel(), and reassembling multi-chunk visible text in raw_parts; on earlier Gemini models, generate() clamps unary
+#     generate_content to 32768.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -832,11 +834,13 @@ class GeminiAdapter:
             from google.genai import types
 
             ttfb_timeout, inter_chunk_timeout, total_timeout = resolve_stream_timeouts()
-            explicit_ttfb = bool(
-                (os.getenv("LLM_STREAM_TTFB_TIMEOUT_SEC") or "").strip()
-                or (os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC") or "").strip()
+            raw_ttfb_env = (os.getenv("LLM_STREAM_TTFB_TIMEOUT_SEC") or "").strip()
+            raw_chunk_env = (os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC") or "").strip()
+            explicit_ttfb = (
+                bool(raw_ttfb_env and ttfb_timeout != DEFAULT_STREAM_TTFB_TIMEOUT_S)
+                or bool(raw_chunk_env)
             )
-            effective_ttfb = ttfb_timeout if explicit_ttfb else total_timeout
+            effective_ttfb = min(ttfb_timeout, total_timeout) if explicit_ttfb else total_timeout
             visible_chunks: list[str] = []
             done_chunk: LLMChunk | None = None
             preacquired = await self.acquire_stream_reservation(contents, priority=priority)
