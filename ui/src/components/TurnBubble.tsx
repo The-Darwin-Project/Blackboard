@@ -4,6 +4,9 @@
 // 2. [Pattern]: AI-generated badge shown for all non-user turns (transparency compliance).
 // 3. [Pattern]: StatusBadge is exported for use in ConversationFeed event header.
 // 4. [Gotcha]: Transient errors (429, 503) rendered as "Brain retrying..." with spinner, not full bubble.
+// 5. [Contract]: VMER-2340 delivery receipt -- <StatusCheck status={turn.status} /> renders on every standard actor card (human and agent), never on early-return rows (thoughts/phase/dispatcher/reflex/tool_result/triage/wait/transient error).
+// 6. [Contract]: Receipt sits in the right header cluster (marginLeft:auto, flexShrink:0) AFTER the timestamp and BEFORE the "View" button. Titles: Sent/Delivered/Evaluated/Executed (backend 'processed' = 'Executed').
+// 7. [Gotcha]: Missing/unknown status falls back to 'Sent' (prototype-safe Object.hasOwn lookup in STATUS_CHECKS). Do not add per-status branches outside that table.
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { approveEvent, rejectEvent, submitFeedback } from '../api/client';
@@ -143,11 +146,20 @@ function ResultViewer({ result }: { result: string }) {
   );
 }
 
+// VMER-2340 receipt table. Unknown/missing status intentionally falls back to 'Sent'.
+// 'Executed' is the UX label for the backend 'processed' status.
+const STATUS_CHECKS: Record<MessageStatus, { title: string; glyph: string; color: string }> = {
+  sent: { title: 'Sent', glyph: '✓', color: '#64748b' },
+  delivered: { title: 'Delivered', glyph: '✓✓', color: '#64748b' },
+  evaluated: { title: 'Evaluated', glyph: '✓✓', color: '#3b82f6' },
+  processed: { title: 'Executed', glyph: '✓✓●', color: '#22c55e' },
+};
+
 function StatusCheck({ status }: { status?: MessageStatus }) {
-  if (status === 'delivered') return <span title="Delivered" style={{ fontSize: 11, color: '#64748b' }}>✓✓</span>;
-  if (status === 'evaluated') return <span title="Evaluated" style={{ fontSize: 11, color: '#3b82f6' }}>✓✓</span>;
-  if (status === 'processed') return <span title="Executed" style={{ fontSize: 11, color: '#22c55e' }}>✓✓●</span>;
-  return <span title="Sent" style={{ fontSize: 11, color: '#64748b' }}>✓</span>;
+  const { title, glyph, color } = status !== undefined && Object.hasOwn(STATUS_CHECKS, status)
+    ? STATUS_CHECKS[status]
+    : STATUS_CHECKS.sent;
+  return <span title={title} style={{ fontSize: 11, color }}>{glyph}</span>;
 }
 
 function FeedbackButtons({ eventId, turnNumber }: { eventId: string; turnNumber: number }) {
