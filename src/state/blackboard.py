@@ -1715,6 +1715,8 @@ return 1
                 dispatch_circuit_breaks=max(s.dispatch_circuit_breaks for s in group),
                 token_total_cumulative=max(s.token_total_cumulative for s in group),
                 tampering_strikes=max((getattr(s, "tampering_strikes", 0) for s in group), default=0),
+                quota_shed_tier1_total=max((getattr(s, "quota_shed_tier1_total", 0) for s in group), default=0),
+                quota_shed_tier2_total=max((getattr(s, "quota_shed_tier2_total", 0) for s in group), default=0),
                 atdd_cycle_sec=(sum(valid_cycles) / len(valid_cycles)) if valid_cycles else None,
             ))
         return result

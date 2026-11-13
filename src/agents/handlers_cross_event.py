@@ -4,6 +4,8 @@
 # 2. [Constraint]: No Brain import. All state access via ToolContext protocol.
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
+# 5. [Security]: recall_pruned_turns applies PII redaction, XML fence stripping, and defangs [!call: to prevent prompt injection. Single turn returns up to 30k chars of raw evidence; range returns up to 3k chars.
+# 6. [Pattern]: inspect_event omits raw dumps for recalled turns to prevent secondary context inflation.
 """Cross-event inspection and sticky note tool handlers."""
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, _resolve_phase
+from ..utils.pii_redaction import redact_pii
+from .context_parts import _strip_xml_fences
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -67,8 +71,12 @@ async def handle_inspect_event(
     my_turns = [t for t in target_event.conversation if t.actor == "brain"]
     lines = [f"\n## My Actions ({len(my_turns)} turns)"]
     for t in my_turns:
-        content = t.thoughts or t.result or ""
-        lines.append(f"[{t.action}] {content}")
+        if getattr(t, "waitingFor", None) == "recall_pruned_turns":
+            dump_len = len(t.thoughts or t.evidence or t.result or "")
+            lines.append(f"[{t.action}] (recalled pruned turns — {dump_len} chars omitted)")
+        else:
+            content = t.thoughts or t.result or ""
+            lines.append(f"[{t.action}] {content}")
     result_text = header + "\n".join(lines)
     result_text = result_text[:int(os.getenv("AGENT_RESULT_MAX_CHARS", "100000"))]
     turn = ConversationTurn(
@@ -189,6 +197,18 @@ async def handle_read_sticky_notes(
     return True
 
 
+def _coerce_turn_int(val: object, default: int) -> int:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        f = float(val)
+        if not (-1_000_000 <= f <= 1_000_000):
+            return default
+        return int(f)
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+
 async def handle_recall_pruned_turns(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -206,23 +226,33 @@ async def handle_recall_pruned_turns(
         await ctx.append_and_broadcast(event_id, turn)
         return True
 
-    try:
-        from_turn = int(args.get("from_turn", 1))
-        to_turn = int(args.get("to_turn", 10))
-    except (ValueError, TypeError):
-        from_turn, to_turn = 1, 10
+    raw_from = _coerce_turn_int(args.get("from_turn"), 1)
+    raw_to_arg = args.get("to_turn")
+    raw_to = raw_from if ("from_turn" in args and raw_to_arg is None) else _coerce_turn_int(raw_to_arg, 10)
+    is_single_turn = (raw_from == raw_to)
 
-    from_turn = max(1, from_turn)
-    to_turn = min(len(event.conversation), to_turn)
-    if to_turn - from_turn > 20:
+    from_turn = max(1, raw_from)
+    to_turn = min(len(event.conversation), raw_to)
+    if to_turn - from_turn >= 20:
         to_turn = from_turn + 19
 
     turns = [t for t in event.conversation if from_turn <= t.turn <= to_turn]
     blocks = []
     for t in turns:
-        content = t.thoughts or t.evidence or t.result or ""
-        if len(content) > 3000:
-            content = content[:3000] + "...(truncated)"
+        if is_single_turn:
+            content = t.evidence or t.result or t.thoughts or ""
+            content = redact_pii(content)
+            content = _strip_xml_fences(content)
+            content = content.replace("[!call:", "[call:")
+            if len(content) > 30000:
+                content = content[:30000] + "\n...(truncated)"
+        else:
+            content = t.thoughts or t.evidence or t.result or ""
+            content = redact_pii(content)
+            content = _strip_xml_fences(content)
+            content = content.replace("[!call:", "[call:")
+            if len(content) > 3000:
+                content = content[:3000] + "...(truncated)"
         blocks.append(f"[T{t.turn} {t.actor}.{t.action}]: {content}")
 
     result_text = "\n\n".join(blocks) if blocks else "(no turns in range)"
@@ -230,6 +260,7 @@ async def handle_recall_pruned_turns(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="tool_result",
         thoughts=result_text,
+        evidence=result_text,
         waitingFor="recall_pruned_turns",
         response_parts=response_parts,
     )

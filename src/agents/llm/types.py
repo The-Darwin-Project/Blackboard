@@ -1367,8 +1367,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "recall_pruned_turns",
         "description": (
             "Retrieve earlier conversation turns from this event that were pruned from your "
-            "context window. Use when the prune marker tells you turns were dropped and you "
-            "need to recall what was discussed earlier. Returns full turn content."
+            "context window or raw tool evidence referenced by <blackboard_evidence_reference>. "
+            "Use when the prune marker tells you turns were dropped or an evidence reference indicates "
+            "tool output was decayed, and you need to recall earlier details. Returns full turn content."
         ),
         "input_schema": {
             "type": "object",

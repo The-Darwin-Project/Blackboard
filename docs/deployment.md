@@ -87,6 +87,8 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | (none) |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
+| `BRAIN_CONTENT_BUDGET_TOKENS` | Sliding-window prompt budget in estimated tokens before pruning older conversation turns (clamped to `[2000, 1000000]`) | `60000` |
+| `BRAIN_TAIL_BUDGET_TOKENS` | Target recent conversation tail budget in estimated tokens retained after pruning (clamped to `[2000, BRAIN_CONTENT_BUDGET_TOKENS]`) | `40000` |
 | `LLM_STREAM_TTFB_TIMEOUT_SEC` | Phase 1 (pre-substantive TTFB) timeout for Brain LLM streaming (`generate_stream`), guarded by `not substantive_seen` so bare `LLMChunk()` wire heartbeats reset the wait without shrinking the deep-reasoning window. On Gemini 4 unary `generate()`, when unset or set to the default `600`, Phase 1 uses `LLM_STREAM_TOTAL_TIMEOUT_SEC` (`1200s`) to preserve the 5-attempt SDK retry window; any non-default value clamps Phase 1 to `min(ttfb_timeout, total_timeout)`. Finite value in `(0, 3600]` | `600` |
 | `LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC` | Phase 2 sliding activity timeout between consecutive stream frames (reset on thought/text/FC chunks and bare `LLMChunk()` SSE wire heartbeats). Finite value in `(0, 3600]` | `60` |
 | `LLM_STREAM_TOTAL_TIMEOUT_SEC` | Non-retryable outer runaway sanity ceiling (`20m`) for the complete stream. Finite value in `(0, 3600]` | `1200` |

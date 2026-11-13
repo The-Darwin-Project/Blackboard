@@ -20,6 +20,10 @@
 #     is_defer_event_available() mirrors this via _single_tool_survives_gates()
 #     so the two functions cannot drift apart, regardless of which gate(s)
 #     stripped defer_event (now or in the future).
+# 12. [Pattern]: DEFAULT_TURN_DECAY_DISTANCE (10) dynamically un-gates recall_pruned_turns
+#     in allow-mode gates (INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL) when conversation
+#     exceeds 10 turns or tri-state has_pruned_or_decayed_turns is set (preserves explicit False).
+#     get_intermediate_tools(ctx) returns intermediate allow-set including recall_pruned_turns.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -36,6 +40,9 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment
+
+
+DEFAULT_TURN_DECAY_DISTANCE = 10
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,15 @@ class GateContext:
     jarvis_already_waiting: bool = False
     jarvis_wait_count: int = 0
     has_dispatch_backpressure: bool = False
+    has_pruned_or_decayed_turns: bool | None = None
+
+    def __post_init__(self):
+        if self.has_pruned_or_decayed_turns is None:
+            object.__setattr__(
+                self,
+                "has_pruned_or_decayed_turns",
+                len(self.conversation or []) > DEFAULT_TURN_DECAY_DISTANCE,
+            )
 
 
 @dataclass(frozen=True)
@@ -464,8 +480,13 @@ INTERMEDIATE_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def _tools_intermediate(_ctx: GateContext) -> set[str]:
-    return set(INTERMEDIATE_TOOLS)
+def get_intermediate_tools(ctx: GateContext) -> set[str]:
+    """Return intermediate toolset, dynamically un-gating recall_pruned_turns if history was pruned/decayed."""
+    return set(INTERMEDIATE_TOOLS) | ({"recall_pruned_turns"} if ctx.has_pruned_or_decayed_turns else set())
+
+
+def _tools_intermediate(ctx: GateContext) -> set[str]:
+    return get_intermediate_tools(ctx)
 
 
 def _tools_escalate(_ctx: GateContext) -> set[str]:
@@ -542,6 +563,8 @@ def _tools_pre_classification(ctx: GateContext) -> set[str]:
                "classify_event", "set_phase"}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
+    if ctx.has_pruned_or_decayed_turns:
+        allowed.add("recall_pruned_turns")
     return allowed
 
 
@@ -553,23 +576,29 @@ def _tools_domain_complex(_ctx: GateContext) -> set[str]:
     return {"close_event"}
 
 
-def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
-    return {
+def _tools_domain_chaotic(ctx: GateContext) -> set[str]:
+    allowed = {
         "select_agent", "classify_event", "lookup_service", "lookup_journal",
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
         "respond_to_jarvis", "wait_for_jarvis", "defer_event",
     }
+    if ctx.has_pruned_or_decayed_turns:
+        allowed.add("recall_pruned_turns")
+    return allowed
 
 
-def _tools_domain_casual(_ctx: GateContext) -> set[str]:
-    return {
+def _tools_domain_casual(ctx: GateContext) -> set[str]:
+    tools = {
         "classify_event", "set_phase", "wait_for_user",
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
         "take_note", "review_notes",
         _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH,
     }
+    if ctx.has_pruned_or_decayed_turns:
+        tools.add("recall_pruned_turns")
+    return tools
 
 
 def _tools_jarvis_response(_ctx: GateContext) -> set[str]:
@@ -1101,6 +1130,8 @@ def build_gate_context(
     )
     budget = min(5 + agent_completions, 10) - refresh_count
 
+    has_pruned = len(conversation) > 10
+
     return GateContext(
         brain_phase=brain_phase,
         event_source=event.source,
@@ -1117,4 +1148,5 @@ def build_gate_context(
         jarvis_already_waiting=jarvis_already_waiting,
         jarvis_wait_count=jarvis_wait_count,
         has_dispatch_backpressure=flags.get("has_dispatch_backpressure", False),
+        has_pruned_or_decayed_turns=has_pruned,
     )

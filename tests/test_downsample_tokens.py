@@ -67,6 +67,20 @@ def test_downsample_empty():
     assert bb._downsample_snapshots([], bucket_seconds=600) == []
 
 
+def test_downsample_preserves_quota_shedding_cumulative_counters():
+    """Quota shedding counters aggregate via max() across the bucket."""
+    bb = BlackboardState.__new__(BlackboardState)
+    snapshots = [
+        _snap(100, quota_shed_tier1_total=1, quota_shed_tier2_total=2),
+        _snap(200, quota_shed_tier1_total=9, quota_shed_tier2_total=6),
+        _snap(250, quota_shed_tier1_total=4, quota_shed_tier2_total=3),
+    ]
+    result = bb._downsample_snapshots(snapshots, bucket_seconds=300)
+    assert len(result) == 1
+    assert result[0].quota_shed_tier1_total == 9
+    assert result[0].quota_shed_tier2_total == 6
+
+
 def test_downsample_covers_all_flow_snapshot_fields():
     """Every non-timestamp FlowSnapshot field must appear in _downsample_snapshots output."""
     bb = BlackboardState.__new__(BlackboardState)

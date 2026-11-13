@@ -196,3 +196,50 @@ class TestFlowCollectorScenarioT8:
         fields = FlowSnapshot.model_fields
         assert "tampering_strikes" in fields, "FlowSnapshot missing tampering_strikes field"
         assert "atdd_cycle_sec" in fields, "FlowSnapshot missing atdd_cycle_sec field"
+        assert "quota_shed_tier1_total" in fields, "FlowSnapshot missing quota_shed_tier1_total"
+        assert "quota_shed_tier2_total" in fields, "FlowSnapshot missing quota_shed_tier2_total"
+
+    @pytest.mark.asyncio
+    async def test_flow_collector_build_snapshot_quota_shedding_telemetry(self):
+        """Scenario: FlowCollector._build_snapshot reads quota shedding telemetry from Redis.
+        Given Redis keys darwin:flow:quota_shed_tier1_total=7 and quota_shed_tier2_total=3,
+        When _build_snapshot() is called,
+        Then the snapshot populates quota_shed_tier1_total=7 and quota_shed_tier2_total=3.
+        When Redis raises an error, values default to 0 without failing snapshot generation.
+        """
+        from src.observers.flow_collector import FlowCollector
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(return_value={"queue_depth": 0, "waiting_approval_events": 0})
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_redis = AsyncMock()
+        mock_bb.redis = mock_redis
+
+        collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+        )
+
+        async def mock_redis_get(key):
+            if key == "darwin:flow:quota_shed_tier1_total":
+                return "7"
+            if key == "darwin:flow:quota_shed_tier2_total":
+                return "3"
+            return None
+
+        mock_redis.get = AsyncMock(side_effect=mock_redis_get)
+        mock_redis.mget = AsyncMock(return_value=["7", "3"])
+
+        snapshot = await collector._build_snapshot()
+        assert snapshot.quota_shed_tier1_total == 7
+        assert snapshot.quota_shed_tier2_total == 3
+
+        # Failure resiliency: Redis connection error falls back to 0
+        mock_redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+        mock_redis.mget = AsyncMock(side_effect=ConnectionError("Redis down"))
+
+        snapshot_err = await collector._build_snapshot()
+        assert snapshot_err.quota_shed_tier1_total == 0
+        assert snapshot_err.quota_shed_tier2_total == 0

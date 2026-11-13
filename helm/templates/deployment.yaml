@@ -168,7 +168,9 @@ spec:
             - name: BRAIN_RECONCILE_WORKERS
               value: {{ .Values.brain.reconcileWorkers | default 0 | quote }}
             - name: BRAIN_CONTENT_BUDGET_TOKENS
-              value: {{ .Values.brain.contentBudgetTokens | default "800000" | quote }}
+              value: {{ .Values.brain.contentBudgetTokens | default "60000" | quote }}
+            - name: BRAIN_TAIL_BUDGET_TOKENS
+              value: {{ .Values.brain.tailBudgetTokens | default "40000" | quote }}
             - name: BRAIN_FULL_TIER_MAX_CHARS
               value: {{ .Values.brain.fullTierMaxChars | default "100000" | quote }}
             - name: LLM_STREAM_TTFB_TIMEOUT_SEC

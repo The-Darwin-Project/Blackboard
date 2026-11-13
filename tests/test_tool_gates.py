@@ -1383,3 +1383,230 @@ def test_defer_wake_iter0_predicate_handles_dict_turns():
     before = list(reversed(after))
     assert _pred_defer_wake_iter0(_ctx(is_defer_wake=True, iteration=0, conversation=after)) is False
     assert _pred_defer_wake_iter0(_ctx(is_defer_wake=True, iteration=0, conversation=before)) is True
+
+
+# ---------------------------------------------------------------------------
+# VMER-2341: Dynamic un-gating of recall_pruned_turns (T-3, T-4)
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicRecallPrunedTurns:
+    """Executable unit specifications for dynamic un-gating of recall_pruned_turns (T-3, T-4).
+
+    Dave Farley 4-Layer ATDD Model:
+      Layer 1 (Domain Intent): Scenarios expressed in Given ... When ... Then docstrings.
+      Layer 2 (DSL): _ctx and _turn helpers simulating conversational history thresholds.
+      Layer 3 (Protocol Driver): Calls to evaluate_gates and build_gate_context.
+      Layer 4 (SUT): src.agents.tool_gates.
+    """
+
+    def test_t3_casual_domain_dynamic_ungating_with_over_10_turns(self):
+        """T-3: Given an event with > 10 turns in DOMAIN_CASUAL,
+        When evaluate_gates() is called,
+        Then recall_pruned_turns is included in active tools.
+        Conversely, when <= 10 turns, recall_pruned_turns is NOT included.
+        """
+        # Case A: Short conversation (5 turns) -> recall_pruned_turns NOT present
+        ctx_short = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+            conversation=[_turn("user", "message")] * 5,
+        )
+        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+        assert "recall_pruned_turns" not in active_short, (
+            "recall_pruned_turns must not leak into casual chats with <= 10 turns"
+        )
+
+        # Case B: Long conversation (> 10 turns) -> recall_pruned_turns MUST be present
+        ctx_long = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+            conversation=[_turn("user", "message")] * 15,
+        )
+        active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
+        assert "recall_pruned_turns" in active_long, (
+            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CASUAL when conversation > 10 turns"
+        )
+
+    def test_t3_chaotic_domain_dynamic_ungating_with_over_10_turns(self):
+        """T-3: Given an event with > 10 turns in DOMAIN_CHAOTIC,
+        When evaluate_gates() is called,
+        Then recall_pruned_turns is included in active tools.
+        Conversely, when conversation has <= 10 turns, recall_pruned_turns is NOT included.
+        """
+        # Negative assertion: <= 10 turns in chaotic domain
+        ctx_chaotic_short = _ctx(
+            brain_phase="dispatch",
+            event_source="aligner",
+            context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
+            conversation=[_turn("user", "message")] * 10,
+        )
+        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_chaotic_short))
+        assert "recall_pruned_turns" not in active_short, (
+            "recall_pruned_turns must not be active in DOMAIN_CHAOTIC when <= 10 turns"
+        )
+
+        # Positive assertion: > 10 turns in chaotic domain
+        ctx_chaotic = _ctx(
+            brain_phase="dispatch",
+            event_source="aligner",
+            context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
+            conversation=[_turn("user", "message")] * 15,
+        )
+        active = _names(evaluate_gates(ALL_SCHEMAS, ctx_chaotic))
+        assert "recall_pruned_turns" in active, (
+            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CHAOTIC when conversation > 10 turns"
+        )
+
+    def test_pre_classification_dynamic_ungating_with_over_10_turns(self):
+        """CR-09: Given an event prior to classification (triage phase, brain_has_classified=False),
+        When evaluate_gates() is called with > 10 turns,
+        Then recall_pruned_turns is un-gated in _tools_pre_classification so the model can recall history to classify.
+        When <= 10 turns, recall_pruned_turns is NOT in pre-classification tools.
+        """
+        ctx_short = _ctx(
+            brain_phase="triage",
+            event_source="chat",
+            context_flags={"brain_has_classified": False},
+            conversation=[_turn("user", "message")] * 10,
+        )
+        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+        assert "recall_pruned_turns" not in active_short
+
+        ctx_long = _ctx(
+            brain_phase="triage",
+            event_source="chat",
+            context_flags={"brain_has_classified": False},
+            conversation=[_turn("user", "message")] * 11,
+        )
+        active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
+        assert "recall_pruned_turns" in active_long, (
+            "recall_pruned_turns must be un-gated pre-classification when history > 10 turns"
+        )
+
+    def test_explicit_has_pruned_flag_respected_over_raw_turn_length(self):
+        """CR-10: Given GateContext constructed explicitly with 15 turns but has_pruned_or_decayed_turns=False,
+        When evaluate_gates() is called,
+        Then gates respect the explicit flag and do NOT un-gate recall_pruned_turns.
+        """
+        ctx_explicit = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+            conversation=[_turn("user", "message")] * 15,
+            has_pruned_or_decayed_turns=False,
+        )
+        active = _names(evaluate_gates(ALL_SCHEMAS, ctx_explicit))
+        assert "recall_pruned_turns" not in active, (
+            "Gates must respect explicit ctx.has_pruned_or_decayed_turns=False regardless of conversation length"
+        )
+
+    def test_build_gate_context_exact_boundary_10_vs_11(self):
+        """CR-11: Exact boundary verification for build_gate_context:
+        10 turns -> has_pruned_or_decayed_turns is False.
+        11 turns -> has_pruned_or_decayed_turns is True.
+        """
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+
+        def _make_doc(turn_count: int) -> EventDocument:
+            evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
+            turns = [
+                ConversationTurn(turn=i, actor="user", action="message", thoughts=f"turn {i}")
+                for i in range(1, turn_count + 1)
+            ]
+            return EventDocument(
+                id="evt-gate-test",
+                source="chat",
+                service="test-svc",
+                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+                conversation=turns,
+            )
+
+        ctx_10 = build_gate_context(_make_doc(10), "dispatch", {})
+        assert ctx_10.has_pruned_or_decayed_turns is False, "10 turns must evaluate to False"
+
+        ctx_11 = build_gate_context(_make_doc(11), "dispatch", {})
+        assert ctx_11.has_pruned_or_decayed_turns is True, "11 turns must evaluate to True"
+
+    def test_get_intermediate_tools_helper(self):
+        """CR-12: Public helper get_intermediate_tools(ctx) returns intermediate toolset
+        dynamically un-gating recall_pruned_turns based on ctx.has_pruned_or_decayed_turns.
+        """
+        from src.agents.tool_gates import get_intermediate_tools
+
+        ctx_no_prune = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"is_intermediate": True},
+            conversation=[],
+            has_pruned_or_decayed_turns=False,
+        )
+        tools_no_prune = get_intermediate_tools(ctx_no_prune)
+        assert isinstance(tools_no_prune, set)
+        assert "recall_pruned_turns" not in tools_no_prune
+
+        ctx_with_prune = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"is_intermediate": True},
+            conversation=[],
+            has_pruned_or_decayed_turns=True,
+        )
+        tools_with_prune = get_intermediate_tools(ctx_with_prune)
+        assert "recall_pruned_turns" in tools_with_prune
+
+
+
+    def test_t4_intermediate_gate_dynamic_ungating_with_over_10_turns(self):
+        """T-4: Given an intermediate turn before final triage with > 10 turns,
+        When INTERMEDIATE_TOOLS gate is evaluated,
+        Then recall_pruned_turns is retained in active tools.
+        Conversely, when <= 10 turns, recall_pruned_turns is NOT in intermediate tools.
+        """
+        # Case A: Short intermediate turn (1 turn) -> recall_pruned_turns stripped
+        ctx_short = _ctx(
+            brain_phase="dispatch",
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+            conversation=[_turn("jarvis", "message")],
+        )
+        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+        assert "recall_pruned_turns" not in active_short
+
+        # Case B: Intermediate turn with > 10 turns -> recall_pruned_turns retained
+        ctx_long = _ctx(
+            brain_phase="dispatch",
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+            conversation=[_turn("brain", "tool_result", waitingFor="run_bash")] * 15,
+        )
+        active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
+        assert "recall_pruned_turns" in active_long, (
+            "recall_pruned_turns must be retained in INTERMEDIATE mode when conversation > 10 turns"
+        )
+
+    def test_build_gate_context_computes_has_pruned_or_decayed_turns_flag(self):
+        """Verify build_gate_context sets has_pruned_or_decayed_turns = len(conversation) > 10."""
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+
+        def _make_doc(turn_count: int) -> EventDocument:
+            evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
+            turns = [
+                ConversationTurn(turn=i, actor="user", action="message", thoughts=f"turn {i}")
+                for i in range(1, turn_count + 1)
+            ]
+            return EventDocument(
+                id="evt-gate-test",
+                source="chat",
+                service="test-svc",
+                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+                conversation=turns,
+            )
+
+        ctx_short = build_gate_context(_make_doc(5), "dispatch", {})
+        assert hasattr(ctx_short, "has_pruned_or_decayed_turns")
+        assert ctx_short.has_pruned_or_decayed_turns is False
+
+        ctx_long = build_gate_context(_make_doc(15), "dispatch", {})
+        assert hasattr(ctx_long, "has_pruned_or_decayed_turns")
+        assert ctx_long.has_pruned_or_decayed_turns is True

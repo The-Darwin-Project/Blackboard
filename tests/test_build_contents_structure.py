@@ -3657,4 +3657,255 @@ class TestCR01CR07CR08ParallelFCAndSignatureHardening:
         assert turn_to_parts(thought_only_resp) == []
 
 
+# ---------------------------------------------------------------------------
+# VMER-2341: Context Sliding Window & Pruning Alternation Safety (T-1, T-2)
+# ---------------------------------------------------------------------------
 
+
+class TestContextSlidingWindowPruning:
+    """Executable acceptance and unit specifications for context sliding window (T-1, T-2).
+
+    Dave Farley 4-Layer ATDD Model:
+      Layer 1 (Domain Intent): Scenarios expressed in Given ... When ... Then docstrings.
+      Layer 2 (DSL): Domain conversation generators (_simulate_conversation, _simulate_batch_fc_fr_turns).
+      Layer 3 (Protocol Driver): Calls to compress_contents with budget parameters and wire alternation validation.
+      Layer 4 (SUT): src.agents.context_parts.compress_contents.
+    """
+
+    def _simulate_conversation(self, turns: int = 45, chars_per_turn: int = 13000) -> list[dict]:
+        """Layer 2 DSL: simulate large alternating conversation with ~150k tokens."""
+        context_msg = {
+            "role": "user",
+            "parts": [{"text": "[EVENT CONTEXT HEADER] service=payments event_id=evt-large"}],
+        }
+        contents = [context_msg]
+        for i in range(1, turns + 1):
+            role = "user" if i % 2 == 1 else "model"
+            contents.append({
+                "role": role,
+                "parts": [{"text": f"Turn {i}: " + ("x" * chars_per_turn)}],
+            })
+        return contents
+
+    def _simulate_batch_fc_fr_turns(self) -> list[dict]:
+        """Layer 2 DSL: simulate conversation with batch FC/FR pairs and interleaved user turns."""
+        context_msg = {
+            "role": "user",
+            "parts": [{"text": "[EVENT CONTEXT HEADER]"}],
+        }
+        contents = [context_msg]
+        for i in range(10):
+            contents.append({
+                "role": "user",
+                "parts": [{"text": f"User question {i}: " + ("u" * 15000)}],
+            })
+            contents.append({
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": f"tool_a_{i}", "args": {"arg": "a" * 8000}}},
+                    {"functionCall": {"name": f"tool_b_{i}", "args": {"arg": "b" * 8000}}},
+                ],
+            })
+            contents.append({
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": f"tool_a_{i}", "response": {"result": "res_a" * 8000}}},
+                    {"functionResponse": {"name": f"tool_b_{i}", "response": {"result": "res_b" * 8000}}},
+                ],
+            })
+            contents.append({
+                "role": "model",
+                "parts": [{"text": f"Model thoughts {i}: " + ("m" * 15000)}],
+            })
+        return contents
+
+    def test_t1_compress_contents_sliding_window_alternation_safe_prune_notice(self):
+        """T-1: Given a conversation with 45 turns and ~150k estimated tokens,
+        When compress_contents() is invoked with default budgets (_CONTENT_BUDGET=60000, _TAIL_BUDGET=40000),
+        Then total tokens are capped below 60,000, preserving latest turns up to tail budget
+        with prune notice folded into context_msg["parts"] and zero consecutive user messages.
+        Also verifies that a large context_msg (25k tokens) combined with conversation turns
+        still strictly enforces estimate_tokens(result) <= 60000.
+        """
+        from src.agents.context_parts import compress_contents, estimate_tokens
+
+        contents = self._simulate_conversation(turns=45, chars_per_turn=13000)
+        raw_tokens = estimate_tokens(contents)
+        assert raw_tokens > 100000, f"Setup error: expected >100k tokens, got {raw_tokens}"
+
+        # Test with default arguments (no explicit max_tokens or tail_budget passed)
+        result = compress_contents(contents)
+
+        # 1. Total tokens capped below 60,000
+        result_tokens = estimate_tokens(result)
+        assert result_tokens <= 60000, f"Expected tokens <= 60000, got {result_tokens}"
+
+        # 2. Prune notice folded directly into Message 0 (context_msg["parts"]), NOT as a separate user Content message
+        assert result[0]["role"] == "user", "Message 0 must be role 'user'"
+        context_parts_text = " ".join(p.get("text", "") for p in result[0].get("parts", []))
+        assert "pruned for context window" in context_parts_text, (
+            "Prune notice must be folded into context_msg['parts'] (Message 0)"
+        )
+
+        # 3. Message 1 must be role 'model' (never a duplicate consecutive user message)
+        assert len(result) > 1
+        assert result[1]["role"] == "model", (
+            f"Expected Message 1 to have role 'model' after prune cut alignment, got {result[1]['role']}"
+        )
+
+        # 4. Strict wire alternation: no two adjacent messages share the same role
+        for idx in range(len(result) - 1):
+            assert result[idx]["role"] != result[idx + 1]["role"], (
+                f"Consecutive identical roles at index {idx} ({result[idx]['role']}) "
+                f"and {idx + 1} ({result[idx + 1]['role']})"
+            )
+
+        # 5. Large context_msg (25k tokens = 100k chars) + 50k tokens of turns
+        large_header_contents = [
+            {
+                "role": "user",
+                "parts": [{"text": "[LARGE SYSTEM BRIEFING]\n" + ("H" * 100000)}],
+            },
+            {
+                "role": "model",
+                "parts": [{"text": "Model turn 1:\n" + ("M" * 100000)}],
+            },
+            {
+                "role": "user",
+                "parts": [{"text": "User turn 2:\n" + ("U" * 100000)}],
+            },
+        ]
+        large_result = compress_contents(large_header_contents)
+        large_tokens = estimate_tokens(large_result)
+        assert large_tokens <= 60000, (
+            f"compress_contents must enforce total max_tokens <= 60000 even with 25k context_msg, got {large_tokens}"
+        )
+
+    def test_latest_fc_fr_survives_compression_with_trailing_terminal_prompt(self):
+        """CR-04: Given [header, model:FC, user:FR(45k tokens), user:terminal_prompt],
+        When compress_contents(max_tokens=30000, tail_budget=20000) is called,
+        Then the latest model:FC and user:FR survive with 1:1 parity and strict alternation.
+        """
+        from src.agents.context_parts import compress_contents
+
+        contents = [
+            {
+                "role": "user",
+                "parts": [{"text": "Event Header Context"}],
+            },
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "run_bash", "args": {"command": "get pods"}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "run_bash", "response": {"result": "R" * 180000}}},  # 45k tokens
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"text": "What is the next action?"}],
+            },
+        ]
+        import copy
+        snapshot = copy.deepcopy(contents)
+
+        result = compress_contents(contents, max_tokens=30000, tail_budget=20000)
+        assert contents == snapshot, "compress_contents must not mutate caller message dicts or parts lists in place"
+
+        # Latest FC/FR must survive and maintain 1:1 count parity
+        fc_count = sum(sum(1 for p in m.get("parts", []) if "functionCall" in p) for m in result)
+        fr_count = sum(sum(1 for p in m.get("parts", []) if "functionResponse" in p) for m in result)
+        assert fc_count >= 1, "Latest model:FC must survive compression"
+        assert fc_count == fr_count, f"1:1 FC/FR parity required, got FC={fc_count}, FR={fr_count}"
+        assert len(result) >= 3, f"Expected at least header + model + user, got {len(result)}"
+
+        # Strict alternating roles
+        for idx in range(len(result) - 1):
+            assert result[idx]["role"] != result[idx + 1]["role"], (
+                f"Consecutive identical roles at index {idx} ({result[idx]['role']}) and {idx + 1}"
+            )
+
+    def test_three_message_batch_fc_fr_compression_preserves_parity(self):
+        """CR-05: Given a conversation with batch FC/FR turns exceeding budget:
+        [header, model(2 FCs), user(text + 2 FRs + text)],
+        When compress_contents() prunes turns,
+        Then 1:1 FC/FR parity and strict alternating roles are preserved.
+        """
+        from src.agents.context_parts import compress_contents
+
+        contents = [
+            {"role": "user", "parts": [{"text": "Header"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "tool_1", "args": {"a": "1"}}},
+                    {"functionCall": {"name": "tool_2", "args": {"b": "2"}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"text": "Intermediate observations:"},
+                    {"functionResponse": {"name": "tool_1", "response": {"result": "res1_" * 20000}}},
+                    {"functionResponse": {"name": "tool_2", "response": {"result": "res2_" * 20000}}},
+                    {"text": "Please summarize."},
+                ],
+            },
+        ]
+
+        result = compress_contents(contents, max_tokens=20000, tail_budget=15000)
+
+        fc_count = sum(sum(1 for p in m.get("parts", []) if "functionCall" in p) for m in result)
+        fr_count = sum(sum(1 for p in m.get("parts", []) if "functionResponse" in p) for m in result)
+        assert fc_count == fr_count, f"Batch FC/FR parity broken: FC={fc_count}, FR={fr_count}"
+
+        for idx in range(len(result) - 1):
+            assert result[idx]["role"] != result[idx + 1]["role"], (
+                f"Consecutive identical roles at index {idx} ({result[idx]['role']}) and {idx + 1}"
+            )
+
+
+    def test_t2_compress_contents_atomic_fc_fr_pruning_maintains_parity_no_orphaned_fr(self):
+        """T-2: Given pruned conversation turns with batch FC/FR pairs,
+        When compress_contents() prunes earlier turns,
+        Then all retained functionCall and functionResponse pairs maintain 1:1 count parity,
+        no orphaned user:FR leads the sequence, and strict alternation is preserved.
+        """
+        from src.agents.context_parts import compress_contents
+
+        contents = self._simulate_batch_fc_fr_turns()
+
+        result = compress_contents(contents, max_tokens=60000, tail_budget=40000)
+
+        # Verify 1:1 FC/FR count parity across all retained messages
+        fc_count = sum(
+            sum(1 for p in msg.get("parts", []) if "functionCall" in p)
+            for msg in result
+        )
+        fr_count = sum(
+            sum(1 for p in msg.get("parts", []) if "functionResponse" in p)
+            for msg in result
+        )
+        assert fc_count == fr_count, (
+            f"Atomic pruning broken: FC count ({fc_count}) != FR count ({fr_count})"
+        )
+
+        # Message 0 is user (context_msg with folded prune notice)
+        assert result[0]["role"] == "user"
+        # Message 1 must be model (not an orphaned user:FR)
+        assert result[1]["role"] == "model", (
+            f"First kept conversation message must be role 'model', got {result[1]['role']}"
+        )
+        assert not any("functionResponse" in p for p in result[1].get("parts", [])), (
+            "Message 1 must not be a functionResponse"
+        )
+
+        # Verify strict wire alternation
+        for idx in range(len(result) - 1):
+            assert result[idx]["role"] != result[idx + 1]["role"], (
+                f"Consecutive identical roles at index {idx} and {idx + 1}"
+            )
