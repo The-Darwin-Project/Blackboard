@@ -1843,3 +1843,337 @@ class TestAdaptiveTwoPhaseStreamTimeouts:
         assert "LLM_STREAM_TOTAL_TIMEOUT_SEC (40.0s) >= LLM_HTTP_TIMEOUT_SEC (35.0s)" in caplog.text
         assert "LLM_STREAM_TOTAL_TIMEOUT_SEC (40.0s) < max(" in caplog.text
 
+
+class TestStreamTimeoutTransientRetryParityAndDocs:
+    """ATDD 4-Layer Executable Specification:
+    Transient Retry Parity for 408/500/504/INTERNAL/DEADLINE_EXCEEDED,
+    Structured Status Code Inspection, Non-Transient 400 Guards,
+    Total Timeout Non-Retryability, and Deployment Docs Parity.
+    """
+
+    # -------------------------------------------------------------------------
+    # Layer 3: Protocol Drivers & Fixtures
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _invoke_is_transient(exc: Exception) -> bool:
+        """Driver invoking Brain._is_transient without side effects."""
+        return Brain._is_transient(exc)
+
+    @staticmethod
+    def _read_repo_text(relative_path: str) -> str:
+        """Driver to read repository text file from repo root."""
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        return (repo_root / relative_path).read_text()
+
+    # -------------------------------------------------------------------------
+    # Layer 2: Domain-Specific Language (DSL) & Assertions
+    # -------------------------------------------------------------------------
+    @classmethod
+    def assert_transient_classification(cls, exc: Exception, expected: bool = True) -> None:
+        actual = cls._invoke_is_transient(exc)
+        assert actual is expected, (
+            f"Expected Brain._is_transient to return {expected} for {type(exc).__name__}: '{exc}', got {actual}"
+        )
+
+    @classmethod
+    def assert_structured_status_code_classification(cls, exc: Exception, expected: bool) -> None:
+        actual = cls._invoke_is_transient(exc)
+        assert actual is expected, (
+            f"Expected structured status code on {type(exc).__name__} (attrs={exc.__dict__}) "
+            f"to classify as transient={expected}, got {actual}"
+        )
+
+    @classmethod
+    def assert_no_numeric_substring_false_positive(cls, exc: Exception) -> None:
+        actual = cls._invoke_is_transient(exc)
+        assert actual is False, (
+            f"False-positive transient match detected on non-transient error: '{exc}'. "
+            f"Expected False, got {actual}"
+        )
+
+    @classmethod
+    def assert_timeout_error_never_transient(cls, exc: Exception) -> None:
+        actual = cls._invoke_is_transient(exc)
+        assert actual is False, (
+            f"Timeout error must NEVER be classified as transient (total timeouts are non-retryable): "
+            f"'{exc}'. Expected False, got {actual}"
+        )
+
+    @classmethod
+    async def run_process_with_llm_retry(
+        cls, first_exc: Exception, *, expect_success: bool = True
+    ) -> tuple[int, list, list[float]]:
+        """DSL driving Brain._process_with_llm with transient first attempt and recovery."""
+        call_count = 0
+        recorded_sleeps: list[float] = []
+
+        def factory(**kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise first_exc
+            return MockStream([_Chunk(text="recovered")])
+
+        async def _spy_sleep(delay: float):
+            recorded_sleeps.append(delay)
+
+        brain = _make_brain(stream_factory=factory)
+        event = _make_event("evt-retry-parity")
+
+        with (
+            _gate_patch(),
+            _gate_ctx_patch(),
+            patch("src.agents.brain.asyncio.sleep", new_callable=AsyncMock, side_effect=_spy_sleep),
+        ):
+            result = await brain._process_with_llm("evt-retry-parity", event)
+
+        error_turns = _get_error_turns(brain)
+        return call_count, error_turns, recorded_sleeps
+
+    @classmethod
+    def assert_deployment_docs_stream_timeout_parity(cls) -> None:
+        deployment_md = cls._read_repo_text("docs/deployment.md")
+        helm_readme = cls._read_repo_text("helm/README.md")
+
+        # Required env vars in docs/deployment.md
+        for var in (
+            "LLM_STREAM_TTFB_TIMEOUT_SEC",
+            "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC",
+            "LLM_STREAM_TOTAL_TIMEOUT_SEC",
+            "LLM_STREAM_SDK_RETRY_ATTEMPTS",
+        ):
+            assert var in deployment_md, f"Variable {var} missing from docs/deployment.md"
+
+        # Ordering invariant update in docs/deployment.md
+        assert (
+            "min(LLM_STREAM_TTFB_TIMEOUT_SEC (35s), LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC (30s))" in deployment_md
+            or "min(LLM_STREAM_TTFB_TIMEOUT_SEC" in deployment_md
+        ), "Updated two-phase timeout ordering invariant missing from docs/deployment.md"
+
+        # Required helm keys in helm/README.md
+        for key in (
+            "streamTtfbTimeoutSec",
+            "streamInterChunkTimeoutSec",
+            "streamTotalTimeoutSec",
+            "streamSdkRetryAttempts",
+        ):
+            assert key in helm_readme, f"Key {key} missing from helm/README.md"
+
+        # Hygiene checks
+        for text, fname in [(deployment_md, "docs/deployment.md"), (helm_readme, "helm/README.md")]:
+            assert "redhat.com" not in text, f"Internal redhat.com reference found in {fname}"
+            assert "/Users/" not in text, f"Local workstation path found in {fname}"
+
+    # -------------------------------------------------------------------------
+    # Layer 1: Executable Scenarios (T-1, T-2, T-3, T-4, T-9)
+    # -------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_t1_transient_classification_and_process_with_llm_retry_loop(self):
+        """T-1: Transient classification & Brain._process_with_llm retry loop for HTTP 408, 500, 504
+        and gRPC INTERNAL, DEADLINE_EXCEEDED with base=5s backoff.
+        """
+        transient_errors = [
+            Exception("408 Request Timeout"),
+            Exception("500 Internal Server Error"),
+            Exception("504 Gateway Timeout"),
+            Exception("INTERNAL: internal error occurred"),
+            Exception("DEADLINE_EXCEEDED: deadline exceeded"),
+        ]
+
+        for exc in transient_errors:
+            self.assert_transient_classification(exc, expected=True)
+
+        # Verify retry loop and base=5s backoff tier in _process_with_llm
+        call_count, error_turns, sleeps = await self.run_process_with_llm_retry(
+            Exception("500 Internal Server Error")
+        )
+        assert call_count == 2, f"Expected 2 attempts (1 failure + 1 retry), got {call_count}"
+        assert len(error_turns) == 0, f"Expected 0 error turns on successful retry, got {error_turns}"
+        assert len(sleeps) == 1, f"Expected 1 sleep call for backoff, got {len(sleeps)}"
+        # base = 5.0 -> backoff = 5.0 * 2^0 + [0.5, 2.0] = [5.5, 7.0] (not rate-limit base 30s)
+        assert 5.0 <= sleeps[0] <= 8.0, f"Expected non-rate-limit backoff (5.0s..8.0s), got {sleeps[0]}"
+
+    def test_t2_structured_status_code_inspection(self):
+        """T-2: Structured status code inspection (.code, .status_code, callable .code(), .status)
+        for transient (408, 429, 500, 502, 503, 504, 529) vs client non-transient (400, 401, 403, 404).
+        """
+        class _AttrErr(Exception):
+            def __init__(self, msg, **kwargs):
+                super().__init__(msg)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        class _CallableCodeErr(Exception):
+            def __init__(self, msg, code_fn):
+                super().__init__(msg)
+                self.code = code_fn
+
+        # Structured transient codes
+        for code in (408, 429, 500, 502, 503, 504, 529):
+            self.assert_structured_status_code_classification(_AttrErr("api error", code=code), True)
+            self.assert_structured_status_code_classification(_AttrErr("api error", status_code=code), True)
+            self.assert_structured_status_code_classification(_AttrErr("api error", status=code), True)
+            self.assert_structured_status_code_classification(_CallableCodeErr("rpc error", lambda c=code: c), True)
+
+        # Structured non-transient client codes
+        for code in (400, 401, 403, 404):
+            self.assert_structured_status_code_classification(_AttrErr("client error", code=code), False)
+            self.assert_structured_status_code_classification(_AttrErr("client error", status_code=code), False)
+            self.assert_structured_status_code_classification(_CallableCodeErr("rpc error", lambda c=code: c), False)
+
+        # Graceful handling of callable that raises
+        def _failing_code():
+            raise RuntimeError("code uncallable")
+
+        self.assert_structured_status_code_classification(
+            _CallableCodeErr("503 service unavailable", _failing_code), True
+        )
+
+    def test_t3_non_transient_400_and_large_number_false_positive_guard(self):
+        """T-3: Non-transient 400 INVALID_ARGUMENT or ValueError containing "65000", "5000", "1500",
+        or evt-500a1b / evt-408xyz returns False (no false-positive substring match on 500/408).
+        """
+        non_transient_cases = [
+            Exception("400 INVALID_ARGUMENT: max_output_tokens 65000 exceeds limit for evt-500a1b"),
+            ValueError("Invalid port 5000 in config for evt-408xyz"),
+            Exception("max_output_tokens 1500 is not allowed"),
+            Exception("Event evt-500000 failed validation"),
+            Exception("400 INVALID_ARGUMENT: request for 42900 tokens rejected"),
+            Exception("400 INVALID_ARGUMENT: INTERNAL error in user payload"),
+        ]
+        for exc in non_transient_cases:
+            self.assert_no_numeric_substring_false_positive(exc)
+
+    def test_t4_direct_is_transient_total_timeout_returns_false(self):
+        """T-4: Direct Brain._is_transient(LLMStreamTotalTimeoutError("... (500.0s) for evt-500abc"))
+        returns False, and TimeoutError never classifies as transient.
+        """
+        from src.agents.llm import LLMStreamTotalTimeoutError
+
+        self.assert_timeout_error_never_transient(
+            LLMStreamTotalTimeoutError("LLM stream total timeout (500.0s) for evt-500abc")
+        )
+        self.assert_timeout_error_never_transient(
+            asyncio.TimeoutError("Timeout after 500.0s for evt-500abc")
+        )
+        self.assert_timeout_error_never_transient(
+            LLMStreamTotalTimeoutError("LLM stream total timeout (502.0s) for evt-502abc")
+        )
+
+    def test_t9_docs_and_helm_readme_stream_timeout_parity(self):
+        """T-9: docs/deployment.md and helm/README.md contain all 4 new env vars and updated
+        stream timeout ordering invariant.
+        """
+        self.assert_deployment_docs_stream_timeout_parity()
+
+    @pytest.mark.asyncio
+    async def test_cr01_rate_limit_structured_and_token_boundary(self):
+        """T-10: Brain._is_rate_limit structured status code vs token-bounded '429' matching,
+        and _process_with_llm backoff tier selection (base=5s vs base=30s).
+        """
+        from src.agents.llm import QuotaExhaustedError
+
+        class _StructuredRateLimitErr(Exception):
+            def __init__(self, msg: str, *, code=None, status_code=None):
+                super().__init__(msg)
+                if code is not None:
+                    self.code = code
+                if status_code is not None:
+                    self.status_code = status_code
+
+        # False-positive substrings ('evt-429abc', '42900', '0.429s') must NOT classify as rate-limit
+        assert Brain._is_rate_limit(
+            RuntimeError("500 Internal Server Error for evt-429abc (42900 tokens)")
+        ) is False
+        assert Brain._is_rate_limit(RuntimeError("took 0.429s")) is False
+
+        # Structured 429 without literal "429" in str(e), QuotaExhaustedError, and bounded "HTTP 429" -> True
+        assert Brain._is_rate_limit(
+            _StructuredRateLimitErr("Rate limit exceeded", code=429)
+        ) is True
+        assert Brain._is_rate_limit(
+            _StructuredRateLimitErr("Rate limit exceeded", status_code=429)
+        ) is True
+        assert Brain._is_rate_limit(QuotaExhaustedError("exhausted")) is True
+        assert Brain._is_rate_limit(RuntimeError("HTTP 429 Too Many Requests")) is True
+
+        # In Brain._process_with_llm: 500 error for evt-429abc uses non-rate-limit tier (5.0 <= delay <= 6.5)
+        calls_non_rl, errors_non_rl, sleeps_non_rl = await self.run_process_with_llm_retry(
+            RuntimeError("500 Internal Server Error for evt-429abc")
+        )
+        assert calls_non_rl == 2
+        assert errors_non_rl == []
+        assert len(sleeps_non_rl) == 1
+        assert 5.0 <= sleeps_non_rl[0] <= 6.5, (
+            f"Expected non-rate-limit backoff [5.0, 6.5] for evt-429abc 500 error, got {sleeps_non_rl[0]}"
+        )
+
+        # In Brain._process_with_llm: structured .code = 429 error uses rate-limit tier (30.0 <= delay <= 39.0)
+        calls_rl, errors_rl, sleeps_rl = await self.run_process_with_llm_retry(
+            _StructuredRateLimitErr("Rate limit reached", code=429)
+        )
+        assert calls_rl == 2
+        assert errors_rl == []
+        assert len(sleeps_rl) == 1
+        assert 30.0 <= sleeps_rl[0] <= 39.0, (
+            f"Expected rate-limit backoff [30.0, 39.0] for structured .code=429, got {sleeps_rl[0]}"
+        )
+
+    def test_cr02_cr03_float_4xx_and_529_boundaries(self):
+        """T-11: Float durations (.500, .504, .429), unstructured 529, structured 4xx outside
+        {400, 401, 403, 404}, unstructured 4xx mentioning transient tokens/codes, and broken .code getter.
+        """
+        class _StructuredClientErr(Exception):
+            def __init__(self, msg: str, **kwargs):
+                super().__init__(msg)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        class _BrokenCodePropertyErr(Exception):
+            @property
+            def code(self):
+                raise RuntimeError("broken getter")
+
+        # 1. Float strings with .500 / .502 / .503 / .504 / .408 / .429 -> False
+        for float_err in (
+            RuntimeError("request failed after 0.500s"),
+            RuntimeError("latency 1.502s"),
+            RuntimeError("elapsed 2.503s"),
+            RuntimeError("latency 1.504s"),
+            RuntimeError("duration 0.408s"),
+            RuntimeError("took 0.429s"),
+        ):
+            self.assert_transient_classification(float_err, expected=False)
+
+        # 2. Unstructured HTTP 529 -> True
+        self.assert_transient_classification(
+            RuntimeError("HTTP 529 Site is overloaded"), expected=True
+        )
+
+        # 3. Structured 4xx exceptions outside {400, 401, 403, 404} -> False even if msg mentions 500 or INTERNAL
+        for client_exc in (
+            _StructuredClientErr("Unprocessable entity: field 500 invalid", code=422),
+            _StructuredClientErr("Conflict: INTERNAL state mismatch 500", status_code=409),
+            _StructuredClientErr("Payload too large: 500MB limit", status=413),
+        ):
+            self.assert_structured_status_code_classification(client_exc, expected=False)
+
+        # 4. Unstructured 4xx client errors mentioning numbers or transient keywords -> False
+        for unstruct_4xx in (
+            RuntimeError("404 NOT_FOUND: user 500 does not exist"),
+            RuntimeError("403 PERMISSION_DENIED: INTERNAL policy check failed"),
+            RuntimeError("401 UNAUTHENTICATED: token 502 rejected"),
+        ):
+            self.assert_transient_classification(unstruct_4xx, expected=False)
+
+        # 5. Exception whose .code property raises on access falls through cleanly without crashing
+        self.assert_transient_classification(
+            _BrokenCodePropertyErr("503 Service Unavailable"), expected=True
+        )
+        self.assert_transient_classification(
+            _BrokenCodePropertyErr("Permanent client validation failure"), expected=False
+        )
+
+
+

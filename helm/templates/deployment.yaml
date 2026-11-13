@@ -171,6 +171,14 @@ spec:
               value: {{ .Values.brain.contentBudgetTokens | default "800000" | quote }}
             - name: BRAIN_FULL_TIER_MAX_CHARS
               value: {{ .Values.brain.fullTierMaxChars | default "100000" | quote }}
+            - name: LLM_STREAM_TTFB_TIMEOUT_SEC
+              value: {{ if and (hasKey .Values.brain "streamTtfbTimeoutSec") (not (kindIs "invalid" .Values.brain.streamTtfbTimeoutSec)) (ne (toString .Values.brain.streamTtfbTimeoutSec) "") }}{{ .Values.brain.streamTtfbTimeoutSec | quote }}{{ else }}"35"{{ end }}
+            - name: LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC
+              value: {{ if and (hasKey .Values.brain "streamInterChunkTimeoutSec") (not (kindIs "invalid" .Values.brain.streamInterChunkTimeoutSec)) (ne (toString .Values.brain.streamInterChunkTimeoutSec) "") }}{{ .Values.brain.streamInterChunkTimeoutSec | quote }}{{ else }}"30"{{ end }}
+            - name: LLM_STREAM_TOTAL_TIMEOUT_SEC
+              value: {{ if and (hasKey .Values.brain "streamTotalTimeoutSec") (not (kindIs "invalid" .Values.brain.streamTotalTimeoutSec)) (ne (toString .Values.brain.streamTotalTimeoutSec) "") }}{{ .Values.brain.streamTotalTimeoutSec | quote }}{{ else }}"180"{{ end }}
+            - name: LLM_STREAM_SDK_RETRY_ATTEMPTS
+              value: {{ if and (hasKey .Values.brain "streamSdkRetryAttempts") (not (kindIs "invalid" .Values.brain.streamSdkRetryAttempts)) (ne (toString .Values.brain.streamSdkRetryAttempts) "") }}{{ .Values.brain.streamSdkRetryAttempts | quote }}{{ else }}"1"{{ end }}
             {{- end }}
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs

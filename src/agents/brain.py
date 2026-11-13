@@ -28,6 +28,9 @@
 #     once (timeout_retries); LLMStreamTotalTimeoutError aborts immediately with zero retries. Stream closed (bounded
 #     aclose, 5s) in finally whenever stream_exhausted is False; normal completion never calls aclose.
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
+#     Transient retry classification (_is_transient / _is_rate_limit): guarded non-transient types (TimeoutError, RequestExceedsBurstError),
+#     structured status code inspection (code/status_code/status), non-transient 4xx guard, transient tokens (RESOURCE_EXHAUSTED,
+#     UNAVAILABLE, INTERNAL, DEADLINE_EXCEEDED), and token-bounded regex fallback for HTTP codes (408, 429, 500, 502, 503, 504, 529).
 #     Repetition guard: _detect_repetition_collapse runs on BOTH accumulated text and thoughts (len > 2000) and returns a
 #     RepetitionCollapse(kind, token): 'runaway' (len > max(32000, max_output_tokens*4) or LLM_STREAM_RUNAWAY_MAX_CHARS),
 #     'micro' (4-37 char token contiguous >= 8x at the tail) or 'macro' (38-200 char phrase contiguous 4x/3x at the tail);
@@ -264,6 +267,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -557,6 +561,29 @@ import re as _re
 
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
 _HTML_TAG_RE = _re.compile(r'<[^>]+>')
+
+# Regex pattern matching HTTP status codes as distinct tokens (bounded by non-alphanumeric/dot chars)
+# to avoid false positives on token counts, float durations, or event IDs (e.g., 65000, 0.500s, 42900, evt-500a1b).
+_TRANSIENT_HTTP_CODE_RE = _re.compile(r"(?<![0-9a-zA-Z_.-])(?:408|429|500|502|503|504|529)(?![0-9a-zA-Z_.-])")
+_RATE_LIMIT_429_RE = _re.compile(r"(?<![0-9a-zA-Z_.-])429(?![0-9a-zA-Z_.-])")
+
+# Non-transient client-error indicators (4xx and canonical gRPC client error codes)
+_NON_TRANSIENT_CLIENT_ERR_RE = _re.compile(
+    r"(?<![0-9a-zA-Z_.-])(?:400|401|403|404|409|413|422|INVALID_ARGUMENT|PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND)(?![0-9a-zA-Z_.-])"
+)
+_NON_TRANSIENT_400_RE = _NON_TRANSIENT_CLIENT_ERR_RE
+
+# Canonical transient status tokens (gRPC and cloud service errors)
+_TRANSIENT_STATUS_TOKENS = (
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+    "INTERNAL",
+    "DEADLINE_EXCEEDED",
+)
+
+# Structured HTTP status code sets
+_TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
+_NON_TRANSIENT_STATUS_CODES = frozenset({400, 401, 403, 404})
 
 _ERROR_TEXT_MAX = 300
 
@@ -2221,10 +2248,10 @@ class Brain:
                         logger.error(f"Brain LLM stream ({timeout_phase}) timeout for {event_id} — giving up")
                         break
                     if attempt < max_retries and self._is_transient(e):
-                        is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
+                        is_rate_limit = self._is_rate_limit(e)
                         base = 30 if is_rate_limit else 5
                         delay = min(base * (2 ** attempt), 120)
-                        jitter = delay * 0.3 * (0.5 - __import__('random').random())
+                        jitter = delay * 0.3 * random.random()
                         delay = max(1, delay + jitter)
                         logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
                         await asyncio.sleep(delay)
@@ -2759,15 +2786,71 @@ class Brain:
         return None, None
 
     @staticmethod
+    def _is_rate_limit(e: Exception) -> bool:
+        """Check if exception is specifically a 429 / quota rate-limit error (uses 30s base backoff)."""
+        from .llm import QuotaExhaustedError, RequestExceedsBurstError
+        if isinstance(e, (RequestExceedsBurstError, asyncio.TimeoutError, TimeoutError)):
+            return False
+        if isinstance(e, QuotaExhaustedError):
+            return True
+
+        for attr in ("code", "status_code", "status"):
+            try:
+                val = getattr(e, attr, None)
+                if callable(val):
+                    val = val()
+            except Exception:
+                val = None
+            if isinstance(val, int) and not isinstance(val, bool):
+                if val == 429:
+                    return True
+                if 400 <= val < 600:
+                    return False
+
+        err_str = str(e)
+        err_lower = err_str.lower()
+        if (
+            "resource_exhausted" in err_lower
+            or "quota exhausted" in err_lower
+            or "too many requests" in err_lower
+        ):
+            return True
+        return bool(_RATE_LIMIT_429_RE.search(err_str))
+
+    @staticmethod
     def _is_transient(e: Exception) -> bool:
         """Check if exception is a transient rate-limit or availability error."""
         from .llm import QuotaExhaustedError, RequestExceedsBurstError
-        if isinstance(e, RequestExceedsBurstError):
-            return False  # Payload larger than the whole bucket: retrying can never succeed
+        if isinstance(e, (RequestExceedsBurstError, asyncio.TimeoutError, TimeoutError)):
+            return False  # Non-retryable burst overflow or timeout (handled by dedicated timeout policy)
         if isinstance(e, QuotaExhaustedError):
             return True
+
+        # Structured status code inspection (.code, .code(), .status_code, .status)
+        for attr in ("code", "status_code", "status"):
+            try:
+                val = getattr(e, attr, None)
+                if callable(val):
+                    val = val()
+            except Exception:
+                val = None
+            if isinstance(val, int) and not isinstance(val, bool):
+                if val in _TRANSIENT_STATUS_CODES:
+                    return True
+                if 400 <= val < 500:
+                    return False
+
+        # Non-transient client error inspection (reject before checking transient tokens/codes)
         err_str = str(e)
-        return any(code in err_str for code in ["429", "502", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+        if _NON_TRANSIENT_CLIENT_ERR_RE.search(err_str):
+            return False
+
+        # Check canonical transient status tokens
+        if any(token in err_str for token in _TRANSIENT_STATUS_TOKENS):
+            return True
+
+        # Check bounded regex for HTTP status codes
+        return bool(_TRANSIENT_HTTP_CODE_RE.search(err_str))
 
     @staticmethod
     async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:

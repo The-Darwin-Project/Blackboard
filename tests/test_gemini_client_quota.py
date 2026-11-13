@@ -11,6 +11,7 @@
 #    default model cannot drift. TestGemini4UnaryStreamAndAssemble pins CR-02/CR-03/CR-04/CR-09/CR-14 unary stream-and-assemble contracts.
 """Unit tests for GeminiAdapter quota decoupling and stream error rollback."""
 import asyncio
+import shutil
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
@@ -1637,4 +1638,223 @@ class TestGemini4UnaryStreamAndAssemble:
         _ = [c async for c in ad_stream.generate_stream("sys", "hello")]
         cfg = ad_stream._client.aio.models.generate_content_stream.call_args.kwargs["config"]
         assert cfg.http_options.retry_options.attempts == 10
+
+
+class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
+    """ATDD 4-Layer Executable Specification:
+    Gemini 4 Unary generate() Chunk-0 Timeout Budget Parity under Helm Defaults,
+    Custom TTFB Override Clamping, and Helm Chart Deployment Rendering.
+    """
+
+    # -------------------------------------------------------------------------
+    # Layer 3: Protocol Drivers & Fixtures
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _make_gemini4_spy_adapter(model_name: str = "gemini-4-argon", tracker=None):
+        ad = GeminiAdapter.__new__(GeminiAdapter)
+        ad._model_name = model_name
+        ad._tracker = tracker
+        ad._estimate_tokens = lambda contents: 50
+        ad._convert_contents = lambda contents: contents
+        ad._build_config = MagicMock(wraps=ad._build_config)
+        ad._client = MagicMock()
+        return ad
+
+    @staticmethod
+    def render_helm_brain_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+        """Driver invoking `helm template darwin helm` to extract the `brain` container env."""
+        import subprocess
+        cmd = ["helm", "template", "darwin", "helm"]
+        if overrides:
+            for k, v in overrides.items():
+                cmd.extend(["--set", f"{k}={v}"])
+        proc = subprocess.run(
+            cmd,
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, f"helm template failed: {proc.stderr}"
+        docs = list(yaml.safe_load_all(proc.stdout))
+        deployment_doc = None
+        for doc in docs:
+            if doc and doc.get("kind") == "Deployment" and doc.get("metadata", {}).get("name") == "darwin-brain":
+                deployment_doc = doc
+                break
+        assert deployment_doc is not None, "Deployment 'darwin-brain' not found in helm template output"
+        containers = deployment_doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        brain_container = next((c for c in containers if c.get("name") == "brain"), None)
+        assert brain_container is not None, "Container 'brain' not found in Deployment spec"
+        env_list = brain_container.get("env", [])
+        return {item["name"]: str(item.get("value", "")) for item in env_list if "name" in item}
+
+    # -------------------------------------------------------------------------
+    # Layer 2: Domain-Specific Language (DSL) & Assertions
+    # -------------------------------------------------------------------------
+    @classmethod
+    async def assert_gemini4_generate_chunk0_budget(
+        cls, monkeypatch, *, ttfb_env: str | None, total_env: str | None, expected_budget: float
+    ) -> None:
+        from unittest.mock import patch
+        from google.genai import types
+
+        monkeypatch.delenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", raising=False)
+        if ttfb_env is not None:
+            monkeypatch.setenv("LLM_STREAM_TTFB_TIMEOUT_SEC", ttfb_env)
+        else:
+            monkeypatch.delenv("LLM_STREAM_TTFB_TIMEOUT_SEC", raising=False)
+
+        if total_env is not None:
+            monkeypatch.setenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", total_env)
+        else:
+            monkeypatch.delenv("LLM_STREAM_TOTAL_TIMEOUT_SEC", raising=False)
+
+        seen_budgets = []
+        real_wait_for = asyncio.wait_for
+
+        async def _spy_wait_for(aw, timeout=None):
+            seen_budgets.append(timeout)
+            return await real_wait_for(aw, timeout=timeout)
+
+        async def _fast_stream():
+            yield _chunk(parts=[types.Part(text="ok")], text="ok", usage=_usage(total=50))
+
+        ad = cls._make_gemini4_spy_adapter("gemini-4-argon")
+        _set_stream(ad, _fast_stream)
+
+        with patch("src.agents.llm.gemini_client.asyncio.wait_for", _spy_wait_for):
+            resp = await ad.generate("sys", "hello")
+
+        assert resp.text == "ok"
+        assert len(seen_budgets) > 0, "asyncio.wait_for was never called"
+        assert seen_budgets[0] == expected_budget, (
+            f"Chunk-0 timeout budget mismatch: expected {expected_budget}s, got {seen_budgets[0]}s"
+        )
+
+    @classmethod
+    def assert_helm_deployment_env_vars(
+        cls, env: dict[str, str], expected_vars: dict[str, str]
+    ) -> None:
+        for k, v in expected_vars.items():
+            assert k in env, f"Expected env var '{k}' missing from brain container env: {list(env.keys())}"
+            assert env[k] == v, f"Expected {k}='{v}', got '{env[k]}'"
+
+    # -------------------------------------------------------------------------
+    # Layer 1: Executable Scenarios (T-5, T-6, T-7, T-8)
+    # -------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_t5_gemini4_generate_helm_default_ttfb_preserves_total_timeout(self, monkeypatch):
+        """T-5: Gemini 4 unary GeminiAdapter.generate() with LLM_STREAM_TTFB_TIMEOUT_SEC="35"
+        (matching the Helm default) preserves total_timeout (180.0s) for Chunk 0.
+        """
+        await self.assert_gemini4_generate_chunk0_budget(
+            monkeypatch,
+            ttfb_env="35",
+            total_env="180",
+            expected_budget=180.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t6_gemini4_generate_custom_ttfb_override_honors_min_ttfb_and_total(self, monkeypatch):
+        """T-6: Gemini 4 unary GeminiAdapter.generate() with custom non-default override (e.g. "45")
+        honors min(ttfb_timeout, total_timeout).
+        """
+        # Case A: explicit ttfb override (45s) < total_timeout (180s) -> 45.0s
+        await self.assert_gemini4_generate_chunk0_budget(
+            monkeypatch,
+            ttfb_env="45",
+            total_env="180",
+            expected_budget=45.0,
+        )
+
+        # Case B: explicit ttfb override (200s) > total_timeout (180s) -> clamps to total_timeout (180.0s)
+        await self.assert_gemini4_generate_chunk0_budget(
+            monkeypatch,
+            ttfb_env="200",
+            total_env="180",
+            expected_budget=180.0,
+        )
+
+    @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
+    def test_t7_helm_default_template_renders_brain_stream_timeout_and_sdk_retry_env(self):
+        """T-7: Default helm template darwin helm renders Deployment with LLM_STREAM_TTFB_TIMEOUT_SEC="35",
+        LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC="30", LLM_STREAM_TOTAL_TIMEOUT_SEC="180",
+        LLM_STREAM_SDK_RETRY_ATTEMPTS="1" in the brain container env.
+        """
+        env = self.render_helm_brain_env()
+        self.assert_helm_deployment_env_vars(
+            env,
+            {
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "35",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "30",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "180",
+                "LLM_STREAM_SDK_RETRY_ATTEMPTS": "1",
+            },
+        )
+
+    @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
+    def test_t8_helm_custom_overrides_reflect_in_brain_env_and_lint_passes(self):
+        """T-8: Custom helm --set overrides reflect in rendered Deployment and helm lint passes."""
+        import subprocess
+
+        overrides = {
+            "brain.streamTtfbTimeoutSec": "45",
+            "brain.streamInterChunkTimeoutSec": "40",
+            "brain.streamTotalTimeoutSec": "210",
+            "brain.streamSdkRetryAttempts": "2",
+        }
+        env = self.render_helm_brain_env(overrides=overrides)
+        self.assert_helm_deployment_env_vars(
+            env,
+            {
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "45",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "40",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "210",
+                "LLM_STREAM_SDK_RETRY_ATTEMPTS": "2",
+            },
+        )
+
+        lint_proc = subprocess.run(
+            ["helm", "lint", "helm"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert lint_proc.returncode == 0, f"helm lint failed: {lint_proc.stderr}\n{lint_proc.stdout}"
+
+    @pytest.mark.skipif(not shutil.which("helm"), reason="helm CLI required")
+    def test_t12_helm_template_zero_retry_attempts_and_partial_brain_values(self):
+        """T-12: Rendering helm template with --set brain.streamSdkRetryAttempts=0 outputs
+        LLM_STREAM_SDK_RETRY_ATTEMPTS="0" (not omitted due to Go template falsy 0), and
+        helm/values.yaml has descriptive inline '#' comments on all 4 stream* keys.
+        """
+        env = self.render_helm_brain_env(overrides={"brain.streamSdkRetryAttempts": "0"})
+        self.assert_helm_deployment_env_vars(
+            env,
+            {
+                "LLM_STREAM_TTFB_TIMEOUT_SEC": "35",
+                "LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC": "30",
+                "LLM_STREAM_TOTAL_TIMEOUT_SEC": "180",
+                "LLM_STREAM_SDK_RETRY_ATTEMPTS": "0",
+            },
+        )
+
+        values_text = (_REPO_ROOT / "helm" / "values.yaml").read_text()
+        for key in (
+            "streamTtfbTimeoutSec",
+            "streamInterChunkTimeoutSec",
+            "streamTotalTimeoutSec",
+            "streamSdkRetryAttempts",
+        ):
+            matching_lines = [
+                line for line in values_text.splitlines() if line.strip().startswith(f"{key}:")
+            ]
+            assert matching_lines, f"Key '{key}:' not found in helm/values.yaml"
+            assert "#" in matching_lines[0], (
+                f"Expected descriptive inline '#' comment on '{key}' in helm/values.yaml, got: {matching_lines[0]!r}"
+            )
+
+
 
