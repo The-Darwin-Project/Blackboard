@@ -144,10 +144,10 @@ function ResultViewer({ result }: { result: string }) {
 }
 
 function StatusCheck({ status }: { status?: MessageStatus }) {
-  if (!status || status === 'sent') return <span title="Sent" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓</span>;
-  if (status === 'delivered') return <span title="Delivered" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓✓</span>;
-  if (status === 'evaluated') return <span title="Read" style={{ fontSize: 11, color: '#3b82f6', marginLeft: 4 }}>✓✓</span>;
-  return <span title="Processed" style={{ fontSize: 11, color: '#10b981', marginLeft: 4 }}>✓✓●</span>;
+  if (status === 'delivered') return <span title="Delivered" style={{ fontSize: 11, color: '#64748b' }}>✓✓</span>;
+  if (status === 'evaluated') return <span title="Evaluated" style={{ fontSize: 11, color: '#3b82f6' }}>✓✓</span>;
+  if (status === 'processed') return <span title="Executed" style={{ fontSize: 11, color: '#22c55e' }}>✓✓●</span>;
+  return <span title="Sent" style={{ fontSize: 11, color: '#64748b' }}>✓</span>;
 }
 
 function FeedbackButtons({ eventId, turnNumber }: { eventId: string; turnNumber: number }) {
@@ -340,10 +340,10 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
             🧠 RECALL
           </span>
         )}
-        {isHuman && <StatusCheck status={turn.status} />}
         {attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+          <StatusCheck status={turn.status} />
           {hasFloatingView && onViewReport && (
             <button
               onClick={() => {

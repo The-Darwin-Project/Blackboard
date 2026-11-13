@@ -182,39 +182,65 @@ describe('TurnBubble: Unified Actor Bubble Cards (ATDD T-1 - T-9)', () => {
     ['developer'],
     ['jarvis'],
     ['brain'],
-  ])('T-8: Given an autonomous %s turn, When rendered in TurnBubble, Then it does NOT render message delivery status checks (F-01)', (actor) => {
+  ])('T-8: Given an autonomous %s turn, When rendered in TurnBubble, Then it renders message delivery status checks', (actor) => {
     renderTurnBubble({
       actor,
       action: 'execute',
       result: 'Finished command',
     });
 
-    expect(screen.queryByTitle('Sent')).toBeNull();
-    expect(screen.queryByTitle('Delivered')).toBeNull();
-    expect(screen.queryByTitle('Read')).toBeNull();
-    expect(screen.queryByTitle('Processed')).toBeNull();
+    const receipt = screen.getByTitle('Sent');
+    expect(receipt).toBeInTheDocument();
+    expect(receipt.textContent).toBe('✓');
   });
 
-  it.each<[MessageStatus | undefined, string, string]>([
+  const statusReceiptMatrix: [MessageStatus | 'unknown' | undefined, string, string][] = [
     [undefined, 'Sent', '✓'],
     ['sent', 'Sent', '✓'],
     ['delivered', 'Delivered', '✓✓'],
-    ['evaluated', 'Read', '✓✓'],
-    ['processed', 'Processed', '✓✓●'],
-  ])('T-9: Given a human message turn with status %s, When rendered, Then it renders the "%s" receipt', (status, title, glyph) => {
-    renderTurnBubble({
-      actor: 'user',
-      action: 'message',
-      thoughts: 'Hello FRIDAY',
-      status,
-    });
+    ['evaluated', 'Evaluated', '✓✓'],
+    ['processed', 'Executed', '✓✓●'],
+    ['unknown' as any, 'Sent', '✓'],
+  ];
 
-    const receipt = screen.getByTitle(title);
-    expect(receipt.textContent).toBe(glyph);
-    for (const other of ['Sent', 'Delivered', 'Read', 'Processed'].filter((t) => t !== title)) {
-      expect(screen.queryByTitle(other)).toBeNull();
+  const t9Matrix = (['user', 'developer', 'brain'] as const).flatMap((actor) =>
+    statusReceiptMatrix.map(([status, title, glyph]) => [actor, status, title, glyph] as const)
+  );
+
+  it.each(t9Matrix)(
+    'T-9: Given a %s turn with status %s, When rendered, Then it renders the "%s" receipt in the right header cluster',
+    (actor, status, title, glyph) => {
+      renderTurnBubble({
+        actor,
+        action: actor === 'user' ? 'message' : 'execute',
+        thoughts: actor === 'user' ? 'Hello FRIDAY' : undefined,
+        result: actor !== 'user' ? 'Finished task' : undefined,
+        status: status as MessageStatus | undefined,
+      });
+
+      const receipt = screen.getByTitle(title);
+      expect(receipt.textContent).toBe(glyph);
+      for (const other of ['Sent', 'Delivered', 'Evaluated', 'Executed'].filter((t) => t !== title)) {
+        expect(screen.queryByTitle(other)).toBeNull();
+      }
+
+      // SC-4 / Processed (Executed) specific glyph color verification (#22c55e -> rgb(34, 197, 94))
+      if (status === 'processed') {
+        expect(receipt.style.color).toBe('rgb(34, 197, 94)');
+      }
+
+      // Assert that the receipt is contained within the right header cluster adjacent to the timestamp (having marginLeft: 'auto')
+      const rightCluster = receipt.parentElement;
+      expect(rightCluster).toBeInTheDocument();
+      expect(rightCluster?.style.marginLeft).toBe('auto');
+
+      const header = screen.getByTestId('turn-bubble-header');
+      expect(header.contains(rightCluster)).toBe(true);
+
+      const expectedTimeString = new Date(1700000000 * 1000).toLocaleTimeString();
+      expect(receipt.previousElementSibling?.textContent).toBe(expectedTimeString);
     }
-  });
+  );
 });
 
 // =============================================================================
