@@ -117,8 +117,8 @@ These blocks control event lifecycle behavior (no external service required):
 | :--- | :--- | :--- |
 | `idleTimeout` | Auto-close stale chat/slack approval threads | `warningSec`, `closeSec` |
 | `brain.reconcileWorkers` | ReconcileScheduler worker pool | `0` = auto-derive from source caps |
-| `brain.contentBudgetTokens` | Sliding-window prompt token budget before pruning | `60000` |
-| `brain.tailBudgetTokens` | Retained recent conversation tail budget in tokens | `40000` |
+| `brain.contentBudgetTokens` | Sliding-window prompt token budget before pruning (env `BRAIN_CONTENT_BUDGET_TOKENS`, clamped to `[2000, 1000000]`) | `60000` |
+| `brain.tailBudgetTokens` | Retained recent conversation tail budget in tokens (env `BRAIN_TAIL_BUDGET_TOKENS`, clamped to `[2000, brain.contentBudgetTokens]`) | `40000` |
 | `brain.streamTtfbTimeoutSec` | Stream pre-substantive TTFB timeout in seconds | `600` |
 | `brain.streamInterChunkTimeoutSec` | Stream sliding activity/heartbeat timeout in seconds | `60` |
 | `brain.streamTotalTimeoutSec` | Stream outer runaway timeout cap in seconds | `1200` |

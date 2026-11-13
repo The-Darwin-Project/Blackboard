@@ -10,7 +10,16 @@
 #    _apply_sibling_signature propagates standalone carrier signatures onto unsigned FCs or the last thought=True part
 #    without mutating caller dicts or emitting empty {} dicts; turn_to_parts filters thought=True and empty "" text.
 # 7. [Budget]: Default _CONTENT_BUDGET=60000, _TAIL_BUDGET=40000 tokens (env-configurable, clamped [2000, 1000000]).
-# 8. [Decay]: Tool turns older than DEFAULT_TURN_DECAY_DISTANCE (10) turns decay into XML-fenced reference tags (<blackboard_evidence_reference>) to shed context while preserving skill prefixes and recall pointers.
+# 8. [Decay]: Tool turns older than DEFAULT_TURN_DECAY_DISTANCE (10, src/utils/turn_decay.py) turns whose payload is
+#    > DECAY_MIN_CHARS (400) decay into XML-fenced reference tags (<blackboard_evidence_reference>) to shed context
+#    while preserving skill prefixes and recall pointers. Callers decide `decay`; recall_pruned_turns results are
+#    exempted by brain.py (they must not ping-pong back into decay).
+# 9. [Security]: ALL untrusted turn text goes through prompt_sanitize.strip_xml_fences (looped, full tag union).
+#    Do NOT reintroduce a local fence list. contents_have_pruned_or_decayed relies on that: a decay tag outside the
+#    event-header part can only come from real decay.
+# 10. [Pattern]: The prune notice is ONE canonical part (format_prune_notice) folded into Message 0. compress_contents
+#    lifts notices from an earlier pass and merges their counts, so compress(compress(x)) never stacks notices. The
+#    count is conversation ENTRIES (messages), not Blackboard turn numbers -- the notice carries no turn range.
 """Pure-function helpers for conversation content building and compression.
 
 Extracted from brain.py for modularity. These have zero dependencies on
@@ -22,10 +31,12 @@ import base64
 import html
 import logging
 import os
+import re
 from typing import TYPE_CHECKING
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment
-from src.utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text
+from src.utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
+from src.utils.turn_decay import DECAY_MIN_CHARS
 
 if TYPE_CHECKING:
     from src.models import ConversationTurn
@@ -51,21 +62,6 @@ def _parse_budget_env(name: str, default: int, min_val: int = 2000, max_val: int
 
 _CONTENT_BUDGET = _parse_budget_env("BRAIN_CONTENT_BUDGET_TOKENS", 60000)
 _TAIL_BUDGET = min(_parse_budget_env("BRAIN_TAIL_BUDGET_TOKENS", 40000), _CONTENT_BUDGET)
-
-_XML_FENCE_TAGS = (
-    "</functionResponse>", "</description>", "</job_log>",
-    "</comments>", "</mention_request>", "</issue_body>",
-    "<blackboard_evidence_reference", "</blackboard_evidence_reference>",
-)
-
-
-def _strip_xml_fences(text: str) -> str:
-    if not text:
-        return ""
-    for tag in _XML_FENCE_TAGS:
-        text = text.replace(tag, "")
-    return text
-
 
 def _valid_sig(val) -> str | bytes | None:
     """Validate a single thought signature value (rejecting bool and whitespace-only strings)."""
@@ -220,12 +216,12 @@ def build_function_response(
 
     response_text = turn.evidence or turn.thoughts or ""
     raw_chars = len(response_text)
-    if decay_evidence and raw_chars > 400:
+    if decay_evidence and raw_chars > DECAY_MIN_CHARS:
         turn_idx = turn_index or getattr(turn, "turn", 0)
         ref = format_evidence_decay_reference(turn_idx, tool_name, raw_chars)
         response_text = f"{skill_prefix}\n{ref}" if skill_prefix else ref
     else:
-        response_text = _strip_xml_fences(response_text)
+        response_text = strip_xml_fences(response_text)
         if skill_prefix:
             response_text = f"{skill_prefix}\n{response_text}"
     return [{"functionResponse": {"name": tool_name, "response": {"result": response_text}}}]
@@ -252,11 +248,11 @@ def build_single_function_response(
         tool_name = turn.waitingFor
     response_text = turn.evidence or turn.thoughts or ""
     raw_chars = len(response_text)
-    if decay_evidence and raw_chars > 400:
+    if decay_evidence and raw_chars > DECAY_MIN_CHARS:
         turn_idx = turn_index or getattr(turn, "turn", 0)
         response_text = format_evidence_decay_reference(turn_idx, tool_name, raw_chars)
     else:
-        response_text = _strip_xml_fences(response_text)
+        response_text = strip_xml_fences(response_text)
     return {"functionResponse": {"name": tool_name, "response": {"result": response_text}}}
 
 
@@ -284,6 +280,57 @@ def estimate_tokens(contents: list[dict]) -> int:
     """Rough token estimate: ~4 chars per token."""
     total_chars = sum(estimate_msg_tokens(msg) for msg in contents)
     return total_chars // 4
+
+
+# Prune notice (folded into Message 0). One canonical shape so compress_contents can recognise a
+# notice from an earlier pass and MERGE counts instead of stacking a second, contradictory notice.
+PRUNE_NOTICE_PREFIX = "[Context pruned:"
+_PRUNE_NOTICE_COUNT_RE = re.compile(r"\[Context pruned: (\d{1,9}) earlier conversation entries")
+_DECAY_REF_TAG = "<blackboard_evidence_reference"
+
+
+def format_prune_notice(count: int) -> dict:
+    """Prune-notice part. ``count`` is conversation entries (messages), NOT Blackboard turn numbers."""
+    return {
+        "text": (
+            f"\n\n{PRUNE_NOTICE_PREFIX} {count} earlier conversation entries pruned for context window. "
+            f"Use recall_pruned_turns(from_turn, to_turn) to retrieve earlier turns by Blackboard turn number if needed.]"
+        )
+    }
+
+
+def prune_notice_count(part: dict) -> int | None:
+    """Pruned-entry count if ``part`` is a prune notice, else None. Anchored and length-capped (linear)."""
+    text = part.get("text") if isinstance(part, dict) else None
+    if not isinstance(text, str):
+        return None
+    m = _PRUNE_NOTICE_COUNT_RE.match(text[:96].lstrip())
+    return int(m.group(1)) if m else None
+
+
+def contents_have_pruned_or_decayed(contents: list[dict]) -> bool:
+    """True when ``contents`` carries a real prune notice or a decayed-evidence reference.
+
+    Tight on purpose (gates recall_pruned_turns): a notice only counts as the START of a Message 0 part,
+    and the event header part (which embeds unsanitized event fields) is never scanned for decay tags.
+    Turn text has its fences stripped upstream, so a decay tag elsewhere can only come from real decay.
+    """
+    if not contents:
+        return False
+    if any(prune_notice_count(p) is not None for p in contents[0].get("parts", [])):
+        return True
+    for mi, msg in enumerate(contents):
+        for pi, part in enumerate(msg.get("parts", [])):
+            if mi == 0 and pi == 0:
+                continue
+            if _DECAY_REF_TAG in str(part.get("text") or ""):
+                return True
+            fr = part.get("functionResponse")
+            if isinstance(fr, dict):
+                res = fr.get("response")
+                if isinstance(res, dict) and _DECAY_REF_TAG in str(res.get("result") or ""):
+                    return True
+    return False
 
 
 def compress_contents(
@@ -315,7 +362,16 @@ def compress_contents(
         header_len = 2 if len(parts) > 2 and "--- CONVERSATION ---" in str(parts[1].get("text", "")) else 1
         header_parts = parts[:header_len]
         action_parts = parts[-1:]
-        conv_parts = parts[header_len:-1]
+        # Notices from an earlier pass are lifted out (and their counts carried) so they are never
+        # pruned/kept as ordinary conversation parts and never stack with the new one.
+        conv_parts = []
+        prior_pruned = 0
+        for cp in parts[header_len:-1]:
+            prior_count = prune_notice_count(cp)
+            if prior_count is None:
+                conv_parts.append(cp)
+            else:
+                prior_pruned += prior_count
         if not conv_parts:
             return contents
 
@@ -331,19 +387,26 @@ def compress_contents(
         kept_parts.reverse()
 
         if len(kept_parts) < len(conv_parts):
-            pruned_count = len(conv_parts) - len(kept_parts)
-            prune_notice = {
-                "text": (
-                    f"\n\n[{pruned_count} earlier turns pruned for context window. "
-                    f"Use recall_pruned_turns(from_turn, to_turn) to retrieve if needed.]"
-                )
-            }
-            last_msg["parts"] = header_parts + [prune_notice] + kept_parts + action_parts
+            pruned_count = prior_pruned + len(conv_parts) - len(kept_parts)
+            last_msg["parts"] = header_parts + [format_prune_notice(pruned_count)] + kept_parts + action_parts
             return [last_msg]
         return contents
 
     context_msg = dict(contents[0])
-    context_msg["parts"] = list(contents[0].get("parts", []))
+    # Lift prune notices left by an earlier pass out of Message 0 (idempotence): their counts merge into
+    # the single notice re-inserted below, at the position the earlier one held.
+    header_parts: list[dict] = []
+    prior_pruned = 0
+    notice_at: int | None = None
+    for hp in contents[0].get("parts", []):
+        prior_count = prune_notice_count(hp)
+        if prior_count is None:
+            header_parts.append(hp)
+        else:
+            prior_pruned += prior_count
+            if notice_at is None:
+                notice_at = len(header_parts)
+    context_msg["parts"] = header_parts
     conv_msgs = list(contents[1:])
 
     # Trailing standalone prompt protection:
@@ -411,24 +474,21 @@ def compress_contents(
     kept_indices.sort()
     kept = [conv_msgs[i] for i in kept_indices]
 
-    if len(kept) < len(conv_msgs):
-        pruned_count = len(conv_msgs) - len(kept)
-        first_kept_idx = len(conv_msgs) - len(kept) + 1
-        prune_notice = {
-            "text": (
-                f"\n\n[{pruned_count} earlier turns (1-{first_kept_idx - 1}) pruned for context window. "
-                f"Use recall_pruned_turns(from_turn, to_turn) to retrieve if needed.]"
-            )
-        }
-        context_msg["parts"].append(prune_notice)
-
+    newly_pruned = len(conv_msgs) - len(kept)
+    notice_pos = len(context_msg["parts"]) if notice_at is None else notice_at
+    if newly_pruned:
         # Cut Boundary Alternation Alignment:
         # Guarantee [context_msg] + kept never has consecutive user messages or orphaned FR
         while kept and kept[0].get("role") == "user":
             if any("functionResponse" in p for p in kept[0].get("parts", [])):
                 kept.pop(0)
+                newly_pruned += 1  # dropped orphan FR is pruned too: keep the notice count honest
             else:
                 context_msg["parts"].extend(kept.pop(0).get("parts", []))
+
+    total_pruned = prior_pruned + newly_pruned
+    if total_pruned:
+        context_msg["parts"].insert(notice_pos, format_prune_notice(total_pruned))
 
     result = [context_msg] + kept
     if trailing_prompt_msg:
@@ -508,11 +568,11 @@ def turn_to_parts(
     if turn.actor == "brain" and turn.action == "tool_result":
         tool_name = turn.waitingFor or "tool"
         raw_text = turn.evidence or turn.thoughts or ""
-        if decay_evidence and len(raw_text) > 400:
+        if decay_evidence and len(raw_text) > DECAY_MIN_CHARS:
             turn_idx = turn_index or getattr(turn, "turn", 0)
             text = f"[SYSTEM {tool_name}]: {format_evidence_decay_reference(turn_idx, tool_name, len(raw_text))}"
         else:
-            raw_text = _strip_xml_fences(raw_text)
+            raw_text = strip_xml_fences(raw_text)
             text = f"[SYSTEM {tool_name}]: {raw_text}"
         return [{"text": text}]
 
@@ -539,7 +599,7 @@ def turn_to_parts(
             )
         if turn.evidence:
             text = f"{text}\n{turn.evidence}" if text else turn.evidence
-        text = _strip_xml_fences(text)
+        text = strip_xml_fences(text)
         if not text:
             return []
         parts: list[dict] = [{"text": text}]
@@ -556,19 +616,19 @@ def turn_to_parts(
         text = turn.thoughts or ""
         if turn.evidence:
             raw_ev = turn.evidence
-            if decay_evidence and len(raw_ev) > 400:
+            if decay_evidence and len(raw_ev) > DECAY_MIN_CHARS:
                 turn_idx = turn_index or getattr(turn, "turn", 0)
                 raw_ev = format_evidence_decay_reference(turn_idx, turn.action, len(raw_ev))
             else:
-                raw_ev = _strip_xml_fences(raw_ev)
+                raw_ev = strip_xml_fences(raw_ev)
             text = f"{text}\n{raw_ev}" if text else raw_ev
         else:
-            text = _strip_xml_fences(text)
+            text = strip_xml_fences(text)
         if turn.action not in ("response",):
             text = f"[FRIDAY {turn.action}]: {text}" if text else f"[FRIDAY {turn.action}]"
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
-        raw = _strip_xml_fences(raw)
+        raw = strip_xml_fences(raw)
         action_suffix = f" ({turn.action})" if turn.action and turn.action != "message" else ""
         # user_name is operator/Slack-supplied: sanitize + cap so a crafted display name
         # cannot break out of the [USER ...] prefix or inject lines into the turn text.
@@ -580,7 +640,7 @@ def turn_to_parts(
         text = f"{prefix}: {raw}" if raw else prefix
     elif turn.actor == "jarvis" and turn.action == "message":
         raw = turn.thoughts or turn.result or ""
-        raw = _strip_xml_fences(raw)
+        raw = strip_xml_fences(raw)
         if is_jarvis_acknowledgment(raw):
             text = f"[AGENT jarvis]: {raw}" if raw else "[AGENT jarvis]"
         elif "?" in raw or any(
@@ -595,11 +655,11 @@ def turn_to_parts(
             text = f"[AGENT jarvis]: {raw}" if raw else "[AGENT jarvis]"
     else:
         raw = turn.evidence or turn.result or turn.thoughts or ""
-        if decay_evidence and len(raw) > 400:
+        if decay_evidence and len(raw) > DECAY_MIN_CHARS:
             turn_idx = turn_index or getattr(turn, "turn", 0)
             raw = format_evidence_decay_reference(turn_idx, turn.actor, len(raw))
         else:
-            raw = _strip_xml_fences(raw)
+            raw = strip_xml_fences(raw)
         text = f"[AGENT {turn.actor}]: {raw}" if raw else f"[AGENT {turn.actor}]"
 
     parts: list[dict] = [{"text": text}]

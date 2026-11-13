@@ -1,6 +1,7 @@
 # BlackBoard/tests/test_tool_gates.py
 # @ai-rules:
-# 1. [Constraint]: No Redis, no async — pure unit tests for tool_gates.py.
+# 1. [Constraint]: No Redis — pure unit tests for tool_gates.py (the one async Brain-level batch-FC test reuses
+#    the mocked Brain harness from tests/test_quota_shedding.py).
 # 2. [Pattern]: Fake conversation turns via SimpleNamespace (matches ConversationTurn interface).
 # 3. [Gotcha]: evaluate_gates returns list[dict], assert on name sets via _names() helper.
 """Tool gate evaluation and rejection diagnostic tests."""
@@ -1503,32 +1504,78 @@ class TestDynamicRecallPrunedTurns:
             "Gates must respect explicit ctx.has_pruned_or_decayed_turns=False regardless of conversation length"
         )
 
-    def test_build_gate_context_exact_boundary_10_vs_11(self):
-        """CR-11: Exact boundary verification for build_gate_context:
-        10 turns -> has_pruned_or_decayed_turns is False.
-        11 turns -> has_pruned_or_decayed_turns is True.
-        """
+    @staticmethod
+    def _doc_with_old_payload(turn_count: int, payload_chars: int, waiting_for: str = "run_bash"):
+        """Event whose FIRST turn is a tool_result with ``payload_chars`` of evidence (distance = turn_count-1)."""
         from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
 
-        def _make_doc(turn_count: int) -> EventDocument:
-            evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
-            turns = [
-                ConversationTurn(turn=i, actor="user", action="message", thoughts=f"turn {i}")
-                for i in range(1, turn_count + 1)
-            ]
-            return EventDocument(
-                id="evt-gate-test",
-                source="chat",
-                service="test-svc",
-                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
-                conversation=turns,
+        evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
+        turns = [
+            ConversationTurn(
+                turn=1, actor="brain", action="tool_result", waitingFor=waiting_for,
+                evidence="x" * payload_chars,
             )
+        ] + [
+            ConversationTurn(turn=i, actor="user", action="message", thoughts=f"turn {i}")
+            for i in range(2, turn_count + 1)
+        ]
+        return EventDocument(
+            id="evt-gate-test",
+            source="chat",
+            service="test-svc",
+            event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+            conversation=turns,
+        )
 
-        ctx_10 = build_gate_context(_make_doc(10), "dispatch", {})
-        assert ctx_10.has_pruned_or_decayed_turns is False, "10 turns must evaluate to False"
+    @pytest.mark.parametrize(
+        "turn_count,expected",
+        [(10, False), (11, False), (12, True), (30, True)],
+    )
+    def test_build_gate_context_flag_matches_real_decay_distance(self, turn_count, expected):
+        """H3: the gate flag follows REAL decay (distance len-1-idx > 10 AND payload > 400 chars), not len > 10.
 
-        ctx_11 = build_gate_context(_make_doc(11), "dispatch", {})
-        assert ctx_11.has_pruned_or_decayed_turns is True, "11 turns must evaluate to True"
+        With the heavy tool turn first, distance == turn_count - 1: 10/11 turns -> 9/10 (still raw, nothing to
+        recall); 12 turns -> 11 (decayed).
+        """
+        ctx = build_gate_context(self._doc_with_old_payload(turn_count, 500), "dispatch", {})
+        assert ctx.has_pruned_or_decayed_turns is expected
+
+    @pytest.mark.parametrize("payload_chars,expected", [(399, False), (400, False), (401, True)])
+    def test_build_gate_context_flag_respects_decay_payload_threshold(self, payload_chars, expected):
+        """H3: at decay distance, only payloads > DECAY_MIN_CHARS (400) count -- 399/400 stay raw, 401 decays."""
+        ctx = build_gate_context(self._doc_with_old_payload(12, payload_chars), "dispatch", {})
+        assert ctx.has_pruned_or_decayed_turns is expected
+
+    def test_build_gate_context_short_turns_never_flag_regardless_of_length(self):
+        """H3: 40 short user turns have nothing decayable, so recall must NOT be un-gated by length alone."""
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+
+        evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
+        doc = EventDocument(
+            id="evt-gate-test", source="chat", service="test-svc",
+            event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+            conversation=[
+                ConversationTurn(turn=i, actor="user", action="message", thoughts="y" * 5000)
+                for i in range(1, 41)
+            ],
+        )
+        assert build_gate_context(doc, "dispatch", {}).has_pruned_or_decayed_turns is False
+
+    def test_build_gate_context_recall_turns_do_not_count_as_decayable(self):
+        """M5: a recall_pruned_turns result is exempt from decay, so it must not re-trigger un-gating."""
+        doc = self._doc_with_old_payload(30, 5000, waiting_for="recall_pruned_turns")
+        assert build_gate_context(doc, "dispatch", {}).has_pruned_or_decayed_turns is False
+
+    @pytest.mark.parametrize("override", [True, False])
+    def test_build_gate_context_explicit_flag_from_built_contents_wins(self, override):
+        """H3: Brain passes the flag derived from BUILT contents (covers budget-only pruning); it overrides
+        the conversation estimate in both directions."""
+        doc = self._doc_with_old_payload(30, 5000)  # estimate would say True
+        ctx = build_gate_context(doc, "dispatch", {}, has_pruned_or_decayed_turns=override)
+        assert ctx.has_pruned_or_decayed_turns is override
+        short = self._doc_with_old_payload(3, 5)  # estimate would say False
+        ctx = build_gate_context(short, "dispatch", {}, has_pruned_or_decayed_turns=override)
+        assert ctx.has_pruned_or_decayed_turns is override
 
     def test_get_intermediate_tools_helper(self):
         """CR-12: Public helper get_intermediate_tools(ctx) returns intermediate toolset
@@ -1586,27 +1633,152 @@ class TestDynamicRecallPrunedTurns:
         )
 
     def test_build_gate_context_computes_has_pruned_or_decayed_turns_flag(self):
-        """Verify build_gate_context sets has_pruned_or_decayed_turns = len(conversation) > 10."""
-        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+        """build_gate_context sets has_pruned_or_decayed_turns from decay eligibility (see the parametrized
+        distance/threshold tests above), not from len(conversation)."""
+        short = build_gate_context(self._doc_with_old_payload(5, 5000), "dispatch", {})
+        assert hasattr(short, "has_pruned_or_decayed_turns")
+        assert short.has_pruned_or_decayed_turns is False
 
-        def _make_doc(turn_count: int) -> EventDocument:
-            evidence = EventEvidence(display_text="test", source_type="chat", domain="casual", severity="info")
-            turns = [
-                ConversationTurn(turn=i, actor="user", action="message", thoughts=f"turn {i}")
-                for i in range(1, turn_count + 1)
-            ]
-            return EventDocument(
-                id="evt-gate-test",
-                source="chat",
-                service="test-svc",
-                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
-                conversation=turns,
-            )
+        long_ = build_gate_context(self._doc_with_old_payload(15, 5000), "dispatch", {})
+        assert hasattr(long_, "has_pruned_or_decayed_turns")
+        assert long_.has_pruned_or_decayed_turns is True
 
-        ctx_short = build_gate_context(_make_doc(5), "dispatch", {})
-        assert hasattr(ctx_short, "has_pruned_or_decayed_turns")
-        assert ctx_short.has_pruned_or_decayed_turns is False
 
-        ctx_long = build_gate_context(_make_doc(15), "dispatch", {})
-        assert hasattr(ctx_long, "has_pruned_or_decayed_turns")
-        assert ctx_long.has_pruned_or_decayed_turns is True
+# ---------------------------------------------------------------------------
+# VMER-2341 (H3/M2): recall_pruned_turns availability through the real Brain loop
+# ---------------------------------------------------------------------------
+
+
+def _budget_pruned_short_casual_event():
+    """7-turn casual event: far too short to decay anything (distance <= 10), but three 120k-char tool
+    results (~90k tokens) exceed the 60k content budget, so ONLY budget pruning removes history."""
+    from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput, EventStatus
+
+    turns = []
+    for i in range(1, 8):
+        if i in (2, 4, 6):
+            turns.append(ConversationTurn(
+                turn=i, actor="brain", action="tool_result", waitingFor="run_bash",
+                evidence=f"HEAVY_{i}_" + ("Q" * 120_000),
+                response_parts=[{"functionCall": {"name": "run_bash", "args": {"cmd": f"c{i}"}}}],
+            ))
+        else:
+            turns.append(ConversationTurn(turn=i, actor="user", action="message", thoughts=f"user {i}"))
+    evidence = EventEvidence(display_text="Budget pruned", source_type="chat", domain="casual")
+    return EventDocument(
+        id="evt-batch-recall", source="chat", service="payments", status=EventStatus.ACTIVE,
+        brain_phase="dispatch",
+        event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+        conversation=turns,
+    )
+
+
+class TestRecallGateThroughBrainLoop:
+    """The same predicate (contents carry a prune notice / decay ref) must govern FC[0], the batch FC[i>0]
+    re-evaluation, and the intermediate TOOL LEAK check."""
+
+    @pytest.mark.asyncio
+    async def test_batch_fc_index_gt0_recall_pruned_turns_permitted_for_budget_only_pruning(self):
+        from types import SimpleNamespace as NS
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from tests.test_quota_shedding import (
+            _async_stream_from_chunks,
+            _make_brain_for_shedding,
+            _make_chunk,
+        )
+
+        event = _budget_pruned_short_casual_event()
+        batch = [
+            {"functionCall": {"name": "lookup_service", "args": {"service_name": "payments"}}},
+            {"functionCall": {"name": "recall_pruned_turns", "args": {"from_turn": 2, "to_turn": 2}}},
+        ]
+        stream = _async_stream_from_chunks([
+            _make_chunk(function_call=NS(name="lookup_service", args={"service_name": "payments"}), raw_parts=batch),
+        ])
+        brain, bb = _make_brain_for_shedding(lambda *a, **k: stream)
+        brain._extract_context_flags = AsyncMock(return_value={"event_domain": "casual"})
+        brain._normalize_response_parts = MagicMock(return_value=batch)
+        bb.get_event = AsyncMock(return_value=event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            await brain._process_with_llm(event.id, event)
+
+        call = brain._adapter.generate_stream.call_args_list[0].kwargs
+        prompt_text = " ".join(
+            p.get("text", "") for m in call["contents"] for p in m.get("parts", []) if isinstance(p, dict)
+        )
+        assert "[Context pruned:" in prompt_text, "precondition: history was budget-pruned, not decayed"
+        assert not any("<blackboard_evidence_reference" in str(m) for m in call["contents"][2:]), (
+            "precondition: nothing decayed (all turns within decay distance)"
+        )
+        assert "recall_pruned_turns" in {t["name"] for t in call["tools"]}
+
+        executed = [c.args[1] for c in brain._execute_function_call.await_args_list]
+        assert executed == ["lookup_service", "recall_pruned_turns"], (
+            f"recall_pruned_turns at FC index 1 must pass the batch gate re-evaluation, executed={executed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_fc_index_gt0_recall_rejected_when_history_untouched(self):
+        """Negative control: with nothing pruned or decayed, casual gates still reject recall at FC[1]."""
+        from types import SimpleNamespace as NS
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.models import ConversationTurn
+        from tests.test_quota_shedding import (
+            _async_stream_from_chunks,
+            _make_brain_for_shedding,
+            _make_chunk,
+        )
+
+        event = _budget_pruned_short_casual_event()
+        event.conversation = [
+            ConversationTurn(turn=i, actor="user", action="message", thoughts=f"user {i}") for i in range(1, 4)
+        ]
+        batch = [
+            {"functionCall": {"name": "lookup_service", "args": {"service_name": "payments"}}},
+            {"functionCall": {"name": "recall_pruned_turns", "args": {"from_turn": 1, "to_turn": 1}}},
+        ]
+        stream = _async_stream_from_chunks([
+            _make_chunk(function_call=NS(name="lookup_service", args={"service_name": "payments"}), raw_parts=batch),
+        ])
+        brain, bb = _make_brain_for_shedding(lambda *a, **k: stream)
+        brain._extract_context_flags = AsyncMock(return_value={"event_domain": "casual"})
+        brain._normalize_response_parts = MagicMock(return_value=batch)
+        bb.get_event = AsyncMock(return_value=event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            await brain._process_with_llm(event.id, event)
+
+        executed = [c.args[1] for c in brain._execute_function_call.await_args_list]
+        assert "recall_pruned_turns" not in executed
+
+    @pytest.mark.asyncio
+    async def test_intermediate_event_keeps_recall_tool_when_contents_pruned(self):
+        """TOOL LEAK check must not strip recall_pruned_turns from an intermediate event whose history was pruned."""
+        from types import SimpleNamespace as NS
+        from unittest.mock import AsyncMock
+
+        from tests.test_quota_shedding import (
+            _async_stream_from_chunks,
+            _make_brain_for_shedding,
+            _make_chunk,
+        )
+
+        event = _budget_pruned_short_casual_event()
+        stream = _async_stream_from_chunks([
+            _make_chunk(function_call=NS(name="wait_for_agent", args={}), raw_parts=[
+                {"functionCall": {"name": "wait_for_agent", "args": {}}}
+            ]),
+        ])
+        brain, _bb = _make_brain_for_shedding(lambda *a, **k: stream)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"event_domain": "casual", "is_intermediate": True}
+        )
+        await brain._process_with_llm(event.id, event)
+
+        tools = {t["name"] for t in brain._adapter.generate_stream.call_args_list[0].kwargs["tools"]}
+        assert "recall_pruned_turns" in tools
+        assert tools <= {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis",
+                         "defer_event", "recall_pruned_turns"}, f"unexpected intermediate toolset: {tools}"

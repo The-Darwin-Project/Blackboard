@@ -4,8 +4,13 @@
 # 2. [Constraint]: No Brain import. All state access via ToolContext protocol.
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
-# 5. [Security]: recall_pruned_turns applies PII redaction, XML fence stripping, and defangs [!call: to prevent prompt injection. Single turn returns up to 30k chars of raw evidence; range returns up to 3k chars.
+# 5. [Security]: recall_pruned_turns sanitizes in THIS order via _sanitize_recalled: pre-cap raw text (bounds the
+#    regex work on the event loop) -> strip_xml_fences (looped) -> redact_pii -> defang [!call: -> final truncate.
+#    Strip MUST precede redaction: a fence tag spliced inside a secret/email otherwise survives redact_pii and
+#    rejoins after the strip. Single turn returns up to 30k chars; range returns up to 3k chars per turn.
 # 6. [Pattern]: inspect_event omits raw dumps for recalled turns to prevent secondary context inflation.
+# 7. [Pattern]: The recall result is stored ONCE (in `thoughts`; Brain replay reads `evidence or thoughts`), and
+#    Brain exempts waitingFor="recall_pruned_turns" turns from evidence decay (no recall/decay ping-pong).
 """Cross-event inspection and sticky note tool handlers."""
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, _resolve_phase
 from ..utils.pii_redaction import redact_pii
-from .context_parts import _strip_xml_fences
+from ..utils.prompt_sanitize import strip_xml_fences
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -197,16 +202,46 @@ async def handle_read_sticky_notes(
     return True
 
 
-def _coerce_turn_int(val: object, default: int) -> int:
+_RECALL_SINGLE_TURN_MAX_CHARS = 30000
+_RECALL_RANGE_TURN_MAX_CHARS = 3000
+_RECALL_MAX_RANGE_TURNS = 20
+# Raw text is cut to this multiple of the output cap BEFORE any regex runs (headroom for stripped tags).
+_RECALL_RAW_CEILING_FACTOR = 2
+
+
+def _parse_turn_int(val: object) -> int | None:
+    """Strict int coercion for a turn bound; None when ``val`` is not a usable finite number."""
     if val is None or isinstance(val, bool):
-        return default
+        return None
     try:
         f = float(val)
         if not (-1_000_000 <= f <= 1_000_000):
-            return default
+            return None
         return int(f)
     except (ValueError, TypeError, OverflowError):
-        return default
+        return None
+
+
+def _coerce_turn_int(val: object, default: int) -> int:
+    parsed = _parse_turn_int(val)
+    return default if parsed is None else parsed
+
+
+def _sanitize_recalled(raw: str, max_chars: int, marker: str) -> str:
+    """Sanitize one recalled turn payload for re-injection into the prompt.
+
+    Order is load-bearing: pre-cap -> strip fences (looped) -> redact PII -> defang -> truncate.
+    """
+    text = raw or ""
+    ceiling = max_chars * _RECALL_RAW_CEILING_FACTOR
+    if len(text) > ceiling:
+        text = text[:ceiling]
+    text = strip_xml_fences(text)
+    text = redact_pii(text)
+    text = text.replace("[!call:", "[call:")
+    if len(text) > max_chars:
+        text = text[:max_chars] + marker
+    return text
 
 
 async def handle_recall_pruned_turns(
@@ -226,6 +261,22 @@ async def handle_recall_pruned_turns(
         await ctx.append_and_broadcast(event_id, turn)
         return True
 
+    for key in ("from_turn", "to_turn"):
+        supplied = args.get(key)
+        if supplied is not None and _parse_turn_int(supplied) is None:
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                thoughts=(
+                    f"Error: {key} must be an integer turn number between 1 and "
+                    f"{len(event.conversation)}; nothing was recalled."
+                ),
+                waitingFor="recall_pruned_turns",
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+
     raw_from = _coerce_turn_int(args.get("from_turn"), 1)
     raw_to_arg = args.get("to_turn")
     raw_to = raw_from if ("from_turn" in args and raw_to_arg is None) else _coerce_turn_int(raw_to_arg, 10)
@@ -233,26 +284,22 @@ async def handle_recall_pruned_turns(
 
     from_turn = max(1, raw_from)
     to_turn = min(len(event.conversation), raw_to)
-    if to_turn - from_turn >= 20:
-        to_turn = from_turn + 19
+    if to_turn - from_turn >= _RECALL_MAX_RANGE_TURNS:
+        to_turn = from_turn + _RECALL_MAX_RANGE_TURNS - 1
 
     turns = [t for t in event.conversation if from_turn <= t.turn <= to_turn]
     blocks = []
     for t in turns:
         if is_single_turn:
-            content = t.evidence or t.result or t.thoughts or ""
-            content = redact_pii(content)
-            content = _strip_xml_fences(content)
-            content = content.replace("[!call:", "[call:")
-            if len(content) > 30000:
-                content = content[:30000] + "\n...(truncated)"
+            content = _sanitize_recalled(
+                t.evidence or t.result or t.thoughts or "",
+                _RECALL_SINGLE_TURN_MAX_CHARS, "\n...(truncated)",
+            )
         else:
-            content = t.thoughts or t.evidence or t.result or ""
-            content = redact_pii(content)
-            content = _strip_xml_fences(content)
-            content = content.replace("[!call:", "[call:")
-            if len(content) > 3000:
-                content = content[:3000] + "...(truncated)"
+            content = _sanitize_recalled(
+                t.thoughts or t.evidence or t.result or "",
+                _RECALL_RANGE_TURN_MAX_CHARS, "...(truncated)",
+            )
         blocks.append(f"[T{t.turn} {t.actor}.{t.action}]: {content}")
 
     result_text = "\n\n".join(blocks) if blocks else "(no turns in range)"
@@ -260,7 +307,6 @@ async def handle_recall_pruned_turns(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="tool_result",
         thoughts=result_text,
-        evidence=result_text,
         waitingFor="recall_pruned_turns",
         response_parts=response_parts,
     )

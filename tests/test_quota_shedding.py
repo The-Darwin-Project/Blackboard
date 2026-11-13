@@ -3,6 +3,8 @@
 # 1. [Constraint]: Pure unit and integration tests for two-tier quota shedding in _process_with_llm.
 # 2. [Pattern]: Follows Dave Farley's 4-layer ATDD model (T-7, T-8, CR-01..CR-06).
 # 3. [Boundary]: Mock adapter stream and asyncio.sleep — no network calls, zero sleep delay.
+# 4. [Policy]: LOCAL QuotaExhaustedError/RequestExceedsBurstError + Tier-1 shrink => zero-sleep retry (the tracker already
+#    paced local capacity). UPSTREAM 429/resource_exhausted => bounded 2**attempt backoff (30/60/120s + jitter), always.
 """Executable specifications for two-tier dynamic token shedding in Brain._process_with_llm (T-7, T-8).
 
 Dave Farley 4-Layer ATDD Model:
@@ -695,8 +697,9 @@ class TestTwoTierQuotaShedding:
             assert "darwin:flow:quota_shed_tier1_total" not in incr_keys
 
     @pytest.mark.asyncio
-    async def test_tier2_additive_jitter_parity_30_to_39_seconds(self, monkeypatch):
-        """Post-merge gap #4: Tier 2 backoff uses additive jitter [30.0, 39.0] matching PR #329."""
+    async def test_tier2_backoff_matches_main_2_pow_attempt_schedule_with_additive_jitter(self, monkeypatch):
+        """Tier 2 backoff on attempt 1 follows main's schedule: min(30 * 2**attempt, 120) = 60s plus additive
+        jitter 0-30% => [60.0, 78.0] (the PR's shorter 2**max(0, attempt-1) schedule was a regression vs main)."""
         monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
         with patch("src.agents.brain._THOUGHT_SIG_V2", True):
             event = _make_shedding_event("evt-jitter-parity")
@@ -727,8 +730,7 @@ class TestTwoTierQuotaShedding:
             async def _record_sleep(d: float):
                 sleeps.append(d)
 
-            # With random.random() == 0.9, old formula (0.5 - 0.9) gave 30 - 3.6 = 26.4s (< 30s);
-            # additive jitter 30 + 30 * 0.3 * 0.9 = 38.1s in [30.0, 39.0].
+            # random.random() == 0.9: attempt 1 => 60 + 60 * 0.3 * 0.9 = 76.2s, inside [60.0, 78.0].
             with (
                 patch("src.agents.brain.random.random", return_value=0.9),
                 patch("asyncio.sleep", new_callable=AsyncMock, side_effect=_record_sleep),
@@ -737,7 +739,8 @@ class TestTwoTierQuotaShedding:
 
             assert res is True
             assert len(sleeps) == 1
-            assert 30.0 <= sleeps[0] <= 39.0, f"Expected additive Tier 2 jitter in [30.0, 39.0], got {sleeps[0]}"
+            assert 60.0 <= sleeps[0] <= 78.0, f"Expected 2**attempt backoff with additive jitter in [60.0, 78.0], got {sleeps[0]}"
+            assert sleeps[0] == pytest.approx(76.2)
 
     def test_helm_and_docs_sliding_window_budget_parity(self):
         """Post-merge gap #1: Helm values.yaml, deployment.yaml, helm/README.md, and docs/deployment.md
@@ -776,3 +779,331 @@ class TestTwoTierQuotaShedding:
             assert rows and rows[0].endswith(f"| {val} |"), (
                 f"Expected {env_var} default '{val}' in docs/deployment.md, got {rows!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# H2/H4/M3/M4: local-vs-upstream backoff policy, shed guards, reservations, priority
+# ---------------------------------------------------------------------------
+
+import src.agents.brain as _brain_mod
+from src.agents.context_parts import compress_contents as _real_compress
+from src.agents.llm.quota_tracker import PRIORITY_NORMAL, QuotaTracker
+
+
+def _fc_success_stream():
+    fc = SimpleNamespace(name="select_agent", args={"agent": "developer"})
+    return _async_stream_from_chunks([
+        _make_chunk(
+            function_call=fc,
+            raw_parts=[{"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}}],
+        )
+    ])
+
+
+def _scripted_factory(script: list):
+    """generate_stream factory: pops exceptions (raised) / streams (returned) in order."""
+    def _factory(*args, **kwargs):
+        if script:
+            res = script.pop(0)
+            if isinstance(res, BaseException):
+                raise res
+            return res
+        return _async_stream_from_chunks([])
+    return _factory
+
+
+def _incr_keys(bb) -> list[str]:
+    return [c.args[0] for c in bb.redis.incr.call_args_list]
+
+
+UPSTREAM_429 = "429 RESOURCE_EXHAUSTED: Quota exceeded for aiplatform.googleapis.com"
+
+
+class TestQuotaBackoffPolicy:
+    """H2: local burst/quota errors retry at once after a real Tier-1 shrink; upstream 429s always back off."""
+
+    def test_quota_backoff_delay_schedule_is_main_2_pow_attempt_bounded(self):
+        with patch("src.agents.brain.random.random", return_value=0.0):
+            assert [Brain._quota_backoff_delay(a) for a in range(5)] == [30, 60, 120, 120, 120]
+        with patch("src.agents.brain.random.random", return_value=1.0):
+            delays = [Brain._quota_backoff_delay(a) for a in range(5)]
+        assert delays == pytest.approx([39.0, 78.0, 156.0, 156.0, 156.0])
+        assert max(delays) <= 120 * 1.3 + 1e-9, "backoff must stay bounded"
+
+    @pytest.mark.asyncio
+    async def test_upstream_429_over_budget_sheds_tier1_but_still_sleeps_30s_base(self, monkeypatch):
+        """Upstream 429 on an over-budget prompt: shed Tier 1 AND back off (never the zero-sleep local path)."""
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), patch("src.agents.brain._TAIL_BUDGET", 1000):
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(
+                _scripted_factory([RuntimeError(UPSTREAM_429), _fc_success_stream()])
+            )
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [30.0]
+            assert "darwin:flow:quota_shed_tier1_total" in _incr_keys(bb)
+            calls = brain._adapter.generate_stream.call_args_list
+            assert estimate_tokens(calls[1].kwargs["contents"]) < estimate_tokens(calls[0].kwargs["contents"])
+
+    @pytest.mark.asyncio
+    async def test_upstream_429_on_already_small_prompt_does_not_shed(self, monkeypatch):
+        """Generic upstream rate limit + prompt within the tail budget: identical prompt, backoff only."""
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), patch("src.agents.brain._TAIL_BUDGET", 10**7):
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(
+                _scripted_factory([RuntimeError(UPSTREAM_429), _fc_success_stream()])
+            )
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+
+            calls = brain._adapter.generate_stream.call_args_list
+            assert calls[1].kwargs["contents"] == calls[0].kwargs["contents"], "prompt must not be shed"
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [30.0]
+            assert not [k for k in _incr_keys(bb) if "quota_shed" in k]
+
+    @pytest.mark.asyncio
+    async def test_upstream_429_backoff_schedule_30_60_120_then_bounded_failure(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), patch("src.agents.brain._TAIL_BUDGET", 10**7):
+            event = _make_shedding_event()
+            brain, _bb = _make_brain_for_shedding(
+                _scripted_factory([RuntimeError(UPSTREAM_429) for _ in range(10)])
+            )
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is False
+
+            assert brain._adapter.generate_stream.call_count == 4, "bounded to max_retries + 1 attempts"
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [30.0, 60.0, 120.0]
+            assert brain._append_and_broadcast.call_args[0][1].action == "error"
+
+    @pytest.mark.asyncio
+    async def test_local_burst_tier1_shrink_retries_with_zero_sleep(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(
+                _scripted_factory([RequestExceedsBurstError(180_000, 100_000), _fc_success_stream()])
+            )
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+            mock_sleep.assert_not_awaited()
+            assert _incr_keys(bb) == ["darwin:flow:quota_shed_tier1_total"]
+
+    @pytest.mark.asyncio
+    async def test_local_quota_exhausted_tier2_shrink_backs_off_with_2_pow_attempt(self, monkeypatch):
+        """Tier-1 is zero-sleep, but a Tier-2 retry of a (non-burst) quota error waits main's 2**attempt delay."""
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("q0"), QuotaExhaustedError("q1"), _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [60.0]  # attempt 1 -> 30 * 2**1
+            assert _incr_keys(bb) == [
+                "darwin:flow:quota_shed_tier1_total", "darwin:flow:quota_shed_tier2_total",
+            ]
+
+
+class TestQuotaShedGuards:
+    """H4/M4: counters only on real shrink, failures never escape the handler."""
+
+    @staticmethod
+    def _noop_compress():
+        return patch.object(
+            Brain, "_compress_contents",
+            new=classmethod(lambda cls, contents, max_tokens=None, tail_budget=None: contents),
+        )
+
+    @pytest.mark.asyncio
+    async def test_tier2_noop_compress_does_not_increment_counter_and_burst_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), self._noop_compress():
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(_scripted_factory([
+                RequestExceedsBurstError(180_000, 100_000),
+                RequestExceedsBurstError(180_000, 100_000),
+                _fc_success_stream(),
+            ]))
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                assert await brain._process_with_llm("evt-shed-test", event) is False
+
+            assert brain._adapter.generate_stream.call_count == 2, "no identical-prompt retry after a no-op shed"
+            mock_sleep.assert_not_awaited()
+            keys = _incr_keys(bb)
+            assert "darwin:flow:quota_shed_tier1_total" in keys
+            assert "darwin:flow:quota_shed_tier2_total" not in keys
+            assert brain._append_and_broadcast.call_args[0][1].action == "error"
+
+    @pytest.mark.asyncio
+    async def test_tier2_noop_compress_non_burst_backs_off_without_counting(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), self._noop_compress():
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("q0"), QuotaExhaustedError("q1"), _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+            assert "darwin:flow:quota_shed_tier2_total" not in _incr_keys(bb)
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [60.0]
+
+    @pytest.mark.asyncio
+    async def test_recovery_compress_and_rebuild_failures_never_escape_and_error_turn_is_recorded(self, monkeypatch):
+        """Tier-1 rebuild AND every explicit-budget compress raise: the handler must swallow them, keep
+        retrying through the generic backoff, and finally record the error turn (no exception out)."""
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+
+        def _boom(cls, contents, max_tokens=None, tail_budget=None):
+            if max_tokens is not None:
+                raise RuntimeError("compress exploded")
+            return _real_compress(contents)
+
+        with (
+            patch("src.agents.brain._THOUGHT_SIG_V2", True),
+            patch.object(Brain, "_compress_contents", new=classmethod(_boom)),
+        ):
+            event = _make_shedding_event()
+            brain, bb = _make_brain_for_shedding(
+                _scripted_factory([QuotaExhaustedError(f"q{i}") for i in range(10)])
+            )
+            orig_build = brain._build_contents
+
+            async def _build(*args, **kwargs):
+                if kwargs.get("turn_decay_distance") == 2:
+                    raise RuntimeError("rebuild exploded")
+                return await orig_build(*args, **kwargs)
+
+            brain._build_contents = _build
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                result = await brain._process_with_llm("evt-shed-test", event)
+
+            assert result is False
+            assert brain._adapter.generate_stream.call_count == 4
+            turn = brain._append_and_broadcast.call_args[0][1]
+            assert turn.action == "error" and "LLM call failed" in turn.thoughts
+            assert not [k for k in _incr_keys(bb) if "quota_shed" in k], "failed sheds must not count"
+
+
+class _TrackedAdapter:
+    """Adapter double wired to a REAL QuotaTracker, mirroring GeminiClient's reservation hand-off contract."""
+
+    def __init__(self, tracker: QuotaTracker, script: list):
+        self._tracker = tracker
+        self._script = script
+        self.calls: list[dict] = []
+        self.acquired: list = []
+        self.set_search_enabled = MagicMock()
+
+    async def acquire_stream_reservation(self, contents, priority: int = PRIORITY_NORMAL):
+        estimate = max(1, estimate_tokens(contents))
+        reservation = await self._tracker.acquire(estimate, max_wait_seconds=1.0, priority=priority)
+        self.acquired.append(reservation)
+        return [estimate, reservation, False]
+
+    def generate_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self._script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return self._started(kwargs["_preacquired"], item)
+
+    async def _started(self, pre, stream):
+        pre[2] = True  # handed off: the stream now owns record/rollback
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            self._tracker.rollback(pre[1])
+
+
+class TestQuotaTrackerBalanceAndPriority:
+    @pytest.mark.asyncio
+    async def test_reserve_release_balanced_across_shedding_retries(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, _bb = _make_brain_for_shedding(lambda *a, **k: None)
+            tracker = QuotaTracker(tpm_limit=10_000_000)
+            adapter = _TrackedAdapter(tracker, [
+                QuotaExhaustedError("q0"), QuotaExhaustedError("q1"), _fc_success_stream(),
+            ])
+            brain._adapter = adapter
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+
+            assert len(adapter.acquired) == 3, "one fresh reservation per attempt"
+            assert len({r.id for r in adapter.acquired}) == 3
+            assert tracker._active_reservations == {}, "every reservation released (no leak, no double-release error)"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_releases_reservation(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, _bb = _make_brain_for_shedding(lambda *a, **k: None)
+            tracker = QuotaTracker(tpm_limit=10_000_000)
+            adapter = _TrackedAdapter(tracker, [asyncio.CancelledError()])
+            brain._adapter = adapter
+            with pytest.raises(asyncio.CancelledError):
+                await brain._process_with_llm("evt-shed-test", event)
+            assert len(adapter.acquired) == 1
+            assert tracker._active_reservations == {}
+
+    @pytest.mark.asyncio
+    async def test_mid_retry_cancel_after_shed_releases_reservation(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, _bb = _make_brain_for_shedding(lambda *a, **k: None)
+            tracker = QuotaTracker(tpm_limit=10_000_000)
+            adapter = _TrackedAdapter(tracker, [QuotaExhaustedError("q0"), asyncio.CancelledError()])
+            brain._adapter = adapter
+            with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(asyncio.CancelledError):
+                await brain._process_with_llm("evt-shed-test", event)
+            assert len(adapter.acquired) == 2
+            assert tracker._active_reservations == {}
+
+    @pytest.mark.asyncio
+    async def test_llm_priority_derived_once_and_stable_across_retries(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            event = _make_shedding_event()
+            brain, _bb = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("q0"), QuotaExhaustedError("q1"), _fc_success_stream(),
+            ]))
+            with (
+                patch.object(_brain_mod, "derive_llm_priority", return_value=2) as mock_priority,
+                patch("asyncio.sleep", new_callable=AsyncMock),
+            ):
+                assert await brain._process_with_llm("evt-shed-test", event) is True
+
+            mock_priority.assert_called_once()
+            priorities = [c.kwargs["priority"] for c in brain._adapter.generate_stream.call_args_list]
+            assert priorities == [2, 2, 2]
+
+    def test_derive_llm_priority_is_pure_and_unaffected_by_shedding_state(self):
+        from src.agents.llm import derive_llm_priority
+
+        event = _make_shedding_event()
+        first = derive_llm_priority(event)
+        assert derive_llm_priority(event) == first == derive_llm_priority(event)

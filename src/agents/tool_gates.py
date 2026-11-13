@@ -11,19 +11,24 @@
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 # 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
 #    user.message turns exist. Prevents closing over unread interventions.
-# 10. [Pattern]: INTERMEDIATE_TOOLS and is_defer_event_available() are exported so brain.py's
-#     empty-toolset fallback and post-gate leak-detector reuse this module's policy instead
-#     of hand-duplicating literals that can drift.
+# 10. [Pattern]: get_intermediate_tools(ctx) (INTERMEDIATE_TOOLS + the dynamic recall_pruned_turns) and
+#     is_defer_event_available() are exported so brain.py's empty-toolset fallback and post-gate
+#     leak-detector reuse this module's policy instead of hand-duplicating literals that can drift.
+#     brain.py must NOT import INTERMEDIATE_TOOLS directly: the static set omits recall_pruned_turns.
 # 11. [Pattern]: evaluate_gates() enforces a structural WAIT_LOOP escape-valve
 #     invariant AFTER the gate loop -- defer_event is force-restored if any
 #     gate combination stripped it while 4+ epoch waits are recorded.
 #     is_defer_event_available() mirrors this via _single_tool_survives_gates()
 #     so the two functions cannot drift apart, regardless of which gate(s)
 #     stripped defer_event (now or in the future).
-# 12. [Pattern]: DEFAULT_TURN_DECAY_DISTANCE (10) dynamically un-gates recall_pruned_turns
-#     in allow-mode gates (INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL) when conversation
-#     exceeds 10 turns or tri-state has_pruned_or_decayed_turns is set (preserves explicit False).
-#     get_intermediate_tools(ctx) returns intermediate allow-set including recall_pruned_turns.
+# 12. [Pattern]: recall_pruned_turns is dynamically un-gated in allow-mode gates (INTERMEDIATE,
+#     PRE_CLASSIFICATION, CHAOTIC, CASUAL) by ctx.has_pruned_or_decayed_turns. build_gate_context sets it
+#     from, in order: (a) the caller-supplied flag -- brain.py derives it from the BUILT contents
+#     (real prune notice or decay reference, incl. budget-only pruning), else (b) conversation_has_decayed_turns():
+#     a turn at distance len-1-idx > DEFAULT_TURN_DECAY_DISTANCE with a decay-eligible payload > DECAY_MIN_CHARS.
+#     A bare conversation length is NOT a signal (11 short turns have nothing to recall). The tri-state
+#     default in GateContext.__post_init__ (len > DEFAULT_TURN_DECAY_DISTANCE) only serves hand-built contexts;
+#     an explicit False is always respected.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -40,9 +45,42 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment
+from src.utils.turn_decay import DECAY_MIN_CHARS, DEFAULT_TURN_DECAY_DISTANCE  # noqa: F401 (re-exported)
 
 
-DEFAULT_TURN_DECAY_DISTANCE = 10
+def _decay_payload_len(turn: object) -> int:
+    """Chars of ``turn`` that evidence decay could replace (0 when the turn type never decays).
+
+    Mirrors context_parts' decay branches: user/jarvis/dispatcher text is stripped, never decayed;
+    brain tool_result decays ``evidence or thoughts``; other brain turns decay ``evidence``; agent
+    turns decay ``evidence or result or thoughts``. recall_pruned_turns results are exempt (Brain keeps
+    them raw so a recall can never ping-pong back into decay).
+    """
+    actor = getattr(turn, "actor", None)
+    if actor in ("user", "jarvis", "dispatcher"):
+        return 0
+    if getattr(turn, "waitingFor", None) == "recall_pruned_turns":
+        return 0
+    evidence = getattr(turn, "evidence", None) or ""
+    if actor == "brain":
+        if getattr(turn, "action", None) == "tool_result":
+            return len(evidence or getattr(turn, "thoughts", None) or "")
+        return len(evidence)
+    return len(evidence or getattr(turn, "result", None) or getattr(turn, "thoughts", None) or "")
+
+
+def conversation_has_decayed_turns(
+    conversation: list, decay_distance: int = DEFAULT_TURN_DECAY_DISTANCE,
+) -> bool:
+    """True when some turn is far enough from the tail AND big enough to have decayed."""
+    turns = conversation or []
+    last = len(turns) - 1
+    for idx, turn in enumerate(turns):
+        if last - idx <= decay_distance:
+            break  # distance only shrinks from here on
+        if _decay_payload_len(turn) > DECAY_MIN_CHARS:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -1094,11 +1132,14 @@ def build_gate_context(
     iteration: int = 0,
     jarvis_already_waiting: bool = False,
     jarvis_wait_count: int = 0,
+    has_pruned_or_decayed_turns: bool | None = None,
 ) -> GateContext:
     """Construct GateContext from event + Brain runtime state.
 
     Defensive: context_flags defaults to {} if None.
     Computes budget state from conversation history.
+    has_pruned_or_decayed_turns: authoritative flag derived from the built contents (Brain); when None it
+    is estimated from the conversation via conversation_has_decayed_turns().
     """
     flags = context_flags or {}
     conversation = event.conversation or []
@@ -1130,7 +1171,11 @@ def build_gate_context(
     )
     budget = min(5 + agent_completions, 10) - refresh_count
 
-    has_pruned = len(conversation) > 10
+    has_pruned = (
+        conversation_has_decayed_turns(conversation)
+        if has_pruned_or_decayed_turns is None
+        else bool(has_pruned_or_decayed_turns)
+    )
 
     return GateContext(
         brain_phase=brain_phase,
