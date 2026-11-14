@@ -21,6 +21,15 @@
 # 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
 #     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
 #     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
+# 12d. [Pattern]: Quota shedding lives in _shed_context_for_quota + _quota_backoff_delay (NOT inline in the retry loop).
+#     Local QuotaExhaustedError/RequestExceedsBurstError (acquire already paced local capacity): Tier-1 that really shrank
+#     the prompt retries with ZERO sleep. Upstream 429/resource_exhausted: ALWAYS back off (2**attempt schedule, same as main),
+#     and only shed when the prompt is still over the tail budget. quota_shed_tier{1,2}_total increment ONLY on a real shrink
+#     (after < before); a no-op shed never retries an identical prompt for a burst error. Shed compress failures are logged,
+#     never raised out of the except handler (the error-turn path below must always run).
+# 12e. [Pattern]: recall_pruned_turns availability is ONE predicate: contents_have_pruned_or_decayed(built contents),
+#     passed into build_gate_context and re-applied (ensure-recall) BEFORE the TOOL LEAK check and in the batch FC[i>0] gate
+#     re-evaluation. Contents are built BEFORE gate evaluation for that reason. recall_pruned_turns turns are exempt from decay.
 # 12b. [Pattern]: Activity-based two-phase + outer ceiling stream watchdog in _process_with_llm via resolve_stream_timeouts() (.llm):
 #     Phase 1 (pre-substantive TTFB, not substantive_seen): LLM_STREAM_TTFB_TIMEOUT_SEC (600s default); Phase 2 (sliding
 #     activity heartbeat, reset on every chunk including bare LLMChunk() wire heartbeats): LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC
@@ -271,6 +280,7 @@ import os
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypedDict
@@ -278,10 +288,12 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypedDict
 import httpx
 
 from src.agents.context_parts import (
-    _XML_FENCE_TAGS,
+    _CONTENT_BUDGET,
+    _TAIL_BUDGET,
     build_function_response as _cp_build_function_response,
     build_single_function_response as _cp_build_single_fr,
     compress_contents as _cp_compress_contents,
+    contents_have_pruned_or_decayed as _cp_contents_have_pruned_or_decayed,
     estimate_msg_tokens as _cp_estimate_msg_tokens,
     estimate_tokens as _cp_estimate_tokens,
     extract_model_parts as _cp_extract_model_parts,
@@ -289,11 +301,23 @@ from src.agents.context_parts import (
     turn_to_parts as _cp_turn_to_parts,
 )
 
-from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
+from ..models import (
+    FLOW_QUOTA_SHED_TIER1_KEY,
+    FLOW_QUOTA_SHED_TIER2_KEY,
+    ConversationTurn,
+    EventDocument,
+    EventStatus,
+    EventType,
+    MessageStatus,
+    _resolve_domain,
+    _resolve_phase,
+)
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
+from ..utils.prompt_sanitize import strip_xml_fences
+from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 from .llm import (
@@ -302,10 +326,72 @@ from .llm import (
     LLMStreamTimeoutError,
     LLMStreamTotalTimeoutError,
     LLMStreamTTFBTimeoutError,
+    QuotaExhaustedError,
+    RequestExceedsBurstError,
     derive_llm_priority,
     resolve_stream_timeouts,
     sanitize_call_syntax,
 )
+
+
+def _contents_have_pruned_or_decayed(contents: list[dict]) -> bool:
+    """True when built contents carry a real prune notice or decay reference (see context_parts)."""
+    return _cp_contents_have_pruned_or_decayed(contents)
+
+
+def _ensure_recall_tool_if_needed(active_tools: list[dict], tool_schemas: list[dict]) -> list[dict]:
+    """Dynamically append recall_pruned_turns tool schema if not already present."""
+    tool_names = {t["name"] if isinstance(t, dict) else getattr(t, "name", "") for t in active_tools}
+    if "recall_pruned_turns" not in tool_names:
+        recall_schema = next(
+            (t for t in tool_schemas if (t["name"] if isinstance(t, dict) else getattr(t, "name", "")) == "recall_pruned_turns"),
+            None,
+        )
+        if recall_schema:
+            return list(active_tools) + [recall_schema]
+    return active_tools
+
+
+async def _incr_flow_counter_safely(blackboard: Any, key: str) -> None:
+    """Increment Redis flow counter without failing if Redis blips."""
+    try:
+        if hasattr(blackboard, "redis") and blackboard.redis:
+            res = blackboard.redis.incr(key)
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as e:
+        logger.warning("Failed to increment Redis flow counter %s: %s", key, e)
+
+
+def _retry_backoff_delay(attempt: int, base: float) -> float:
+    """Bounded exponential backoff: min(base * 2**attempt, 120) plus 0-30% additive jitter, floored at 1s."""
+    delay = min(base * (2 ** attempt), 120)
+    return max(1, delay + delay * 0.3 * random.random())
+
+
+@dataclass
+class _QuotaShedState:
+    """Mutable prompt state shared across quota-shedding retries of one _process_with_llm call."""
+    raw_contents: list[dict]
+    active_tools: list[dict]
+    tail_budget: int
+    recall_enabled: bool = False
+    tier1_done: bool = False
+
+    @property
+    def prompt(self) -> list[dict]:
+        return [
+            {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
+            {"role": "model", "parts": [{"text": BRAIN_PREFILL_MODEL}]},
+        ] + self.raw_contents
+
+    def adopt(self, contents: list[dict]) -> None:
+        """Take a shrunk prompt; re-enable recall_pruned_turns if it now carries pruned/decayed history."""
+        self.raw_contents = contents
+        if _contents_have_pruned_or_decayed(contents):
+            from .llm import BRAIN_TOOL_SCHEMAS
+            self.recall_enabled = True
+            self.active_tools = _ensure_recall_tool_if_needed(self.active_tools, BRAIN_TOOL_SCHEMAS)
 
 
 class ContextFlags(TypedDict, total=False):
@@ -332,6 +418,7 @@ class ContextFlags(TypedDict, total=False):
     has_dispatch_backpressure: bool
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
+    _cached_header: str
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -647,9 +734,7 @@ def _close_unanswered_fc(
     evidence = tail_turn.get("evidence") if isinstance(tail_turn, dict) else getattr(tail_turn, "evidence", None)
     waiting_for = tail_turn.get("waitingFor") if isinstance(tail_turn, dict) else getattr(tail_turn, "waitingFor", None)
 
-    raw_recorded = (thoughts or evidence or "").strip()
-    for tag in _XML_FENCE_TAGS:
-        raw_recorded = raw_recorded.replace(tag, "")
+    raw_recorded = strip_xml_fences((thoughts or evidence or "").strip())
     recorded = raw_recorded[:_TRAILING_FC_RESULT_MAX]
 
     logger.warning(
@@ -997,10 +1082,6 @@ class RepetitionCollapse(NamedTuple):
 
     kind: str
     token: str  # repeating unit; "" for 'runaway' (a pure length cutoff, not a repetition)
-
-# Conversation compression safety net: when estimated prompt tokens exceed this budget,
-# _compress_contents prunes oldest turns from the front, keeping the last ~200K tokens.
-_CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 
 # Ephemeral-only model/effort routing (scoped to Tekton-spawned pods -- local
 # sidecars keep their Deployment-configured model, never read these maps).
@@ -1921,13 +2002,21 @@ class Brain:
 
         # === Tool gate evaluation (all gating logic lives in tool_gates.py) ===
         from .tool_gates import (
-            INTERMEDIATE_TOOLS,
             build_gate_context,
             evaluate_gates,
+            get_intermediate_tools,
             is_defer_event_available,
         )
 
         brain_phase = _resolve_phase(event.brain_phase)
+
+        # Contents are built BEFORE gate evaluation: "was history pruned or decayed?" (a real prune notice or
+        # decay reference, including budget-only pruning) is the single predicate that un-gates
+        # recall_pruned_turns, and it can only be answered from the built contents.
+        terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
+        raw_contents = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt)
+        recall_enabled = _contents_have_pruned_or_decayed(raw_contents)
+
         gate_ctx = build_gate_context(
             event=event,
             brain_phase=brain_phase,
@@ -1936,6 +2025,7 @@ class Brain:
             iteration=iteration,
             jarvis_already_waiting=event_id in self._waiting_for_jarvis,
             jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+            has_pruned_or_decayed_turns=recall_enabled,
         )
         active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
 
@@ -1987,21 +2077,24 @@ class Brain:
         else:
             active_tools = tier_always + tier_phase + tier_rest
 
+        # recall_pruned_turns must be present BEFORE the leak check below, which would otherwise strip it
+        # from an intermediate event as an ungated tool.
+        if recall_enabled:
+            active_tools = _ensure_recall_tool_if_needed(active_tools, BRAIN_TOOL_SCHEMAS)
+
         # Fail-closed invariant: intermediate events MUST only have communication tools
         if context_flags.get("is_intermediate"):
+            allowed_intermediate = get_intermediate_tools(gate_ctx)
             final_names = {t["name"] for t in active_tools}
-            if not final_names <= INTERMEDIATE_TOOLS:
-                leaked = final_names - INTERMEDIATE_TOOLS
-                active_tools = [t for t in active_tools if t["name"] in INTERMEDIATE_TOOLS]
+            if not final_names <= allowed_intermediate:
+                leaked = final_names - allowed_intermediate
+                active_tools = [t for t in active_tools if t["name"] in allowed_intermediate]
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
-
-        terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
-        prompt = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt)
 
         prompt = [
             {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
             {"role": "model", "parts": [{"text": BRAIN_PREFILL_MODEL}]},
-        ] + prompt
+        ] + raw_contents
 
         # Signal UI that Brain is processing (visible even when LLM produces no text)
         await self._broadcast({
@@ -2030,6 +2123,12 @@ class Brain:
 
         # Priority is stable for the whole call (including retries): derive once, outside the retry loop.
         llm_priority = derive_llm_priority(event)
+        shed = _QuotaShedState(
+            raw_contents=raw_contents,
+            active_tools=active_tools,
+            tail_budget=_TAIL_BUDGET,
+            recall_enabled=recall_enabled,
+        )
 
         try:
             for attempt in range(max_retries + 1):
@@ -2257,13 +2356,68 @@ class Brain:
                         last_grounding = None
                         logger.error(f"Brain LLM stream ({timeout_phase}) timeout for {event_id} — giving up")
                         break
+
+                    is_burst_error = isinstance(e, RequestExceedsBurstError)
+                    # Local = our own QuotaTracker (acquire_stream_reservation already paced local capacity, so a
+                    # shrunk prompt may retry at once). Upstream = a real HTTP 429 / resource_exhausted: backing off
+                    # is the remedy there, not a smaller prompt.
+                    is_local_quota = isinstance(e, QuotaExhaustedError)
+                    is_upstream_rate_limit = (
+                        not is_local_quota and self._is_transient(e) and self._is_rate_limit(e)
+                    )
+                    if attempt < max_retries and (is_local_quota or is_upstream_rate_limit):
+                        conv_len = len(event.conversation or [])
+                        if is_burst_error and conv_len <= 1:
+                            logger.warning(
+                                f"Single-turn event {event_id} cannot be shrunk to satisfy burst limit — failing fast without retry"
+                            )
+                            last_error = e
+                            break
+
+                        shed_tier = 0
+                        if conv_len > 1:
+                            try:
+                                shed_tier = await self._shed_context_for_quota(
+                                    event=event,
+                                    context_flags=context_flags,
+                                    terminal_prompt=terminal_prompt,
+                                    shed=shed,
+                                    attempt=attempt,
+                                    only_if_over_budget=is_upstream_rate_limit,
+                                )
+                            except Exception as shed_err:
+                                # Must never escape this handler: the error-turn recording below has to run.
+                                logger.warning(f"Quota shedding failed for {event_id} (non-fatal): {shed_err}")
+                                shed_tier = 0
+                            if shed_tier:
+                                raw_contents = shed.raw_contents
+                                active_tools = shed.active_tools
+                                prompt = shed.prompt
+                                recall_enabled = shed.recall_enabled
+
+                        if shed_tier:
+                            if is_local_quota and (shed_tier == 1 or is_burst_error):
+                                continue
+                            delay = self._quota_backoff_delay(attempt)
+                            logger.warning(
+                                f"Brain LLM rate-limit / quota error for {event_id} (attempt {attempt+1}/{max_retries+1}): "
+                                f"{redact_pii(_sanitize_error_text(e))}. Retrying in {delay:.0f}s..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        if is_burst_error:
+                            logger.warning(
+                                f"Burst error for {event_id} but the prompt could not be shrunk further — failing fast"
+                            )
+                            last_error = e
+                            break
+                        # Nothing shed (upstream limit on an already-small prompt, or a no-op shed): fall through
+                        # to the generic transient backoff below.
+
                     if attempt < max_retries and self._is_transient(e):
                         is_rate_limit = self._is_rate_limit(e)
-                        base = 30 if is_rate_limit else 5
-                        delay = min(base * (2 ** attempt), 120)
-                        jitter = delay * 0.3 * random.random()
-                        delay = max(1, delay + jitter)
-                        logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
+                        delay = _retry_backoff_delay(attempt, 30 if is_rate_limit else 5)
+                        logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {redact_pii(_sanitize_error_text(e))}. Retrying in {delay:.0f}s...")
                         await asyncio.sleep(delay)
                         continue
                     err_str = str(e)
@@ -2298,8 +2452,13 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return False
 
-        # If all retries failed with no output, write error turn
-        if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
+        # If any retry loop exited with last_error, clear partial accumulators and write error turn
+        if last_error:
+            accumulated_text = ""
+            accumulated_thoughts = ""
+            function_call = None
+            raw_parts = None
+            last_grounding = None
             self._reasoning_by_event.pop(event_id, None)
             is_timeout = isinstance(last_error, asyncio.TimeoutError)
             error_text = (
@@ -2456,8 +2615,12 @@ class Brain:
                             iteration=iteration,
                             jarvis_already_waiting=event_id in self._waiting_for_jarvis,
                             jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                            has_pruned_or_decayed_turns=recall_enabled,
                         )
                         refreshed_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                        # Same predicate as the initial toolset: a recall at FC position > 0 must stay allowed.
+                        if recall_enabled:
+                            refreshed_tools = _ensure_recall_tool_if_needed(refreshed_tools, BRAIN_TOOL_SCHEMAS)
                         valid_names = {t["name"] for t in refreshed_tools}
                 except Exception as e:
                     logger.error(
@@ -2861,6 +3024,88 @@ class Brain:
 
         # Check bounded regex for HTTP status codes
         return bool(_TRANSIENT_HTTP_CODE_RE.search(err_str))
+
+    @staticmethod
+    def _quota_backoff_delay(attempt: int) -> float:
+        """Rate-limit retry delay: 30s base, 2**attempt schedule capped at 120s (identical to main)."""
+        return _retry_backoff_delay(attempt, 30)
+
+    async def _shed_context_for_quota(
+        self,
+        *,
+        event: EventDocument,
+        context_flags: "ContextFlags",
+        terminal_prompt: str,
+        shed: _QuotaShedState,
+        attempt: int,
+        only_if_over_budget: bool = False,
+    ) -> int:
+        """Shrink ``shed``'s prompt after a quota error. Returns 0 (nothing shrank), 1 or 2.
+
+        Tier 1 (once per call): rebuild with a tight decay distance (older tool output -> reference tags).
+        Tier 2: halve the tail budget and tail-compress. Each tier increments its flow counter ONLY when the
+        estimated tokens really dropped, and a failing rebuild/compress is logged and treated as "no shrink"
+        instead of escaping the caller's except handler. ``only_if_over_budget`` (upstream 429s) skips shedding
+        for a prompt already within the tail budget -- a smaller prompt does not cure a generic rate limit.
+        """
+        event_id = event.id
+        before = _cp_estimate_tokens(shed.raw_contents)
+        if only_if_over_budget and before <= shed.tail_budget:
+            logger.info(
+                "Skipping quota shedding for %s: prompt (%d tokens) already within tail budget %d",
+                event_id, before, shed.tail_budget,
+            )
+            return 0
+
+        if not shed.tier1_done:
+            shed.tier1_done = True
+            logger.warning(
+                f"Tier 1 quota shedding triggered for {event_id} on attempt {attempt+1}: "
+                f"decaying historical tool turns (decay_distance=2)"
+            )
+            try:
+                rebuilt: list[dict] | None = await self._build_contents(
+                    event,
+                    context_cache=context_flags,
+                    terminal_prompt=terminal_prompt,
+                    turn_decay_distance=2,
+                )
+            except Exception as rebuild_err:
+                logger.warning(
+                    f"Tier 1 rebuild failed for {event_id}, falling back to compression: {rebuild_err}"
+                )
+                fallback_budget = max(2000, shed.tail_budget // 2)
+                try:
+                    rebuilt = self._compress_contents(
+                        shed.raw_contents, max_tokens=fallback_budget, tail_budget=fallback_budget,
+                    )
+                except Exception as compress_err:
+                    logger.warning(f"Tier 1 fallback compression failed for {event_id}: {compress_err}")
+                    rebuilt = None
+            if rebuilt is not None and _cp_estimate_tokens(rebuilt) < before:
+                shed.adopt(rebuilt)
+                await _incr_flow_counter_safely(self.blackboard, FLOW_QUOTA_SHED_TIER1_KEY)
+                return 1
+
+        tail_budget = min(shed.tail_budget // 2, max(2000, int(before * 0.6)))
+        shed.tail_budget = tail_budget
+        logger.warning(
+            f"Tier 2 quota shedding triggered for {event_id} on attempt {attempt+1}: "
+            f"halving tail budget to {tail_budget}"
+        )
+        try:
+            compressed = self._compress_contents(
+                shed.raw_contents, max_tokens=tail_budget, tail_budget=tail_budget,
+            )
+        except Exception as compress_err:
+            logger.warning(f"Tier 2 compression failed for {event_id}: {compress_err}")
+            return 0
+        if _cp_estimate_tokens(compressed) < before:
+            shed.adopt(compressed)
+            await _incr_flow_counter_safely(self.blackboard, FLOW_QUOTA_SHED_TIER2_KEY)
+            return 2
+        logger.warning(f"Tier 2 compression for {event_id} did not reduce the prompt ({before} tokens)")
+        return 0
 
     @staticmethod
     async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:
@@ -3729,9 +3974,16 @@ class Brain:
 
         return None
 
+    @staticmethod
+    def _build_operational_briefing(event: EventDocument) -> str:
+        """Deterministic Operational Briefing for Message 0 context compaction (0 LLM calls)."""
+        from .llm.prompt import build_operational_briefing
+        return build_operational_briefing(event)
+
     async def _build_contents(
         self, event: EventDocument, context_cache: ContextFlags | None = None,
         terminal_prompt: str = _TERMINAL_PROMPT_FALLBACK,
+        turn_decay_distance: int = DEFAULT_TURN_DECAY_DISTANCE,
     ) -> list[dict]:
         """Build structured Gemini-format contents array from Redis conversation.
 
@@ -3745,60 +3997,70 @@ class Brain:
         from ..models import EventEvidence
         from .llm.prompt import build_event_header
 
-        # -- Resolve async data for the event header --
-        evidence = event.event.evidence
-        subject_type = event.subject_type
-
-        # Gate get_service: only for K8s deployment subjects
-        svc = None
-        if (subject_type == "service"
-                and event.service not in ("general", "system")
-                and not (isinstance(evidence, EventEvidence) and evidence.gitlab_context)):
-            svc = await self.blackboard.get_service(event.service)
-
-        mermaid = ""
-
-        if context_cache and "_cached_active_ids" in context_cache:
-            active_event_ids = context_cache["_cached_active_ids"]
+        if context_cache is not None and "_cached_header" in context_cache:
+            header = context_cache["_cached_header"]
         else:
-            active_event_ids = await self.blackboard.get_active_events()
-        related = []
-        for eid in active_event_ids:
-            if eid == event.id:
-                continue
-            other = await self.blackboard.get_event(eid)
-            if not other:
-                continue
-            if other.service == event.service:
-                last_action = other.conversation[-1] if other.conversation else None
-                summary = f"  - {eid} ({other.source}): {other.event.reason}"
-                if last_action:
-                    summary += f" [last: {last_action.actor}.{last_action.action}]"
-                related.append(summary)
-            elif other.service == "general":
-                for turn in other.conversation[-3:]:
-                    if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
-                        related.append(f"  - {eid} (chat): {other.event.reason}")
-                        break
+            # -- Resolve async data for the event header --
+            evidence = event.event.evidence
+            subject_type = event.subject_type
 
-        if context_cache and "_cached_recent_closed" in context_cache:
-            recent_closed = context_cache["_cached_recent_closed"]
-        else:
-            recent_closed = await self.blackboard.get_recent_closed_for_service(
-                event.service, minutes=15
+            # Gate get_service: only for K8s deployment subjects
+            svc = None
+            if (subject_type == "service"
+                    and event.service not in ("general", "system")
+                    and not (isinstance(evidence, EventEvidence) and evidence.gitlab_context)):
+                svc = await self.blackboard.get_service(event.service)
+
+            mermaid = ""
+
+            if context_cache and "_cached_active_ids" in context_cache:
+                active_event_ids = context_cache["_cached_active_ids"]
+            else:
+                active_event_ids = await self.blackboard.get_active_events()
+            related = []
+            for eid in active_event_ids:
+                if eid == event.id:
+                    continue
+                other = await self.blackboard.get_event(eid)
+                if not other:
+                    continue
+                if other.service == event.service:
+                    last_action = other.conversation[-1] if other.conversation else None
+                    summary = f"  - {eid} ({other.source}): {other.event.reason}"
+                    if last_action:
+                        summary += f" [last: {last_action.actor}.{last_action.action}]"
+                    related.append(summary)
+                elif other.service == "general":
+                    for turn in other.conversation[-3:]:
+                        if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
+                            related.append(f"  - {eid} (chat): {other.event.reason}")
+                            break
+
+            if context_cache and "_cached_recent_closed" in context_cache:
+                recent_closed = context_cache["_cached_recent_closed"]
+            else:
+                recent_closed = await self.blackboard.get_recent_closed_for_service(
+                    event.service, minutes=15
+                )
+
+            journal = await self._get_journal_cached(event.service)
+
+            # -- Build source-aware header via pure function --
+            header = build_event_header(
+                event,
+                service_meta=svc,
+                journal_entries=journal if journal else None,
+                related_events=related if related else None,
+                recent_closed=recent_closed if recent_closed else None,
+                mermaid=mermaid,
             )
 
-        journal = await self._get_journal_cached(event.service)
+            briefing = Brain._build_operational_briefing(event)
+            if briefing:
+                header = f"{header}\n\n{briefing}"
 
-        # -- Build source-aware header via pure function --
-        header = build_event_header(
-            event,
-            service_meta=svc,
-            journal_entries=journal if journal else None,
-            related_events=related if related else None,
-            recent_closed=recent_closed if recent_closed else None,
-            mermaid=mermaid,
-        )
+            if context_cache is not None:
+                context_cache["_cached_header"] = header
 
         if not event.conversation:
             new_event_text = header + f"\n\n(No turns yet -- this is a new event. Triage it.)\n{terminal_prompt}"
@@ -3819,6 +4081,9 @@ class Brain:
         # -- Build structured conversation messages --
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
         header_separated = False
+        # A recalled payload is exactly what the model asked to see again: decaying it would send it
+        # straight back to recall_pruned_turns (ping-pong). Quota shedding (tight decay distance) overrides.
+        exempt_recall_from_decay = turn_decay_distance >= DEFAULT_TURN_DECAY_DISTANCE
         last_non_brain_pos: tuple[int, int] | None = None
         _fc_emitted_for_turn: set[int] = set()
         _last_emitted_idx: int | None = None
@@ -3827,6 +4092,12 @@ class Brain:
         for idx, turn in enumerate(event.conversation):
             if idx in _skip_set:
                 continue
+
+            turn_distance = len(event.conversation) - 1 - idx
+            decay = turn_distance > turn_decay_distance and not (
+                exempt_recall_from_decay and turn.waitingFor == "recall_pruned_turns"
+            )
+            turn_idx = getattr(turn, "turn", idx)
 
             role = "model" if turn.actor == "brain" else "user"
             if turn.actor == "brain" and turn.action == "tool_result":
@@ -3904,7 +4175,7 @@ class Brain:
 
                             # Build FR for FC[0] (head turn)
                             fc0_name = batch_fc_names[0] if batch_fc_names else None
-                            all_frs = [_cp_build_single_fr(turn, fc0_name)]
+                            all_frs = [_cp_build_single_fr(turn, fc0_name, decay_evidence=decay, turn_index=turn_idx)]
 
                             # Look-ahead for batch_index continuation turns (any action)
                             for bi in range(1, turn.batch_size):
@@ -3920,8 +4191,18 @@ class Brain:
                                             if bi < len(batch_fc_names)
                                             else None
                                         )
+                                        scan_distance = len(event.conversation) - 1 - scan_idx
+                                        scan_decay = scan_distance > turn_decay_distance and not (
+                                            exempt_recall_from_decay
+                                            and scan_turn.waitingFor == "recall_pruned_turns"
+                                        )
+                                        scan_turn_idx = getattr(scan_turn, "turn", scan_idx)
                                         all_frs.append(
-                                            _cp_build_single_fr(scan_turn, fc_name_for_bi)
+                                            _cp_build_single_fr(
+                                                scan_turn, fc_name_for_bi,
+                                                decay_evidence=scan_decay,
+                                                turn_index=scan_turn_idx,
+                                            )
                                         )
                                         _skip_set.add(scan_idx)
                                         found = True
@@ -3994,20 +4275,22 @@ class Brain:
                         _fc_emitted_for_turn.add(idx)
 
                         # Build user:FR — falls through to merge logic below
-                        parts = self._build_function_response(turn, skill_prefix)
+                        parts = self._build_function_response(
+                            turn, skill_prefix, decay_evidence=decay, turn_index=turn_idx
+                        )
                         role = "user"
                     else:
                         # No valid FC extracted — text fallback
-                        parts = self._turn_to_parts(turn)
+                        parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
                         if not parts:
                             continue
                 else:
                     # Grounding excluded — text fallback
-                    parts = self._turn_to_parts(turn)
+                    parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
                     if not parts:
                         continue
             else:
-                parts = self._turn_to_parts(turn)
+                parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
                 if not parts:
                     continue
 
@@ -4031,16 +4314,10 @@ class Brain:
                 )
 
             # -- Merge into contents --
-            can_merge = False
+            # Same-role neighbours always merge: Gemini allows functionResponse + text parts in one user
+            # Content and FRs only arrive right after their model FC turn. This deliberately drops the old
+            # FR/text separation guard (#310); alternation and FC/FR pairing are covered by the wire-invariant tests.
             if contents and contents[-1]["role"] == role:
-                if role == "model":
-                    can_merge = True
-                else:
-                    prev_has_fr = any(p.get("functionResponse") for p in contents[-1]["parts"])
-                    curr_has_fr = any(p.get("functionResponse") for p in parts)
-                    can_merge = (prev_has_fr == curr_has_fr)
-
-            if can_merge:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
                     header_separated = True
@@ -4077,18 +4354,50 @@ class Brain:
             context_label="Trailing FC safety net",
         )
 
-        action_prompt = {"text": terminal_prompt}
-        if contents[-1]["role"] == "user" and not any(p.get("functionResponse") for p in contents[-1]["parts"]):
-            contents[-1]["parts"].append(action_prompt)
-        else:
-            contents.append({"role": "user", "parts": [action_prompt]})
+        if terminal_prompt:
+            action_prompt = {"text": terminal_prompt}
+            if contents[-1]["role"] == "user" and not any(p.get("functionResponse") for p in contents[-1]["parts"]):
+                contents[-1]["parts"].append(action_prompt)
+            else:
+                contents.append({"role": "user", "parts": [action_prompt]})
 
-        return self._compress_contents(contents)
+        raw_tokens = _cp_estimate_tokens(contents)
+        compressed = self._compress_contents(contents)
+        prompt_tokens = _cp_estimate_tokens(compressed)
+
+        decayed_turns_count = 0
+        for msg in compressed:
+            for part in msg.get("parts", []):
+                t = str(part.get("text") or "")
+                if "<blackboard_evidence_reference" in t:
+                    decayed_turns_count += t.count("<blackboard_evidence_reference")
+                fr = part.get("functionResponse")
+                if isinstance(fr, dict):
+                    res = fr.get("response")
+                    if isinstance(res, dict):
+                        res_str = str(res.get("result") or "")
+                        if "<blackboard_evidence_reference" in res_str:
+                            decayed_turns_count += res_str.count("<blackboard_evidence_reference")
+
+        # Entries dropped by compression (messages, or parts for a single-message prompt). Computed from the
+        # structured result: the prune-notice text is never regex-scanned (that was quadratic on large Message 0).
+        pruned_turns_count = max(0, len(contents) - len(compressed))
+
+        brain_logger = logging.getLogger("darwin.brain")
+        brain_logger.debug(
+            "build_contents: raw_tokens=%d, prompt_tokens=%d, decayed_turns_count=%d, pruned_turns_count=%d",
+            raw_tokens, prompt_tokens, decayed_turns_count, pruned_turns_count,
+        )
+        return compressed
 
     @staticmethod
-    def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
+    def _turn_to_parts(
+        turn: ConversationTurn,
+        decay_evidence: bool = False,
+        turn_index: int = 0,
+    ) -> list[dict]:
         """Delegate to context_parts.turn_to_parts."""
-        return _cp_turn_to_parts(turn)
+        return _cp_turn_to_parts(turn, decay_evidence=decay_evidence, turn_index=turn_index)
 
     _close_unanswered_fc = staticmethod(_close_unanswered_fc)
 
@@ -4102,9 +4411,16 @@ class Brain:
         return _cp_extract_model_parts(response_parts)
 
     @staticmethod
-    def _build_function_response(turn: "ConversationTurn", skill_prefix: str = "") -> list[dict]:
+    def _build_function_response(
+        turn: "ConversationTurn",
+        skill_prefix: str = "",
+        decay_evidence: bool = False,
+        turn_index: int = 0,
+    ) -> list[dict]:
         """Delegate to context_parts.build_function_response."""
-        return _cp_build_function_response(turn, skill_prefix)
+        return _cp_build_function_response(
+            turn, skill_prefix=skill_prefix, decay_evidence=decay_evidence, turn_index=turn_index
+        )
 
     # =========================================================================
     # Conversation Compression (progressive, no LLM call)
@@ -4121,9 +4437,14 @@ class Brain:
         return _cp_estimate_tokens(contents)
 
     @classmethod
-    def _compress_contents(cls, contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -> list[dict]:
-        """Delegate to context_parts.compress_contents."""
-        return _cp_compress_contents(contents, max_tokens)
+    def _compress_contents(
+        cls,
+        contents: list[dict],
+        max_tokens: int | None = None,
+        tail_budget: int | None = None,
+    ) -> list[dict]:
+        """Delegate to context_parts.compress_contents (None = that module's current budget)."""
+        return _cp_compress_contents(contents, max_tokens=max_tokens, tail_budget=tail_budget)
 
     # =========================================================================
     # Function Call Dispatcher

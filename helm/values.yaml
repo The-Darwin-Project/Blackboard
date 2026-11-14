@@ -288,7 +288,8 @@ archivist:
 # =============================================================================
 brain:
   reconcileWorkers: 0 # 0 = auto-derive from source caps * 1.3. N = fixed worker count.
-  contentBudgetTokens: "800000" # Conversation compression trigger budget (Gemini 3.1 Pro 1M context)
+  contentBudgetTokens: "60000" # Conversation sliding-window compression trigger budget in tokens (BRAIN_CONTENT_BUDGET_TOKENS, clamped [2000, 1000000])
+  tailBudgetTokens: "40000" # Retained recent conversation tail budget in tokens when compression fires (BRAIN_TAIL_BUDGET_TOKENS, <= contentBudgetTokens)
   fullTierMaxChars: "100000" # Per-turn ceiling in the uncompressed "full" tier -- caps one oversized message
   streamTtfbTimeoutSec: "600" # Phase 1 (pre-substantive TTFB) streaming timeout in seconds for Carbon deep prefill (LLM_STREAM_TTFB_TIMEOUT_SEC)
   streamInterChunkTimeoutSec: "60" # Phase 2 (sliding activity/heartbeat) streaming timeout in seconds (LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC)

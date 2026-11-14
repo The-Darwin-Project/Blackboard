@@ -11,15 +11,24 @@
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 # 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
 #    user.message turns exist. Prevents closing over unread interventions.
-# 10. [Pattern]: INTERMEDIATE_TOOLS and is_defer_event_available() are exported so brain.py's
-#     empty-toolset fallback and post-gate leak-detector reuse this module's policy instead
-#     of hand-duplicating literals that can drift.
+# 10. [Pattern]: get_intermediate_tools(ctx) (INTERMEDIATE_TOOLS + the dynamic recall_pruned_turns) and
+#     is_defer_event_available() are exported so brain.py's empty-toolset fallback and post-gate
+#     leak-detector reuse this module's policy instead of hand-duplicating literals that can drift.
+#     brain.py must NOT import INTERMEDIATE_TOOLS directly: the static set omits recall_pruned_turns.
 # 11. [Pattern]: evaluate_gates() enforces a structural WAIT_LOOP escape-valve
 #     invariant AFTER the gate loop -- defer_event is force-restored if any
 #     gate combination stripped it while 4+ epoch waits are recorded.
 #     is_defer_event_available() mirrors this via _single_tool_survives_gates()
 #     so the two functions cannot drift apart, regardless of which gate(s)
 #     stripped defer_event (now or in the future).
+# 12. [Pattern]: recall_pruned_turns is dynamically un-gated in allow-mode gates (INTERMEDIATE,
+#     PRE_CLASSIFICATION, CHAOTIC, CASUAL) by ctx.has_pruned_or_decayed_turns. build_gate_context sets it
+#     from, in order: (a) the caller-supplied flag -- brain.py derives it from the BUILT contents
+#     (real prune notice or decay reference, incl. budget-only pruning), else (b) conversation_has_decayed_turns():
+#     a turn at distance len-1-idx > DEFAULT_TURN_DECAY_DISTANCE with a decay-eligible payload > DECAY_MIN_CHARS.
+#     A bare conversation length is NOT a signal (11 short turns have nothing to recall). The tri-state
+#     default in GateContext.__post_init__ (len > DEFAULT_TURN_DECAY_DISTANCE) only serves hand-built contexts;
+#     an explicit False is always respected.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -36,6 +45,42 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment
+from src.utils.turn_decay import DECAY_MIN_CHARS, DEFAULT_TURN_DECAY_DISTANCE  # noqa: F401 (re-exported)
+
+
+def _decay_payload_len(turn: object) -> int:
+    """Chars of ``turn`` that evidence decay could replace (0 when the turn type never decays).
+
+    Mirrors context_parts' decay branches: user/jarvis/dispatcher text is stripped, never decayed;
+    brain tool_result decays ``evidence or thoughts``; other brain turns decay ``evidence``; agent
+    turns decay ``evidence or result or thoughts``. recall_pruned_turns results are exempt (Brain keeps
+    them raw so a recall can never ping-pong back into decay).
+    """
+    actor = getattr(turn, "actor", None)
+    if actor in ("user", "jarvis", "dispatcher"):
+        return 0
+    if getattr(turn, "waitingFor", None) == "recall_pruned_turns":
+        return 0
+    evidence = getattr(turn, "evidence", None) or ""
+    if actor == "brain":
+        if getattr(turn, "action", None) == "tool_result":
+            return len(evidence or getattr(turn, "thoughts", None) or "")
+        return len(evidence)
+    return len(evidence or getattr(turn, "result", None) or getattr(turn, "thoughts", None) or "")
+
+
+def conversation_has_decayed_turns(
+    conversation: list, decay_distance: int = DEFAULT_TURN_DECAY_DISTANCE,
+) -> bool:
+    """True when some turn is far enough from the tail AND big enough to have decayed."""
+    turns = conversation or []
+    last = len(turns) - 1
+    for idx, turn in enumerate(turns):
+        if last - idx <= decay_distance:
+            break  # distance only shrinks from here on
+        if _decay_payload_len(turn) > DECAY_MIN_CHARS:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -56,6 +101,15 @@ class GateContext:
     jarvis_already_waiting: bool = False
     jarvis_wait_count: int = 0
     has_dispatch_backpressure: bool = False
+    has_pruned_or_decayed_turns: bool | None = None
+
+    def __post_init__(self):
+        if self.has_pruned_or_decayed_turns is None:
+            object.__setattr__(
+                self,
+                "has_pruned_or_decayed_turns",
+                len(self.conversation or []) > DEFAULT_TURN_DECAY_DISTANCE,
+            )
 
 
 @dataclass(frozen=True)
@@ -464,8 +518,13 @@ INTERMEDIATE_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def _tools_intermediate(_ctx: GateContext) -> set[str]:
-    return set(INTERMEDIATE_TOOLS)
+def get_intermediate_tools(ctx: GateContext) -> set[str]:
+    """Return intermediate toolset, dynamically un-gating recall_pruned_turns if history was pruned/decayed."""
+    return set(INTERMEDIATE_TOOLS) | ({"recall_pruned_turns"} if ctx.has_pruned_or_decayed_turns else set())
+
+
+def _tools_intermediate(ctx: GateContext) -> set[str]:
+    return get_intermediate_tools(ctx)
 
 
 def _tools_escalate(_ctx: GateContext) -> set[str]:
@@ -542,6 +601,8 @@ def _tools_pre_classification(ctx: GateContext) -> set[str]:
                "classify_event", "set_phase"}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
+    if ctx.has_pruned_or_decayed_turns:
+        allowed.add("recall_pruned_turns")
     return allowed
 
 
@@ -553,23 +614,29 @@ def _tools_domain_complex(_ctx: GateContext) -> set[str]:
     return {"close_event"}
 
 
-def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
-    return {
+def _tools_domain_chaotic(ctx: GateContext) -> set[str]:
+    allowed = {
         "select_agent", "classify_event", "lookup_service", "lookup_journal",
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
         "respond_to_jarvis", "wait_for_jarvis", "defer_event",
     }
+    if ctx.has_pruned_or_decayed_turns:
+        allowed.add("recall_pruned_turns")
+    return allowed
 
 
-def _tools_domain_casual(_ctx: GateContext) -> set[str]:
-    return {
+def _tools_domain_casual(ctx: GateContext) -> set[str]:
+    tools = {
         "classify_event", "set_phase", "wait_for_user",
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
         "take_note", "review_notes",
         _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH,
     }
+    if ctx.has_pruned_or_decayed_turns:
+        tools.add("recall_pruned_turns")
+    return tools
 
 
 def _tools_jarvis_response(_ctx: GateContext) -> set[str]:
@@ -1065,11 +1132,14 @@ def build_gate_context(
     iteration: int = 0,
     jarvis_already_waiting: bool = False,
     jarvis_wait_count: int = 0,
+    has_pruned_or_decayed_turns: bool | None = None,
 ) -> GateContext:
     """Construct GateContext from event + Brain runtime state.
 
     Defensive: context_flags defaults to {} if None.
     Computes budget state from conversation history.
+    has_pruned_or_decayed_turns: authoritative flag derived from the built contents (Brain); when None it
+    is estimated from the conversation via conversation_has_decayed_turns().
     """
     flags = context_flags or {}
     conversation = event.conversation or []
@@ -1101,6 +1171,12 @@ def build_gate_context(
     )
     budget = min(5 + agent_completions, 10) - refresh_count
 
+    has_pruned = (
+        conversation_has_decayed_turns(conversation)
+        if has_pruned_or_decayed_turns is None
+        else bool(has_pruned_or_decayed_turns)
+    )
+
     return GateContext(
         brain_phase=brain_phase,
         event_source=event.source,
@@ -1117,4 +1193,5 @@ def build_gate_context(
         jarvis_already_waiting=jarvis_already_waiting,
         jarvis_wait_count=jarvis_wait_count,
         has_dispatch_backpressure=flags.get("has_dispatch_backpressure", False),
+        has_pruned_or_decayed_turns=has_pruned,
     )

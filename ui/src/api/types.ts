@@ -425,6 +425,8 @@ export interface FlowSnapshot {
   token_calls_delta: number;
   token_total_cumulative: number;
   tampering_strikes?: number;
+  quota_shed_tier1_total?: number;
+  quota_shed_tier2_total?: number;
   atdd_cycle_sec?: number | null;
 }
 

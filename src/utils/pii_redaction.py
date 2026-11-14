@@ -18,6 +18,8 @@
 #    a fix to live_api_adapter.py in parallel with a manually-driven session fix that additionally
 #    extracted the utility to this shared module (so Archivist's Ranking API calls get the same
 #    coverage). Merged: shared-module placement (manual fix) + fuller pattern set (Darwin's fix).
+# 4. [Security]: _EMAIL_RE and _URL_CREDENTIALS_RE use bounded quantifiers so redact_pii is linear-ish on
+#    adversarial input (it runs synchronously on the asyncio loop). Do NOT relax them back to `+`.
 """Shared PII/secret redaction for text eligible for durable external storage.
 
 Used by:
@@ -30,7 +32,9 @@ from __future__ import annotations
 
 import re
 
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# Quantifiers are BOUNDED (RFC 5321: local part <= 64, domain <= 255). Unbounded `+` made a long
+# alphanumeric run with no '@' (e.g. a base64 blob) cost O(n^2): 4s at 30k chars, 16s at 60k.
+_EMAIL_RE = re.compile(r"[\w.+-]{1,64}@[\w-]{1,255}\.[\w.-]{1,255}")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
 _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
@@ -57,8 +61,11 @@ _KEYED_SECRET_RE = re.compile(
 # Anchors on the last '@' before the host authority boundary, supporting usernames
 # containing '@' (e.g. email identities) and passwords containing unencoded '/' or '@',
 # while avoiding URL paths containing '@' (e.g. npm scopes or branch names).
+# Userinfo quantifiers are bounded (1024): the unbounded form rescanned to end-of-string from every
+# "://" and cost O(n^2) on repeated "://" input (7s at 60k chars).
 _URL_CREDENTIALS_RE = re.compile(
-    r"://(?:[^/\s?#]+|[^/:\s?#]+:(?![0-9]+(?:/|$))[^\s?#]+)@(?=[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:[^a-zA-Z0-9_.:-]|$))"
+    r"://(?:[^/\s?#]{1,1024}|[^/:\s?#]{1,1024}:(?![0-9]+(?:/|$))[^\s?#]{1,1024})"
+    r"@(?=[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:[^a-zA-Z0-9_.:-]|$))"
 )
 # PEM private key blocks. Closed blocks first; then an unclosed BEGIN header (text sliced
 # before the END marker, e.g. a tail-truncated thought) redacts through end of string, since

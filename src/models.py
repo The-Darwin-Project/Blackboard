@@ -722,6 +722,10 @@ class FlowMetricsResponse(BaseModel):
     staleness_guards: list[dict] = Field(default_factory=list)
 
 
+FLOW_QUOTA_SHED_TIER1_KEY = "darwin:flow:quota_shed_tier1_total"
+FLOW_QUOTA_SHED_TIER2_KEY = "darwin:flow:quota_shed_tier2_total"
+
+
 class FlowSnapshot(BaseModel):
     """Point-in-time flow health snapshot. Persisted to Redis sorted set every 60s."""
     timestamp: float
@@ -759,6 +763,8 @@ class FlowSnapshot(BaseModel):
     token_calls_delta: int = 0
     token_total_cumulative: int = 0
     tampering_strikes: int = 0
+    quota_shed_tier1_total: int = 0
+    quota_shed_tier2_total: int = 0
     atdd_cycle_sec: float | None = None
 
 

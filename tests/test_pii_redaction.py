@@ -11,6 +11,8 @@ non-email secret classes (API keys, tokens, IPs) at all.
 """
 from __future__ import annotations
 
+import pytest
+
 from src.utils.pii_redaction import redact_pii
 
 
@@ -258,3 +260,24 @@ class TestRedactPemPrivateKeys:
         block = f"-----BEGIN PRIVATE KEY-----\n{self.BODY}\n-----END PRIVATE KEY-----"
         result = redact_pii(f"{block}\nmid\n{block}")
         assert result == "[REDACTED_PRIVATE_KEY]\nmid\n[REDACTED_PRIVATE_KEY]"
+
+
+
+class TestRedactionIsNotQuadratic:
+    """L9: redact_pii runs synchronously on the asyncio loop; unbounded quantifiers made it O(n^2)."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        ["a" * 60_000, "://x" * 15_000, "a.b" * 20_000, "@" * 60_000, "user:" + "p" * 60_000],
+        ids=["alnum-run", "repeated-scheme", "dotted", "at-signs", "long-password"],
+    )
+    def test_adversarial_input_completes_quickly(self, payload):
+        import time
+
+        started = time.monotonic()
+        redact_pii(payload)
+        assert time.monotonic() - started < 1.5
+
+    def test_bounded_quantifiers_still_redact_realistic_values(self):
+        assert redact_pii("mail alice.smith+tag@mail.example.co.uk now") == "mail [redacted-email] now"
+        assert "[REDACTED]" in redact_pii("https://user:s3cretpass@host.example.com/path")

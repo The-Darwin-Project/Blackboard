@@ -25,7 +25,11 @@ if TYPE_CHECKING:
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
 
-from ..models import FlowSnapshot
+from ..models import (
+    FLOW_QUOTA_SHED_TIER1_KEY,
+    FLOW_QUOTA_SHED_TIER2_KEY,
+    FlowSnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +204,36 @@ class FlowCollector:
         token_snap = self._token_meter.snapshot() if self._token_meter else {}
         platform_totals = self._token_meter.get_platform_totals() if self._token_meter else {}
 
+        # Quota shedding telemetry counters
+        quota_shed_tier1 = 0
+        quota_shed_tier2 = 0
+        try:
+            if hasattr(self._blackboard, "redis") and self._blackboard.redis:
+                r = self._blackboard.redis
+                if hasattr(r, "mget"):
+                    vals = await r.mget([FLOW_QUOTA_SHED_TIER1_KEY, FLOW_QUOTA_SHED_TIER2_KEY])
+                    if isinstance(vals, (list, tuple)) and len(vals) == 2:
+                        if vals[0]:
+                            quota_shed_tier1 = int(vals[0])
+                        if vals[1]:
+                            quota_shed_tier2 = int(vals[1])
+                    else:
+                        r1 = await r.get(FLOW_QUOTA_SHED_TIER1_KEY)
+                        if r1:
+                            quota_shed_tier1 = int(r1)
+                        r2 = await r.get(FLOW_QUOTA_SHED_TIER2_KEY)
+                        if r2:
+                            quota_shed_tier2 = int(r2)
+                else:
+                    r1 = await r.get(FLOW_QUOTA_SHED_TIER1_KEY)
+                    if r1:
+                        quota_shed_tier1 = int(r1)
+                    r2 = await r.get(FLOW_QUOTA_SHED_TIER2_KEY)
+                    if r2:
+                        quota_shed_tier2 = int(r2)
+        except Exception:
+            pass
+
         return FlowSnapshot(
             timestamp=now,
             queue_depth=flow["queue_depth"],
@@ -236,5 +270,7 @@ class FlowCollector:
             token_calls_delta=token_snap.get("calls", 0),
             token_total_cumulative=platform_totals.get("total_tokens", 0),
             tampering_strikes=tampering_strikes,
+            quota_shed_tier1_total=quota_shed_tier1,
+            quota_shed_tier2_total=quota_shed_tier2,
             atdd_cycle_sec=avg_cycle,
         )

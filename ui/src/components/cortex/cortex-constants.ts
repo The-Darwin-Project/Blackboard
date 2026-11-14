@@ -7,7 +7,7 @@
 import type { Neuron } from './types';
 
 export const TOOL_GROUPS: Record<string, string[]> = {
-  observation: ['lookup_service', 'lookup_journal', 'consult_deep_memory', 'refresh_gitlab_context', 'refresh_kargo_context', 'take_note', 'review_notes'],
+  observation: ['lookup_service', 'lookup_journal', 'consult_deep_memory', 'refresh_gitlab_context', 'refresh_kargo_context', 'take_note', 'review_notes', 'recall_pruned_turns'],
   classification: ['classify_event', 'set_phase'],
   routing: ['select_agent', 'create_plan', 'message_agent', 'reply_to_agent'],
   lifecycle: ['defer_event', 'wait_for_user', 'close_event'],
@@ -87,6 +87,7 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'tool:refresh_kargo_context': 'Fetch latest Kargo promotion status',
   'tool:take_note': 'Record a qualitative field note for long-term knowledge',
   'tool:review_notes': 'Review all accumulated field notes in the notebook',
+  'tool:recall_pruned_turns': 'Retrieve historical conversation turns pruned from context window',
   // Classification tools
   'tool:classify_event': 'Classify event domain and severity via LLM',
   'tool:set_phase': 'Transition event to a new lifecycle phase',

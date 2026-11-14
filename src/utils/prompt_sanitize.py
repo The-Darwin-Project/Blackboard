@@ -13,6 +13,11 @@
 #    unreviewable.
 # 5. [Pattern]: sanitize_title/fallback_title are the single title pipeline (PATCH validator, LLM namer,
 #    chat/slack fallbacks): line breaks -> space FIRST, then strip invisibles, then collapse \s+, cap LAST.
+# 6. [Security]: strip_xml_fences is the SINGLE prompt-fence sanitizer (context_parts, prompt, brain,
+#    handlers_cross_event). It removes the full tag union and LOOPS until unchanged so nested split tags
+#    ("</func</functionResponse>tionResponse>") cannot reassemble a fence. Callers that also redact PII MUST
+#    strip first, redact second, defang "[!call:" third, truncate LAST (a fence spliced inside a secret
+#    would otherwise defeat redaction and rejoin after the strip).
 """Sanitize untrusted scalars (display names, CI fields) embedded in Brain/FRIDAY prompts."""
 from __future__ import annotations
 
@@ -42,6 +47,46 @@ def sanitize_prompt_text(value: object, *, max_len: int) -> str:
     text = _LINE_BREAKERS.sub(" ", text)
     text = _STRIP_CHARS.sub("", text)
     return text[:max_len]
+
+
+# Every delimiter an untrusted string must not be able to forge inside a Brain prompt. Union of the
+# per-module lists that previously diverged (context_parts, prompt, brain). Literal alternation only
+# (no quantifiers), so matching is linear in the input length.
+_FENCE_TAGS = (
+    "</blackboard_evidence_reference>",
+    "<functionResponse>", "</functionResponse>",
+    "<functionCall>", "</functionCall>",
+    "<context>", "</context>",
+    "<description>", "</description>",
+    "</job_log>", "</comments>", "</mention_request>", "</issue_body>",
+    "--- CONVERSATION ---",
+)
+# The decay-reference OPEN tag is removed WITH its attributes (bounded, no nested quantifier): leaving
+# `turn="9" tool="x">` behind would splice garbage into whatever the tag was embedded in.
+_EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"
+_FENCE_RE = re.compile(
+    "|".join([_EVIDENCE_OPEN] + [re.escape(t) for t in sorted(_FENCE_TAGS, key=len, reverse=True)])
+)
+_DASH_RUN_RE = re.compile(r"-{3,}")
+# Nested-split depth beyond this is adversarial; bounding the passes keeps the sanitizer O(passes * n).
+_FENCE_MAX_PASSES = 8
+
+
+def strip_xml_fences(text: str) -> str:
+    """Remove prompt-fence tags/delimiters, looping until a pass changes nothing.
+
+    A single pass is bypassable: removing the inner tag of ``<context<context>>`` reassembles
+    ``<context>``. When the pass cap is hit without converging (adversarial nesting), fall back to
+    deleting every ``<`` and collapsing ``---`` runs, which cannot form any fence tag or delimiter.
+    """
+    if not text:
+        return ""
+    for _ in range(_FENCE_MAX_PASSES):
+        cleaned = _FENCE_RE.sub("", text)
+        if cleaned == text:
+            return cleaned
+        text = cleaned
+    return _DASH_RUN_RE.sub("--", text.replace("<", ""))
 
 
 UNTITLED_EVENT = "Untitled Event"
