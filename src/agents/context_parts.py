@@ -180,11 +180,21 @@ def extract_model_parts(response_parts: list[dict] | None) -> list[dict]:
 
 def format_evidence_decay_reference(turn_index: int, tool_name: str, char_count: int) -> str:
     """Format XML-fenced reference for decayed historical tool evidence."""
-    safe_tool = html.escape(sanitize_prompt_text(str(tool_name or "tool"), max_len=PROMPT_NAME_MAX_LEN), quote=True)
+    raw_tool = str(tool_name or "tool")
+    safe_tool = html.escape(sanitize_prompt_text(raw_tool, max_len=PROMPT_NAME_MAX_LEN), quote=True)
+    if raw_tool.strip() == "recall_pruned_turns":
+        body = (
+            f"Prior recall output archived in Blackboard Turn {turn_index}. "
+            f"Do NOT recall Turn {turn_index}; use recall_pruned_turns on the original source turn number only if an exact omitted detail is strictly required."
+        )
+    else:
+        body = (
+            f"Archived in Blackboard Turn {turn_index}. Do NOT recall routinely; "
+            f"use recall_pruned_turns(from_turn={turn_index}, to_turn={turn_index}) only if an exact omitted detail is strictly required."
+        )
     return (
         f'<blackboard_evidence_reference turn="{turn_index}" tool="{safe_tool}" chars="{char_count}">\n'
-        f'Raw tool output stored in Blackboard Turn {turn_index}. '
-        f'Call recall_pruned_turns(from_turn={turn_index}, to_turn={turn_index}) to retrieve full un-decayed payload.\n'
+        f'{body}\n'
         f'</blackboard_evidence_reference>'
     )
 
@@ -294,7 +304,7 @@ def format_prune_notice(count: int) -> dict:
     return {
         "text": (
             f"\n\n{PRUNE_NOTICE_PREFIX} {count} earlier conversation entries pruned for context window. "
-            f"Use recall_pruned_turns(from_turn, to_turn) to retrieve earlier turns by Blackboard turn number if needed.]"
+            f"Do NOT recall routinely; use recall_pruned_turns(from_turn, to_turn) to retrieve earlier turns by Blackboard turn number only if an exact omitted detail is strictly required.]"
         )
     }
 
@@ -566,14 +576,17 @@ def turn_to_parts(
         return []
 
     if turn.actor == "brain" and turn.action == "tool_result":
-        tool_name = turn.waitingFor or "tool"
+        safe_tool = (
+            strip_xml_fences(sanitize_prompt_text(turn.waitingFor or "tool", max_len=PROMPT_NAME_MAX_LEN)).strip()
+            or "tool"
+        )
         raw_text = turn.evidence or turn.thoughts or ""
         if decay_evidence and len(raw_text) > DECAY_MIN_CHARS:
             turn_idx = turn_index or getattr(turn, "turn", 0)
-            text = f"[SYSTEM {tool_name}]: {format_evidence_decay_reference(turn_idx, tool_name, len(raw_text))}"
+            text = f"[SYSTEM {safe_tool}]: {format_evidence_decay_reference(turn_idx, safe_tool, len(raw_text))}"
         else:
             raw_text = strip_xml_fences(raw_text)
-            text = f"[SYSTEM {tool_name}]: {raw_text}"
+            text = f"[SYSTEM {safe_tool}]: {raw_text}"
         return [{"text": text}]
 
     if (
@@ -613,19 +626,25 @@ def turn_to_parts(
 
     text = ""
     if turn.actor == "brain":
-        text = turn.thoughts or ""
+        raw_thoughts = turn.thoughts or ""
         if turn.evidence:
             raw_ev = turn.evidence
             if decay_evidence and len(raw_ev) > DECAY_MIN_CHARS:
+                safe_thoughts = strip_xml_fences(raw_thoughts)
                 turn_idx = turn_index or getattr(turn, "turn", 0)
                 raw_ev = format_evidence_decay_reference(turn_idx, turn.action, len(raw_ev))
+                text = f"{safe_thoughts}\n{raw_ev}" if safe_thoughts else raw_ev
             else:
-                raw_ev = strip_xml_fences(raw_ev)
-            text = f"{text}\n{raw_ev}" if text else raw_ev
+                raw_combined = f"{raw_thoughts}\n{raw_ev}" if raw_thoughts else raw_ev
+                text = strip_xml_fences(raw_combined)
         else:
-            text = strip_xml_fences(text)
+            text = strip_xml_fences(raw_thoughts)
         if turn.action not in ("response",):
-            text = f"[FRIDAY {turn.action}]: {text}" if text else f"[FRIDAY {turn.action}]"
+            safe_action = (
+                strip_xml_fences(sanitize_prompt_text(turn.action or "action", max_len=PROMPT_NAME_MAX_LEN)).strip()
+                or "action"
+            )
+            text = f"[FRIDAY {safe_action}]: {text}" if text else f"[FRIDAY {safe_action}]"
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
         raw = strip_xml_fences(raw)
@@ -654,13 +673,17 @@ def turn_to_parts(
         else:
             text = f"[AGENT jarvis]: {raw}" if raw else "[AGENT jarvis]"
     else:
+        safe_actor = (
+            strip_xml_fences(sanitize_prompt_text(turn.actor or "agent", max_len=PROMPT_NAME_MAX_LEN)).strip()
+            or "agent"
+        )
         raw = turn.evidence or turn.result or turn.thoughts or ""
         if decay_evidence and len(raw) > DECAY_MIN_CHARS:
             turn_idx = turn_index or getattr(turn, "turn", 0)
-            raw = format_evidence_decay_reference(turn_idx, turn.actor, len(raw))
+            raw = format_evidence_decay_reference(turn_idx, safe_actor, len(raw))
         else:
             raw = strip_xml_fences(raw)
-        text = f"[AGENT {turn.actor}]: {raw}" if raw else f"[AGENT {turn.actor}]"
+        text = f"[AGENT {safe_actor}]: {raw}" if raw else f"[AGENT {safe_actor}]"
 
     parts: list[dict] = [{"text": text}]
 

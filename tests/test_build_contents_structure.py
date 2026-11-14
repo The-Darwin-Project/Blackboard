@@ -635,7 +635,7 @@ class TestNativeFCFRPropagation:
 
         # Use a tight budget to force compression
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-             patch("src.agents.brain._CONTENT_BUDGET", 200):
+             patch("src.agents.context_parts._CONTENT_BUDGET", 200):
             contents = await Brain._build_contents(brain, event)
 
         # Verify: no model:FC without a following user:FR
@@ -1074,7 +1074,7 @@ class TestFCFREdgeCases:
         brain = _make_brain_mock()
 
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-             patch("src.agents.brain._CONTENT_BUDGET", 100):
+             patch("src.agents.context_parts._CONTENT_BUDGET", 100):
             contents = await Brain._build_contents(brain, event)
 
         # Verify no orphaned FR (FR without preceding FC)
@@ -1149,7 +1149,7 @@ class TestFCFREdgeCases:
 
         # Budget tight enough that the 10K thought must be pruned
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-             patch("src.agents.brain._CONTENT_BUDGET", 50):
+             patch("src.agents.context_parts._CONTENT_BUDGET", 50):
             contents = await Brain._build_contents(brain, event)
 
         # No crash — graceful output
@@ -1725,7 +1725,7 @@ class TestParallelFunctionCallExecution:
         brain = _make_brain_mock()
 
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-             patch("src.agents.brain._CONTENT_BUDGET", 100):
+             patch("src.agents.context_parts._CONTENT_BUDGET", 100):
             contents = await Brain._build_contents(brain, event)
 
         # Verify atomicity: if any FC exists, matching FR must exist, and vice versa
@@ -4140,3 +4140,9 @@ class TestBrainContentsHygiene:
         record = next(r.getMessage() for r in caplog.records if "pruned_turns_count" in r.getMessage())
         logged = int(record.rsplit("pruned_turns_count=", 1)[1])
         assert logged > 0
+
+    def test_t11_brain_module_does_not_reexport_unused_content_budget(self):
+        """T-11 (VMER-2368): Verify src.agents.brain does not re-export unused _CONTENT_BUDGET."""
+        import src.agents.brain as brain_mod
+
+        assert not hasattr(brain_mod, "_CONTENT_BUDGET")

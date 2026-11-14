@@ -386,7 +386,7 @@ async def test_gate_fallback_predicate_matches_what_build_contents_actually_deca
             actor, action, wf, field = rng.choice(_KINDS)
             n = rng.choice(_LENS)
             conv.append(_make_turn(turn=i + 1, actor=actor, action=action, waitingFor=wf, **({field: "z" * n} if n else {})))
-        with patch("src.agents.brain._CONTENT_BUDGET", 10**9), patch("src.agents.brain._TAIL_BUDGET", 10**9):
+        with patch("src.agents.context_parts._CONTENT_BUDGET", 10**9), patch("src.agents.context_parts._TAIL_BUDGET", 10**9):
             built = await Brain._build_contents(_make_brain_mock(), _make_event(conversation=conv))
         actual = "blackboard_evidence_reference" in _all_text(built)
         predicted = conversation_has_decayed_turns(conv)

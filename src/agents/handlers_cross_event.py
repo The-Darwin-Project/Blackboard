@@ -9,13 +9,15 @@
 #    Strip MUST precede redaction: a fence tag spliced inside a secret/email otherwise survives redact_pii and
 #    rejoins after the strip. Single turn returns up to 30k chars; range returns up to 3k chars per turn.
 # 6. [Pattern]: inspect_event omits raw dumps for recalled turns to prevent secondary context inflation.
-# 7. [Pattern]: The recall result is stored ONCE (in `thoughts`; Brain replay reads `evidence or thoughts`), and
-#    Brain exempts waitingFor="recall_pruned_turns" turns from evidence decay (no recall/decay ping-pong).
+# 7. [Pattern]: The recall result is stored ONCE (in `thoughts`; Brain replay reads `evidence or thoughts`),
+#    Brain exempts waitingFor="recall_pruned_turns" turns from evidence decay (no recall/decay ping-pong),
+#    and handle_recall_pruned_turns skips prior waitingFor="recall_pruned_turns" turns (no recursive nesting).
 """Cross-event inspection and sticky note tool handlers."""
 from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
     from .tool_router import ToolContext
 
 logger = logging.getLogger("darwin.brain")
+
+_TOOL_RECALL_PRUNED_TURNS = "recall_pruned_turns"
 
 
 async def handle_inspect_event(
@@ -76,7 +80,7 @@ async def handle_inspect_event(
     my_turns = [t for t in target_event.conversation if t.actor == "brain"]
     lines = [f"\n## My Actions ({len(my_turns)} turns)"]
     for t in my_turns:
-        if getattr(t, "waitingFor", None) == "recall_pruned_turns":
+        if getattr(t, "waitingFor", None) == _TOOL_RECALL_PRUNED_TURNS:
             dump_len = len(t.thoughts or t.evidence or t.result or "")
             lines.append(f"[{t.action}] (recalled pruned turns — {dump_len} chars omitted)")
         else:
@@ -255,7 +259,7 @@ async def handle_recall_pruned_turns(
             turn=(await ctx.next_turn_number(event_id)),
             actor="brain", action="tool_result",
             thoughts="No conversation found.",
-            waitingFor="recall_pruned_turns",
+            waitingFor=_TOOL_RECALL_PRUNED_TURNS,
             response_parts=response_parts,
         )
         await ctx.append_and_broadcast(event_id, turn)
@@ -271,7 +275,7 @@ async def handle_recall_pruned_turns(
                     f"Error: {key} must be an integer turn number between 1 and "
                     f"{len(event.conversation)}; nothing was recalled."
                 ),
-                waitingFor="recall_pruned_turns",
+                waitingFor=_TOOL_RECALL_PRUNED_TURNS,
                 response_parts=response_parts,
             )
             await ctx.append_and_broadcast(event_id, turn)
@@ -283,11 +287,13 @@ async def handle_recall_pruned_turns(
     is_single_turn = (raw_from == raw_to)
 
     from_turn = max(1, raw_from)
-    to_turn = min(len(event.conversation), raw_to)
-    if to_turn - from_turn >= _RECALL_MAX_RANGE_TURNS:
-        to_turn = from_turn + _RECALL_MAX_RANGE_TURNS - 1
+    upper_turn = min(len(event.conversation), raw_to)
 
-    turns = [t for t in event.conversation if from_turn <= t.turn <= to_turn]
+    in_window = [t for t in event.conversation if from_turn <= t.turn <= upper_turn]
+    turns = [
+        t for t in in_window
+        if getattr(t, "waitingFor", None) != _TOOL_RECALL_PRUNED_TURNS
+    ][:_RECALL_MAX_RANGE_TURNS]
     blocks = []
     for t in turns:
         if is_single_turn:
@@ -302,12 +308,27 @@ async def handle_recall_pruned_turns(
             )
         blocks.append(f"[T{t.turn} {t.actor}.{t.action}]: {content}")
 
-    result_text = "\n\n".join(blocks) if blocks else "(no turns in range)"
+    if blocks:
+        result_text = "\n\n".join(blocks)
+    elif in_window:
+        src_turns: list[str] = []
+        for rt in in_window:
+            for m in re.findall(r"\[T(\d+)\s", rt.thoughts or ""):
+                tag = f"T{m}"
+                if tag not in src_turns:
+                    src_turns.append(tag)
+        hint = f" (originally covering {', '.join(src_turns[:10])})" if src_turns else ""
+        result_text = (
+            f"(turn(s) in requested range are prior recall_pruned_turns outputs{hint}; "
+            f"request the original source turn number instead)"
+        )
+    else:
+        result_text = "(no turns in range)"
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="tool_result",
         thoughts=result_text,
-        waitingFor="recall_pruned_turns",
+        waitingFor=_TOOL_RECALL_PRUNED_TURNS,
         response_parts=response_parts,
     )
     await ctx.append_and_broadcast(event_id, turn)

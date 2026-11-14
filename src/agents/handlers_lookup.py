@@ -7,6 +7,9 @@
 # 5. [Gotcha]: consult_deep_memory cached guard uses string matching coupled to Archivist response text.
 # 6. [Pattern]: consult_deep_memory scopes search_knowledge() via service_filter=svc or event.service --
 #    explicit tool-call `service` arg wins, falling back to the event's own service.
+# 7. [Gotcha]: handle_lookup_journal bounds payloads here (default 15, max 30, <=16k chars), never in BlackboardState.
+#    Source orientations are opposite: get_cached_journal(svc) is RPUSH oldest-first (slice [-limit:], fit newest,
+#    reverse back); get_recent_journal_entries() is newest-first (slice [:limit]).
 """Lookup and query tool handlers (service, deep memory, journal)."""
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn
+from ..utils.pii_redaction import redact_pii
+from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
 from .handler_utils import _safe_int
 
 if TYPE_CHECKING:
@@ -302,23 +307,94 @@ async def handle_consult_deep_memory(
     return True
 
 
+_JOURNAL_DEFAULT_LIMIT = 15
+_JOURNAL_MAX_LIMIT = 30
+_JOURNAL_MAX_CHARS = 16_000
+_JOURNAL_TITLE_MAX_LEN = PROMPT_NAME_MAX_LEN
+_JOURNAL_TRUNCATION_SUFFIX = "...(truncated)"
+
+
+def _format_bounded_journal(
+    title: str,
+    selected_newest_first: list[str],
+    total: int,
+    *,
+    reverse_to_chronological: bool,
+) -> str:
+    """Fit newest entries within _JOURNAL_MAX_CHARS including header."""
+    safe_title = (
+        strip_xml_fences(sanitize_prompt_text(title, max_len=_JOURNAL_TITLE_MAX_LEN))
+        .replace("[!call:", "[call:")
+        .strip()
+        or "unknown"
+    )
+    cap_note = f" ({_JOURNAL_MAX_CHARS}-char cap reached)"
+    fitted: list[str] = []
+    char_truncated = False
+    max_header_len = len(
+        f"## Ops Journal: {safe_title}\n\nShowing latest {total} of {total} entries{cap_note}:\n\n"
+    )
+    budget = max(64, _JOURNAL_MAX_CHARS - max_header_len)
+    used = 0
+    for raw_entry in (selected_newest_first or ()):
+        raw_str = str(raw_entry)[: _JOURNAL_MAX_CHARS * 2]
+        clean_entry = redact_pii(strip_xml_fences(raw_str)).replace("[!call:", "[call:")
+        line = f"- {clean_entry}"
+        sep = 1 if fitted else 0
+        if used + sep + len(line) <= budget:
+            fitted.append(line)
+            used += sep + len(line)
+        else:
+            char_truncated = True
+            if not fitted:
+                avail = max(16, budget - len(_JOURNAL_TRUNCATION_SUFFIX))
+                fitted.append(line[:avail] + _JOURNAL_TRUNCATION_SUFFIX)
+            break
+    if reverse_to_chronological:
+        fitted.reverse()
+    if len(fitted) < total or char_truncated:
+        suffix = cap_note if char_truncated else ""
+        header = f"## Ops Journal: {safe_title}\n\nShowing latest {len(fitted)} of {total} entries{suffix}:\n\n"
+    else:
+        header = f"## Ops Journal: {safe_title}\n\n{total} entries:\n\n"
+    out = header + "\n".join(fitted)
+    return out[:_JOURNAL_MAX_CHARS]
+
+
 async def handle_lookup_journal(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
-    service_name = args.get("service_name", "")
+    raw_svc = args.get("service_name")
+    service_name = (
+        strip_xml_fences(sanitize_prompt_text(raw_svc, max_len=_JOURNAL_TITLE_MAX_LEN))
+        .replace("[!call:", "[call:")
+        .strip()
+        if isinstance(raw_svc, str)
+        else ""
+    )
+    limit = min(
+        _JOURNAL_MAX_LIMIT,
+        _safe_int(args.get("limit"), default=_JOURNAL_DEFAULT_LIMIT) or _JOURNAL_DEFAULT_LIMIT,
+    )
     bb = ctx.get_blackboard()
     if service_name:
         entries = await ctx.get_cached_journal(service_name)
         if entries:
-            header = f"## Ops Journal: {service_name}\n\n{len(entries)} entries:\n\n"
-            journal_text = header + "\n".join(f"- {e}" for e in entries)
+            total = len(entries)
+            selected = list(reversed(entries[-limit:]))
+            journal_text = _format_bounded_journal(
+                service_name, selected, total, reverse_to_chronological=True,
+            )
         else:
             journal_text = f"## Ops Journal: {service_name}\n\nNo entries found."
     else:
         entries = await bb.get_recent_journal_entries()
         if entries:
-            header = f"## Ops Journal: all services\n\n{len(entries)} entries:\n\n"
-            journal_text = header + "\n".join(f"- {e}" for e in entries)
+            total = len(entries)
+            selected = entries[:limit]
+            journal_text = _format_bounded_journal(
+                "all services", selected, total, reverse_to_chronological=False,
+            )
         else:
             journal_text = "## Ops Journal\n\nNo entries found across any service."
     turn = ConversationTurn(

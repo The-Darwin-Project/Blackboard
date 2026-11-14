@@ -450,11 +450,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "lookup_journal",
         "description": (
-            "Look up the ops journal. When service_name is provided, returns history for that "
-            "specific service. When omitted, returns recent entries across all services -- useful "
-            "for cross-service timing, pipeline patterns, and operational trends. Use FIRST for "
-            "any question about what happened, recent events, service history, or status. Can "
-            "directly answer user questions without needing an agent."
+            "Look up the ops journal (returns bounded recent entries). When service_name is provided, "
+            "returns recent history for that specific service. When omitted, returns recent entries "
+            "across all services -- useful for cross-service timing, pipeline patterns, and operational "
+            "trends. Use FIRST for any question about what happened, recent events, service history, or "
+            "status. Can directly answer user questions without needing an agent."
         ),
         "input_schema": {
             "type": "object",
@@ -462,6 +462,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "service_name": {
                     "type": "string",
                     "description": "Service name to look up. service_name is optional, name can be omitted for cross-service/source results.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum recent entries to return (1-30, default 15). Prefer default during triage.",
                 },
             },
         },
@@ -1368,8 +1372,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Retrieve earlier conversation turns from this event that were pruned from your "
             "context window or raw tool evidence referenced by <blackboard_evidence_reference>. "
-            "Use when the prune marker tells you turns were dropped or an evidence reference indicates "
-            "tool output was decayed, and you need to recall earlier details. Returns full turn content."
+            "Recalling is expensive on shared TPM quota and must NOT be called routinely during "
+            "triage or sequentially across decayed references. Use ONLY when an exact detail "
+            "absent from the operational briefing, sticky notes, or recent turns is strictly "
+            "required. Automatically skips prior recall_pruned_turns outputs."
         ),
         "input_schema": {
             "type": "object",

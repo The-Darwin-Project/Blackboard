@@ -23,7 +23,9 @@
 #     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
 # 12d. [Pattern]: Quota shedding lives in _shed_context_for_quota + _quota_backoff_delay (NOT inline in the retry loop).
 #     Local QuotaExhaustedError/RequestExceedsBurstError (acquire already paced local capacity): Tier-1 that really shrank
-#     the prompt retries with ZERO sleep. Upstream 429/resource_exhausted: ALWAYS back off (2**attempt schedule, same as main),
+#     the prompt retries with ZERO sleep. Non-burst QuotaExhaustedError skips Tier-1 no-op -> Tier-2 escalation when
+#     before <= tail_budget, and skips Tier-2 halving when before <= _MIN_NON_BURST_TIER2_TOKENS (16_000), falling back
+#     to 30s transient backoff with recent turns intact. Upstream 429/resource_exhausted: ALWAYS back off (2**attempt schedule, same as main),
 #     and only shed when the prompt is still over the tail budget. quota_shed_tier{1,2}_total increment ONLY on a real shrink
 #     (after < before); a no-op shed never retries an identical prompt for a burst error. Shed compress failures are logged,
 #     never raised out of the except handler (the error-turn path below must always run).
@@ -288,7 +290,6 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, TypedDict
 import httpx
 
 from src.agents.context_parts import (
-    _CONTENT_BUDGET,
     _TAIL_BUDGET,
     build_function_response as _cp_build_function_response,
     build_single_function_response as _cp_build_single_fr,
@@ -369,6 +370,9 @@ def _retry_backoff_delay(attempt: int, base: float) -> float:
     return max(1, delay + delay * 0.3 * random.random())
 
 
+_MIN_NON_BURST_TIER2_TOKENS = 16_000
+
+
 @dataclass
 class _QuotaShedState:
     """Mutable prompt state shared across quota-shedding retries of one _process_with_llm call."""
@@ -377,6 +381,7 @@ class _QuotaShedState:
     tail_budget: int
     recall_enabled: bool = False
     tier1_done: bool = False
+    tier1_noop: bool = False
 
     @property
     def prompt(self) -> list[dict]:
@@ -2384,10 +2389,14 @@ class Brain:
                                     shed=shed,
                                     attempt=attempt,
                                     only_if_over_budget=is_upstream_rate_limit,
+                                    is_burst_error=is_burst_error,
                                 )
                             except Exception as shed_err:
                                 # Must never escape this handler: the error-turn recording below has to run.
-                                logger.warning(f"Quota shedding failed for {event_id} (non-fatal): {shed_err}")
+                                logger.warning(
+                                    f"Quota shedding failed for {event_id} (non-fatal): "
+                                    f"{redact_pii(_sanitize_error_text(shed_err))}"
+                                )
                                 shed_tier = 0
                             if shed_tier:
                                 raw_contents = shed.raw_contents
@@ -3039,6 +3048,7 @@ class Brain:
         shed: _QuotaShedState,
         attempt: int,
         only_if_over_budget: bool = False,
+        is_burst_error: bool = False,
     ) -> int:
         """Shrink ``shed``'s prompt after a quota error. Returns 0 (nothing shrank), 1 or 2.
 
@@ -3047,6 +3057,9 @@ class Brain:
         estimated tokens really dropped, and a failing rebuild/compress is logged and treated as "no shrink"
         instead of escaping the caller's except handler. ``only_if_over_budget`` (upstream 429s) skips shedding
         for a prompt already within the tail budget -- a smaller prompt does not cure a generic rate limit.
+        ``is_burst_error`` distinguishes single-call burst overruns from non-burst quota waits: non-burst errors
+        do not escalate a Tier-1 no-op into Tier 2 when already within ``tail_budget`` and skip Tier-2 halving
+        when ``before <= min(_MIN_NON_BURST_TIER2_TOKENS, shed.tail_budget)``.
         """
         event_id = event.id
         before = _cp_estimate_tokens(shed.raw_contents)
@@ -3072,23 +3085,48 @@ class Brain:
                 )
             except Exception as rebuild_err:
                 logger.warning(
-                    f"Tier 1 rebuild failed for {event_id}, falling back to compression: {rebuild_err}"
+                    f"Tier 1 rebuild failed for {event_id}, falling back to compression: "
+                    f"{redact_pii(_sanitize_error_text(rebuild_err))}"
                 )
-                fallback_budget = max(2000, shed.tail_budget // 2)
-                try:
-                    rebuilt = self._compress_contents(
-                        shed.raw_contents, max_tokens=fallback_budget, tail_budget=fallback_budget,
-                    )
-                except Exception as compress_err:
-                    logger.warning(f"Tier 1 fallback compression failed for {event_id}: {compress_err}")
+                if is_burst_error or before > shed.tail_budget or len(event.conversation) > 4:
+                    fallback_budget = max(2000, shed.tail_budget // 2)
+                    try:
+                        rebuilt = self._compress_contents(
+                            shed.raw_contents, max_tokens=fallback_budget, tail_budget=fallback_budget,
+                        )
+                    except Exception as compress_err:
+                        logger.warning(
+                            f"Tier 1 fallback compression failed for {event_id}: "
+                            f"{redact_pii(_sanitize_error_text(compress_err))}"
+                        )
+                        rebuilt = None
+                else:
                     rebuilt = None
             if rebuilt is not None and _cp_estimate_tokens(rebuilt) < before:
                 shed.adopt(rebuilt)
                 await _incr_flow_counter_safely(self.blackboard, FLOW_QUOTA_SHED_TIER1_KEY)
                 return 1
+            elif rebuilt is not None:
+                shed.tier1_noop = True
+            if not is_burst_error and before <= shed.tail_budget:
+                logger.info(
+                    "Tier 1 quota shedding was a no-op for %s (%d tokens <= tail budget %d) on non-burst error; "
+                    "skipping Tier 2 hard pruning",
+                    event_id, before, shed.tail_budget,
+                )
+                return 0
+
+        effective_floor = min(_MIN_NON_BURST_TIER2_TOKENS, shed.tail_budget)
+        if not is_burst_error and (
+            before <= effective_floor or (shed.tier1_noop and before <= shed.tail_budget)
+        ):
+            logger.info(
+                "Skipping non-burst Tier 2 quota shedding for %s: prompt (%d tokens) <= floor %d (tier1_noop=%s)",
+                event_id, before, effective_floor, shed.tier1_noop,
+            )
+            return 0
 
         tail_budget = min(shed.tail_budget // 2, max(2000, int(before * 0.6)))
-        shed.tail_budget = tail_budget
         logger.warning(
             f"Tier 2 quota shedding triggered for {event_id} on attempt {attempt+1}: "
             f"halving tail budget to {tail_budget}"
@@ -3098,9 +3136,13 @@ class Brain:
                 shed.raw_contents, max_tokens=tail_budget, tail_budget=tail_budget,
             )
         except Exception as compress_err:
-            logger.warning(f"Tier 2 compression failed for {event_id}: {compress_err}")
+            logger.warning(
+                f"Tier 2 compression failed for {event_id}: "
+                f"{redact_pii(_sanitize_error_text(compress_err))}"
+            )
             return 0
         if _cp_estimate_tokens(compressed) < before:
+            shed.tail_budget = tail_budget
             shed.adopt(compressed)
             await _incr_flow_counter_safely(self.blackboard, FLOW_QUOTA_SHED_TIER2_KEY)
             return 2
