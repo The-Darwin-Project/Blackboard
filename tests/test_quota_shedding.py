@@ -41,10 +41,10 @@ from src.models import (
 # ---------------------------------------------------------------------------
 
 def _make_shedding_event(event_id: str = "evt-shed-test") -> EventDocument:
-    """Build an event with 15 conversation turns including multi-KB historical tool evidence.
+    """Build an event with 14 conversation turns (1..14, alternating user and tool_result).
 
-    Turns 10, 12, 14 carry ~25,000 chars each so post-Tier-1 the recent turns still
-    contain >25k tokens, forcing real tail_budget pruning in Tier 2.
+    Turns 12 and 14 carry 33,000 chars each (~17.1k post-Tier-1 tokens > _MIN_NON_BURST_TIER2_TOKENS = 16,000)
+    while earlier tool turns (2..10, turn_distance > 2) carry 15,000 chars each.
     """
     turns: list[ConversationTurn] = []
     for i in range(1, 15):
@@ -59,7 +59,7 @@ def _make_shedding_event(event_id: str = "evt-shed-test") -> EventDocument:
             )
         else:
             fc_part = {"functionCall": {"name": "run_bash", "args": {"cmd": f"step {i}"}}}
-            chars = 25000 if i >= 10 else 15000
+            chars = 33000 if i >= 12 else 15000
             turns.append(
                 ConversationTurn(
                     turn=i,
@@ -919,6 +919,218 @@ class TestQuotaBackoffPolicy:
             assert _incr_keys(bb) == [
                 "darwin:flow:quota_shed_tier1_total", "darwin:flow:quota_shed_tier2_total",
             ]
+
+    @pytest.mark.asyncio
+    async def test_t1_non_burst_quota_exhausted_tier1_noop_within_tail_budget_skips_tier2_pruning(self, monkeypatch):
+        """T-1 (VMER-2368): Given a 4-turn triage event (~22k tokens <= 40k tail_budget) where heavy
+        tool turns 2 and 4 sit at turn_distance <= 2 and turn 1 is < DECAY_MIN_CHARS,
+        When Brain._process_with_llm encounters non-burst QuotaExhaustedError(s),
+        Then:
+        (a) Tier-1 no-op within tail_budget does NOT escalate to Tier-2 pruning on attempt 0 or
+            across consecutive non-burst QuotaExhaustedErrors (attempts 0 and 1), sleeping 30s / 60s
+            transient backoff with zero quota_shed_tier{1,2}_total increments.
+        (b) Conversely, when before > shed.tail_budget (~47.5k > 40k within turn_distance <= 2),
+            non-burst QuotaExhaustedError DOES escalate Tier-1 no-op to Tier-2 pruning.
+        """
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            turns = [
+                ConversationTurn(turn=1, actor="user", action="message", thoughts="Triage event start"),
+                ConversationTurn(
+                    turn=2,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="lookup_journal",
+                    evidence="JOURNAL_DUMP_1_" + ("A" * 44000),  # ~11k tokens at turn_distance=2 (<=2)
+                    response_parts=[{"functionCall": {"name": "lookup_journal", "args": {"service_name": "payments"}}}],
+                ),
+                ConversationTurn(turn=3, actor="user", action="message", thoughts="Follow-up triage context"),
+                ConversationTurn(
+                    turn=4,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="consult_deep_memory",
+                    evidence="MEMORY_DUMP_2_" + ("B" * 40000),  # ~10k tokens at turn_distance=0 (<=2)
+                    response_parts=[{"functionCall": {"name": "consult_deep_memory", "args": {"query": "payments"}}}],
+                ),
+            ]
+            evidence = EventEvidence(display_text="Triage 4-turn", source_type="chat", domain="complicated")
+            event = EventDocument(
+                id="evt-triage-3turn",
+                source="chat",
+                service="payments",
+                status=EventStatus.ACTIVE,
+                brain_phase="triage",
+                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+                conversation=turns,
+            )
+
+            # Single non-burst QuotaExhaustedError on attempt 0
+            brain, bb = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("Quota exhausted: wait 12.0s"),
+                _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-triage-3turn", event) is True
+
+            calls = brain._adapter.generate_stream.call_args_list
+            assert len(calls) == 2
+            assert calls[1].kwargs["contents"] == calls[0].kwargs["contents"], (
+                "Non-burst QuotaExhaustedError within tail_budget must not escalate Tier-1 no-op to Tier-2 pruning"
+            )
+            _assert_wire_invariants(calls[1].kwargs["contents"], "evt-triage-3turn")
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [30.0]
+            assert _incr_keys(bb) == []
+
+            # (a) Consecutive non-burst QuotaExhaustedErrors (attempts 0 and 1) on same <=16k/<=40k Tier-1 no-op
+            # Wait: ~22k is > 16k! If tier1_done was latched True on a no-op, attempt 1 would hit Tier 2 and prune 22k!
+            # Verify consecutive non-burst QuotaExhaustedErrors on Tier-1 no-op within tail_budget skip Tier 2 on BOTH attempts:
+            brain_consec, bb_consec = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("Quota exhausted attempt 0"),
+                QuotaExhaustedError("Quota exhausted attempt 1"),
+                _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep_consec,
+            ):
+                assert await brain_consec._process_with_llm("evt-triage-3turn", event) is True
+
+            calls_consec = brain_consec._adapter.generate_stream.call_args_list
+            assert len(calls_consec) == 3
+            assert calls_consec[1].kwargs["contents"] == calls_consec[0].kwargs["contents"]
+            assert calls_consec[2].kwargs["contents"] == calls_consec[0].kwargs["contents"], (
+                "Consecutive non-burst QuotaExhaustedErrors on Tier-1 no-op within tail_budget must skip Tier 2 on both attempts"
+            )
+            assert [c.args[0] for c in mock_sleep_consec.await_args_list] == [30.0, 60.0]
+            assert _incr_keys(bb_consec) == []
+
+            # (b) Conversely, when before > shed.tail_budget (~47.5k > 40k within turn_distance <= 2),
+            # non-burst QuotaExhaustedError DOES escalate Tier-1 no-op to Tier-2 pruning:
+            heavy_turns = [
+                ConversationTurn(turn=1, actor="user", action="message", thoughts="Triage event start"),
+                ConversationTurn(
+                    turn=2,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="lookup_journal",
+                    evidence="JOURNAL_HEAVY_1_" + ("A" * 100000),  # ~25k tokens at turn_distance=2
+                    response_parts=[{"functionCall": {"name": "lookup_journal", "args": {"service_name": "payments"}}}],
+                ),
+                ConversationTurn(turn=3, actor="user", action="message", thoughts="Follow-up triage context"),
+                ConversationTurn(
+                    turn=4,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="consult_deep_memory",
+                    evidence="MEMORY_HEAVY_2_" + ("B" * 90000),  # ~22.5k tokens at turn_distance=0
+                    response_parts=[{"functionCall": {"name": "consult_deep_memory", "args": {"query": "payments"}}}],
+                ),
+            ]
+            heavy_event = EventDocument(
+                id="evt-triage-over-tail",
+                source="chat",
+                service="payments",
+                status=EventStatus.ACTIVE,
+                brain_phase="triage",
+                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+                conversation=heavy_turns,
+            )
+            brain_heavy, bb_heavy = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("Quota exhausted over tail_budget"),
+                _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep_heavy,
+            ):
+                assert await brain_heavy._process_with_llm("evt-triage-over-tail", heavy_event) is True
+
+            calls_heavy = brain_heavy._adapter.generate_stream.call_args_list
+            tokens_h0 = estimate_tokens(calls_heavy[0].kwargs["contents"])
+            tokens_h1 = estimate_tokens(calls_heavy[1].kwargs["contents"])
+            assert tokens_h0 > 40_000
+            assert tokens_h1 < tokens_h0, f"Over-tail-budget Tier-1 no-op must escalate to Tier 2: {tokens_h0} -> {tokens_h1}"
+            assert "darwin:flow:quota_shed_tier2_total" in _incr_keys(bb_heavy)
+            assert [c.args[0] for c in mock_sleep_heavy.await_args_list] == [30.0]
+
+    @pytest.mark.asyncio
+    async def test_t2_compact_triage_event_skips_non_burst_tier2_pruning_below_16k_floor(self, monkeypatch):
+        """T-2 (VMER-2368): Given a 6-turn compact triage event (<= 16,000 tokens after Tier-1 decay),
+        When consecutive non-burst QuotaExhaustedErrors occur on attempt 0 and attempt 1
+        followed by stream success on attempt 2,
+        Then attempt 0 runs Tier-1 decay (zero sleep, tier1 counter incremented once) and
+        attempt 1 skips Tier-2 destructive pruning (before <= 16,000), sleeping 60.0s transient
+        backoff with attempt 2 contents identical to attempt 1 contents and zero tier2 counter increment.
+        """
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            turns = [
+                ConversationTurn(turn=1, actor="user", action="message", thoughts="User turn 1"),
+                ConversationTurn(
+                    turn=2,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="run_bash",
+                    evidence="OLDER_TOOL_OUTPUT_" + ("A" * 16000),  # turn_distance=4 (>2), decays in Tier 1
+                    response_parts=[{"functionCall": {"name": "run_bash", "args": {"cmd": "step2"}}}],
+                ),
+                ConversationTurn(turn=3, actor="user", action="message", thoughts="User turn 3"),
+                ConversationTurn(
+                    turn=4,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="run_bash",
+                    evidence="RECENT_TOOL_4_" + ("B" * 16000),  # ~4k tokens at turn_distance=2 (<=2)
+                    response_parts=[{"functionCall": {"name": "run_bash", "args": {"cmd": "step4"}}}],
+                ),
+                ConversationTurn(turn=5, actor="user", action="message", thoughts="User turn 5"),
+                ConversationTurn(
+                    turn=6,
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="run_bash",
+                    evidence="RECENT_TOOL_6_" + ("C" * 16000),  # ~4k tokens at turn_distance=0 (<=2)
+                    response_parts=[{"functionCall": {"name": "run_bash", "args": {"cmd": "step6"}}}],
+                ),
+            ]
+            evidence = EventEvidence(display_text="Compact 6-turn triage", source_type="chat", domain="complicated")
+            event = EventDocument(
+                id="evt-compact-6turn",
+                source="chat",
+                service="payments",
+                status=EventStatus.ACTIVE,
+                brain_phase="triage",
+                event=EventInput(reason="test", evidence=evidence, timeDate="2026-01-01T00:00:00Z"),
+                conversation=turns,
+            )
+
+            brain, bb = _make_brain_for_shedding(_scripted_factory([
+                QuotaExhaustedError("Quota exhausted attempt 0"),
+                QuotaExhaustedError("Quota exhausted attempt 1"),
+                _fc_success_stream(),
+            ]))
+            with (
+                patch("src.agents.brain.random.random", return_value=0.0),
+                patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                assert await brain._process_with_llm("evt-compact-6turn", event) is True
+
+            calls = brain._adapter.generate_stream.call_args_list
+            assert len(calls) == 3
+            tokens_0 = estimate_tokens(calls[0].kwargs["contents"])
+            tokens_1 = estimate_tokens(calls[1].kwargs["contents"])
+            assert tokens_1 < tokens_0, f"Expected Tier-1 decay on attempt 0: {tokens_0} -> {tokens_1}"
+            assert tokens_1 <= 16_000, f"Precondition: post-Tier-1 tokens must be <= 16,000, got {tokens_1}"
+            _assert_wire_invariants(calls[1].kwargs["contents"], "evt-compact-6turn")
+            assert calls[2].kwargs["contents"] == calls[1].kwargs["contents"], (
+                "Compact prompt (<= 16,000 tokens) must skip non-burst Tier-2 destructive pruning on attempt 1"
+            )
+            assert [c.args[0] for c in mock_sleep.await_args_list] == [60.0]
+            assert _incr_keys(bb) == ["darwin:flow:quota_shed_tier1_total"]
 
 
 class TestQuotaShedGuards:
