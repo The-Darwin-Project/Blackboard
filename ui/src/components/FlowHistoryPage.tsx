@@ -98,7 +98,7 @@ export default function FlowHistoryPage() {
   }
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="h-full overflow-y-auto p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-text-primary">Flow Health</h2>
         <div className="flex gap-1">
@@ -117,6 +117,8 @@ export default function FlowHistoryPage() {
           ))}
         </div>
       </div>
+
+      <TpmUsagePanel snapshots={snapshots} />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <SparkCard title="Queue Depth" data={snapshots} dataKey="queue_depth" color="#3b82f6" />
@@ -147,8 +149,6 @@ export default function FlowHistoryPage() {
         <SparkCard title="Aligner Pending" data={snapshots} dataKey="aligner_pending" color="#EF7B4D" />
         <SparkCard title="Jenkins Pending" data={snapshots} dataKey="jenkins_pending" color="#D33833" />
       </div>
-
-      <TpmUsagePanel snapshots={snapshots} />
     </div>
   );
 }
