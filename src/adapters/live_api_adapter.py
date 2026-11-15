@@ -1516,7 +1516,7 @@ class LiveAPIAdapter:
         if not query.strip():
             return "Error: query required"
         query = _redact_pii(query.strip())[:500]
-        model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
+        model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-4-hydrogen")
         project = os.getenv("GCP_PROJECT", "")
         location = os.getenv("GCP_LOCATION", "global")
         try:
@@ -1524,15 +1524,18 @@ class LiveAPIAdapter:
             from google.genai import types
 
             client = genai.Client(vertexai=True, project=project, location=location)
+            config_kwargs: dict = {
+                "tools": [types.Tool(google_search=types.GoogleSearch())],
+                "temperature": 0.1,
+                "max_output_tokens": 2048,
+            }
+            if "gemini-4" in (model or "").lower():
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
             async with asyncio.timeout(30):
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=query,
-                    config=types.GenerateContentConfig(
-                        tools=[types.Tool(google_search=types.GoogleSearch())],
-                        temperature=0.1,
-                        max_output_tokens=2048,
-                    ),
+                    config=types.GenerateContentConfig(**config_kwargs),
                 )
             chunks = []
             if response.candidates:

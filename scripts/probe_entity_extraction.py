@@ -7,7 +7,7 @@
 """
 Probe: Validate entity extraction quality from archived events.
 
-Reads 5-10 archived events from Qdrant, runs Flash Lite entity extraction,
+Reads 5-10 archived events from Qdrant, runs gemini-4-hydrogen entity extraction,
 and inspects the resulting graph structure for quality.
 
 Usage:
@@ -105,7 +105,7 @@ async def run_probe():
         location=os.environ["GCP_LOCATION"],
     )
 
-    model = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-3.5-flash-lite")
+    model = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-4-hydrogen")
     print(f"Model: {model}")
     print(f"GCP_PROJECT: {os.environ.get('GCP_PROJECT')}")
 
@@ -148,14 +148,17 @@ async def run_probe():
 
         start = time.time()
         try:
+            config_kwargs = {
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+                "response_schema": EXTRACTION_SCHEMA,
+            }
+            if "gemini-4" in (model or "").lower():
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
             response = await client.aio.models.generate_content(
                 model=model,
                 contents=f"{EXTRACTION_PROMPT}\n\n---\n{summary_text}",
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=EXTRACTION_SCHEMA,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             elapsed = time.time() - start
             latencies.append(elapsed)

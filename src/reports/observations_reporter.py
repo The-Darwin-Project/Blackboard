@@ -63,14 +63,17 @@ async def _analyze_series(client, model: str, series: dict) -> str:
         f"Data sample ({len(sampled)} of {series['count']} points):\n{data_block}\n\n"
         f"{_SERIES_PROMPT}"
     )
+    config: dict = {"max_output_tokens": 2048, "temperature": 0.2}
+    if "gemini-4" in (model or "").lower():
+        config["thinking_config"] = {"thinking_level": "LOW"}
     async with asyncio.timeout(30):
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=model,
             contents=prompt,
-            config={"max_output_tokens": 512, "temperature": 0.2},
+            config=config,
         )
-    return response.text or ""
+    return text if (text := (response.text or "").strip()) else f"[Analysis unavailable for `{series['name']}`: empty LLM response]"
 
 
 async def _summarize(client, model: str, analyses: list[str], context: str) -> str:
@@ -79,12 +82,15 @@ async def _summarize(client, model: str, analyses: list[str], context: str) -> s
     if context:
         prompt += f"User context: {context}\n\n"
     prompt += _SUMMARY_PROMPT
+    config: dict = {"max_output_tokens": 4096, "temperature": 0.2}
+    if "gemini-4" in (model or "").lower():
+        config["thinking_config"] = {"thinking_level": "LOW"}
     async with asyncio.timeout(30):
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=model,
             contents=prompt,
-            config={"max_output_tokens": 1024, "temperature": 0.2},
+            config=config,
         )
     return response.text or ""
 
@@ -205,7 +211,7 @@ async def generate_report(
         else:
             analyses.append(r)
 
-    valid = [a for a in analyses if not a.startswith("[Analysis unavailable")]
+    valid = [a for a in analyses if a.strip() and not a.startswith("[Analysis unavailable")]
     try:
         summary = (
             await _summarize(client, model, valid, context)

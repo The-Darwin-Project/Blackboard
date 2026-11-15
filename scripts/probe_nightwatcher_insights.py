@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Pattern]: Probe script -- tests how the Nightwatcher LLM uses AI Insights data in clustering.
 # 2. [Constraint]: Uses real escalation data from live shifts API + real AI Insights data.
-# 3. [Pattern]: Runs the analysis + declare_clusters flow locally against Gemini Flash. No Smartsheet writes.
+# 3. [Pattern]: Runs the analysis + declare_clusters flow locally against gemini-4-argon. No Smartsheet writes.
 """
 Probe: Nightwatcher with AI Insights signal.
 
@@ -30,7 +30,7 @@ os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
 
 PROJECT = os.environ.get("GCP_PROJECT", "")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
-MODEL = os.environ.get("LLM_MODEL_NIGHTWATCHER", "gemini-3-flash-preview")
+MODEL = os.environ.get("LLM_MODEL_NIGHTWATCHER", "gemini-4-argon")
 
 DARWIN_URL = "https://darwin-blackboard-brain-darwin.apps.cnv2.engineering.redhat.com"
 INSIGHTS_URL = "https://ai-insights.apps.cnv2.engineering.redhat.com/ai-insights/api/insights"
@@ -194,7 +194,7 @@ async def run_probe(escalations, insights):
         temperature=0.3,
         max_output_tokens=8192,
         tools=[tool],
-        thinking_config=types.ThinkingConfig(thinking_budget=8192),
+        thinking_config=types.ThinkingConfig(thinking_level="MEDIUM") if "gemini-4" in MODEL.lower() else types.ThinkingConfig(thinking_budget=8192),
     )
 
     for label, include_insights in [("WITHOUT AI Insights", False), ("WITH AI Insights", True)]:
@@ -222,7 +222,7 @@ async def run_probe(escalations, insights):
                 temperature=0.3,
                 max_output_tokens=8192,
                 tools=[tool],
-                thinking_config=types.ThinkingConfig(thinking_budget=8192),
+                thinking_config=types.ThinkingConfig(thinking_level="MEDIUM") if "gemini-4" in MODEL.lower() else types.ThinkingConfig(thinking_budget=8192),
             ),
         )
         elapsed = round(time.time() - start, 1)

@@ -125,7 +125,7 @@ class Aligner:
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.7-flash")
+                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-4-argon")
                 
                 self._adapter = create_adapter("gemini", project, location, model_name)
                 logger.info(f"Aligner LLM adapter initialized: gemini/{model_name}")
@@ -435,17 +435,27 @@ class Aligner:
             """
             
             response = await adapter.generate(
-                system_prompt="", contents=prompt, max_output_tokens=1024,
-                thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
+                system_prompt="",
+                contents=prompt,
+                temperature=self.temperature,
+                max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ALIGNER", "10000")),
+                thinking_level=os.getenv("LLM_THINKING_ALIGNER") or "low",
             )
             from .llm import record_token_usage
             record_token_usage("aligner", response.usage)
             
             import json
-            if not response.text:
+            raw = (response.text or "").strip()
+            if not raw:
                 logger.warning("Aligner LLM returned empty response for filter config")
                 return self._parse_simple_filter(instruction)
-            data = json.loads(response.text.strip())
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip() if "\n" in raw else raw.strip("`").strip()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Aligner LLM returned invalid JSON for filter config ({e}), falling back to simple parser")
+                return self._parse_simple_filter(instruction)
             
             until = None
             if data.get("duration_minutes", 0) > 0:

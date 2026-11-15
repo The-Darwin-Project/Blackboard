@@ -191,7 +191,7 @@ async def refine_instructions(
         try:
             from ..agents.llm import create_adapter
 
-            model = os.getenv("LLM_MODEL_TIMEKEEPER", os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash-lite"))
+            model = os.getenv("LLM_MODEL_TIMEKEEPER", "gemini-4-hydrogen")
             adapter = create_adapter(
                 provider="gemini",
                 project=os.getenv("GCP_PROJECT", ""),
@@ -228,19 +228,25 @@ async def refine_instructions(
 
             temp = float(os.getenv("LLM_TEMPERATURE_TIMEKEEPER", "0.3"))
             max_tokens = int(os.getenv("LLM_MAX_TOKENS_TIMEKEEPER", "2048"))
+            thinking_level = os.getenv("LLM_THINKING_TIMEKEEPER") or "low"
 
-            response = await adapter.generate(
-                system_prompt=system_prompt,
-                contents=prompt,
-                temperature=temp,
-                max_output_tokens=max_tokens,
-            )
+            async with asyncio.timeout(float(os.getenv("TIMEKEEPER_REFINE_TIMEOUT_SEC", "30"))):
+                response = await adapter.generate(
+                    system_prompt=system_prompt,
+                    contents=prompt,
+                    temperature=temp,
+                    max_output_tokens=max_tokens,
+                    thinking_level=thinking_level,
+                )
             from src.agents.llm import record_token_usage
             record_token_usage("timekeeper", response.usage)
 
-            refined = response.text.strip()
+            refined = (response.text or "").strip()
             return RefineResponse(refined=refined, reasoning="")
 
+        except TimeoutError as e:
+            logger.warning("Refine endpoint timed out")
+            raise HTTPException(status_code=504, detail="LLM refine timed out") from e
         except Exception as e:
             logger.exception("Refine endpoint error")
             raise HTTPException(503, f"Refine unavailable: {e}") from e

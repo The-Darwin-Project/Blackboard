@@ -164,12 +164,12 @@ gcp:
       temperature: "1.5"
       maxOutputTokens: "65536"
     aligner:
-      model: "gemini-3.8-flash"
+      model: "gemini-4-argon"
       temperature: "0.3"
-      thinkingLevel: "high"
+      thinkingLevel: "low"
       maxOutputTokens: "10000"
     archivist:
-      model: "gemini-3.8-flash" # Event summarization for deep memory
+      model: "gemini-4-argon" # Event summarization for deep memory
       temperature: "0.4"
       thinkingLevel: "high"
       maxOutputTokens: "32000" # Gemini fallback only (_archive_event_fallback)
@@ -178,22 +178,24 @@ gcp:
     lessonExtractor:
       model: "claude-sonnet-5-5" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
-      model: "gemini-3.8-flash" # MR triage and plan generation
+      model: "gemini-4-argon" # MR triage and plan generation
       temperature: "0.3"
       thinkingLevel: "low"
       maxOutputTokens: "10000"
     timekeeper:
-      model: "gemini-3.5-flash-lite" # Instruction refinement (lightweight, fast)
+      model: "gemini-4-hydrogen" # Instruction refinement (lightweight, fast)
       temperature: "0.3"
+      thinkingLevel: "low"
       maxOutputTokens: "2048"
     nightwatcher:
-      model: "gemini-3.8-flash" # Shift consolidation (medium thinking for clustering)
+      model: "gemini-4-argon" # Shift consolidation (medium thinking for clustering)
       temperature: "0.5"
       thinkingLevel: "medium"
       maxOutputTokens: "16000"
     jenkinsObserver:
-      model: "gemini-3.5-flash-lite" # CI gating triage (lightweight, fast)
+      model: "gemini-4-hydrogen" # CI gating triage (lightweight, fast)
       temperature: "0.3"
+      thinkingLevel: "low"
       maxOutputTokens: "6144" # Raised from 4096 for Phase 1 narrative analysis (summary/probable_cause/signals/suggested_next_step) alongside per-job triage.
   tpmLimit: "3000000" # Vertex AI tokens-per-minute quota (GCP base-model cap is 4M; 3M leaves 1M headroom for sidecars). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
@@ -611,7 +613,7 @@ jenkinsObserver:
     retriggerCooldownSeconds: "21600" # 6h — one retrigger per job per cooldown window
   skillsCatalog:
     url: ""
-    skills: "" # Comma-separated skill slugs for observer Flash Lite triage. Production values in GitOps overlay.
+    skills: "" # Comma-separated skill slugs for observer gemini-4-hydrogen triage. Production values in GitOps overlay.
   releaseAi:
     url: ""
     email: "" # Forwarded-Email header value for Release AI RCA queries (RELEASE_AI_EMAIL)
@@ -628,7 +630,7 @@ idleTimeout:
 # Google Search Grounding (function call — isolated generateContent with grounding)
 # =============================================================================
 googleSearch:
-  model: "gemini-3.5-flash-lite" # Model for isolated grounded search calls
+  model: "gemini-4-hydrogen" # Model for isolated grounded search calls
 # =============================================================================
 # RAG Engine (Vertex AI RAG grounding — JARVIS MemoryCorpus only in this restore)
 # =============================================================================

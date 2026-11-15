@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-NAMER_MODEL = os.getenv("LLM_MODEL_EVENT_NAMER", "gemini-3.5-flash-lite")
+NAMER_MODEL = os.getenv("LLM_MODEL_EVENT_NAMER", "gemini-4-hydrogen")
 NAMER_TIMEOUT_SECONDS = 10.0
 NAMER_CONCURRENCY = int(os.getenv("EVENT_NAMER_CONCURRENCY", "4"))
 NAMER_MAX_PENDING = int(os.getenv("EVENT_NAMER_MAX_PENDING", "50"))  # backlog cap; excess events keep fallback title
@@ -64,7 +64,7 @@ async def generate_event_title(
         # Timeout bounds semaphore wait AND the LLM call, so bursts cannot queue unboundedly.
         async with asyncio.timeout(NAMER_TIMEOUT_SECONDS):
             async with _get_semaphore():
-                response = await get_adapter().generate(system_prompt=sys_prompt, contents=user_prompt)
+                response = await get_adapter().generate(system_prompt=sys_prompt, contents=user_prompt, max_output_tokens=256, thinking_level="low")
 
         # First visible line of the model output (extra lines are commentary), sanitized like user titles.
         line = next((t for ln in (response.text or "").splitlines() if (t := sanitize_title(ln).strip("\"'*` "))), "")

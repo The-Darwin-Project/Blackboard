@@ -133,6 +133,11 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_ARCHIVIST_DIGEST
+            - name: LLM_MODEL_LESSON_EXTRACTOR
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_LESSON_EXTRACTOR
             # AI Transparency & Compliance
             - name: DARWIN_CONTACT_EMAIL
               valueFrom:
@@ -400,6 +405,11 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_TIMEKEEPER
+            - name: LLM_THINKING_TIMEKEEPER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_TIMEKEEPER
             - name: LLM_MAX_TOKENS_TIMEKEEPER
               valueFrom:
                 configMapKeyRef:
@@ -599,6 +609,11 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_JENKINS_OBSERVER
+            - name: LLM_THINKING_JENKINS_OBSERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_JENKINS_OBSERVER
             - name: LLM_MAX_TOKENS_JENKINS_OBSERVER
               valueFrom:
                 configMapKeyRef:

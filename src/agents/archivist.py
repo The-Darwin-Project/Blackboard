@@ -73,7 +73,7 @@ KNOWLEDGE_COLLECTION = "darwin_knowledge"
 VALID_SCOPES = {"convention", "ownership", "historical", "relationship"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
-ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.7-flash")
+ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-4-argon")
 EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-5-5")
 # Separate output-token knobs per provider/call-shape (Goal 4, truncation-search-destroy):
 # LLM_MAX_TOKENS_ARCHIVIST stays Gemini-fallback-only (_archive_event_fallback).
@@ -520,7 +520,7 @@ class Archivist:
             system_prompt=SUMMARIZE_PROMPT,
             contents=conversation_text,
             temperature=float(os.getenv("LLM_TEMPERATURE_ARCHIVIST", "0.3")),
-            max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
+            max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "32000")),
             thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
         )
         from .llm import record_token_usage
@@ -1844,15 +1844,21 @@ class Archivist:
             contents=prompt_body,
             temperature=0.2,
             max_output_tokens=_ARCHIVIST_DIGEST_MAX_TOKENS,
+            thinking_level=os.getenv("LLM_THINKING_ARCHIVIST_DIGEST") or "low",
         )
+        if response.usage:
+            from .llm import record_token_usage
+            record_token_usage("archivist", response.usage)
 
-        raw = response.text.strip()
+        raw = (response.text or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
         try:
+            if not raw:
+                raise ValueError("Empty response from Archivist digest LLM")
             result = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             logger.warning("Field notes digest returned invalid JSON")
             return {"notes": len(notes), "attempted": 0, "stored": 0, "skipped": 0, "failed": 1}
 

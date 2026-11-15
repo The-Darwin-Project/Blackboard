@@ -1,6 +1,5 @@
 ---
 description: Headhunter agent -- GitLab todo poller, MR lifecycle automation, maintainer resolution
-alwaysApply: true
 globs: "**/headhunter*.py,**/headhunter_skills/**"
 alwaysApply: false
 ---
@@ -17,18 +16,18 @@ alwaysApply: false
 
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** Flash via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
+* **LLM:** gemini-4-argon via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
 * **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` queries the global WIP count via injected `Brain.count_global_wip(include_new=True)` (or local fallback), which subtracts `_waiting_for_user` events to free capacity for incoming work. Backs off when system is at capacity.
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
 ## LLM Analysis
 
-All MRs go through Flash Lite analysis with the system instruction from `headhunter_skills/gitlab-mr-triage.md` (loaded via `_load_gitlab_si()`, externalized skill file pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules).
+All MRs go through gemini-4-argon analysis with the system instruction from `headhunter_skills/gitlab-mr-triage.md` (loaded via `_load_gitlab_si()`, externalized skill file pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules).
 
 | Path | Trigger | How |
 |---|---|---|
-| **LLM Analysis** | All MRs | Flash reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. No input truncation — full description flows to Flash (1M+ context). Bot Instructions in the description are included as prompt context. Output controlled by `LLM_MAX_TOKENS_HEADHUNTER`. |
+| **LLM Analysis** | All MRs | gemini-4-argon reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. No input truncation — full description flows to gemini-4-argon (1M+ context). Bot Instructions in the description are included as prompt context. Output controlled by `LLM_MAX_TOKENS_HEADHUNTER`. |
 | **Emergency Fallback** | LLM unavailable | Inline `_emergency_plan()` produces COMPLICATED/developer plan. Safety net only. |
 
 ## Maintainer Resolution
@@ -117,7 +116,7 @@ headhunter:
 gcp:
   llm:
     headhunter:
-      model: "gemini-3.5-flash"
+      model: "gemini-4-argon"
       temperature: "0.3"
       thinkingLevel: "low"
       maxOutputTokens: "10000"
