@@ -468,8 +468,8 @@ class Archivist:
                 f"{summary.get('symptom', '')} "
                 f"{summary.get('root_cause', '')} "
                 f"{summary.get('fix_action', '')} "
-                f"{' '.join(summary.get('pattern_keywords', summary.get('keywords', [])))} "
-                f"{' '.join(summary.get('instance_keywords', []))} "
+                f"{' '.join(summary.get('pattern_keywords') or summary.get('keywords') or [])} "
+                f"{' '.join(summary.get('instance_keywords') or [])} "
                 f"{summary.get('outcome', '')}"
             )
             vector = await self._embed(embed_text)
@@ -485,7 +485,7 @@ class Archivist:
                 payload=summary,
             )
 
-            for fact in summary.get("reference_facts", []):
+            for fact in summary.get("reference_facts") or []:
                 try:
                     await self.store_knowledge(
                         topic=fact.get("topic", ""),
@@ -501,7 +501,7 @@ class Archivist:
             logger.info(
                 f"Archived event {event.id} -> Qdrant "
                 f"(service={event.service}, turns={len(event.conversation)}, "
-                f"facts={len(summary.get('reference_facts', []))})"
+                f"facts={len(summary.get('reference_facts') or [])})"
             )
 
             await self._extract_and_store_graph(summary, event.service, event.id)
@@ -564,8 +564,8 @@ class Archivist:
             f"{summary.get('symptom', '')} "
             f"{summary.get('root_cause', '')} "
             f"{summary.get('fix_action', '')} "
-            f"{' '.join(summary.get('pattern_keywords', summary.get('keywords', [])))} "
-            f"{' '.join(summary.get('instance_keywords', []))} "
+            f"{' '.join(summary.get('pattern_keywords') or summary.get('keywords') or [])} "
+            f"{' '.join(summary.get('instance_keywords') or [])} "
             f"{summary.get('outcome', '')}"
         )
         vector = await self._embed(embed_text)
@@ -581,7 +581,7 @@ class Archivist:
             payload=summary,
         )
 
-        for fact in summary.get("reference_facts", []):
+        for fact in summary.get("reference_facts") or []:
             try:
                 await self.store_knowledge(
                     topic=fact.get("topic", ""),
@@ -788,7 +788,7 @@ class Archivist:
                 logger.warning(f"correct_memory: event {event_id} not found in Qdrant")
                 return False
 
-            payload = existing[0].get("payload", {})
+            payload = existing[0].get("payload") or {}
             payload["root_cause"] = corrected_root_cause
             payload["fix_action"] = corrected_fix_action
             payload["corrected"] = True
@@ -799,8 +799,8 @@ class Archivist:
                 f"{payload.get('symptom', '')} "
                 f"{corrected_root_cause} "
                 f"{corrected_fix_action} "
-                f"{' '.join(payload.get('pattern_keywords', payload.get('keywords', [])))} "
-                f"{' '.join(payload.get('instance_keywords', []))} "
+                f"{' '.join(payload.get('pattern_keywords') or payload.get('keywords') or [])} "
+                f"{' '.join(payload.get('instance_keywords') or [])} "
                 f"{payload.get('procedures', '')} "
                 f"{payload.get('outcome', '')}"
             )
@@ -1322,8 +1322,8 @@ class Archivist:
 
             now = time.time()
             for r in results:
-                vu = r.get("payload", {}).get("valid_until")
-                if vu is not None and vu < now:
+                vu = (r.get("payload") or {}).get("valid_until")
+                if isinstance(vu, (int, float)) and not isinstance(vu, bool) and vu < now:
                     r["stale"] = True
 
             if self.pulse_port and results:

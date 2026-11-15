@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 if TYPE_CHECKING:
     from ..models import EventDocument
 
-from src.utils.jarvis_ack import is_jarvis_acknowledgment
+from src.utils.jarvis_ack import is_jarvis_acknowledgment, is_stabilization_wake
 from src.utils.turn_decay import DECAY_MIN_CHARS, DEFAULT_TURN_DECAY_DISTANCE  # noqa: F401 (re-exported)
 
 
@@ -149,6 +149,20 @@ def _pred_intermediate(ctx: GateContext) -> bool:
     return bool(ctx.context_flags.get("is_intermediate"))
 
 
+def _pred_idle_agent_wait(ctx: GateContext) -> bool:
+    """True when wait_for_agent has nothing to wait on: no intermediate state AND no live agent task.
+
+    ``has_active_agent_task`` is supplied by Brain (refreshed per batch FC so a select_agent earlier in the
+    same batch is visible). It is also True while an agent that already posted a non-message turn is still
+    running (is_intermediate=False in that window). An absent flag means "unknown" (hand-built contexts) and
+    fails open -- handle_wait_for_agent still rejects a wait with no active agent.
+    """
+    flags = ctx.context_flags
+    if flags.get("is_intermediate") or flags.get("has_active_agent_task"):
+        return False
+    return "has_active_agent_task" in flags
+
+
 def _pred_phase_escalate(ctx: GateContext) -> bool:
     return ctx.brain_phase != "escalate"
 
@@ -240,7 +254,7 @@ def _pred_jarvis_response(ctx: GateContext) -> bool:
         for t in reversed(ctx.conversation):
             if t.actor == "jarvis" and t.action in ("message", "insight"):
                 raw = str(getattr(t, "thoughts", None) or getattr(t, "result", None) or "")
-                if is_jarvis_acknowledgment(raw):
+                if is_jarvis_acknowledgment(raw) or is_stabilization_wake(raw):
                     break
                 has_unanswered = True
                 break
@@ -309,11 +323,11 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
                 if thoughts_str.startswith("PHASE: CLOSE"):
                     break
         
-        if actor == "jarvis":
+        if actor == "jarvis" and action == "message":
             thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
             result = t.get("result") if isinstance(t, dict) else getattr(t, "result", None)
             raw = str(thoughts or result or "")
-            if is_jarvis_acknowledgment(raw):
+            if is_jarvis_acknowledgment(raw) or is_stabilization_wake(raw):
                 continue
 
         if actor in ("jarvis", "user") and action == "message" and (not status_val or status_val in ("sent", "delivered")):
@@ -560,6 +574,10 @@ def _tools_jira_comment(_ctx: GateContext) -> set[str]:
     return {"comment_jira_issue", "transition_jira_issue"}
 
 
+def _tools_wait_for_agent(_ctx: GateContext) -> set[str]:
+    return {"wait_for_agent"}
+
+
 def _tools_kargo(_ctx: GateContext) -> set[str]:
     return {"refresh_kargo_context"}
 
@@ -673,6 +691,13 @@ def _tools_wait_user(_ctx: GateContext) -> set[str]:
 
 def _msg_defer_wake_iter0(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: first wake cycle. Prerequisite: verify state before re-deferring."
+
+
+def _msg_idle_agent_wait(tool: str, _ctx: GateContext) -> str:
+    return (
+        f"[GATE] {tool} unavailable. State: no agent task is running for this event. "
+        "Prerequisite: dispatch an agent with select_agent first."
+    )
 
 
 def _msg_intermediate(tool: str, _ctx: GateContext) -> str:
@@ -824,6 +849,14 @@ def _msg_hard_strip_wait_user(tool: str, ctx: GateContext) -> str:
 # ---------------------------------------------------------------------------
 
 GATE_REGISTRY: list[GateDefinition] = [
+    GateDefinition(
+        gate_id="IDLE_AGENT_WAIT",
+        mode="strip",
+        predicate=_pred_idle_agent_wait,
+        tools_affected=_tools_wait_for_agent,
+        message=_msg_idle_agent_wait,
+    ),
+
     GateDefinition(
         gate_id="DEFER_WAKE_ITER0",
         mode="strip",

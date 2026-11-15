@@ -13,6 +13,11 @@
 #     -- the pre-close `event` local is stale (missing the final closing turns) by the time Archivist runs.
 # 7c. [Pattern]: _create_reflex_pair(event_id, event_domain, event_service) threads event.service into
 #     ReflexSearcher for service-scoped knowledge-fact search (lessons stay unscoped).
+# 7d. [Constraint]: FRIDAY->JARVIS stabilization handoff state lives in _stabilization_waits (event_id -> start ts),
+#     SEPARATE from normal wait_for_jarvis state. A stabilization wait is ALSO mirrored into _waiting_for_jarvis so the
+#     scan/park guards treat the event as parked, but ONLY _stabilization_waits (pending_stabilization_event_ids) may drive
+#     the [STABILIZATION WAKE] rewrite/dedup bypass in LiveAPIAdapter. _clear_jarvis_wait clears both; _jarvis_recovery_rounds
+#     (round cap 2) is cleaned in _close_and_broadcast. Timer registration is re-validated after every await (token check).
 # 8. [Pattern]: _event_to_markdown is a backward-compat wrapper for src/utils/event_markdown.event_to_markdown.
 # 9. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
@@ -413,6 +418,7 @@ class ContextFlags(TypedDict, total=False):
     has_aligner_turns: bool
     has_slack_participant: bool
     is_intermediate: bool
+    has_active_agent_task: bool
     has_pending_huddle: bool
     event_domain: str
     domain_confidence: str
@@ -678,6 +684,15 @@ _TRANSIENT_STATUS_TOKENS = (
 # Structured HTTP status code sets
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
 _NON_TRANSIENT_STATUS_CODES = frozenset({400, 401, 403, 404})
+
+# Stream-timeout error phrases (see LLMStream*TimeoutError messages) that are transient but carry no status token.
+_TRANSIENT_STREAM_MARKERS = ("Server disconnected", "TTFB timed out", "inter-chunk timed out")
+
+# FRIDAY->JARVIS stabilization handoff tuning (see ai-rules 7d).
+_STABILIZATION_MAX_ROUNDS = 2
+_STABILIZATION_TELEMETRY_INTERVAL_S = 45.0
+_STABILIZATION_HANDOFF_TIMEOUT_S = 180.0
+_STABILIZATION_FALLBACK_TIMEOUT_S = 60.0
 
 _ERROR_TEXT_MAX = 300
 
@@ -949,8 +964,12 @@ class _BrainToolContext:
     def clear_jarvis_wait(self, eid: str) -> None:
         self._b._clear_jarvis_wait(eid)
 
+    def get_system_stability_snapshot(self) -> dict:
+        """Return hexagonal system stability metrics (Step 4)."""
+        return self._b.get_system_stability_snapshot()
+
     def has_jarvis_waiters(self) -> bool:
-        return bool(self._b._waiting_for_jarvis)
+        return self._b.has_jarvis_waiters()
 
     def get_active_meta_event_id(self) -> str | None:
         return self._b._active_meta_event_id
@@ -1178,7 +1197,9 @@ class Brain:
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
-        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge timer task
+        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge/stabilization timer task
+        self._stabilization_waits: dict[str, float] = {}  # event_id -> handoff token (SEPARATE from normal waits)
+        self._jarvis_recovery_rounds: dict[str, int] = {}  # event_id -> stabilization handoff rounds used
         self._jarvis_wait_count: dict[str, int] = {}  # event_id -> escalation counter
         self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
@@ -1971,6 +1992,9 @@ class Brain:
             context_flags = await self._extract_context_flags(
                 event, is_intermediate=is_intermediate, skip_kg=True,
             )
+            # Live-worker signal for the IDLE_AGENT_WAIT gate (is_intermediate is False while a worker that already
+            # posted a non-message turn keeps running). Set here, like is_defer_wakeup, so the flag is always present.
+            context_flags["has_active_agent_task"] = self._has_active_agent_task(event_id)
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
@@ -2616,10 +2640,16 @@ class Brain:
                         event = await self.blackboard.get_event(event_id)
                         from .tool_gates import evaluate_gates, build_gate_context
                         brain_phase = _resolve_phase(event.brain_phase)
+                        # FC[0] (e.g. select_agent) may have just started a worker; refresh the live-agent flag so
+                        # IDLE_AGENT_WAIT does not strip a batched wait_for_agent using the pre-dispatch snapshot.
+                        batch_flags = {
+                            **context_flags,
+                            "has_active_agent_task": self._has_active_agent_task(event_id),
+                        }
                         gate_ctx = build_gate_context(
                             event=event,
                             brain_phase=brain_phase,
-                            context_flags=context_flags,
+                            context_flags=batch_flags,
                             is_defer_wake=is_defer_wake,
                             iteration=iteration,
                             jarvis_already_waiting=event_id in self._waiting_for_jarvis,
@@ -4705,10 +4735,11 @@ class Brain:
             return
 
     def _clear_jarvis_wait(self, event_id: str) -> None:
-        """Clear wait_for_jarvis state and cancel the nudge timer."""
+        """Clear wait-for-JARVIS state and cancel its nudge/stabilization timer."""
         self._waiting_for_jarvis.pop(event_id, None)
+        self._stabilization_waits.pop(event_id, None)
         task = self._jarvis_wait_tasks.pop(event_id, None)
-        if task and not task.done():
+        if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
     def _get_slack_channel(self):
@@ -5855,9 +5886,30 @@ class Brain:
         """Timestamp of last processing for this event. Returns current time if unknown."""
         return self._last_processed.get(event_id, time.time())
 
+    def get_system_stability_snapshot(self) -> dict:
+        """Return hexagonal system stability metrics (Step 4)."""
+        from .llm import get_quota_tracker
+        tracker = get_quota_tracker()
+        stats = tracker.get_stats() if tracker else {}
+        active_wip = len([t for t in self._active_tasks.values() if not t.done()]) if hasattr(self, "_active_tasks") else 0
+        return {
+            "tokens_used_60s": stats.get("tokens_used_60s", 0),
+            "tpm_limit": stats.get("tpm_limit", 0),
+            "tokens_remaining": stats.get("tokens_remaining", 0),
+            "utilization_pct": stats.get("utilization_pct", 0.0),
+            "active_reservations": stats.get("active_reservations", 0),
+            "high_priority_waiters": stats.get("high_priority_waiters", 0),
+            "pending_jarvis_events": self.pending_jarvis_event_ids(),
+            "active_wip": active_wip,
+        }
+
     def has_jarvis_waiters(self) -> bool:
-        """True if any event is currently waiting for JARVIS."""
-        return bool(self._waiting_for_jarvis)
+        """True if any event is in an ordinary wait_for_jarvis wait.
+
+        Stabilization handoffs are excluded: they are FRIDAY->JARVIS watches that last up to 180s, and
+        counting them would make JARVIS's create_system_review fail with "FRIDAY is waiting for your response".
+        """
+        return any(eid not in self._stabilization_waits for eid in self._waiting_for_jarvis)
 
     def pending_jarvis_event_ids(self) -> list[str]:
         """Event IDs currently waiting for JARVIS response."""
@@ -5970,6 +6022,165 @@ class Brain:
             except Exception as e:
                 logger.warning(f"Broadcast target failed: {e}")
 
+    @staticmethod
+    def _is_transient_llm_error_turn(turn: "ConversationTurn | dict | None") -> bool:
+        """True if ``turn`` is a brain.error turn whose text describes a transient LLM/quota failure.
+
+        Reuses the module-level transient classifiers (_TRANSIENT_STATUS_TOKENS, bounded
+        _TRANSIENT_HTTP_CODE_RE, _NON_TRANSIENT_CLIENT_ERR_RE) so bare "429"/"503" substrings inside
+        token counts, durations or event ids do not match. Accepts ConversationTurn objects or dicts.
+        """
+        if not turn:
+            return False
+        if isinstance(turn, dict):
+            actor, action, thoughts = turn.get("actor"), turn.get("action"), turn.get("thoughts")
+        else:
+            actor, action, thoughts = getattr(turn, "actor", None), getattr(turn, "action", None), getattr(turn, "thoughts", None)
+        if actor != "brain" or action != "error":
+            return False
+        text = str(thoughts or "")
+        if not text:
+            return False
+        if "Quota exhausted" in text:
+            # A single request larger than the burst limit is never fixed by waiting for stability.
+            return "exceeds the burst limit" not in text
+        if _NON_TRANSIENT_CLIENT_ERR_RE.search(text):
+            return False
+        if any(token in text for token in _TRANSIENT_STATUS_TOKENS):
+            return True
+        if any(marker in text for marker in _TRANSIENT_STREAM_MARKERS):
+            return True
+        return bool(_TRANSIENT_HTTP_CODE_RE.search(text))
+
+    def pending_stabilization_event_ids(self) -> list[str]:
+        """Events in an active FRIDAY->JARVIS stabilization handoff (excludes normal wait_for_jarvis waits)."""
+        return list(self._stabilization_waits.keys())
+
+    async def _send_stability_telemetry(self, event_id: str) -> None:
+        """Best-effort telemetry tick to JARVIS. Never raises (CancelledError excepted)."""
+        send = getattr(self._live_adapter, "send_stability_telemetry", None)
+        if send is None:
+            return
+        try:
+            await send(event_id, self.get_system_stability_snapshot())
+        except Exception as e:
+            logger.warning("Stability telemetry delivery failed for %s (non-fatal): %s", event_id, e)
+
+    async def _jarvis_stabilization_loop(
+        self, event_id: str, timeout_s: float = _STABILIZATION_HANDOFF_TIMEOUT_S,
+    ) -> None:
+        """Telemetry ticker + TTL for one stabilization handoff.
+
+        Exits silently when the wait is cleared early (JARVIS wake / close / cancel). Only a genuine
+        timeout (or an unexpected internal error) clears the wait, appends a defer turn and re-enqueues.
+        """
+        me = asyncio.current_task()
+        exit_reason: str | None = None  # "timeout" | "error"; None = early wake / cancel (nothing to do)
+        owns_wait = False
+        try:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                if self._jarvis_wait_tasks.get(event_id) is not me or event_id not in self._stabilization_waits:
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    exit_reason = "timeout"
+                    break
+                await asyncio.sleep(min(_STABILIZATION_TELEMETRY_INTERVAL_S, remaining))
+                if self._jarvis_wait_tasks.get(event_id) is not me or event_id not in self._stabilization_waits:
+                    return
+                if deadline - time.monotonic() <= 0:
+                    exit_reason = "timeout"
+                    break
+                await self._send_stability_telemetry(event_id)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("Stabilization loop for %s failed unexpectedly: %s", event_id, e, exc_info=True)
+            exit_reason = "error"
+        finally:
+            # Synchronous cleanup (no await): only the task that still owns the registry entry may clear it,
+            # so a stale loop never clobbers a newer round's wait.
+            if self._jarvis_wait_tasks.get(event_id) is me:
+                owns_wait = True
+                self._jarvis_wait_tasks.pop(event_id, None)
+                if exit_reason is not None:
+                    self._stabilization_waits.pop(event_id, None)
+                    self._waiting_for_jarvis.pop(event_id, None)
+
+        if exit_reason is None or not owns_wait:
+            return
+
+        if exit_reason == "timeout":
+            note = f"JARVIS stabilization watch window elapsed ({timeout_s:g}s); resuming event evaluation after cooldown."
+        else:
+            note = "JARVIS stabilization watch aborted after an internal error; resuming event evaluation."
+        wake_turn = ConversationTurn(turn=0, actor="dispatcher", action="defer", thoughts=note)
+        try:
+            assigned = await self._append_and_broadcast(event_id, wake_turn)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("Stabilization TTL wake append failed for %s: %s", event_id, e)
+            assigned = -1  # persistence failed, but the event must still be re-evaluated
+        if assigned == 0:
+            logger.info("Stabilization wake for %s skipped: event missing or closed", event_id)
+            return
+        self.enqueue_for_processing(event_id)
+
+    async def _handoff_transient_error_to_jarvis(self, event_id: str, summary: str, snapshot: dict) -> bool:
+        """Park an event in a bounded JARVIS stabilization watch instead of escalating to a human.
+
+        Returns True when the scan must NOT escalate this cycle (handoff in place, or the event is
+        gone); False when the round cap (_STABILIZATION_MAX_ROUNDS) is exhausted and the caller
+        should fall through to normal human escalation.
+        """
+        rounds = self._jarvis_recovery_rounds.get(event_id, 0) + 1
+        if rounds > _STABILIZATION_MAX_ROUNDS:
+            return False
+
+        wait_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="wait",
+            waitingFor="jarvis",
+            thoughts=(
+                f"Transient LLM/quota saturation detected ({summary}). "
+                f"Handing off to JARVIS stabilization watch (round {rounds}/{_STABILIZATION_MAX_ROUNDS})."
+            ),
+        )
+        try:
+            assigned = await self._append_and_broadcast(event_id, wait_turn)
+        except Exception as e:
+            logger.warning("Stabilization handoff append failed for %s: %s", event_id, e)
+            return False
+        if assigned == 0:
+            logger.info("Stabilization handoff skipped for %s: event missing or closed", event_id)
+            return True
+
+        # Register the wait BEFORE the peer is told, so a fast [STABILIZATION WAKE] reply is recognised.
+        self._jarvis_recovery_rounds[event_id] = rounds
+        token = time.time()
+        self._clear_jarvis_wait(event_id)  # drop any previous timer/wait for this event
+        self._waiting_for_jarvis[event_id] = token
+        self._stabilization_waits[event_id] = token
+
+        handed_off = False
+        try:
+            adapter = self._live_adapter
+            if adapter is not None and adapter.is_operational_peer_ready():
+                handed_off = bool(await adapter.request_stabilization_watch(event_id, summary, snapshot))
+        except Exception as e:
+            logger.warning("Stabilization watch request failed for %s (60s fallback): %s", event_id, e)
+        finally:
+            # Re-validate after the await: a fast reply, close or newer round may have replaced our wait.
+            if self._stabilization_waits.get(event_id) == token and event_id not in self._jarvis_wait_tasks:
+                timeout_s = _STABILIZATION_HANDOFF_TIMEOUT_S if handed_off else _STABILIZATION_FALLBACK_TIMEOUT_S
+                self._jarvis_wait_tasks[event_id] = asyncio.create_task(
+                    self._jarvis_stabilization_loop(event_id, timeout_s=timeout_s)
+                )
+        return True
+
     async def _escalate_to_human(
         self, event_id: str, event: EventDocument, nudge_count: int, idle_seconds: float,
     ) -> None:
@@ -6029,6 +6240,11 @@ class Brain:
         await self._append_and_broadcast(event_id, wait_turn)
         self._waiting_for_user[event_id] = time.time()
         logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
+
+    def _has_active_agent_task(self, event_id: str) -> bool:
+        """True if a (non-parallel) agent worker task is currently running for this event."""
+        task = self._active_tasks.get(event_id)
+        return task is not None and not task.done()
 
     def _escalation_blocked(self, event_id: str) -> bool:
         """True if a worker task or the per-event lock became active since the scan loaded the event.
@@ -6161,6 +6377,7 @@ class Brain:
         self._waiting_for_agent.pop(event_id, None)
         self._clear_jarvis_wait(event_id)
         self._jarvis_wait_count.pop(event_id, None)
+        self._jarvis_recovery_rounds.pop(event_id, None)
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._orphan_last_attempt.pop(event_id, None)
@@ -7060,9 +7277,19 @@ class Brain:
             if trailing_errors > 0:
                 if trailing_errors >= 3:
                     if eid not in self._escalated_error_events:
+                        # Re-check right before acting: a worker/lock may have become active across the scan's awaits.
                         if self._escalation_blocked(eid):
                             logger.debug(f"Scan: skip error escalation for {eid} (worker/lock active)")
                             continue
+                        if (
+                            event.source not in ("chat", "slack", "jarvis")
+                            and all(self._is_transient_llm_error_turn(t) for t in event.conversation[-trailing_errors:])
+                        ):
+                            summary = f"Event {eid} halted with {trailing_errors} transient errors."
+                            if await self._handoff_transient_error_to_jarvis(
+                                eid, summary, self.get_system_stability_snapshot(),
+                            ):
+                                continue
                         now = time.time()
                         last_retry = self._last_error_retry.get(eid, 0.0)
                         if last_retry > 0.0 and (now - last_retry < 60.0):

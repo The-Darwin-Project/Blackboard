@@ -63,6 +63,8 @@ graph TD
     POST_ESC -->|"automated: incident staged"| CLOSE
     POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]
     POST_ESC -->|"CHAOTIC stabilized"| RECLASS
+    POST_ESC -->|"transient infra/quota cleared, work unexecuted"| DISPATCH
+    POST_ESC -->|"transient infra/quota cleared, verify pending"| VERIFY
 
     CLOSE["CLOSE: wrap up"]
 ```
@@ -136,7 +138,9 @@ Do not transition to VERIFY while an agent dispatch is still running.
 
 **Agent wait discipline:** After dispatching an agent, call wait_for_agent ONCE
 to park. If the agent is still running when you wake, that is the signal to
-defer — not to call wait_for_agent again. Repeated wait_for_agent calls without
+defer — not to call wait_for_agent again. On wake from a deferral, if the agent's
+terminal result turn is already in the conversation, evaluate it directly rather
+than calling wait_for_agent. Repeated wait_for_agent calls without
 intervening evidence create pulse noise and conversation bloat. The pattern is:
 dispatch → wait_for_agent (once) → agent delivers → process result. If the
 agent needs more time than expected, defer with a calibrated interval rather
@@ -216,17 +220,19 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 ## After Escalation
 
-- **Automated events:** CLOSE. Incident is an offline artifact for business hours.
-- **FRIDAY needs input:** request user approval after escalating. Human responds
-  via dashboard or chat. If event closes before reply, follow-up event created.
-- **Interrupted or check-in-resumed escalation:** Stream interruptions, quota backpressure,
+- **Automated events**: Enter close. The escalation itself is the final outcome for this cycle. The system relies on humans to unblock.
+- **FRIDAY needs input**: Enter close if blocking, or defer if the system should re-verify on an interval while waiting for the human. Do not park indefinitely.
+- **Interrupted or check-in-resumed escalation**: Stream interruptions, quota backpressure,
   or automated check-in cascades can leave an automated event in escalation midway through
   outbound reporting or without a post-wake state measurement. Check conversation history
   first: when incident staging and maintainer notification are already recorded, advance
   directly to close so outbound alerts remain single-delivery; when escalation followed an
   automated check-in cascade without a post-wake external state measurement, refresh live
   repository or promotion state before staging an incident — if the upstream pipeline or
-  merge already succeeded, complete verification and close.
+  merge already succeeded, complete verification and close. If a user or system event
+  interrupts an escalation that has not yet recorded incident staging, re-enter triage or
+  dispatch depending on the payload.
+- **Transient infrastructure or quota saturation cleared**: If escalation triggers single-delivery stabilization watch and the external transient limitation clears, domain work may remain unexecuted. Re-enter dispatch if execution is required, or verify if checking live repository or promotion state is needed.
 
 ## Close Phase Constraint
 

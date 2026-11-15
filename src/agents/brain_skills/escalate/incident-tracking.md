@@ -180,9 +180,13 @@ If no proven fix exists, omit this section.
 | `priority` | Normal (P3/P4): first occurrence, no blast radius. Major (P2): persistent after retest, blocks one component. Critical/Blocker (P1): affects multiple components or versions, production outage. |
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |
 
-### Mandatory Maintainer Notification for P1/P2 Incidents
+### Maintainer Notification (P1 and CHAOTIC Only)
 
-For any incident classified as Critical/Blocker (P1) or Major (P2), you MUST issue a maintainer notification ping via the chat/slack tool immediately after filing the incident. Do not rely solely on the Jira/incident ticket.
+For an incident classified as Critical/Blocker (P1), or filed while stabilizing a CHAOTIC-domain event, you MUST ping the maintainers with `notify_user_slack` immediately after filing the incident. Do not rely solely on the Jira/incident ticket.
+
+Major (P2) and lower (P3/P4) incidents are delivered by `report_incident` alone: Nightwatcher owns batch delivery, so a per-incident Slack ping only adds noise. This matches `always/01-function-rules.md` and `close/when-to-close.md`.
+
+Direct synchronous human-action requests are separate from incident priority and still use `notify_user_slack`: a pending `request_user_approval`, a green MR blocked on a mandatory human merge, or an explicit user request to be messaged.
 
 Include the event id in every output: incident summary, maintainer notifications, and close reason.
 

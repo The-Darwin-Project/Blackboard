@@ -9,7 +9,7 @@
 """
 Generate brain_skills/always/phase-tool-map.md from GATE_REGISTRY.
 
-Produces a navigation skill with Mermaid diagram, 30-gate table, skill pointers,
+Produces a navigation skill with Mermaid diagram, 31-gate table, skill pointers,
 and behavioral annotations — derived from the single source of truth in tool_gates.py.
 """
 from __future__ import annotations
@@ -52,6 +52,7 @@ _DOMAIN_OODA_MAP: dict[str, tuple[str, str]] = {
 }
 
 _CONDITION_SUMMARIES: dict[str, str] = {
+    "IDLE_AGENT_WAIT": "no running agent task (neither is_intermediate nor has_active_agent_task)",
     "DISPATCH_DEFER_GATE": "dispatch phase without dispatcher backpressure",
     "DEFER_WAKE_ITER0": "first cycle after defer wake",
     "INTERMEDIATE": "agent actively working (is_intermediate flag)",
@@ -112,8 +113,8 @@ _MERMAID_DIAGRAM = (
     "integration actions<br/>"
     "\u2014 NO: escalate]\n"
     "        ESCALATE[ESCALATE<br/>incident reporting, user notification,<br/>"
-    "closure<br/>"
-    "\u2014 NO: dispatch, defer]\n"
+    "closure, transient recovery to dispatch/verify<br/>"
+    "\u2014 NO: direct dispatch in escalate]\n"
     "        CLOSE[CLOSE<br/>closure, user notification,<br/>"
     "result delivery<br/>"
     "\u2014 NO: observations, dispatch]\n"

@@ -141,7 +141,9 @@ for classification.
 
 Call `review_notes` during triage to check what knowledge has been captured.
 Notes complement deep memory — they capture recent, not-yet-digested knowledge
-that may not have been archived yet.
+that may not have been archived yet. Call `review_notes` before `take_note` as well:
+extending or correcting an existing note keeps the shared notebook compact, while a
+duplicate dilutes the signal loaded into every concurrent event.
 
 ## Learning Loop
 

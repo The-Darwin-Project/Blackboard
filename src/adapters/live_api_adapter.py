@@ -9,9 +9,15 @@
 # 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only send_event_message reaches her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
-# 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays
-#     active event context via _replay_pending_context, then sends SESSION_STARTUP_PROTOCOL
-#     directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
+# 8b. [Pattern]: _try_reconnect clears ordinary wait_for_jarvis waits (stale after session loss) but PRESERVES active
+#     stabilization watches, and replays active events plus events
+#     in a stabilization handoff (Brain.pending_stabilization_event_ids) via _replay_pending_context, then sends
+#     SESSION_STARTUP_PROTOCOL directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
+# 8c. [Constraint]: [STABILIZATION WAKE] is a trusted marker. send_event_message adds it (and bypasses content dedup) ONLY
+#     while Brain.pending_stabilization_event_ids() contains the event; otherwise any leading marker is stripped. Normal
+#     wait_for_jarvis waits (pending_jarvis_event_ids) never trigger the rewrite.
+# 8d. [Gotcha]: Periodic stability ticks go through send_stability_telemetry (NOT receive_brain_response, which arms
+#     _awaiting_jarvis_reply and appends a "MUST call send_event_message" reply demand).
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
@@ -71,6 +77,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -86,6 +93,11 @@ from ..agents.jarvis_instructions import (
 from ..memory.pulse import PulseBatch
 from ..models import _resolve_phase
 from ..utils import redact_pii as _redact_pii
+from ..utils.jarvis_ack import (
+    STABILIZATION_WAKE_PREFIX,
+    is_stabilization_wake,
+    strip_stabilization_wake_prefix,
+)
 
 if TYPE_CHECKING:
     from ..agents.archivist import Archivist
@@ -136,6 +148,9 @@ _REVIEW_REFS = _build_skill_refs(["proactive-review", "proactive-review-constrai
 _REPORT_REFS = _build_skill_refs(["shift-report"])
 _RESUME_REFS = _build_skill_refs(["shared-context", "darwin-ecosystem"])
 
+# Overall bound for connect+send of a stabilization handoff prompt (seconds).
+_STABILIZATION_WATCH_TIMEOUT_S = 20.0
+
 
 async def _is_event_closed_or_missing(blackboard: Any, event_id: str) -> bool:
     """Return True if the event does not exist or has a closed/resolved status."""
@@ -156,6 +171,17 @@ async def _is_event_closed_or_missing(blackboard: Any, event_id: str) -> bool:
     except Exception as exc:
         logger.warning("Failed to verify event %s status: %s", event_id, exc)
         return True
+
+
+def _safe_score(val: object) -> float:
+    """Coerce a Qdrant payload score to a finite float; bool/None/non-numeric/nan/inf -> 0.0."""
+    if isinstance(val, bool) or val is None:
+        return 0.0
+    try:
+        fval = float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return fval if math.isfinite(fval) else 0.0
 
 
 class LiveAPIAdapter:
@@ -548,7 +574,7 @@ class LiveAPIAdapter:
             lessons = await self._archivist.list_lessons(limit=500)
             for p in lessons:
                 nid = f"lesson:{p.get('id', '')}"
-                payload = p.get("payload", {})
+                payload = p.get("payload") or {}
                 title = payload.get("title", "")
                 channel = payload.get("channel", "external")
                 if title:
@@ -556,7 +582,7 @@ class LiveAPIAdapter:
             memories = await self._archivist.list_memories(limit=500)
             for p in memories:
                 nid = f"memory:{p.get('id', '')}"
-                payload = p.get("payload", {})
+                payload = p.get("payload") or {}
                 symptom = payload.get("symptom", "")
                 service = payload.get("service", "")
                 if symptom:
@@ -565,7 +591,7 @@ class LiveAPIAdapter:
                 knowledge = await self._archivist.list_knowledge(limit=500)
                 for p in knowledge:
                     nid = f"knowledge:{p.get('id', '')}"
-                    payload = p.get("payload", {})
+                    payload = p.get("payload") or {}
                     topic = payload.get("topic", "")
                     scope = payload.get("scope", "")
                     if topic:
@@ -931,6 +957,11 @@ class LiveAPIAdapter:
             async with asyncio.timeout(getattr(self, "_tool_timeout", 60.0)):
                 if name == "list_active_events":
                     return await self._tool_list_active_events()
+                elif name == "check_system_stability":
+                    brain = getattr(self, "_brain", None)
+                    if brain and hasattr(brain, "get_system_stability_snapshot"):
+                        return json.dumps(brain.get_system_stability_snapshot())
+                    return "{}"
                 elif name == "view_event_blackboard":
                     return await self._tool_view_event_blackboard(args.get("event_id", ""))
                 elif name == "read_event_turns":
@@ -1180,7 +1211,7 @@ class LiveAPIAdapter:
             lesson = await self._archivist.get_lesson(nid)
             if not lesson:
                 return f"Lesson {nid} not found"
-            payload = lesson.get("payload", {})
+            payload = lesson.get("payload") or {}
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_lessons\n"
@@ -1195,7 +1226,7 @@ class LiveAPIAdapter:
             memory = await self._archivist.get_memory(nid)
             if not memory:
                 return f"Memory {nid} not found"
-            payload = memory.get("payload", {})
+            payload = memory.get("payload") or {}
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_events\n"
@@ -1212,8 +1243,9 @@ class LiveAPIAdapter:
             fact = await self._archivist.get_knowledge(nid)
             if not fact:
                 return f"Knowledge {nid} not found"
-            payload = fact.get("payload", {})
-            stale = " [STALE]" if payload.get("valid_until") and payload["valid_until"] < time.time() else ""
+            payload = fact.get("payload") or {}
+            vu = payload.get("valid_until")
+            stale = " [STALE]" if isinstance(vu, (int, float)) and not isinstance(vu, bool) and vu < time.time() else ""
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_knowledge\n"
@@ -1239,27 +1271,27 @@ class LiveAPIAdapter:
         if knowledge:
             lines.append("\n### Reference Facts")
             for k in knowledge:
-                p = k.get("payload", {})
+                p = k.get("payload") or {}
                 stale = " [STALE]" if k.get("stale") else ""
                 lines.append(
-                    f"- [{k.get('score', 0):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
+                    f"- [{_safe_score(k.get('score')):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
                     f"{p.get('fact', '?')}{stale}"
                 )
         if memories:
             lines.append("\n### Past Events")
             for m in memories:
-                p = m.get("payload", {})
+                p = m.get("payload") or {}
                 lines.append(
-                    f"- [{m.get('score', 0):.2f}] {p.get('service', '?')}: "
+                    f"- [{_safe_score(m.get('score')):.2f}] {p.get('service', '?')}: "
                     f"{p.get('symptom', '?')} → {p.get('root_cause', '?')} "
                     f"({p.get('outcome', '?')})"
                 )
         if lessons:
             lines.append("\n### Lessons")
             for ls in lessons:
-                p = ls.get("payload", {})
+                p = ls.get("payload") or {}
                 lines.append(
-                    f"- [{ls.get('score', 0):.2f}] {p.get('title', '?')}: "
+                    f"- [{_safe_score(ls.get('score')):.2f}] {p.get('title', '?')}: "
                     f"{p.get('pattern', '?')}"
                 )
         if not knowledge and not memories and not lessons:
@@ -1372,8 +1404,16 @@ class LiveAPIAdapter:
         # Re-enable if JARVIS spams: rate_err = await self._check_rate_limit(event_id, current_turn)
         # if rate_err: return rate_err
 
-        if await self._check_content_dedup(event_id, message):
-            return f"Blocked: identical message already sent for {event_id} within the last hour."
+        if self._is_stabilization_waiter(event_id):
+            # Active FRIDAY->JARVIS stabilization handoff: the wake must reach FRIDAY even if its text repeats.
+            if not is_stabilization_wake(message):
+                message = f"{STABILIZATION_WAKE_PREFIX} {message.strip()}"
+        else:
+            # Normal flows: the marker is trusted only during a stabilization handoff, so never persist a spoofed one.
+            if is_stabilization_wake(message):
+                message = strip_stabilization_wake_prefix(message) or "Stabilization wake received with no active stabilization watch."
+            if await self._check_content_dedup(event_id, message):
+                return f"Blocked: identical message already sent for {event_id} within the last hour."
 
         await self._record_intervention(event_id, current_turn)
 
@@ -1734,8 +1774,9 @@ class LiveAPIAdapter:
         audit_lines: list[str] = []
         audit_event_ids: list[str] = []
 
+        brain = getattr(self, "_brain", None)
         for eid in non_jarvis:
-            if self._brain.is_task_running(eid):
+            if brain and hasattr(brain, "is_task_running") and brain.is_task_running(eid):
                 continue
             last_processed = self._brain.last_processed_time(eid)
             silence = now - last_processed
@@ -2126,15 +2167,32 @@ class LiveAPIAdapter:
                 try:
                     await self._connect()
                     if self._session:
-                        if self._brain:
-                            for eid in self._brain.pending_jarvis_event_ids():
-                                self._brain.clear_jarvis_wait(eid)
-                            logger.info("Cortex reconnect: cleared stale JARVIS wait states")
+                        self._clear_non_stabilization_jarvis_waits()
                         await self._replay_pending_context()
                         return
                 except Exception as e:
                     logger.warning("Cortex reconnect failed: %s", e)
         logger.info("Cortex: no recent activity, staying idle until next pulse")
+
+    def _clear_non_stabilization_jarvis_waits(self) -> None:
+        """On reconnect, drop stale ordinary wait_for_jarvis waits (JARVIS lost the context they were waiting on).
+
+        Active FRIDAY->JARVIS stabilization watches are preserved: they are re-announced by
+        _replay_pending_context and expire on their own timer. Never raises.
+        """
+        brain = getattr(self, "_brain", None)
+        if not brain:
+            return
+        try:
+            stabilizing = set(self._pending_stabilization_ids())
+            stale = [eid for eid in (brain.pending_jarvis_event_ids() or ()) if eid not in stabilizing]
+            for eid in stale:
+                brain.clear_jarvis_wait(eid)
+            if stale:
+                logger.info("Cortex reconnect: cleared %d stale JARVIS wait state(s), kept %d stabilization watch(es)",
+                            len(stale), len(stabilizing))
+        except Exception as e:
+            logger.warning("Cortex reconnect: clearing stale JARVIS waits failed (non-fatal): %s", e)
 
     async def _replay_pending_context(self) -> None:
         """After reconnect, re-send active event summaries + last handoff so JARVIS can resume."""
@@ -2142,7 +2200,8 @@ class LiveAPIAdapter:
             return
         try:
             active_ids = await self._blackboard.get_active_events()
-            if not active_ids:
+            pending_stabilization = self._pending_stabilization_ids()
+            if not active_ids and not pending_stabilization:
                 return
 
             # Retrieve last handoff report — JARVIS's own observations from previous session
@@ -2156,25 +2215,33 @@ class LiveAPIAdapter:
             except Exception:
                 pass
 
-            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost.{handoff_section}Active event summaries:"]
-            for eid in active_ids[:5]:
-                event = await self._blackboard.get_event(eid)
-                if not event:
-                    continue
-                elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
-                phase = _resolve_phase(event.brain_phase)
-                turns = len(event.conversation)
-                last_action = ""
-                if event.conversation:
-                    last = event.conversation[-1]
-                    last_action = f"{last.actor}.{last.action}"
-                lines.append(
-                    f"  {eid}: phase={phase}, {turns} turns, {elapsed}m elapsed, "
-                    f"last={last_action}"
-                )
+            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost.{handoff_section}"]
+
+            if pending_stabilization:
+                lines.append("Events waiting for stabilization watch:")
+                for eid in pending_stabilization:
+                    lines.append(f"  {eid}")
+
+            if active_ids:
+                lines.append("Active event summaries:")
+                for eid in active_ids[:5]:
+                    event = await self._blackboard.get_event(eid)
+                    if not event:
+                        continue
+                    elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
+                    phase = _resolve_phase(event.brain_phase)
+                    turns = len(event.conversation)
+                    last_action = ""
+                    if event.conversation:
+                        last = event.conversation[-1]
+                        last_action = f"{last.actor}.{last.action}"
+                    lines.append(
+                        f"  {eid}: phase={phase}, {turns} turns, {elapsed}m elapsed, "
+                        f"last={last_action}"
+                    )
             if len(lines) > 1:
-                await self._session.send(input="\n".join(lines), end_of_turn=True)
-                logger.info("Cortex reconnect: replayed context for %d events (handoff=%s)", len(lines) - 1, bool(handoff_section))
+                await self._session.send(input=_redact_pii("\n".join(lines)), end_of_turn=True)
+                logger.info("Cortex reconnect: replayed context for %d lines (handoff=%s)", len(lines) - 1, bool(handoff_section))
                 # Send startup protocol — JARVIS must rebuild context before monitoring
                 await self._session.send(input=SESSION_STARTUP_PROTOCOL, end_of_turn=True)
                 logger.info("Cortex reconnect: sent startup protocol")
@@ -2228,3 +2295,72 @@ class LiveAPIAdapter:
                 )
             except Exception as e:
                 logger.debug("Cortex summary injection failed: %s", e)
+
+    def _pending_stabilization_ids(self) -> list[str]:
+        """Events in an active stabilization handoff (empty when the brain predates the port)."""
+        brain = getattr(self, "_brain", None)
+        getter = getattr(brain, "pending_stabilization_event_ids", None)
+        if getter is None:
+            return []
+        try:
+            return list(getter() or [])
+        except Exception as e:
+            logger.debug("pending_stabilization_event_ids failed (non-fatal): %s", e)
+            return []
+
+    def _is_stabilization_waiter(self, event_id: str) -> bool:
+        return event_id in self._pending_stabilization_ids()
+
+    def is_operational_peer_ready(self) -> bool:
+        return bool(not getattr(self, "_stopped", False) and not self._shadow)
+
+    async def request_stabilization_watch(self, event_id: str, summary: str, snapshot: dict) -> bool:
+        """Ask JARVIS to watch system stability for ``event_id``. True only if the handoff prompt was delivered.
+
+        The whole connect+send sequence is bounded by _STABILIZATION_WATCH_TIMEOUT_S so a stuck
+        connect cannot stall the Brain scan loop; failures are logged and reported as False.
+        """
+        if not self.is_operational_peer_ready():
+            return False
+
+        async def _deliver() -> bool:
+            if self._session is None:
+                await self._connect()
+            if self._session is None:
+                logger.warning("Stabilization watch for %s not delivered: no Cortex session", event_id)
+                return False
+            prompt = (
+                f"[FRIDAY STABILIZATION HANDOFF for {event_id}]\n"
+                f"Summary: {summary}\n"
+                f"Snapshot: {json.dumps(snapshot, default=str)}\n"
+                f"Instructions: call check_system_stability and wake via "
+                f"send_event_message(event_id=\"{event_id}\", message=\"[STABILIZATION WAKE] ...\")"
+            )
+            await self._session.send(input=_redact_pii(prompt), end_of_turn=True)
+            return True
+
+        try:
+            return await asyncio.wait_for(_deliver(), timeout=_STABILIZATION_WATCH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("Stabilization watch for %s timed out after %.0fs", event_id, _STABILIZATION_WATCH_TIMEOUT_S)
+        except Exception as e:
+            logger.warning("Stabilization watch for %s failed: %s", event_id, e)
+        return False
+
+    async def send_stability_telemetry(self, event_id: str, snapshot: dict) -> bool:
+        """Send one periodic telemetry tick to JARVIS.
+
+        Deliberately independent of receive_brain_response: it must NOT arm _awaiting_jarvis_reply or demand a
+        send_event_message reply -- JARVIS only speaks when stability is restored. Returns False if undelivered.
+        """
+        if self._session is None:
+            logger.debug("Stability telemetry for %s dropped: no Cortex session", event_id)
+            return False
+        try:
+            msg = f"[STABILITY TELEMETRY for {event_id}] {json.dumps(snapshot, default=str)}"
+            async with asyncio.timeout(15.0):
+                await self._session.send(input=_redact_pii(msg), end_of_turn=True)
+            return True
+        except Exception as e:
+            logger.warning("Stability telemetry delivery failed for %s (non-fatal): %s", event_id, e)
+            return False
