@@ -135,7 +135,7 @@ Usage: {{ include "darwin.validateSidecars" . }}
 {{- end -}}
 {{- $model := (get $sc "modelName") | default "" -}}
 {{- if and (eq $cli "agy") (hasPrefix "claude" $model) -}}
-{{- fail (printf "sidecars.%s.cliType is 'agy' but modelName=%q is a Claude model: agy requires a Gemini model (e.g. gemini-3.7-flash)" $role $model) -}}
+{{- fail (printf "sidecars.%s.cliType is 'agy' but modelName=%q is a Claude model: agy requires a Gemini model (e.g. gemini-4-argon)" $role $model) -}}
 {{- end -}}
 {{- if and (eq $cli "claude") (hasPrefix "gemini" $model) -}}
 {{- fail (printf "sidecars.%s.cliType is 'claude' but modelName=%q is a Gemini model: claude requires a Claude model (e.g. claude-sonnet-5-5)" $role $model) -}}

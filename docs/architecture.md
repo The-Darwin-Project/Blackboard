@@ -200,13 +200,13 @@ The Brain and in-process daemons use `google-genai` Python SDK. Sidecar agents u
 | Component | SDK | Default Model |
 | --- | --- | --- |
 | Brain | `google-genai` Python SDK | `gemini-4-carbon` |
-| Aligner | `google-genai` Python SDK | `gemini-3.5-flash` |
-| Archivist | `google-genai` + `AnthropicVertex` | Gemini (digest) + Claude (archive/extraction) |
-| Headhunter (GitLab) | `google-genai` Python SDK | `gemini-3.5-flash` |
-| Headhunter (GitHub) | `google-genai` Python SDK | `gemini-3.5-flash` |
+| Aligner | `google-genai` Python SDK | `gemini-4-argon` |
+| Archivist | `google-genai` + `AnthropicVertex` | `gemini-4-argon` (digest/fallback) + Claude (archive/extraction) |
+| Headhunter (GitLab) | `google-genai` Python SDK | `gemini-4-argon` |
+| Headhunter (GitHub) | `google-genai` Python SDK | `gemini-4-argon` |
 | Architect sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
 | SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 | Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
 | QE sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 | SecurityAnalyst (ephemeral) | Gemini CLI or Claude Code CLI | Inherits sidecar image default |
-| Nightwatcher | `google-genai` Python SDK | `gemini-3-flash-preview` |
+| Nightwatcher | `google-genai` Python SDK | `gemini-4-argon` |

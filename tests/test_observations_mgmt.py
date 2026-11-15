@@ -260,11 +260,14 @@ class TestReportGeneration:
         mock_client.models.generate_content = MagicMock(return_value=mock_llm_response)
 
         with patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz48L3N2Zz4="):
-            result = await generate_report(mock_bb, mock_client, "gemini-3.5-flash-lite", ["pipeline_duration_m"])
+            result = await generate_report(mock_bb, mock_client, "gemini-4-hydrogen", ["pipeline_duration_m"])
 
         assert "markdown" in result
         assert len(result["markdown"]) > 0
         assert "pipeline_duration_m" in result["markdown"]
+        assert mock_client.models.generate_content.called
+        for call in mock_client.models.generate_content.call_args_list:
+            assert call.kwargs["config"].get("thinking_config") == {"thinking_level": "LOW"}
 
     @pytest.mark.asyncio
     async def test_generate_report_partial_failure(self):
@@ -326,7 +329,7 @@ class TestReportGeneration:
         with patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz48L3N2Zz4="):
             mock_client = MagicMock()
             mock_client.models.generate_content = flaky_generate
-            result = await generate_report(mock_bb, mock_client, "gemini-3.5-flash-lite", ["error_count", "pod_restart_count"])
+            result = await generate_report(mock_bb, mock_client, "gemini-4-hydrogen", ["error_count", "pod_restart_count"])
 
         assert "markdown" in result
         md = result["markdown"]

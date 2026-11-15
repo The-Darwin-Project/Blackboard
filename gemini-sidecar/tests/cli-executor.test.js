@@ -92,14 +92,14 @@ describe('CLI Executor', () => {
 });
 
 describe('invalid-model fallback (shared getRetryOptions)', () => {
-    it('T-17: agy falls back to gemini-3.8-flash exactly once', async (t) => {
+    it('T-17: agy falls back to gemini-4-argon exactly once', async (t) => {
         const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', EPHEMERAL_MODEL_EXPLORER: 'invalid-model-that-fails' });
         try {
             const calls = mockSpawn(t, (args) => args.includes('invalid-model-that-fails')
                 ? { code: 1, stderr: 'INVALID_ARGUMENT: model not found' }
                 : { code: 0, stdout: '{"ok":true}' });
             const result = await mod.executeCLI('test', { role: 'explorer' });
-            assert.equal(result.usedModel, 'gemini-3.8-flash');
+            assert.equal(result.usedModel, 'gemini-4-argon');
             assert.equal(calls.length, 2);
         } finally {
             restore();
@@ -151,7 +151,37 @@ describe('invalid-model fallback (shared getRetryOptions)', () => {
             const ws = { readyState: 1, send() {} };
             const result = await mod.executeCLIStreaming(ws, 'evt-1', 'test', {});
             assert.equal(result.status, 'success');
-            assert.deepEqual(calls.map(modelOf), ['gemini-bad', 'gemini-3.8-flash']);
+            assert.deepEqual(calls.map(modelOf), ['gemini-bad', 'gemini-4-argon']);
+        } finally {
+            restore();
+        }
+    });
+
+    it('steps down from default gemini-4-argon to gemini-4-hydrogen on agy invalid model error', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy', AGENT_MODEL: undefined, GEMINI_MODEL: undefined });
+        try {
+            const calls = mockSpawn(t, (args) => modelOf(args) === 'gemini-4-argon'
+                ? { code: 1, stderr: 'INVALID_ARGUMENT: model gemini-4-argon not found' }
+                : { code: 0, stdout: '{"ok":true}' });
+            const result = await mod.executeCLI('test', {});
+            assert.equal(result.status, 'success');
+            assert.equal(result.usedModel, 'gemini-4-hydrogen');
+            assert.deepEqual(calls.map(modelOf), ['gemini-4-argon', 'gemini-4-hydrogen']);
+        } finally {
+            restore();
+        }
+    });
+
+    it('falls back from explicit gemini-4-carbon to gemini-4-argon on agy invalid model error', async (t) => {
+        const { mod, restore } = freshExecutor({ AGENT_CLI: 'agy' });
+        try {
+            const calls = mockSpawn(t, (args) => modelOf(args) === 'gemini-4-carbon'
+                ? { code: 1, stderr: 'INVALID_ARGUMENT: model gemini-4-carbon not found' }
+                : { code: 0, stdout: '{"ok":true}' });
+            const result = await mod.executeCLI('test', { model: 'gemini-4-carbon' });
+            assert.equal(result.status, 'success');
+            assert.equal(result.usedModel, 'gemini-4-argon');
+            assert.deepEqual(calls.map(modelOf), ['gemini-4-carbon', 'gemini-4-argon']);
         } finally {
             restore();
         }

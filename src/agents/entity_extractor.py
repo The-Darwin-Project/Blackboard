@@ -1,6 +1,6 @@
 # BlackBoard/src/agents/entity_extractor.py
 # @ai-rules:
-# 1. [Constraint]: Uses gemini-3.5-flash-lite with responseSchema (not prompt-based JSON).
+# 1. [Constraint]: Uses gemini-4-hydrogen with responseSchema (not prompt-based JSON).
 # 2. [Pattern]: Fail-open. Returns empty KnowledgeGraphEntities on any error.
 # 3. [Constraint]: Entity types limited to Service, Event, Fix (narrow scope for Phase 1).
 # 4. [Gotcha]: Must handle events with no clear service (source=chat/slack) gracefully.
@@ -10,7 +10,7 @@
 Entity extraction for the Knowledge Graph.
 
 Extracts Service, Event, and Fix entities from archived event summaries
-using Flash Lite with native structured output (responseSchema).
+using gemini-4-hydrogen with native structured output (responseSchema).
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-KG_EXTRACTOR_MODEL = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-3.5-flash-lite")
+KG_EXTRACTOR_MODEL = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-4-hydrogen")
 KG_EXTRACTOR_TIMEOUT = float(os.getenv("KG_EXTRACTOR_TIMEOUT", "30"))
 
 
@@ -126,7 +126,7 @@ async def extract_entities(
     service: str | None = None,
     event_id: str | None = None,
 ) -> KnowledgeGraphEntities:
-    """Extract entities from an event summary using Flash Lite.
+    """Extract entities from an event summary using gemini-4-hydrogen.
 
     `event_id` is the caller's authoritative event id (falls back to
     `event_summary['event_id']` when omitted). It is used both in the prompt
@@ -154,15 +154,20 @@ async def extract_entities(
         client = _get_client()
         from google.genai import types
 
+        config_kwargs: dict[str, Any] = {
+            "temperature": 0.1,
+            "max_output_tokens": 4096,
+            "response_mime_type": "application/json",
+            "response_schema": _RESPONSE_SCHEMA,
+        }
+        if "gemini-4" in (KG_EXTRACTOR_MODEL or "").lower():
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=KG_EXTRACTOR_MODEL,
                 contents=f"{_EXTRACTION_PROMPT}\n\n---\n{summary_text}",
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=_RESPONSE_SCHEMA,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             ),
             timeout=KG_EXTRACTOR_TIMEOUT,
         )

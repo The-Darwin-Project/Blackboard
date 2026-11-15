@@ -69,6 +69,8 @@ class TestExtractEntities:
         assert len(result.relationships) == 1
         assert result.entities[0].type == "service"
         assert result.relationships[0].rel_type == "AFFECTED"
+        call_cfg = mock_client.aio.models.generate_content.call_args.kwargs["config"]
+        assert str(call_cfg.thinking_config.thinking_level).endswith("LOW")
 
     async def test_timeout_returns_empty_model(self):
         """T-7: TimeoutError from LLM returns empty KnowledgeGraphEntities."""

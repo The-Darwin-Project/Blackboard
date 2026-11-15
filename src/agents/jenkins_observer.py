@@ -1,7 +1,7 @@
 # BlackBoard/src/agents/jenkins_observer.py
 # @ai-rules:
 # 1. [Pattern]: Poll-driven event creation — _drain_once() fires every poll interval,
-#    checks Jenkins for failed/missing/unstable CI gating jobs, triages with Flash Lite.
+#    checks Jenkins for failed/missing/unstable CI gating jobs, triages with gemini-4-hydrogen.
 #    Phases are split into named helpers (_poll_and_stage, _recheck_and_filter,
 #    _consolidate_floods, _process_candidates) -- mirrors Aligner._drain_once's structure.
 # 2. [Pattern]: TimeKeeper lifecycle — start()/stop() own an asyncio.Task running _poll_loop().
@@ -65,7 +65,7 @@
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
-Polls Jenkins for failed/missing gating jobs, triages with Flash Lite,
+Polls Jenkins for failed/missing gating jobs, triages with gemini-4-hydrogen,
 creates events with source="aligner" + subject_type="ci_gating" for FRIDAY.
 """
 from __future__ import annotations
@@ -582,12 +582,12 @@ class JenkinsObserver:
         self._skills_loaded_at = time.time()
 
     async def _get_llm_adapter(self):
-        """Lazy-load a Gemini adapter via the shared factory for Flash Lite triage."""
+        """Lazy-load a Gemini adapter via the shared factory for gemini-4-hydrogen triage."""
         if self._llm_adapter is None:
             from .llm import create_adapter
             project = os.getenv("GCP_PROJECT")
             location = os.getenv("GCP_LOCATION", "us-central1")
-            model = os.getenv("LLM_MODEL_JENKINS_OBSERVER", "gemini-3.5-flash-lite")
+            model = os.getenv("LLM_MODEL_JENKINS_OBSERVER", "gemini-4-hydrogen")
             self._llm_adapter = create_adapter("gemini", project, location, model)
         return self._llm_adapter
 
@@ -1047,7 +1047,7 @@ class JenkinsObserver:
     async def _triage_and_build_evidence(
         self, signals: list[tuple[str, dict]]
     ) -> EventEvidence:
-        """Run Flash Lite triage on failed jobs and build structured evidence."""
+        """Run gemini-4-hydrogen triage on failed jobs and build structured evidence."""
         failed_jobs = []
         missing_jobs = []
         version = signals[0][1].get("version", "") if signals else ""
@@ -1103,6 +1103,7 @@ class JenkinsObserver:
                 contents=prompt,
                 temperature=float(os.getenv("LLM_TEMPERATURE_JENKINS_OBSERVER", "0.3")),
                 max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_JENKINS_OBSERVER", "4096")),
+                thinking_level=os.getenv("LLM_THINKING_JENKINS_OBSERVER") or "low",
             )
             from .llm import record_token_usage
             record_token_usage("jenkins_observer", response.usage if response else None)
@@ -1163,7 +1164,7 @@ class JenkinsObserver:
         *,
         include_analysis: bool = True,
     ) -> str:
-        """Build a triage prompt for Flash Lite.
+        """Build a triage prompt for gemini-4-hydrogen.
 
         include_analysis gates the narrative-analysis instructions/JSON-schema
         below JENKINS_OBSERVER_ANALYSIS_ENABLED: when the kill switch is off,

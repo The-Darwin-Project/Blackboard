@@ -426,7 +426,7 @@ async def handle_google_web_search(
         await ctx.append_and_broadcast(event_id, turn)
         return True
 
-    model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
+    model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-4-hydrogen")
     project = os.getenv("GCP_PROJECT", "")
     location = os.getenv("GCP_LOCATION", "global")
 
@@ -435,15 +435,18 @@ async def handle_google_web_search(
         from google.genai import types
 
         client = genai.Client(vertexai=True, project=project, location=location)
+        config_kwargs: dict = {
+            "tools": [types.Tool(google_search=types.GoogleSearch())],
+            "temperature": 0.1,
+            "max_output_tokens": 2048,
+        }
+        if "gemini-4" in (model or "").lower():
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
         async with asyncio.timeout(60):
             response = await client.aio.models.generate_content(
                 model=model,
                 contents=query,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=0.1,
-                    max_output_tokens=2048,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
 
         chunks = []

@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Nightwatcher (Agent 6) -- Shift Consolidation
 
-The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Jira incidents. It runs a phase-gated Gemini Flash session on a cron schedule (default 06:00/18:00 UTC).
+The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Jira incidents. It runs a phase-gated gemini-4-argon session on a cron schedule (default 06:00/18:00 UTC).
 
 ## Core Principle: LLM Decides Clustering. Code Drives Combining. Tools Carry Context.
 
@@ -30,7 +30,7 @@ Code contains ZERO clustering logic. The LLM decides how to group events. Code e
 
 ### Phase 1: REVIEW (LLM-driven)
 
-Multi-turn Flash tool-calling loop. LLM reads event reports, journals, and deep memory. Builds understanding of the shift.
+Multi-turn gemini-4-argon tool-calling loop. LLM reads event reports, journals, and deep memory. Builds understanding of the shift.
 
 Tools: `set_phase`, `get_event_report`, `search_journal`, `consult_deep_memory`
 
@@ -101,7 +101,7 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 | `NIGHTWATCHER_MAX_BATCHES` | `10` | Max batches drained per sweep |
 | `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | `30` | Pause between batches within a sweep |
 | `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | `1800` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) |
-| `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
+| `LLM_MODEL_NIGHTWATCHER` | `gemini-4-argon` | Gemini 4 Argon model for the tool-calling session |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
 | `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` (Helm sets `16000`) | Max output tokens per cart-step LLM turn (analysis loop uses `LLM_MAX_TOKENS_NIGHTWATCHER_ANALYSIS`, default `16384`) |
 | `LLM_THINKING_NIGHTWATCHER` | `medium` | Thinking budget for complex clustering |

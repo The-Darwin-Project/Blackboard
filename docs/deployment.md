@@ -82,8 +82,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `GCP_PROJECT` | GCP project ID | (required) |
 | `GCP_LOCATION` | Vertex AI location | `global` |
 | `LLM_MODEL_BRAIN` | Brain model | `gemini-4-carbon` (rollback: `gemini-4-argon`) |
-| `LLM_MODEL_MANAGER` | Manager (DevTeam) model | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-4-argon` |
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | `3000000` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
@@ -118,7 +117,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-3.5-flash` |
+| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-4-argon` |
 | `ALIGNER_CPU_THRESHOLD` | CPU warning threshold | (see code) |
 | `ALIGNER_MEMORY_THRESHOLD` | Memory warning threshold | (see code) |
 | `ALIGNER_ERROR_RATE_THRESHOLD` | Error rate threshold | (see code) |
@@ -134,7 +133,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `TIMEKEEPER_POLL_INTERVAL` | TimeKeeper poll interval (seconds) | `30` |
 | `TIMEKEEPER_MAX_PER_USER` | Max schedules per user | `10` |
 | `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
-| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.5-flash` |
+| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-4-hydrogen` |
 
 ### Headhunter (GitLab)
 
@@ -143,7 +142,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `HEADHUNTER_ENABLED` | Enable GitLab MR lifecycle agent | `false` |
 | `HEADHUNTER_POLL_INTERVAL` | Todo poll interval (seconds) | (see code) |
 | `GITLAB_HOST` | GitLab instance hostname | (required if enabled) |
-| `LLM_MODEL_HEADHUNTER` | Headhunter Flash model | (see code) |
+| `LLM_MODEL_HEADHUNTER` | Headhunter model | `gemini-4-argon` |
 
 ### Headhunter (GitHub)
 
@@ -216,7 +215,7 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `NIGHTWATCHER_MAX_BATCHES` | Max batches drained per sweep (`BATCH_SIZE` x `MAX_BATCHES` per sweep) | `10` |
 | `NIGHTWATCHER_BATCH_COOLDOWN_SECONDS` | Pause between batches within a sweep | `30` |
 | `NIGHTWATCHER_BATCH_TIMEOUT_SECONDS` | Per-batch circuit breaker timeout (seconds); clamped to [60, 3300] to settle and restage before inflight TTL (3600s) | `1800` |
-| `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
+| `LLM_MODEL_NIGHTWATCHER` | Nightwatcher model | `gemini-4-argon` |
 | `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
 | `LLM_THINKING_NIGHTWATCHER` | Nightwatcher LLM thinking level (`minimal`, `low`, `medium`, `high`; Gemini `ThinkingLevel`, ignored by the Claude adapter) | `medium` (code default and Helm) |
 | `LLM_MAX_TOKENS_NIGHTWATCHER` | Nightwatcher LLM max output tokens per cart step (thinking tokens count against it) | code default `8192`; Helm (`gcp.llm.nightwatcher.maxOutputTokens`) sets `16000` |

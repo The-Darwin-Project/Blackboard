@@ -14,7 +14,7 @@
 # 10. [Pattern]: issue_title sanitized (replace </ → < /) in _build_issue_analysis_prompt.
 # 11. [Pattern]: Phase B uses gate_closed flag — no per-item Redis gate re-check after first closure.
 # 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
-# 13. [Pattern]: No input truncation on descriptions — full text flows to Flash (1M+ context).
+# 13. [Pattern]: No input truncation on descriptions — full text flows to gemini-4-argon (1M+ context).
 #     Output controlled by max_output_tokens. _COMMENT_LIMIT (default 2000) for aggregated notes only.
 # 14. [Pattern]: analyze_and_plan returns plan_text only (str). Domain classification removed —
 #     events land in disorder, FRIDAY classifies during triage.
@@ -41,7 +41,7 @@ Orchestrator pattern — delegates platform-specific operations to adapters:
 - GitHubPlatform: GitHub PR polling (secondary head)
 - HeadhunterJira: Jira issue polling (tertiary head)
 
-LLM analysis (Flash triage) and event lifecycle are platform-agnostic.
+LLM analysis (gemini-4-argon triage) and event lifecycle are platform-agnostic.
 """
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ class Headhunter:
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
         self._wip_counter: Callable[..., Awaitable[int]] | None = None
-        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.7-flash")
+        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-4-argon")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._max_output_tokens = _safe_int("LLM_MAX_TOKENS_HEADHUNTER", 10000)
@@ -178,7 +178,7 @@ class Headhunter:
             )
             from .llm import record_token_usage
             record_token_usage("headhunter", response.usage)
-            plan_text = response.text.strip()
+            plan_text = (response.text or "").strip()
             logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
             return plan_text
         except Exception as e:
