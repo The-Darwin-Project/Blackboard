@@ -424,6 +424,10 @@ export interface FlowSnapshot {
   token_total_delta: number;
   token_calls_delta: number;
   token_total_cumulative: number;
+  tpm_used?: number;
+  tpm_limit?: number;
+  tpm_utilization_pct?: number;
+  quota_throttle_delta?: number;
   tampering_strikes?: number;
   quota_shed_tier1_total?: number;
   quota_shed_tier2_total?: number;

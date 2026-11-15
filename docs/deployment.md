@@ -84,7 +84,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `LLM_MODEL_BRAIN` | Brain model | `gemini-4-carbon` (rollback: `gemini-4-argon`) |
 | `LLM_MODEL_MANAGER` | Manager (DevTeam) model | `gemini-3.1-pro-preview` |
 | `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-3.1-pro-preview` |
-| `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | (none) |
+| `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | `3000000` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
 | `BRAIN_CONTENT_BUDGET_TOKENS` | Sliding-window prompt budget in estimated tokens before pruning older conversation turns (clamped to `[2000, 1000000]`) | `60000` |

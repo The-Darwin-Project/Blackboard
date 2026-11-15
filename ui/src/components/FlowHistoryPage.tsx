@@ -10,6 +10,8 @@
 import { useState } from 'react';
 import { LineChart, Line, ResponsiveContainer, Tooltip, YAxis, XAxis } from 'recharts';
 import { useFlowHistory } from '../hooks/useFlowHistory';
+import { formatTime } from '../utils/formatTokens';
+import TpmUsagePanel from './TpmUsagePanel';
 import type { FlowSnapshot } from '../api/types';
 
 const RANGES = [
@@ -18,10 +20,6 @@ const RANGES = [
   { label: '24h', seconds: 86400 },
   { label: '7d', seconds: 604800 },
 ] as const;
-
-function formatTime(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
 
 interface SparkCardProps {
   title: string;
@@ -149,6 +147,8 @@ export default function FlowHistoryPage() {
         <SparkCard title="Aligner Pending" data={snapshots} dataKey="aligner_pending" color="#EF7B4D" />
         <SparkCard title="Jenkins Pending" data={snapshots} dataKey="jenkins_pending" color="#D33833" />
       </div>
+
+      <TpmUsagePanel snapshots={snapshots} />
     </div>
   );
 }

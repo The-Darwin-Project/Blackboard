@@ -1699,9 +1699,13 @@ return 1
                 avg_reconcile_ms=sum(s.avg_reconcile_ms for s in group) / n,
                 avg_spawn_latency_sec=sum(s.avg_spawn_latency_sec for s in group) / n,
                 dispatch_success_rate_pct=sum(s.dispatch_success_rate_pct for s in group) / n,
+                tpm_used=round(sum(s.tpm_used for s in group) / n),
+                tpm_limit=max(s.tpm_limit for s in group),
+                tpm_utilization_pct=round(sum(s.tpm_utilization_pct for s in group) / n, 1),
                 # Deltas: sum()
                 reconcile_count_delta=sum(s.reconcile_count_delta for s in group),
                 error_count_delta=sum(s.error_count_delta for s in group),
+                quota_throttle_delta=sum(s.quota_throttle_delta for s in group),
                 token_input_delta=sum(s.token_input_delta for s in group),
                 token_output_delta=sum(s.token_output_delta for s in group),
                 token_thinking_delta=sum(s.token_thinking_delta for s in group),
