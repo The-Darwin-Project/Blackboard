@@ -1278,133 +1278,306 @@ class TestReceiveLoopClosure:
             adapter._try_reconnect.assert_called_once()
 
 
-class TestStabilizationWatch:
+def _stab_brain(*, stabilization=(), normal=()):
+    """Autospec'd Brain: a stabilization wait is mirrored into the normal pending list, as in production."""
+    from unittest.mock import create_autospec
+    from src.agents.brain import Brain
+
+    brain = create_autospec(Brain, instance=True)
+    brain.pending_stabilization_event_ids.return_value = list(stabilization)
+    brain.pending_jarvis_event_ids.return_value = list(normal) + list(stabilization)
+    return brain
+
+
+def _send_adapter(brain, *, dedup=False):
+    bb = MagicMock()
+    bb.get_event = AsyncMock(return_value=MagicMock(source="headhunter", conversation=[]))
+    bb.append_turn = AsyncMock()
+    bb.transition_event_status = AsyncMock()
+    adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+    adapter._shadow = False
+    adapter._record_intervention = AsyncMock()
+    adapter._write_shadow = AsyncMock()
+    adapter._check_content_dedup = AsyncMock(return_value=dedup)
+    return adapter, bb
+
+
+def _persisted_text(bb) -> str:
+    return bb.append_turn.call_args[0][1].thoughts
+
+
+class TestStabilizationWake:
+    """[STABILIZATION WAKE] rewrite/dedup bypass is keyed ONLY on active stabilization waits."""
+
     @pytest.mark.asyncio
-    async def test_t7_request_stabilization_watch_lazy_connects_and_sends(self):
+    async def test_active_stabilization_wait_rewrites_and_bypasses_dedup(self):
+        adapter, bb = _send_adapter(_stab_brain(stabilization=["evt-1"]), dedup=True)
+        res = await adapter._tool_send_event_message("evt-1", "System stable, resume work")
+        assert "Message delivered to" in res
+        assert _persisted_text(bb) == "[STABILIZATION WAKE] System stable, resume work"
+        adapter._check_content_dedup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_already_prefixed_wake_is_not_double_prefixed(self):
+        adapter, bb = _send_adapter(_stab_brain(stabilization=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", "[STABILIZATION WAKE] TPM 32%")
+        assert _persisted_text(bb) == "[STABILIZATION WAKE] TPM 32%"
+
+    @pytest.mark.asyncio
+    async def test_normal_wait_for_jarvis_reply_is_not_rewritten(self):
+        adapter, bb = _send_adapter(_stab_brain(normal=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", "The MR looks risky: please re-check the auth change")
+        assert _persisted_text(bb) == "The MR looks risky: please re-check the auth change"
+        adapter._check_content_dedup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_normal_wait_for_jarvis_still_deduplicates(self):
+        adapter, bb = _send_adapter(_stab_brain(normal=["evt-1"]), dedup=True)
+        res = await adapter._tool_send_event_message("evt-1", "same text again")
+        assert res.startswith("Blocked")
+        bb.append_turn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_other_event_unaffected_while_one_event_is_stabilizing(self):
+        adapter, bb = _send_adapter(_stab_brain(stabilization=["evt-1"]))
+        await adapter._tool_send_event_message("evt-2", "plain observation")
+        assert _persisted_text(bb) == "plain observation"
+        adapter._check_content_dedup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_spoofed_marker_is_stripped_when_no_stabilization_active(self):
+        adapter, bb = _send_adapter(_stab_brain(normal=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", "[STABILIZATION WAKE] actually please look at the MR")
+        assert _persisted_text(bb) == "actually please look at the MR"
+
+    @pytest.mark.asyncio
+    async def test_bare_spoofed_marker_gets_explanatory_text(self):
+        adapter, bb = _send_adapter(_stab_brain())
+        await adapter._tool_send_event_message("evt-1", "[STABILIZATION WAKE]")
+        text = _persisted_text(bb)
+        assert not text.startswith("[STABILIZATION WAKE]")
+        assert "no active stabilization watch" in text
+
+    @pytest.mark.asyncio
+    async def test_wake_is_handled_without_a_brain(self):
+        adapter, bb = _send_adapter(None)
+        adapter._brain = None
+        res = await adapter._tool_send_event_message("evt-1", "hello")
+        assert "Message delivered to" in res
+
+
+class TestStabilizationWatch:
+    @staticmethod
+    def _adapter(brain=None):
         bb = MagicMock()
         bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
-        brain = MagicMock()
-        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain or MagicMock())
         adapter._shadow = False
         adapter._stopped = False
         adapter._session = None
         adapter._running = False
-        
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_request_watch_lazy_connects_and_sends(self):
+        adapter = self._adapter()
         mock_session = MagicMock()
         mock_session.send = AsyncMock()
-        
+
         async def mock_connect():
             adapter._session = mock_session
         adapter._connect = AsyncMock(side_effect=mock_connect)
-        
-        assert adapter.is_operational_peer_ready() is True
-        
-        success = await adapter.request_stabilization_watch("evt-1", "Test summary", {"utilization_pct": 85.0})
-        
-        assert success is True
-        adapter._connect.assert_awaited_once()
-        mock_session.send.assert_awaited_once()
 
-    def test_t7_brain_introspection_port_declares_get_system_stability_snapshot(self):
-        from src.ports import BrainIntrospectionPort
-        assert hasattr(BrainIntrospectionPort, "get_system_stability_snapshot")
+        assert adapter.is_operational_peer_ready() is True
+        assert await adapter.request_stabilization_watch("evt-1", "Test summary", {"utilization_pct": 85.0}) is True
+
+        adapter._connect.assert_awaited_once()
+        sent = mock_session.send.await_args.kwargs["input"]
+        assert "[FRIDAY STABILIZATION HANDOFF for evt-1]" in sent
+        assert "check_system_stability" in sent
+        assert mock_session.send.await_args.kwargs["end_of_turn"] is True
 
     @pytest.mark.asyncio
-    async def test_t8_request_stabilization_watch_fails_if_shadow_or_stopped(self):
-        adapter = LiveAPIAdapter(MagicMock(), MagicMock(), MagicMock(), AsyncMock(), MagicMock())
+    async def test_request_watch_false_if_shadow_or_stopped(self):
+        adapter = self._adapter()
         adapter._shadow = True
-        adapter._stopped = False
-        success = await adapter.request_stabilization_watch("evt-1", "sum", {})
-        assert success is False
-        
+        assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
         adapter._shadow = False
         adapter._stopped = True
-        success = await adapter.request_stabilization_watch("evt-1", "sum", {})
-        assert success is False
+        assert adapter.is_operational_peer_ready() is False
+        assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
 
     @pytest.mark.asyncio
-    async def test_t9_pending_jarvis_event_ids_behavior(self):
-        bb = MagicMock()
-        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
-        brain = MagicMock()
-        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2", "evt-3"])
-        brain.get_system_stability_snapshot = MagicMock(return_value={"tokens_used_60s": 1000})
-        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+    async def test_request_watch_connect_hang_is_bounded(self, monkeypatch):
+        import src.adapters.live_api_adapter as mod
+        monkeypatch.setattr(mod, "_STABILIZATION_WATCH_TIMEOUT_S", 0.05)
+        adapter = self._adapter()
+
+        async def hang():
+            await asyncio.sleep(30)
+        adapter._connect = AsyncMock(side_effect=hang)
+
+        started = time.monotonic()
+        assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
+        assert time.monotonic() - started < 2.0
+
+    @pytest.mark.asyncio
+    async def test_request_watch_logs_exceptions_instead_of_silent_false(self, caplog):
+        adapter = self._adapter()
+        adapter._connect = AsyncMock(side_effect=RuntimeError("vertex 503"))
+        with caplog.at_level("WARNING"):
+            assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
+        assert any("vertex 503" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_request_watch_false_when_no_session_after_connect(self):
+        adapter = self._adapter()
+        adapter._connect = AsyncMock()
+        assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
+
+    @pytest.mark.asyncio
+    async def test_request_watch_false_when_send_fails(self):
+        adapter = self._adapter()
+        adapter._session = MagicMock()
+        adapter._session.send = AsyncMock(side_effect=ConnectionError("ws closed"))
+        assert await adapter.request_stabilization_watch("evt-1", "sum", {}) is False
+
+    def test_brain_introspection_port_declares_stabilization_surface(self):
+        from src.ports import BrainIntrospectionPort, JarvisPeerPort
+        assert hasattr(BrainIntrospectionPort, "get_system_stability_snapshot")
+        assert hasattr(BrainIntrospectionPort, "pending_stabilization_event_ids")
+        for name in ("is_operational_peer_ready", "request_stabilization_watch", "send_stability_telemetry"):
+            assert hasattr(JarvisPeerPort, name)
+            assert hasattr(LiveAPIAdapter, name)
+
+    @pytest.mark.asyncio
+    async def test_check_system_stability_tool_returns_snapshot_json(self):
+        brain = _stab_brain()
+        brain.get_system_stability_snapshot.return_value = {"tokens_used_60s": 1000}
+        adapter = self._adapter(brain)
         res = await adapter._handle_tool_call("check_system_stability", {})
-        assert "1000" in res
+        assert json.loads(res) == {"tokens_used_60s": 1000}
 
     @pytest.mark.asyncio
-    async def test_t9_tool_send_event_message_bypasses_md5(self):
-        bb = MagicMock()
-        bb.get_event = AsyncMock(return_value=MagicMock(source="headhunter", conversation=[]))
-        bb.append_turn = AsyncMock()
-        bb.transition_event_status = AsyncMock()
-        brain = MagicMock()
-        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2", "evt-3"])
-        brain.resume_if_parked = AsyncMock()
-        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
-        adapter._shadow = False
-        adapter._get_current_turn = AsyncMock(return_value=1)
-        adapter._record_intervention = AsyncMock()
-        adapter._write_shadow = AsyncMock()
-        adapter._check_content_dedup = AsyncMock(side_effect=Exception("Should not be called"))
-        
-        for eid in ["evt-1", "evt-2", "evt-3"]:
-            res = await adapter._tool_send_event_message(eid, "System stable, resume work")
-            assert "Message delivered to" in res
-            
-            # Check turn passed to bb.append_turn
-            call_args = bb.append_turn.call_args[0]
-            turn = call_args[1]
-            assert turn.thoughts.startswith("[STABILIZATION WAKE]")
-            assert "System stable, resume work" in turn.thoughts
-            bb.append_turn.reset_mock()
+    async def test_try_reconnect_preserves_jarvis_waits(self):
+        adapter = _make_reconnect_adapter()
 
-    @pytest.mark.asyncio
-    async def test_t9_try_reconnect_does_not_call_clear_jarvis_wait(self):
-        adapter = LiveAPIAdapter(MagicMock(), MagicMock(), MagicMock(), AsyncMock(), MagicMock())
-        adapter._running = True
-        adapter._stopped = False
-        adapter._generating_report = False
-        import time
-        adapter._last_pulse_time = time.time()
-        adapter._session = None
-        adapter._brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1"])
-        adapter._replay_pending_context = AsyncMock()
-        adapter._connect = AsyncMock(side_effect=lambda: setattr(adapter, "_session", MagicMock()))
-        
-        from unittest.mock import patch
-        with patch("src.adapters.live_api_adapter.asyncio.sleep", AsyncMock()):
+        async def fake_connect():
+            adapter._session = MagicMock()
+        adapter._connect.side_effect = fake_connect
+        with patch("time.time", return_value=1050.0), patch("asyncio.sleep", AsyncMock()):
             await adapter._try_reconnect()
-        
         adapter._brain.clear_jarvis_wait.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_t9_replay_pending_context_includes_pending_jarvis_event_ids(self):
+    async def test_replay_pending_context_lists_only_stabilization_waits(self):
         bb = MagicMock()
         bb.get_active_events = AsyncMock(return_value=["evt-1"])
         bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
         bb.get_handoff_reports = AsyncMock(return_value=[])
-        brain = MagicMock()
-        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2"])
-        
-        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(),
+                                 _stab_brain(stabilization=["evt-stab"], normal=["evt-normal"]))
         adapter._session = AsyncMock()
         adapter._session.send = AsyncMock()
-        
+
         await adapter._replay_pending_context()
-        
-        calls_str = str(adapter._session.send.mock_calls)
-        assert "evt-1" in calls_str
-        assert "evt-2" in calls_str
+
+        first_msg = adapter._session.send.await_args_list[0].kwargs["input"]
+        assert "Events waiting for stabilization watch:" in first_msg
+        assert "evt-stab" in first_msg
+        assert "evt-normal" not in first_msg
 
     @pytest.mark.asyncio
-    async def test_t10_regression_tool_send_event_message_enforces_md5(self):
+    async def test_replay_pending_context_runs_for_stabilization_only(self):
         bb = MagicMock()
-        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
-        brain = MagicMock()
-        brain.pending_jarvis_event_ids = MagicMock(return_value=[])
-        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
-        adapter._check_content_dedup = AsyncMock(return_value=True)
-        res = await adapter._tool_send_event_message("evt-2", "Duplicate message")
-        assert "Blocked" in res
+        bb.get_active_events = AsyncMock(return_value=[])
+        bb.get_handoff_reports = AsyncMock(return_value=[])
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), _stab_brain(stabilization=["evt-stab"]))
+        adapter._session = AsyncMock()
+        adapter._session.send = AsyncMock()
+        await adapter._replay_pending_context()
+        assert adapter._session.send.await_count >= 1
+
+
+class TestStabilityTelemetry:
+    @staticmethod
+    def _adapter(session="default"):
+        adapter = LiveAPIAdapter(MagicMock(), MagicMock(), MagicMock(), AsyncMock(), MagicMock())
+        if session == "default":
+            adapter._session = MagicMock()
+            adapter._session.send = AsyncMock()
+        else:
+            adapter._session = session
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_telemetry_tick_does_not_arm_reply_state_or_demand_reply(self):
+        adapter = self._adapter()
+        assert adapter._awaiting_jarvis_reply is False
+
+        assert await adapter.send_stability_telemetry("evt-1", {"utilization_pct": 91.5}) is True
+
+        assert adapter._awaiting_jarvis_reply is False
+        assert adapter._awaiting_jarvis_event_id is None
+        sent = adapter._session.send.await_args.kwargs["input"]
+        assert sent.startswith("[STABILITY TELEMETRY for evt-1]")
+        assert "91.5" in sent
+        assert "MUST call send_event_message" not in sent
+
+    @pytest.mark.asyncio
+    async def test_direct_response_path_still_arms_reply_state(self):
+        """Contrast: receive_brain_response is the FRIDAY-DIRECT path and legitimately demands a reply."""
+        adapter = self._adapter()
+        await adapter.receive_brain_response("evt-1", "please look")
+        assert adapter._awaiting_jarvis_reply is True
+        assert "MUST call send_event_message" in adapter._session.send.await_args.kwargs["input"]
+
+    @pytest.mark.asyncio
+    async def test_telemetry_without_session_returns_false(self):
+        adapter = self._adapter(session=None)
+        assert await adapter.send_stability_telemetry("evt-1", {}) is False
+
+    @pytest.mark.asyncio
+    async def test_telemetry_send_failure_is_logged_and_returns_false(self, caplog):
+        adapter = self._adapter()
+        adapter._session.send = AsyncMock(side_effect=ConnectionError("ws closed"))
+        with caplog.at_level("WARNING"):
+            assert await adapter.send_stability_telemetry("evt-1", {}) is False
+        assert any("telemetry delivery failed" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_telemetry_redacts_pii(self):
+        adapter = self._adapter()
+        await adapter.send_stability_telemetry("evt-1", {"note": "contact alice@example.com"})
+        assert "alice@example.com" not in adapter._session.send.await_args.kwargs["input"]
+
+
+class TestDeepMemoryScoreCoercion:
+    @staticmethod
+    def _adapter(items):
+        archivist = MagicMock()
+        archivist.search_knowledge = AsyncMock(return_value=items)
+        archivist.search = AsyncMock(return_value=items)
+        archivist.search_lessons = AsyncMock(return_value=items)
+        return LiveAPIAdapter(MagicMock(), archivist, MagicMock(), AsyncMock(), None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", ["abc", float("nan"), float("inf"), float("-inf"), None, True, [], {}])
+    async def test_non_numeric_scores_render_as_zero(self, bad):
+        items = [{"id": "x", "score": bad, "payload": {"topic": "t", "service": "s", "title": "ti"}}]
+        res = await self._adapter(items)._tool_search_deep_memory("q")
+        assert res.count("[0.00]") == 3  # knowledge + past events + lessons
+        assert "nan" not in res.lower() and "inf" not in res.lower()
+
+    @pytest.mark.asyncio
+    async def test_numeric_and_numeric_string_scores_are_preserved(self):
+        items = [{"id": "x", "score": 0.873, "payload": {}}, {"id": "y", "score": "0.5", "payload": None}]
+        res = await self._adapter(items)._tool_search_deep_memory("q")
+        assert "[0.87]" in res
+        assert "[0.50]" in res
+
+    @pytest.mark.asyncio
+    async def test_none_payload_does_not_raise(self):
+        items = [{"id": "x", "score": 0.1, "payload": None}]
+        res = await self._adapter(items)._tool_search_deep_memory("q")
+        assert "Deep Memory Search" in res

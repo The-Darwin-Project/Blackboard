@@ -522,82 +522,126 @@ class TestGemini4PhaseBudgetsAndSelfAuditSkillsProbe:
         assert set(tool_re.findall(added_sticky)) == set()
 
 
+def _skill_text(*parts: str) -> str:
+    return (SKILLS_DIR.joinpath(*parts)).read_text(encoding="utf-8")
 
-class TestVmer2383OptionBAndSkillHardening:
-    def test_t16_option_b_slack_notification_policy(self):
-        from pathlib import Path
-        src_dir = Path(__file__).parent.parent / "src"
-        skills_dir = src_dir / "agents" / "brain_skills"
-        
-        with open(src_dir / "agents" / "llm" / "types.py", "r") as f:
-            types_content = f.read()
-        assert "report_incident" in types_content
-        assert "Nightwatcher" in types_content
-        assert "CHAOTIC" in types_content
-        assert "P1" in types_content
-        assert "pipeline failure notification, escalation" not in types_content
-        
-        with open(skills_dir / "always" / "01-function-rules.md", "r") as f:
-            f1 = f.read()
-        assert "P1" in f1 or "CHAOTIC" in f1
-        
-        with open(skills_dir / "close" / "when-to-close.md", "r") as f:
-            f2 = f.read()
-        assert "P1" in f2 or "CHAOTIC" in f2
-        
-        with open(skills_dir / "escalate" / "incident-tracking.md", "r") as f:
-            f3 = f.read()
-        assert "P1" in f3 or "CHAOTIC" in f3
-        
-        with open(skills_dir / "dispatch" / "mr-lifecycle.md", "r") as f:
-            mr_lifecycle = f.read()
-        assert "notify maintainers via notify_user_slack" not in mr_lifecycle.split("## Bot MR Merge Conflicts")[1].split("##")[0]
-        assert "notify_user_slack" in mr_lifecycle.split("**Exception — Agent-authored commits**:")[1].split("##")[0]
 
-    def test_t17_phase_lifecycle_escalate_recovery_and_no_tools(self):
-        import re
-        from pathlib import Path
-        skills_dir = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
-        
-        with open(skills_dir / "always" / "09-phase-lifecycle.md", "r") as f:
-            phase_lf = f.read()
-        assert ("POST_ESC -->" in phase_lf and "DISPATCH" in phase_lf) or "ESCALATE -> DISPATCH" in phase_lf
-        
-        after_esc = phase_lf.split("## After Escalation")[1].split("##")[0] if "## After Escalation" in phase_lf else ""
+def _md_section(text: str, heading: str) -> str:
+    """Body of the markdown section whose heading line starts with ``heading`` (up to the next heading of any level)."""
+    lines = text.splitlines()
+    start = next((n for n, line in enumerate(lines) if line.startswith(heading)), None)
+    assert start is not None, f"heading {heading!r} not found"
+    end = next((n for n in range(start + 1, len(lines)) if lines[n].startswith("#")), len(lines))
+    return "\n".join(lines[start + 1:end])
+
+
+def _headings_outside_fences(text: str) -> list[tuple[int, str]]:
+    out, fenced = [], False
+    for n, line in enumerate(text.splitlines()):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and re.match(r"#{1,6} ", line):
+            out.append((n, line))
+    return out
+
+
+class TestVmer2383NotificationPolicyAndSkillHardening:
+    def test_notify_user_slack_schema_description_describes_capability_only(self):
+        from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
+
+        schema = next(t for t in BRAIN_TOOL_SCHEMAS if t["name"] == "notify_user_slack")
+        desc = schema["description"]
+        assert "Slack DM" in desc
+        assert desc.count("(") == desc.count(")"), f"unbalanced parentheses: {desc!r}"
+        assert "Option B" not in desc
+        assert not re.search(r"\bP[1-4]\b", desc), "priority policy belongs in brain_skills, not the tool schema"
+        assert "report_incident" not in desc and "Nightwatcher" not in desc
+        assert "pipeline failure notification, escalation" not in desc
+        assert desc.rstrip().endswith(".")
+        assert set(schema["input_schema"]["properties"]) >= {"user_email", "message"}
+
+    def test_p1_chaotic_notification_policy_is_consistent_across_skills(self):
+        rules = _md_section(_skill_text("always", "01-function-rules.md"), "## Notification Authority")
+        bullet = next(line for line in rules.splitlines() if line.startswith("- Notifications (`notify_user_slack`)"))
+        for token in ("P1", "CHAOTIC", "report_incident", "P2/P3/P4"):
+            assert token in bullet, f"01-function-rules bullet missing {token}"
+
+        close = _skill_text("close", "when-to-close.md")
+        step = next(line for line in close.splitlines() if line.startswith("5. `notify_user_slack`"))
+        assert "CHAOTIC" in step and "P1" in step and "skip" in step.lower()
+
+        incident = _skill_text("escalate", "incident-tracking.md")
+        body = _md_section(incident, "### Maintainer Notification (P1 and CHAOTIC Only)")
+        for token in ("P1", "CHAOTIC", "notify_user_slack", "report_incident", "Nightwatcher", "P2", "P3/P4"):
+            assert token in body, f"incident-tracking notification section missing {token}"
+        assert "MUST ping the maintainers with `notify_user_slack`" in body
+        # The contradictory legacy rule ("P1 or P2 -> MUST ping") must be gone everywhere.
+        assert "Critical/Blocker (P1) or Major (P2), you MUST" not in incident
+        assert "P1/P2 Incidents" not in incident
+
+    def test_touched_notification_skill_headings_are_well_formed(self):
+        for rel in (("escalate", "incident-tracking.md"), ("close", "when-to-close.md"),
+                    ("always", "01-function-rules.md")):
+            for n, heading in _headings_outside_fences(_skill_text(*rel)):
+                assert len(heading) <= 80, f"{rel[-1]}:{n + 1} heading looks garbled: {heading!r}"
+                assert heading.count("`") % 2 == 0, f"{rel[-1]}:{n + 1} unbalanced code span in heading"
+
+    def test_mr_lifecycle_notifies_only_for_human_merge_block(self):
+        text = _skill_text("dispatch", "mr-lifecycle.md")
+        conflicts = _md_section(text, "## Bot MR Merge Conflicts")
+        assert conflicts.strip()
+        assert "notify maintainers via notify_user_slack" not in conflicts
+        exception = text.split("**Exception — Agent-authored commits**:")[1].split("\n## ")[0]
+        assert "`notify_user_slack`" in exception and "mandatory human merge" in exception
+        assert "\n\n## Post-Approval Merge Dispatch" in text, "heading must be preceded by a blank line"
+
+    def test_t17_phase_lifecycle_escalate_recovery_edges_and_tool_free_after_escalation(self):
+        phase_lf = _skill_text("always", "09-phase-lifecycle.md")
+        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*work unexecuted"\|\s*DISPATCH', phase_lf)
+        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*verify pending"\|\s*VERIFY', phase_lf)
+
+        after_esc = _md_section(phase_lf, "## After Escalation")
+        assert after_esc.strip(), "After Escalation section must not be empty"
         tool_re = re.compile(r"\b(" + "|".join(re.escape(t) for t in _TOOL_NAMES) + r")\b")
         assert tool_re.findall(after_esc) == []
-        
-        with open(skills_dir / "always" / "12-actor-responses.md", "r") as f:
-            actor_res = f.read()
-        assert "[STABILIZATION WAKE]" in actor_res
-        assert "agent.result" in actor_res
+
+        actor_res = _skill_text("always", "12-actor-responses.md")
+        bullet = next(line for line in actor_res.splitlines() if line.startswith("- **Stabilization wake**"))
+        assert "[STABILIZATION WAKE]" in bullet and "agent.result" in bullet and "defer_wake" in bullet
 
     def test_t18_deep_memory_fixes_and_decision_routing(self):
-        from pathlib import Path
-        skills_dir = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
-        
-        with open(skills_dir / "dispatch" / "decision-routing.md", "r") as f:
-            decision_routing = f.read()
-        with open(skills_dir / "dispatch" / "deep-memory-fixes.md", "r") as f:
-            deep_memory_fixes = f.read()
-        with open(skills_dir / "always" / "10-observations.md", "r") as f:
-            observations = f.read()
-            
+        decision_routing = _skill_text("dispatch", "decision-routing.md")
+        deep_memory_fixes = _skill_text("dispatch", "deep-memory-fixes.md")
+        observations = _skill_text("always", "10-observations.md")
+
         assert "delta probes on follow-ups" in decision_routing
-        
-        # Proximity assertion between "sensor inputs for you to evaluate against" and "approval gates"
+        assert decision_routing.rstrip().splitlines()[-1].startswith("**Follow-up checks:**")
+
         idx1 = decision_routing.find("sensor inputs for you to evaluate against")
         idx2 = decision_routing.find("approval gates")
         assert idx1 != -1 and idx2 != -1
         assert abs(idx1 - idx2) <= 160
 
         assert len(deep_memory_fixes.splitlines()) <= 100
-        
-        assert "review_notes" in observations
-        assert "review_notes" in deep_memory_fixes
-        assert "### Note vs Other Tools" in observations
-        note_vs_other = observations.split("### Note vs Other Tools")[1].split("##")[0]
-        import re
+        step3 = next(line for line in deep_memory_fixes.splitlines() if line.startswith("3. "))
+        assert step3.count("`") % 2 == 0, f"unbalanced inline code span: {step3!r}"
+        assert "`review_notes`" in step3 and '`take_note(category="cross-event")`' in step3
+        assert "check review_notes before take_note" not in deep_memory_fixes
+
+        review = _md_section(observations, "### Review Before Decisions")
+        assert "`review_notes`" in review and "take_note" in review
+        assert not observations.split("### Review Before Decisions")[1].startswith(
+            "\nUse review_notes"
+        ), "stray unformatted sentence under the heading"
+        note_vs_other = _md_section(observations, "### Note vs Other Tools")
         tool_re = re.compile(r"\b(" + "|".join(re.escape(t) for t in _TOOL_NAMES) + r")\b")
         found_tools = set(tool_re.findall(note_vs_other))
-        assert found_tools.issubset({"record_observation", "take_note"})
+        assert {"record_observation", "take_note"} <= found_tools
+        assert found_tools <= {"record_observation", "take_note"}
+
+    def test_touched_skill_headings_have_leading_blank_line(self):
+        for rel in (("dispatch", "mr-lifecycle.md"), ("always", "10-observations.md"),
+                    ("always", "12-actor-responses.md"), ("dispatch", "decision-routing.md")):
+            lines = _skill_text(*rel).splitlines()
+            for n, heading in _headings_outside_fences("\n".join(lines)):
+                assert n == 0 or lines[n - 1].strip() in ("", "---"), f"{rel[-1]}:{n + 1} heading lacks a blank line before: {heading!r}"

@@ -821,8 +821,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "notify_user_slack",
         "description": (
             "Send a Slack DM notification to a user by email address. "
-            "Use when an agent recommends notifying someone, or when the event outcome "
-            "requires human attention (e.g., Option B authority (Critical-Blocker P1 multi-service or production outages, direct synchronous maintainer action/reply such as request_user_approval or green MR blocked on mandatory human merge, or explicit user DM request). Routine P2/P3/P4 automated escalations go to report_incident where Nightwatcher owns batch delivery.). "
+            "Use for direct, time-sensitive human attention: a request that needs a synchronous "
+            "maintainer reply or action, or an outage that needs an immediate ping. "
             "The message is delivered as a DM from the Darwin bot."
         ),
         "input_schema": {

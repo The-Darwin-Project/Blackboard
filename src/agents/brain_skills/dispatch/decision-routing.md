@@ -95,4 +95,4 @@ but do not override the need to understand why the pipeline failed.
 Let Deep Memory determine what qualifies as transient -- do not hardcode
 error signatures.
 
-Use delta probes on follow-ups.
+**Follow-up checks:** prefer delta probes on follow-ups -- ask only what changed since the last check instead of re-running the full investigation. Repeating full probes burns agent time and tokens without adding evidence.

@@ -2,6 +2,10 @@
 # @ai-rules:
 # 1. [Constraint]: Pure helper. No Redis, no Brain import, no LLM.
 # 2. [Pattern]: Matches bare observations and acknowledgments from JARVIS.
+# 3. [Constraint]: STABILIZATION_WAKE_PREFIX is a TRUSTED marker. Only LiveAPIAdapter.send_event_message may add it,
+#    and only while Brain.pending_stabilization_event_ids() contains the event. For every other JARVIS message the adapter
+#    strips the prefix (strip_stabilization_wake_prefix) so tool_gates can key ack handling on the prefix alone.
+# 4. [Gotcha]: A stabilization wake is a "recovered" signal, not a question -- tool_gates treat it like an acknowledgment.
 """JARVIS acknowledgment detection helper."""
 from __future__ import annotations
 
@@ -20,7 +24,18 @@ def is_jarvis_acknowledgment(text: str | None) -> bool:
     stripped = text.strip().strip("*_\"'").strip()
     return bool(_JARVIS_ACK_PATTERN.search(stripped))
 
+
 STABILIZATION_WAKE_PREFIX = "[STABILIZATION WAKE]"
 
+
 def is_stabilization_wake(text: str | None) -> bool:
-    return bool(text and text.strip().startswith(STABILIZATION_WAKE_PREFIX))
+    """Return True if text carries the trusted stabilization-wake marker prefix."""
+    return isinstance(text, str) and text.strip().startswith(STABILIZATION_WAKE_PREFIX)
+
+
+def strip_stabilization_wake_prefix(text: str) -> str:
+    """Remove a leading stabilization-wake marker (and following whitespace) from text."""
+    stripped = text.strip()
+    if stripped.startswith(STABILIZATION_WAKE_PREFIX):
+        return stripped[len(STABILIZATION_WAKE_PREFIX):].strip()
+    return text

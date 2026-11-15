@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.agents.brain import Brain
 from src.agents.tool_gates import (
     GATE_REGISTRY,
     GateContext,
@@ -317,8 +318,6 @@ class TestDomainChaotic:
             "wait_for_agent", "reply_to_agent", "message_agent",
             "respond_to_jarvis", "wait_for_jarvis",
         }
-        # test_t4 modification: IDLE_AGENT_WAIT strips wait_for_agent if is_intermediate=False
-        expected.discard("wait_for_agent")
         assert names == expected
 
     def test_includes_agent_communication(self):
@@ -326,8 +325,7 @@ class TestDomainChaotic:
         ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic"})
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        # test_t4: idle strips wait_for_agent so we only assert reply/message
-        assert {"reply_to_agent", "message_agent"} <= names
+        assert {"wait_for_agent", "reply_to_agent", "message_agent"} <= names
 
 
 class TestDomainCasual:
@@ -1786,56 +1784,218 @@ class TestRecallGateThroughBrainLoop:
         assert tools <= {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis",
                          "defer_event", "recall_pruned_turns"}, f"unexpected intermediate toolset: {tools}"
 
-class TestIdleAgentWaitGate:
-    def test_t4_chaotic_keeps_wait_when_intermediate(self):
-        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": True})
-        result = evaluate_gates(ALL_SCHEMAS, ctx)
-        names = _names(result)
-        assert "wait_for_agent" in names
+class TestPredIdleAgentWait:
+    """Per-gate unit tests for _pred_idle_agent_wait (named predicate, ai-rules #4)."""
 
-    def test_t4_chaotic_strips_wait_when_idle(self):
-        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": False})
-        result = evaluate_gates(ALL_SCHEMAS, ctx)
-        names = _names(result)
-        assert "wait_for_agent" not in names
+    @staticmethod
+    def _pred(**flags) -> bool:
+        from src.agents.tool_gates import _pred_idle_agent_wait
+        return _pred_idle_agent_wait(_ctx(context_flags=flags))
+
+    def test_fires_when_explicitly_idle(self):
+        assert self._pred(is_intermediate=False, has_active_agent_task=False) is True
+
+    def test_not_fired_while_intermediate(self):
+        assert self._pred(is_intermediate=True, has_active_agent_task=True) is False
+        assert self._pred(is_intermediate=True, has_active_agent_task=False) is False
+
+    def test_not_fired_while_agent_runs_after_posting_non_message_turn(self):
+        """is_intermediate=False (agent already posted a progress/huddle turn) but the worker is still running."""
+        assert self._pred(is_intermediate=False, has_active_agent_task=True) is False
+
+    def test_fails_open_when_live_agent_flag_absent(self):
+        """Hand-built contexts without the flag must not lose wait_for_agent (handler still guards)."""
+        assert self._pred(is_intermediate=False) is False
+        assert self._pred() is False
+
+    def test_registry_uses_named_predicate_not_lambda(self):
+        from src.agents.tool_gates import _pred_idle_agent_wait
+        gate = next(g for g in GATE_REGISTRY if g.gate_id == "IDLE_AGENT_WAIT")
+        assert gate.predicate is _pred_idle_agent_wait
+        assert gate.predicate.__name__ == "_pred_idle_agent_wait"
+        for fn in (gate.tools_affected, gate.message):
+            assert fn.__name__ != "<lambda>"
+
+    def test_gate_only_strips_wait_for_agent(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "complicated",
+                                  "is_intermediate": False, "has_active_agent_task": False})
+        result = _names(evaluate_gates(ALL_SCHEMAS, ctx))
+        assert "wait_for_agent" not in result
+        assert {"select_agent", "reply_to_agent", "message_agent"} <= result
+        gate = next(g for g in GATE_REGISTRY if g.gate_id == "IDLE_AGENT_WAIT")
+        assert gate.tools_affected(ctx) == {"wait_for_agent"}
+        assert "wait_for_agent" in gate.message("wait_for_agent", ctx)
+
+    def test_idle_gate_is_first_in_registry_order_independent_of_domain(self):
+        for domain in ("chaotic", "complicated", "complex"):
+            ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": domain,
+                                      "is_intermediate": False, "has_active_agent_task": False})
+            assert "wait_for_agent" not in _names(evaluate_gates(ALL_SCHEMAS, ctx)), domain
+
+    def test_wait_kept_while_agent_running_even_if_not_intermediate(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "complicated",
+                                  "is_intermediate": False, "has_active_agent_task": True})
+        assert "wait_for_agent" in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_chaotic_keeps_wait_when_intermediate(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": True})
+        assert "wait_for_agent" in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_diagnose_rejection_explains_idle_gate(self):
+        from src.agents.tool_gates import diagnose_rejection
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "complicated",
+                                  "is_intermediate": False, "has_active_agent_task": False})
+        msg = diagnose_rejection("wait_for_agent", ctx)
+        assert msg.startswith("[GATE] wait_for_agent unavailable.")
+        assert "running agent task" in msg
+
+
+class TestIdleAgentWaitBatchedAfterSelectAgent:
+    """select_agent -> wait_for_agent in ONE batched turn must survive the FC[1] gate re-evaluation."""
+
+    @staticmethod
+    async def _run(register_worker: bool) -> list[str]:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from tests.test_batch_execution_real_loop import MockStream, _Chunk, _fc, _make_brain, _make_event
+
+        fcs = [_fc("select_agent", {"agent_name": "developer", "task_instruction": "go"}),
+               _fc("wait_for_agent", {"summary": "waiting"})]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([_Chunk(raw_parts=fcs)]))
+        # Pre-dispatch snapshot: no worker yet (this is the stale state the FC[1] re-eval must NOT trust).
+        brain._extract_context_flags = AsyncMock(return_value={
+            "event_domain": "complicated", "brain_has_classified": True,
+            "is_intermediate": False, "has_active_agent_task": False,
+        })
+
+        async def _execute(event_id, name, args, **kw):
+            if name == "select_agent" and register_worker:
+                brain._active_tasks[event_id] = MagicMock(done=MagicMock(return_value=False))
+            return True
+
+        brain._execute_function_call = AsyncMock(side_effect=_execute)
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            await brain._process_with_llm("evt-test", _make_event())
+        return [c.args[1] for c in brain._execute_function_call.await_args_list]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_agent_allowed_right_after_select_agent_started_worker(self):
+        assert await self._run(register_worker=True) == ["select_agent", "wait_for_agent"]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_agent_rejected_when_no_worker_was_started(self):
+        assert await self._run(register_worker=False) == ["select_agent"]
+
+    def test_has_active_agent_task_tracks_live_worker_only(self):
+        from unittest.mock import MagicMock
+
+        from tests.test_batch_execution_real_loop import _make_brain
+
+        brain = _make_brain()
+        assert brain._has_active_agent_task("e") is False
+        brain._active_tasks["e"] = MagicMock(done=MagicMock(return_value=False))
+        assert brain._has_active_agent_task("e") is True
+        brain._active_tasks["e"] = MagicMock(done=MagicMock(return_value=True))
+        assert brain._has_active_agent_task("e") is False
+
+
+class TestIdleAgentWaitContextFlag:
+    @staticmethod
+    async def _flags_seen_by_gates(worker_running: bool) -> dict:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from tests.test_batch_execution_real_loop import MockStream, _Chunk, _make_brain, _make_event
+
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([_Chunk(text="plain reply")]))
+        brain._extract_context_flags = AsyncMock(return_value={"event_domain": "complicated"})
+        if worker_running:
+            brain._active_tasks["evt-test"] = MagicMock(done=MagicMock(return_value=False))
+        from src.agents import tool_gates
+
+        seen: list[dict] = []
+        real_build = tool_gates.build_gate_context
+
+        def _spy(**kwargs):
+            seen.append(dict(kwargs["context_flags"]))
+            return real_build(**kwargs)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), patch("src.agents.tool_gates.build_gate_context", _spy):
+            await brain._process_with_llm("evt-test", _make_event())
+        assert seen, "gate context was never built"
+        return seen[0]
+
+    @pytest.mark.asyncio
+    async def test_process_with_llm_marks_live_worker_in_gate_flags(self):
+        assert (await self._flags_seen_by_gates(worker_running=True))["has_active_agent_task"] is True
+
+    @pytest.mark.asyncio
+    async def test_process_with_llm_marks_no_worker_in_gate_flags(self):
+        assert (await self._flags_seen_by_gates(worker_running=False))["has_active_agent_task"] is False
+
 
 class TestStabilizationWake:
-    def test_t6_wake_strips_respond_and_allows_close(self):
-        turns = [
-            _turn("jarvis", "message", thoughts="[STABILIZATION WAKE] System TPM drained to 32%, safe to resume.")
-        ]
-        ctx = _ctx(brain_phase="close", conversation=turns, context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+    def test_wake_strips_respond_and_allows_close(self):
         from src.agents.tool_gates import has_unevaluated_close_blocker
-        has_blocker = has_unevaluated_close_blocker(ctx.conversation)
-        assert has_blocker is False
-        
-        result = evaluate_gates(ALL_SCHEMAS, ctx)
-        names = _names(result)
+        from src.utils.jarvis_ack import is_stabilization_wake
+
+        turns = [_turn("jarvis", "message", thoughts="[STABILIZATION WAKE] System TPM drained to 32%, safe to resume.")]
+        ctx = _ctx(brain_phase="close", conversation=turns,
+                   context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+        assert has_unevaluated_close_blocker(ctx.conversation) is False
+
+        names = _names(evaluate_gates(ALL_SCHEMAS, ctx))
         assert "close_event" in names
         assert "respond_to_jarvis" not in names
 
-        from src.utils.jarvis_ack import is_stabilization_wake
         assert is_stabilization_wake("[STABILIZATION WAKE] System TPM drained to 32%") is True
+        assert is_stabilization_wake("  [STABILIZATION WAKE] leading whitespace ok") is True
         assert is_stabilization_wake("Normal message") is False
+        assert is_stabilization_wake("mentions [STABILIZATION WAKE] mid-sentence") is False
+        assert is_stabilization_wake(None) is False
+        assert is_stabilization_wake(123) is False  # type: ignore[arg-type]
 
-    def test_t6_normal_jarvis_blocks_close(self):
-        turns = [
-            _turn("jarvis", "message", thoughts="Regular jarvis message here to block close.")
-        ]
-        ctx = _ctx(brain_phase="close", conversation=turns, context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+    def test_normal_jarvis_message_blocks_close(self):
         from src.agents.tool_gates import has_unevaluated_close_blocker
-        has_blocker = has_unevaluated_close_blocker(ctx.conversation)
-        assert has_blocker is True
-        
-        result = evaluate_gates(ALL_SCHEMAS, ctx)
-        names = _names(result)
+
+        turns = [_turn("jarvis", "message", thoughts="Regular jarvis message here to block close.")]
+        ctx = _ctx(brain_phase="close", conversation=turns,
+                   context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+        assert has_unevaluated_close_blocker(ctx.conversation) is True
+
+        names = _names(evaluate_gates(ALL_SCHEMAS, ctx))
         assert "close_event" not in names
         assert "respond_to_jarvis" in names
 
-    def test_t4_generate_phase_tool_map_includes_gate(self):
-        from src.skill_reconciler.generate_map import generate_phase_tool_map
-        import os
+    def test_wake_followed_by_substantive_jarvis_message_still_blocks_close(self):
+        from src.agents.tool_gates import has_unevaluated_close_blocker
+
+        turns = [_turn("jarvis", "message", thoughts="[STABILIZATION WAKE] stable"),
+                 _turn("jarvis", "message", thoughts="Also: the MR needs a security review.")]
+        assert has_unevaluated_close_blocker(turns) is True
+
+    def test_wake_prefix_on_non_message_jarvis_action_is_not_special(self):
+        """Only action=message is considered by the close blocker; an insight carrying the prefix is ignored the same way."""
+        from src.agents.tool_gates import has_unevaluated_close_blocker
+
+        turns = [_turn("jarvis", "insight", thoughts="[STABILIZATION WAKE] x")]
+        assert has_unevaluated_close_blocker(turns) is False
+
+    def test_strip_helper_removes_only_leading_marker(self):
+        from src.utils.jarvis_ack import strip_stabilization_wake_prefix
+
+        assert strip_stabilization_wake_prefix("[STABILIZATION WAKE] hello") == "hello"
+        assert strip_stabilization_wake_prefix("[STABILIZATION WAKE]") == ""
+        assert strip_stabilization_wake_prefix("hello [STABILIZATION WAKE]") == "hello [STABILIZATION WAKE]"
+
+
+class TestPhaseToolMapIncludesIdleGate:
+    def test_generate_phase_tool_map_includes_gate(self, monkeypatch):
         from pathlib import Path
-        os.environ["BLACKBOARD_ROOT"] = str(Path(__file__).resolve().parents[1])
-        result = generate_phase_tool_map()
-        assert "IDLE_AGENT_WAIT" in str(result)
+
+        from src.skill_reconciler.generate_map import generate_phase_tool_map
+
+        monkeypatch.setenv("BLACKBOARD_ROOT", str(Path(__file__).resolve().parents[1]))
+        corpus_key, body = generate_phase_tool_map()
+        assert corpus_key == "always/phase-tool-map.md"
+        assert "IDLE_AGENT_WAIT" in body
+        assert "no running agent task" in body

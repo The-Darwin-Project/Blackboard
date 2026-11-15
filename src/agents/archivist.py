@@ -788,7 +788,7 @@ class Archivist:
                 logger.warning(f"correct_memory: event {event_id} not found in Qdrant")
                 return False
 
-            payload = existing[0].get("payload", {})
+            payload = existing[0].get("payload") or {}
             payload["root_cause"] = corrected_root_cause
             payload["fix_action"] = corrected_fix_action
             payload["corrected"] = True
@@ -799,7 +799,7 @@ class Archivist:
                 f"{payload.get('symptom', '')} "
                 f"{corrected_root_cause} "
                 f"{corrected_fix_action} "
-                f"{' '.join(payload.get('pattern_keywords', payload.get('keywords', [])))} "
+                f"{' '.join(payload.get('pattern_keywords') or payload.get('keywords') or [])} "
                 f"{' '.join(payload.get('instance_keywords') or [])} "
                 f"{payload.get('procedures', '')} "
                 f"{payload.get('outcome', '')}"
@@ -1322,7 +1322,7 @@ class Archivist:
 
             now = time.time()
             for r in results:
-                vu = r.get("payload", {}).get("valid_until")
+                vu = (r.get("payload") or {}).get("valid_until")
                 if isinstance(vu, (int, float)) and not isinstance(vu, bool) and vu < now:
                     r["stale"] = True
 

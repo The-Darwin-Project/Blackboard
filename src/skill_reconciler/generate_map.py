@@ -52,8 +52,7 @@ _DOMAIN_OODA_MAP: dict[str, tuple[str, str]] = {
 }
 
 _CONDITION_SUMMARIES: dict[str, str] = {
-    "IDLE_AGENT_WAIT": "no active in-flight agent (not is_intermediate)",
-
+    "IDLE_AGENT_WAIT": "no running agent task (neither is_intermediate nor has_active_agent_task)",
     "DISPATCH_DEFER_GATE": "dispatch phase without dispatcher backpressure",
     "DEFER_WAKE_ITER0": "first cycle after defer wake",
     "INTERMEDIATE": "agent actively working (is_intermediate flag)",

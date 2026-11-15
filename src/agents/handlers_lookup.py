@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -22,9 +23,9 @@ from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
 from .handler_utils import _safe_int
 
-import math
 
 def _safe_seconds(val: object) -> int:
+    """Coerce a payload duration to whole seconds; bool/None/non-numeric/non-finite -> 0."""
     if isinstance(val, bool) or val is None:
         return 0
     try:
@@ -33,7 +34,9 @@ def _safe_seconds(val: object) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
 
+
 def _safe_score(val: object) -> float:
+    """Coerce a payload similarity score to a finite float; bool/None/non-numeric/nan/inf -> 0.0."""
     if isinstance(val, bool) or val is None:
         return 0.0
     try:
@@ -254,7 +257,7 @@ async def handle_consult_deep_memory(
             for i, r in enumerate(lessons, 1):
                 p = r.get("payload") or {}
                 memory_text += (
-                    f"{i}. **{p.get('title', '?')}** (score: {_safe_score(r.get("score")):.2f}, "
+                    f"{i}. **{p.get('title', '?')}** (score: {_safe_score(r.get('score')):.2f}, "
                     f"channel: {p.get('channel', '?')})\n"
                     f"   - Pattern: {p.get('pattern', '?')}\n"
                 )
@@ -278,13 +281,13 @@ async def handle_consult_deep_memory(
                 defer_m = f"{total_defer // 60}m" if total_defer else "0m"
                 timings = p.get("operational_timings") or []
                 timing_str = ", ".join(
-                    f"{t.get('process', '?')}={_safe_seconds(t.get("duration_seconds")) // 60}m"
+                    f"{t.get('process', '?')}={_safe_seconds(t.get('duration_seconds')) // 60}m"
                     for t in timings if isinstance(t, dict)
                 ) or "none"
                 domain_str = p.get("brain_domain", p.get("domain", "?"))
                 corrected = " [CORRECTED]" if p.get("corrected") else ""
                 memory_text += (
-                    f"{i}. domain: {domain_str} | score: {_safe_score(r.get("score")):.2f}{corrected}\n"
+                    f"{i}. domain: {domain_str} | score: {_safe_score(r.get('score')):.2f}{corrected}\n"
                     f"   - Pattern: {p.get('symptom', '?')}\n"
                     f"   - Root cause: {p.get('root_cause', '?')}\n"
                     f"   - Fix: {p.get('fix_action', '?')}\n"

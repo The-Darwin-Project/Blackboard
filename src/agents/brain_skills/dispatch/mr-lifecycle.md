@@ -140,8 +140,8 @@ updaters, submodule sync, Kargo stages). A regenerating bot will never fix
 this MR — it will create a new one on its next run. Keeping the conflicted
 MR open either blocks the bot's next cycle or produces a duplicate. Close
 the conflicting MR with a comment explaining the automated closure reason
-(merge conflicts on a bot-regenerated MR), and close the Darwin event. Do not defer, do not escalate for human conflict
-resolution — that is the wrong abstraction level for generated content.
+(merge conflicts on a bot-regenerated MR), and close the Darwin event. Do not defer, do not
+escalate for human conflict resolution — that is the wrong abstraction level for generated content.
 
 **Exception — explicit tracking instructions:** If the MR description
 contains explicit instructions not to close (e.g., state-tracking MRs
@@ -174,8 +174,10 @@ is NOT invalidated when the pusher has write access (which Darwin agents do).
 This makes pre-push disable (see execution-method.md Auto-Merge Bypass Vector)
 the only safety net on GitHub — it is not redundant.
 
+When the pipeline is green but the MR is blocked only on a mandatory human merge, use
+`notify_user_slack` to ask the maintainer to merge: this is a direct synchronous human-action
+block, so the Slack ping is warranted even though routine failures go to `report_incident`.
 
-Use notify_user_slack when blocked on human merge.
 ## Post-Approval Merge Dispatch and Cluster Rollout Verification
 
 Do NOT wait indefinitely for a human to merge after an explicit plan approval.
