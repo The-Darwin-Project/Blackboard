@@ -180,7 +180,7 @@ If no proven fix exists, omit this section.
 | `priority` | Normal (P3/P4): first occurrence, no blast radius. Major (P2): persistent after retest, blocks one component. Critical/Blocker (P1): affects multiple components or versions, production outage. |
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |
 
-### Mandatory Maintainer Notification for P1/P2 Incidents
+### Mandatory Maintainer Notification: P1 or CHAOTIC only, use report_incident for routine P2/P3/P4 without notify_user_slack for P1/P2 Incidents
 
 For any incident classified as Critical/Blocker (P1) or Major (P2), you MUST issue a maintainer notification ping via the chat/slack tool immediately after filing the incident. Do not rely solely on the Jira/incident ticket.
 

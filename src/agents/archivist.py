@@ -468,8 +468,8 @@ class Archivist:
                 f"{summary.get('symptom', '')} "
                 f"{summary.get('root_cause', '')} "
                 f"{summary.get('fix_action', '')} "
-                f"{' '.join(summary.get('pattern_keywords', summary.get('keywords', [])))} "
-                f"{' '.join(summary.get('instance_keywords', []))} "
+                f"{' '.join(summary.get('pattern_keywords') or summary.get('keywords') or [])} "
+                f"{' '.join(summary.get('instance_keywords') or [])} "
                 f"{summary.get('outcome', '')}"
             )
             vector = await self._embed(embed_text)
@@ -485,7 +485,7 @@ class Archivist:
                 payload=summary,
             )
 
-            for fact in summary.get("reference_facts", []):
+            for fact in summary.get("reference_facts") or []:
                 try:
                     await self.store_knowledge(
                         topic=fact.get("topic", ""),
@@ -564,8 +564,8 @@ class Archivist:
             f"{summary.get('symptom', '')} "
             f"{summary.get('root_cause', '')} "
             f"{summary.get('fix_action', '')} "
-            f"{' '.join(summary.get('pattern_keywords', summary.get('keywords', [])))} "
-            f"{' '.join(summary.get('instance_keywords', []))} "
+            f"{' '.join(summary.get('pattern_keywords') or summary.get('keywords') or [])} "
+            f"{' '.join(summary.get('instance_keywords') or [])} "
             f"{summary.get('outcome', '')}"
         )
         vector = await self._embed(embed_text)
@@ -581,7 +581,7 @@ class Archivist:
             payload=summary,
         )
 
-        for fact in summary.get("reference_facts", []):
+        for fact in summary.get("reference_facts") or []:
             try:
                 await self.store_knowledge(
                     topic=fact.get("topic", ""),
@@ -800,7 +800,7 @@ class Archivist:
                 f"{corrected_root_cause} "
                 f"{corrected_fix_action} "
                 f"{' '.join(payload.get('pattern_keywords', payload.get('keywords', [])))} "
-                f"{' '.join(payload.get('instance_keywords', []))} "
+                f"{' '.join(payload.get('instance_keywords') or [])} "
                 f"{payload.get('procedures', '')} "
                 f"{payload.get('outcome', '')}"
             )
@@ -1323,7 +1323,7 @@ class Archivist:
             now = time.time()
             for r in results:
                 vu = r.get("payload", {}).get("valid_until")
-                if vu is not None and vu < now:
+                if isinstance(vu, (int, float)) and not isinstance(vu, bool) and vu < now:
                     r["stale"] = True
 
             if self.pulse_port and results:

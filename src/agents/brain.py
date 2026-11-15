@@ -13,11 +13,12 @@
 #     -- the pre-close `event` local is stale (missing the final closing turns) by the time Archivist runs.
 # 7c. [Pattern]: _create_reflex_pair(event_id, event_domain, event_service) threads event.service into
 #     ReflexSearcher for service-scoped knowledge-fact search (lessons stay unscoped).
-# 8. [Pattern]: _event_to_markdown is a backward-compat wrapper for src/utils/event_markdown.event_to_markdown.
-# 9. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
-# 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
-# 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
-# 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
+# 8. [Constraint]: _waiting_for_jarvis (dict[str, float]) is strictly SEPARATE from _waiting_for_user. _jarvis_recovery_rounds is cleaned in _close_and_broadcast.
+# 9. [Pattern]: _event_to_markdown is a backward-compat wrapper for src/utils/event_markdown.event_to_markdown.
+# 10. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
+# 11. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
+# 12. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
+# 13. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12c. [Pattern]: LLM call priority comes from derive_llm_priority(event) (llm/types.py), computed ONCE per _process_with_llm
 #     before the retry loop and passed as generate_stream(priority=...). Do NOT inline the heuristic here; change the helper.
 #     PRIORITY_HIGH = interactive source (chat/slack/jarvis), sticky approved_by, or user approve/reject/message in last 3 turns.
@@ -949,6 +950,10 @@ class _BrainToolContext:
     def clear_jarvis_wait(self, eid: str) -> None:
         self._b._clear_jarvis_wait(eid)
 
+    def get_system_stability_snapshot(self) -> dict:
+        """Return hexagonal system stability metrics (Step 4)."""
+        return self._b.get_system_stability_snapshot()
+
     def has_jarvis_waiters(self) -> bool:
         return bool(self._b._waiting_for_jarvis)
 
@@ -1178,7 +1183,8 @@ class Brain:
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
-        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge timer task
+        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}
+        self._jarvis_recovery_rounds: dict[str, int] = {}
         self._jarvis_wait_count: dict[str, int] = {}  # event_id -> escalation counter
         self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
@@ -4705,10 +4711,10 @@ class Brain:
             return
 
     def _clear_jarvis_wait(self, event_id: str) -> None:
-        """Clear wait_for_jarvis state and cancel the nudge timer."""
+        """Clear wait-for-JARVIS state and cancel its nudge/stabilization timer."""
         self._waiting_for_jarvis.pop(event_id, None)
         task = self._jarvis_wait_tasks.pop(event_id, None)
-        if task and not task.done():
+        if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
     def _get_slack_channel(self):
@@ -5855,6 +5861,23 @@ class Brain:
         """Timestamp of last processing for this event. Returns current time if unknown."""
         return self._last_processed.get(event_id, time.time())
 
+    def get_system_stability_snapshot(self) -> dict:
+        """Return hexagonal system stability metrics (Step 4)."""
+        from .llm import get_quota_tracker
+        tracker = get_quota_tracker()
+        stats = tracker.get_stats() if tracker else {}
+        active_wip = len([t for t in self._active_tasks.values() if not t.done()]) if hasattr(self, "_active_tasks") else 0
+        return {
+            "tokens_used_60s": stats.get("tokens_used_60s", 0),
+            "tpm_limit": stats.get("tpm_limit", 0),
+            "tokens_remaining": stats.get("tokens_remaining", 0),
+            "utilization_pct": stats.get("utilization_pct", 0.0),
+            "active_reservations": stats.get("active_reservations", 0),
+            "high_priority_waiters": stats.get("high_priority_waiters", 0),
+            "pending_jarvis_events": self.pending_jarvis_event_ids(),
+            "active_wip": active_wip,
+        }
+
     def has_jarvis_waiters(self) -> bool:
         """True if any event is currently waiting for JARVIS."""
         return bool(self._waiting_for_jarvis)
@@ -5969,6 +5992,104 @@ class Brain:
                 await target(message)
             except Exception as e:
                 logger.warning(f"Broadcast target failed: {e}")
+
+    def _is_transient_llm_error_turn(self, turn) -> bool:
+        if not turn:
+            return False
+        actor = turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", "brain")
+        action = turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)
+        if (actor is not None and actor != "brain") or action != "error":
+            return False
+        text = str((turn.get("thoughts") if isinstance(turn, dict) else getattr(turn, "thoughts", None)) or "")
+        if not text:
+            return False
+        if "Quota exhausted" in text and "exceeds the burst limit" not in text:
+            return True
+        return any(
+            err in text
+            for err in (
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "503",
+                "UNAVAILABLE",
+                "DEADLINE_EXCEEDED",
+                "Server disconnected",
+                "first-chunk",
+                "inter-chunk",
+            )
+        )
+
+
+    async def _jarvis_stabilization_loop(self, event_id: str, timeout_s: float = 180.0) -> None:
+        try:
+            start_time = time.time()
+            while True:
+                remaining = timeout_s - (time.time() - start_time)
+                if remaining <= 0 or event_id not in self._waiting_for_jarvis:
+                    break
+                await asyncio.sleep(min(45.0, remaining))
+                if event_id in self._waiting_for_jarvis and self._live_adapter and hasattr(self._live_adapter, "receive_brain_response"):
+                    try:
+                        telem = f"[STABILITY TELEMETRY for {event_id}] {json.dumps(self.get_system_stability_snapshot(), default=str)}"
+                        await self._live_adapter.receive_brain_response(telem)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            return
+        
+        self._waiting_for_jarvis.pop(event_id, None)
+        self._jarvis_wait_tasks.pop(event_id, None)
+        
+        wake_turn = ConversationTurn(
+            turn=0,
+            actor="dispatcher",
+            action="defer",
+            thoughts=f"JARVIS stabilization watch window elapsed ({timeout_s}s); resuming event evaluation after cooldown.",
+        )
+        try:
+            await self._append_and_broadcast(event_id, wake_turn)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("Stabilization TTL wake append failed for %s: %s", event_id, e)
+        
+        self.enqueue_for_processing(event_id)
+
+    async def _handoff_transient_error_to_jarvis(self, event_id: str, summary: str, snapshot: dict) -> bool:
+        rounds = self._jarvis_recovery_rounds.get(event_id, 0) + 1
+        if rounds > 2:
+            return False
+        
+        self._jarvis_recovery_rounds[event_id] = rounds
+        self._waiting_for_jarvis[event_id] = time.time()
+        
+        wait_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="wait",
+            waitingFor="jarvis",
+            thoughts=f"Transient LLM/quota saturation detected ({summary}). Handing off to JARVIS stabilization watch (round {rounds}/2).",
+        )
+        try:
+            await self._append_and_broadcast(event_id, wait_turn)
+        except Exception as e:
+            logger.warning("Stabilization handoff append failed for %s: %s", event_id, e)
+            try:
+                event = await self.blackboard.get_event(event_id)
+                if event and hasattr(event, "conversation"):
+                    event.conversation.append(wait_turn)
+            except Exception:
+                pass
+        
+        handed_off = False
+        if self._live_adapter and hasattr(self._live_adapter, "is_operational_peer_ready") and self._live_adapter.is_operational_peer_ready() and hasattr(self._live_adapter, "request_stabilization_watch"):
+            handed_off = await self._live_adapter.request_stabilization_watch(event_id, summary, snapshot)
+        
+        task = self._jarvis_wait_tasks.get(event_id)
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        self._jarvis_wait_tasks[event_id] = asyncio.create_task(self._jarvis_stabilization_loop(event_id, timeout_s=180.0 if handed_off else 60.0))
+        return True
 
     async def _escalate_to_human(
         self, event_id: str, event: EventDocument, nudge_count: int, idle_seconds: float,
@@ -6161,6 +6282,7 @@ class Brain:
         self._waiting_for_agent.pop(event_id, None)
         self._clear_jarvis_wait(event_id)
         self._jarvis_wait_count.pop(event_id, None)
+        self._jarvis_recovery_rounds.pop(event_id, None)
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._orphan_last_attempt.pop(event_id, None)
@@ -7060,6 +7182,12 @@ class Brain:
             if trailing_errors > 0:
                 if trailing_errors >= 3:
                     if eid not in self._escalated_error_events:
+                        if event.source not in ("chat", "slack") and event.source != "jarvis" and all(self._is_transient_llm_error_turn(t) for t in event.conversation[-trailing_errors:]):
+                            snapshot = self.get_system_stability_snapshot()
+                            summary = f"Event {eid} halted with {trailing_errors} transient errors."
+                            handoff_ok = await self._handoff_transient_error_to_jarvis(eid, summary, snapshot)
+                            if handoff_ok:
+                                continue
                         if self._escalation_blocked(eid):
                             logger.debug(f"Scan: skip error escalation for {eid} (worker/lock active)")
                             continue

@@ -19,3 +19,8 @@ def is_jarvis_acknowledgment(text: str | None) -> bool:
         return False
     stripped = text.strip().strip("*_\"'").strip()
     return bool(_JARVIS_ACK_PATTERN.search(stripped))
+
+STABILIZATION_WAKE_PREFIX = "[STABILIZATION WAKE]"
+
+def is_stabilization_wake(text: str | None) -> bool:
+    return bool(text and text.strip().startswith(STABILIZATION_WAKE_PREFIX))

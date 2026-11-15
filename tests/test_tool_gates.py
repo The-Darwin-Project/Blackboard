@@ -73,8 +73,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_30_gates(self):
-        assert len(GATE_REGISTRY) == 30
+    def test_registry_has_31_gates(self):
+        assert len(GATE_REGISTRY) == 31
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -85,9 +85,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentysix_strip_mode_gates(self):
+    def test_twentyseven_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 26
+        assert len(strip_gates) == 27
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +317,8 @@ class TestDomainChaotic:
             "wait_for_agent", "reply_to_agent", "message_agent",
             "respond_to_jarvis", "wait_for_jarvis",
         }
+        # test_t4 modification: IDLE_AGENT_WAIT strips wait_for_agent if is_intermediate=False
+        expected.discard("wait_for_agent")
         assert names == expected
 
     def test_includes_agent_communication(self):
@@ -324,7 +326,8 @@ class TestDomainChaotic:
         ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic"})
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert {"wait_for_agent", "reply_to_agent", "message_agent"} <= names
+        # test_t4: idle strips wait_for_agent so we only assert reply/message
+        assert {"reply_to_agent", "message_agent"} <= names
 
 
 class TestDomainCasual:
@@ -1782,3 +1785,57 @@ class TestRecallGateThroughBrainLoop:
         assert "recall_pruned_turns" in tools
         assert tools <= {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis",
                          "defer_event", "recall_pruned_turns"}, f"unexpected intermediate toolset: {tools}"
+
+class TestIdleAgentWaitGate:
+    def test_t4_chaotic_keeps_wait_when_intermediate(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": True})
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "wait_for_agent" in names
+
+    def test_t4_chaotic_strips_wait_when_idle(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": False})
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "wait_for_agent" not in names
+
+class TestStabilizationWake:
+    def test_t6_wake_strips_respond_and_allows_close(self):
+        turns = [
+            _turn("jarvis", "message", thoughts="[STABILIZATION WAKE] System TPM drained to 32%, safe to resume.")
+        ]
+        ctx = _ctx(brain_phase="close", conversation=turns, context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+        from src.agents.tool_gates import has_unevaluated_close_blocker
+        has_blocker = has_unevaluated_close_blocker(ctx.conversation)
+        assert has_blocker is False
+        
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "close_event" in names
+        assert "respond_to_jarvis" not in names
+
+        from src.utils.jarvis_ack import is_stabilization_wake
+        assert is_stabilization_wake("[STABILIZATION WAKE] System TPM drained to 32%") is True
+        assert is_stabilization_wake("Normal message") is False
+
+    def test_t6_normal_jarvis_blocks_close(self):
+        turns = [
+            _turn("jarvis", "message", thoughts="Regular jarvis message here to block close.")
+        ]
+        ctx = _ctx(brain_phase="close", conversation=turns, context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+        from src.agents.tool_gates import has_unevaluated_close_blocker
+        has_blocker = has_unevaluated_close_blocker(ctx.conversation)
+        assert has_blocker is True
+        
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "close_event" not in names
+        assert "respond_to_jarvis" in names
+
+    def test_t4_generate_phase_tool_map_includes_gate(self):
+        from src.skill_reconciler.generate_map import generate_phase_tool_map
+        import os
+        from pathlib import Path
+        os.environ["BLACKBOARD_ROOT"] = str(Path(__file__).resolve().parents[1])
+        result = generate_phase_tool_map()
+        assert "IDLE_AGENT_WAIT" in str(result)

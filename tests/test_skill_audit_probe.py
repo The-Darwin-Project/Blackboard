@@ -522,3 +522,82 @@ class TestGemini4PhaseBudgetsAndSelfAuditSkillsProbe:
         assert set(tool_re.findall(added_sticky)) == set()
 
 
+
+class TestVmer2383OptionBAndSkillHardening:
+    def test_t16_option_b_slack_notification_policy(self):
+        from pathlib import Path
+        src_dir = Path(__file__).parent.parent / "src"
+        skills_dir = src_dir / "agents" / "brain_skills"
+        
+        with open(src_dir / "agents" / "llm" / "types.py", "r") as f:
+            types_content = f.read()
+        assert "report_incident" in types_content
+        assert "Nightwatcher" in types_content
+        assert "CHAOTIC" in types_content
+        assert "P1" in types_content
+        assert "pipeline failure notification, escalation" not in types_content
+        
+        with open(skills_dir / "always" / "01-function-rules.md", "r") as f:
+            f1 = f.read()
+        assert "P1" in f1 or "CHAOTIC" in f1
+        
+        with open(skills_dir / "close" / "when-to-close.md", "r") as f:
+            f2 = f.read()
+        assert "P1" in f2 or "CHAOTIC" in f2
+        
+        with open(skills_dir / "escalate" / "incident-tracking.md", "r") as f:
+            f3 = f.read()
+        assert "P1" in f3 or "CHAOTIC" in f3
+        
+        with open(skills_dir / "dispatch" / "mr-lifecycle.md", "r") as f:
+            mr_lifecycle = f.read()
+        assert "notify maintainers via notify_user_slack" not in mr_lifecycle.split("## Bot MR Merge Conflicts")[1].split("##")[0]
+        assert "notify_user_slack" in mr_lifecycle.split("**Exception — Agent-authored commits**:")[1].split("##")[0]
+
+    def test_t17_phase_lifecycle_escalate_recovery_and_no_tools(self):
+        import re
+        from pathlib import Path
+        skills_dir = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
+        
+        with open(skills_dir / "always" / "09-phase-lifecycle.md", "r") as f:
+            phase_lf = f.read()
+        assert ("POST_ESC -->" in phase_lf and "DISPATCH" in phase_lf) or "ESCALATE -> DISPATCH" in phase_lf
+        
+        after_esc = phase_lf.split("## After Escalation")[1].split("##")[0] if "## After Escalation" in phase_lf else ""
+        tool_re = re.compile(r"\b(" + "|".join(re.escape(t) for t in _TOOL_NAMES) + r")\b")
+        assert tool_re.findall(after_esc) == []
+        
+        with open(skills_dir / "always" / "12-actor-responses.md", "r") as f:
+            actor_res = f.read()
+        assert "[STABILIZATION WAKE]" in actor_res
+        assert "agent.result" in actor_res
+
+    def test_t18_deep_memory_fixes_and_decision_routing(self):
+        from pathlib import Path
+        skills_dir = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
+        
+        with open(skills_dir / "dispatch" / "decision-routing.md", "r") as f:
+            decision_routing = f.read()
+        with open(skills_dir / "dispatch" / "deep-memory-fixes.md", "r") as f:
+            deep_memory_fixes = f.read()
+        with open(skills_dir / "always" / "10-observations.md", "r") as f:
+            observations = f.read()
+            
+        assert "delta probes on follow-ups" in decision_routing
+        
+        # Proximity assertion between "sensor inputs for you to evaluate against" and "approval gates"
+        idx1 = decision_routing.find("sensor inputs for you to evaluate against")
+        idx2 = decision_routing.find("approval gates")
+        assert idx1 != -1 and idx2 != -1
+        assert abs(idx1 - idx2) <= 160
+
+        assert len(deep_memory_fixes.splitlines()) <= 100
+        
+        assert "review_notes" in observations
+        assert "review_notes" in deep_memory_fixes
+        assert "### Note vs Other Tools" in observations
+        note_vs_other = observations.split("### Note vs Other Tools")[1].split("##")[0]
+        import re
+        tool_re = re.compile(r"\b(" + "|".join(re.escape(t) for t in _TOOL_NAMES) + r")\b")
+        found_tools = set(tool_re.findall(note_vs_other))
+        assert found_tools.issubset({"record_observation", "take_note"})

@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 if TYPE_CHECKING:
     from ..models import EventDocument
 
-from src.utils.jarvis_ack import is_jarvis_acknowledgment
+from src.utils.jarvis_ack import is_jarvis_acknowledgment, is_stabilization_wake
 from src.utils.turn_decay import DECAY_MIN_CHARS, DEFAULT_TURN_DECAY_DISTANCE  # noqa: F401 (re-exported)
 
 
@@ -240,7 +240,7 @@ def _pred_jarvis_response(ctx: GateContext) -> bool:
         for t in reversed(ctx.conversation):
             if t.actor == "jarvis" and t.action in ("message", "insight"):
                 raw = str(getattr(t, "thoughts", None) or getattr(t, "result", None) or "")
-                if is_jarvis_acknowledgment(raw):
+                if is_jarvis_acknowledgment(raw) or is_stabilization_wake(raw):
                     break
                 has_unanswered = True
                 break
@@ -309,11 +309,11 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
                 if thoughts_str.startswith("PHASE: CLOSE"):
                     break
         
-        if actor == "jarvis":
+        if actor == "jarvis" and action == "message":
             thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
             result = t.get("result") if isinstance(t, dict) else getattr(t, "result", None)
             raw = str(thoughts or result or "")
-            if is_jarvis_acknowledgment(raw):
+            if is_jarvis_acknowledgment(raw) or is_stabilization_wake(raw):
                 continue
 
         if actor in ("jarvis", "user") and action == "message" and (not status_val or status_val in ("sent", "delivered")):
@@ -824,6 +824,14 @@ def _msg_hard_strip_wait_user(tool: str, ctx: GateContext) -> str:
 # ---------------------------------------------------------------------------
 
 GATE_REGISTRY: list[GateDefinition] = [
+    GateDefinition(
+        gate_id="IDLE_AGENT_WAIT",
+        mode="strip",
+        predicate=lambda ctx: not _pred_intermediate(ctx),
+        tools_affected=lambda ctx: {"wait_for_agent"},
+        message=lambda n, ctx: f"[GATE] {n} unavailable. wait_for_agent requires an active in-flight agent task (is_intermediate=True)",
+    ),
+
     GateDefinition(
         gate_id="DEFER_WAKE_ITER0",
         mode="strip",

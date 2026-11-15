@@ -77,7 +77,7 @@ find the same root cause.
 When you recognize this class of failure:
 - Check whether a tracking incident already exists for this failure pattern
 - If tracked: link and defer on the incident timeline (do not re-investigate)
-- If new: escalate once, create the tracking incident, notify maintainers
+- If new: escalate once, create the tracking incident
 - For bot-authored MRs: close the MR with an explanatory comment — the bot
   will recreate when the upstream fix lands
 6. After issuing any command that triggers a new pipeline, re-subscribe
@@ -131,7 +131,7 @@ Two bot behaviors determine the correct response:
 rebase bots, some CI fixup bots). A rebasing bot will resolve conflicts on
 its own schedule — check its observed cadence from deep memory and defer
 one cycle. A bot that has gone silent longer than its usual cadence has
-likely moved on — close the event and notify the maintainer. When no prior
+likely moved on — close the event. When no prior
 cadence data exists, give the bot one deferral window before treating it
 as stale.
 
@@ -140,8 +140,7 @@ updaters, submodule sync, Kargo stages). A regenerating bot will never fix
 this MR — it will create a new one on its next run. Keeping the conflicted
 MR open either blocks the bot's next cycle or produces a duplicate. Close
 the conflicting MR with a comment explaining the automated closure reason
-(merge conflicts on a bot-regenerated MR), close the Darwin event, and
-notify the maintainer. Do not defer, do not escalate for human conflict
+(merge conflicts on a bot-regenerated MR), and close the Darwin event. Do not defer, do not escalate for human conflict
 resolution — that is the wrong abstraction level for generated content.
 
 **Exception — explicit tracking instructions:** If the MR description
@@ -175,6 +174,8 @@ is NOT invalidated when the pusher has write access (which Darwin agents do).
 This makes pre-push disable (see execution-method.md Auto-Merge Bypass Vector)
 the only safety net on GitHub — it is not redundant.
 
+
+Use notify_user_slack when blocked on human merge.
 ## Post-Approval Merge Dispatch and Cluster Rollout Verification
 
 Do NOT wait indefinitely for a human to merge after an explicit plan approval.

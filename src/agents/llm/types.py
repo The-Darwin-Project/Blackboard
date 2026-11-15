@@ -802,8 +802,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "wait_for_agent",
         "description": (
             "Signal that the Brain is waiting for an agent to complete its task. "
-            "Pauses the event until the agent reports back. Use when you have dispatched "
-            "an agent and need to wait for its result before proceeding."
+            "Pauses the event until the agent reports back. Valid ONLY while an in-flight "
+            "agent has not yet posted its terminal result turn. Never call on defer_wake "
+            "when agent.result is already present."
         ),
         "input_schema": {
             "type": "object",
@@ -821,7 +822,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Send a Slack DM notification to a user by email address. "
             "Use when an agent recommends notifying someone, or when the event outcome "
-            "requires human attention (e.g., pipeline failure notification, escalation). "
+            "requires human attention (e.g., Option B authority (Critical-Blocker P1 multi-service or production outages, direct synchronous maintainer action/reply such as request_user_approval or green MR blocked on mandatory human merge, or explicit user DM request). Routine P2/P3/P4 automated escalations go to report_incident where Nightwatcher owns batch delivery.). "
             "The message is delivered as a DM from the Darwin bot."
         ),
         "input_schema": {
@@ -1519,7 +1520,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "Record a qualitative field note — an environment quirk, a correction, "
             "a cross-event correlation, a workflow detail, or a convention you discovered. "
             "Notes accumulate in the shared notebook and are periodically digested into "
-            "Reference Facts for long-term recall. "
+            "Reference Facts for long-term recall. Check review_notes first to avoid duplicate notes. "
             "<bridge>See always/10-observations.md § Field Notes for when to note vs observe.</bridge>"
         ),
         "input_schema": {

@@ -22,6 +22,27 @@ from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
 from .handler_utils import _safe_int
 
+import math
+
+def _safe_seconds(val: object) -> int:
+    if isinstance(val, bool) or val is None:
+        return 0
+    try:
+        fval = float(val)  # type: ignore[arg-type]
+        return int(fval) if math.isfinite(fval) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+def _safe_score(val: object) -> float:
+    if isinstance(val, bool) or val is None:
+        return 0.0
+    try:
+        fval = float(val)  # type: ignore[arg-type]
+        return fval if math.isfinite(fval) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 if TYPE_CHECKING:
     from .tool_router import ToolContext
 
@@ -211,7 +232,7 @@ async def handle_consult_deep_memory(
             has_results = True
             memory_text += "### Reference Facts\n"
             for i, r in enumerate(knowledge, 1):
-                p = r.get("payload", {})
+                p = r.get("payload") or {}
                 stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
                 fact_text = p.get("fact", "?")
                 memory_text += (
@@ -231,9 +252,9 @@ async def handle_consult_deep_memory(
             has_results = True
             memory_text += "### Lessons Learned\n"
             for i, r in enumerate(lessons, 1):
-                p = r.get("payload", {})
+                p = r.get("payload") or {}
                 memory_text += (
-                    f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f}, "
+                    f"{i}. **{p.get('title', '?')}** (score: {_safe_score(r.get("score")):.2f}, "
                     f"channel: {p.get('channel', '?')})\n"
                     f"   - Pattern: {p.get('pattern', '?')}\n"
                 )
@@ -249,21 +270,21 @@ async def handle_consult_deep_memory(
             has_results = True
             memory_text += "### Past Events\n"
             for i, r in enumerate(results, 1):
-                p = r.get("payload", {})
-                dur = p.get("duration_seconds", 0)
+                p = r.get("payload") or {}
+                dur = _safe_seconds(p.get("duration_seconds"))
                 dur_m = f"{dur // 60}m" if dur else "?"
-                defers = p.get("defer_patterns", [])
-                total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
+                defers = p.get("defer_patterns") or []
+                total_defer = sum(_safe_seconds(d.get("duration_seconds")) for d in defers if isinstance(d, dict))
                 defer_m = f"{total_defer // 60}m" if total_defer else "0m"
-                timings = p.get("operational_timings", [])
+                timings = p.get("operational_timings") or []
                 timing_str = ", ".join(
-                    f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
+                    f"{t.get('process', '?')}={_safe_seconds(t.get("duration_seconds")) // 60}m"
                     for t in timings if isinstance(t, dict)
                 ) or "none"
                 domain_str = p.get("brain_domain", p.get("domain", "?"))
                 corrected = " [CORRECTED]" if p.get("corrected") else ""
                 memory_text += (
-                    f"{i}. domain: {domain_str} | score: {r.get('score', 0):.2f}{corrected}\n"
+                    f"{i}. domain: {domain_str} | score: {_safe_score(r.get("score")):.2f}{corrected}\n"
                     f"   - Pattern: {p.get('symptom', '?')}\n"
                     f"   - Root cause: {p.get('root_cause', '?')}\n"
                     f"   - Fix: {p.get('fix_action', '?')}\n"

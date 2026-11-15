@@ -133,6 +133,8 @@ same mistake, or miss the same cross-event pattern every time.
 - **Concise rule → note, full narrative → conversation.** The active field-note notebook loads into triage context across concurrent events, so verbose multi-section reports dilute signal and consume shared token capacity. Distill each field note to a compact, self-contained insight of a few lines capturing the reusable rule, environment quirk, or cross-event correlation key and incident reference, and keep detailed investigation narratives in the event conversation.
 
 ### Review Before Decisions
+Use review_notes before creating duplicate incident notes.
+
 
 Field notes and deep memory capture knowledge at different time scales —
 notes hold recent, not-yet-digested observations that may not have been

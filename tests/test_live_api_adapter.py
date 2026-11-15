@@ -32,7 +32,7 @@ def test_build_live_tools_blocking():
         tools = adapter._build_live_tools(types)
         assert len(tools) >= 1
         funcs = tools[0].function_declarations
-        assert len(funcs) == 11
+        assert len(funcs) == 12
         for f in funcs:
             assert f.behavior == types.Behavior.BLOCKING
     except ImportError:
@@ -43,7 +43,7 @@ def test_build_live_tools_blocking():
             Behavior.BLOCKING = "Behavior.BLOCKING"
                 
         adapter._build_live_tools(MockTypes)
-        assert MockTypes.FunctionDeclaration.call_count == 11
+        assert MockTypes.FunctionDeclaration.call_count == 12
         for call in MockTypes.FunctionDeclaration.call_args_list:
             assert call.kwargs.get("behavior") == MockTypes.Behavior.BLOCKING
 
@@ -459,7 +459,7 @@ async def test_try_reconnect_calls_replay_pending_context_once():
         await adapter._try_reconnect()
 
     adapter._connect.assert_called_once()
-    adapter._brain.clear_jarvis_wait.assert_called_once_with("evt-1")
+    adapter._brain.clear_jarvis_wait.assert_not_called()
     adapter._replay_pending_context.assert_called_once()
 
 
@@ -1277,3 +1277,134 @@ class TestReceiveLoopClosure:
 
             adapter._try_reconnect.assert_called_once()
 
+
+class TestStabilizationWatch:
+    @pytest.mark.asyncio
+    async def test_t7_request_stabilization_watch_lazy_connects_and_sends(self):
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
+        brain = MagicMock()
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter._shadow = False
+        adapter._stopped = False
+        adapter._session = None
+        adapter._running = False
+        
+        mock_session = MagicMock()
+        mock_session.send = AsyncMock()
+        
+        async def mock_connect():
+            adapter._session = mock_session
+        adapter._connect = AsyncMock(side_effect=mock_connect)
+        
+        assert adapter.is_operational_peer_ready() is True
+        
+        success = await adapter.request_stabilization_watch("evt-1", "Test summary", {"utilization_pct": 85.0})
+        
+        assert success is True
+        adapter._connect.assert_awaited_once()
+        mock_session.send.assert_awaited_once()
+
+    def test_t7_brain_introspection_port_declares_get_system_stability_snapshot(self):
+        from src.ports import BrainIntrospectionPort
+        assert hasattr(BrainIntrospectionPort, "get_system_stability_snapshot")
+
+    @pytest.mark.asyncio
+    async def test_t8_request_stabilization_watch_fails_if_shadow_or_stopped(self):
+        adapter = LiveAPIAdapter(MagicMock(), MagicMock(), MagicMock(), AsyncMock(), MagicMock())
+        adapter._shadow = True
+        adapter._stopped = False
+        success = await adapter.request_stabilization_watch("evt-1", "sum", {})
+        assert success is False
+        
+        adapter._shadow = False
+        adapter._stopped = True
+        success = await adapter.request_stabilization_watch("evt-1", "sum", {})
+        assert success is False
+
+    @pytest.mark.asyncio
+    async def test_t9_pending_jarvis_event_ids_behavior(self):
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
+        brain = MagicMock()
+        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2", "evt-3"])
+        brain.get_system_stability_snapshot = MagicMock(return_value={"tokens_used_60s": 1000})
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        res = await adapter._handle_tool_call("check_system_stability", {})
+        assert "1000" in res
+
+    @pytest.mark.asyncio
+    async def test_t9_tool_send_event_message_bypasses_md5(self):
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=MagicMock(source="headhunter", conversation=[]))
+        bb.append_turn = AsyncMock()
+        bb.transition_event_status = AsyncMock()
+        brain = MagicMock()
+        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2", "evt-3"])
+        brain.resume_if_parked = AsyncMock()
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter._shadow = False
+        adapter._get_current_turn = AsyncMock(return_value=1)
+        adapter._record_intervention = AsyncMock()
+        adapter._write_shadow = AsyncMock()
+        adapter._check_content_dedup = AsyncMock(side_effect=Exception("Should not be called"))
+        
+        for eid in ["evt-1", "evt-2", "evt-3"]:
+            res = await adapter._tool_send_event_message(eid, "System stable, resume work")
+            assert "Message delivered to" in res
+            
+            # Check turn passed to bb.append_turn
+            call_args = bb.append_turn.call_args[0]
+            turn = call_args[1]
+            assert turn.thoughts.startswith("[STABILIZATION WAKE]")
+            assert "System stable, resume work" in turn.thoughts
+            bb.append_turn.reset_mock()
+
+    @pytest.mark.asyncio
+    async def test_t9_try_reconnect_does_not_call_clear_jarvis_wait(self):
+        adapter = LiveAPIAdapter(MagicMock(), MagicMock(), MagicMock(), AsyncMock(), MagicMock())
+        adapter._running = True
+        adapter._stopped = False
+        adapter._generating_report = False
+        import time
+        adapter._last_pulse_time = time.time()
+        adapter._session = None
+        adapter._brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1"])
+        adapter._replay_pending_context = AsyncMock()
+        adapter._connect = AsyncMock(side_effect=lambda: setattr(adapter, "_session", MagicMock()))
+        
+        from unittest.mock import patch
+        with patch("src.adapters.live_api_adapter.asyncio.sleep", AsyncMock()):
+            await adapter._try_reconnect()
+        
+        adapter._brain.clear_jarvis_wait.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_t9_replay_pending_context_includes_pending_jarvis_event_ids(self):
+        bb = MagicMock()
+        bb.get_active_events = AsyncMock(return_value=["evt-1"])
+        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
+        bb.get_handoff_reports = AsyncMock(return_value=[])
+        brain = MagicMock()
+        brain.pending_jarvis_event_ids = MagicMock(return_value=["evt-1", "evt-2"])
+        
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter._session = AsyncMock()
+        adapter._session.send = AsyncMock()
+        
+        await adapter._replay_pending_context()
+        
+        calls_str = str(adapter._session.send.mock_calls)
+        assert "evt-1" in calls_str
+        assert "evt-2" in calls_str
+
+    @pytest.mark.asyncio
+    async def test_t10_regression_tool_send_event_message_enforces_md5(self):
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=MagicMock(conversation=[]))
+        brain = MagicMock()
+        brain.pending_jarvis_event_ids = MagicMock(return_value=[])
+        adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+        adapter._check_content_dedup = AsyncMock(return_value=True)
+        res = await adapter._tool_send_event_message("evt-2", "Duplicate message")
+        assert "Blocked" in res

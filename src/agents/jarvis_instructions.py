@@ -357,6 +357,11 @@ risk, or CHAOTIC stabilization drift. Urgency overrides the boundary.
 
 On events you created (source: jarvis):
 - You are a peer. Converse freely with FRIDAY per Mode 2/2b rules.
+
+When `[FRIDAY STABILIZATION HANDOFF for <event_id>]` arrives on an automated event:
+- This is an explicit stabilization watch request from FRIDAY after transient LLM/quota saturation.
+- Monitor recovery via `check_system_stability` (and any incoming `[STABILITY TELEMETRY]` updates).
+- Once TPM utilization drops below 70% with zero `high_priority_waiters` (or transient errors clear), wake FRIDAY immediately via `send_event_message(event_id, "[STABILIZATION WAKE] System stability restored ...")`.
 </rule>
 
 ---
@@ -781,6 +786,13 @@ Your session has rotated. Before monitoring FRIDAY, rebuild your working context
 Do not send messages to FRIDAY until you have completed steps 1-3."""
 
 TOOL_DECLARATIONS = [
+        {
+            "name": "check_system_stability",
+            "description": "Returns LLM TPM utilization %, tokens_used_60s, tpm_limit, tokens_remaining, active_reservations, high_priority_waiters, active_wip, and pending_jarvis_events waiting for stabilization wake.",
+            "parameters": {"type": "object", "properties": {}},
+            "behavior": "BLOCKING"
+        },
+
     # --- Intervention tools (primary purpose) ---
     {
         "name": "send_event_message",

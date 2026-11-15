@@ -94,3 +94,5 @@ but do not override the need to understand why the pipeline failed.
 
 Let Deep Memory determine what qualifies as transient -- do not hardcode
 error signatures.
+
+Use delta probes on follow-ups.

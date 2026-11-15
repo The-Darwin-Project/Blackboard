@@ -9,9 +9,7 @@
 # 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only send_event_message reaches her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
-# 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays
-#     active event context via _replay_pending_context, then sends SESSION_STARTUP_PROTOCOL
-#     directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
+# 8b. [Pattern]: _try_reconnect preserves _waiting_for_jarvis across reconnects and replays active + pending_jarvis event context via _replay_pending_context, then sends SESSION_STARTUP_PROTOCOL directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
@@ -86,6 +84,7 @@ from ..agents.jarvis_instructions import (
 from ..memory.pulse import PulseBatch
 from ..models import _resolve_phase
 from ..utils import redact_pii as _redact_pii
+from ..utils.jarvis_ack import is_stabilization_wake, STABILIZATION_WAKE_PREFIX
 
 if TYPE_CHECKING:
     from ..agents.archivist import Archivist
@@ -548,7 +547,7 @@ class LiveAPIAdapter:
             lessons = await self._archivist.list_lessons(limit=500)
             for p in lessons:
                 nid = f"lesson:{p.get('id', '')}"
-                payload = p.get("payload", {})
+                payload = p.get("payload") or {}
                 title = payload.get("title", "")
                 channel = payload.get("channel", "external")
                 if title:
@@ -556,7 +555,7 @@ class LiveAPIAdapter:
             memories = await self._archivist.list_memories(limit=500)
             for p in memories:
                 nid = f"memory:{p.get('id', '')}"
-                payload = p.get("payload", {})
+                payload = p.get("payload") or {}
                 symptom = payload.get("symptom", "")
                 service = payload.get("service", "")
                 if symptom:
@@ -565,7 +564,7 @@ class LiveAPIAdapter:
                 knowledge = await self._archivist.list_knowledge(limit=500)
                 for p in knowledge:
                     nid = f"knowledge:{p.get('id', '')}"
-                    payload = p.get("payload", {})
+                    payload = p.get("payload") or {}
                     topic = payload.get("topic", "")
                     scope = payload.get("scope", "")
                     if topic:
@@ -931,6 +930,11 @@ class LiveAPIAdapter:
             async with asyncio.timeout(getattr(self, "_tool_timeout", 60.0)):
                 if name == "list_active_events":
                     return await self._tool_list_active_events()
+                elif name == "check_system_stability":
+                    brain = getattr(self, "_brain", None)
+                    if brain and hasattr(brain, "get_system_stability_snapshot"):
+                        return json.dumps(brain.get_system_stability_snapshot())
+                    return "{}"
                 elif name == "view_event_blackboard":
                     return await self._tool_view_event_blackboard(args.get("event_id", ""))
                 elif name == "read_event_turns":
@@ -1180,7 +1184,7 @@ class LiveAPIAdapter:
             lesson = await self._archivist.get_lesson(nid)
             if not lesson:
                 return f"Lesson {nid} not found"
-            payload = lesson.get("payload", {})
+            payload = lesson.get("payload") or {}
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_lessons\n"
@@ -1195,7 +1199,7 @@ class LiveAPIAdapter:
             memory = await self._archivist.get_memory(nid)
             if not memory:
                 return f"Memory {nid} not found"
-            payload = memory.get("payload", {})
+            payload = memory.get("payload") or {}
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_events\n"
@@ -1212,8 +1216,9 @@ class LiveAPIAdapter:
             fact = await self._archivist.get_knowledge(nid)
             if not fact:
                 return f"Knowledge {nid} not found"
-            payload = fact.get("payload", {})
-            stale = " [STALE]" if payload.get("valid_until") and payload["valid_until"] < time.time() else ""
+            payload = fact.get("payload") or {}
+            vu = payload.get("valid_until")
+            stale = " [STALE]" if isinstance(vu, (int, float)) and not isinstance(vu, bool) and vu < time.time() else ""
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_knowledge\n"
@@ -1239,27 +1244,27 @@ class LiveAPIAdapter:
         if knowledge:
             lines.append("\n### Reference Facts")
             for k in knowledge:
-                p = k.get("payload", {})
+                p = k.get("payload") or {}
                 stale = " [STALE]" if k.get("stale") else ""
                 lines.append(
-                    f"- [{k.get('score', 0):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
+                    f"- [{float(k.get("score") or 0.0):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
                     f"{p.get('fact', '?')}{stale}"
                 )
         if memories:
             lines.append("\n### Past Events")
             for m in memories:
-                p = m.get("payload", {})
+                p = m.get("payload") or {}
                 lines.append(
-                    f"- [{m.get('score', 0):.2f}] {p.get('service', '?')}: "
+                    f"- [{float(m.get("score") or 0.0):.2f}] {p.get('service', '?')}: "
                     f"{p.get('symptom', '?')} → {p.get('root_cause', '?')} "
                     f"({p.get('outcome', '?')})"
                 )
         if lessons:
             lines.append("\n### Lessons")
             for ls in lessons:
-                p = ls.get("payload", {})
+                p = ls.get("payload") or {}
                 lines.append(
-                    f"- [{ls.get('score', 0):.2f}] {p.get('title', '?')}: "
+                    f"- [{float(ls.get("score") or 0.0):.2f}] {p.get('title', '?')}: "
                     f"{p.get('pattern', '?')}"
                 )
         if not knowledge and not memories and not lessons:
@@ -1372,8 +1377,14 @@ class LiveAPIAdapter:
         # Re-enable if JARVIS spams: rate_err = await self._check_rate_limit(event_id, current_turn)
         # if rate_err: return rate_err
 
-        if await self._check_content_dedup(event_id, message):
-            return f"Blocked: identical message already sent for {event_id} within the last hour."
+        brain = getattr(self, "_brain", None)
+        is_stabilization_waiter = bool(brain and hasattr(brain, "pending_jarvis_event_ids") and event_id in (brain.pending_jarvis_event_ids() or ()))
+        if not is_stabilization_waiter:
+            if await self._check_content_dedup(event_id, message):
+                return f"Blocked: identical message already sent for {event_id} within the last hour."
+        else:
+            if not is_stabilization_wake(message):
+                message = f"{STABILIZATION_WAKE_PREFIX} {message.strip()}"
 
         await self._record_intervention(event_id, current_turn)
 
@@ -1731,8 +1742,9 @@ class LiveAPIAdapter:
         audit_lines: list[str] = []
         audit_event_ids: list[str] = []
 
+        brain = getattr(self, "_brain", None)
         for eid in non_jarvis:
-            if self._brain.is_task_running(eid):
+            if brain and hasattr(brain, "is_task_running") and brain.is_task_running(eid):
                 continue
             last_processed = self._brain.last_processed_time(eid)
             silence = now - last_processed
@@ -2123,10 +2135,6 @@ class LiveAPIAdapter:
                 try:
                     await self._connect()
                     if self._session:
-                        if self._brain:
-                            for eid in self._brain.pending_jarvis_event_ids():
-                                self._brain.clear_jarvis_wait(eid)
-                            logger.info("Cortex reconnect: cleared stale JARVIS wait states")
                         await self._replay_pending_context()
                         return
                 except Exception as e:
@@ -2139,7 +2147,9 @@ class LiveAPIAdapter:
             return
         try:
             active_ids = await self._blackboard.get_active_events()
-            if not active_ids:
+            brain = getattr(self, "_brain", None)
+            pending_jarvis = brain.pending_jarvis_event_ids() if brain and hasattr(brain, "pending_jarvis_event_ids") else []
+            if not active_ids and not pending_jarvis:
                 return
 
             # Retrieve last handoff report — JARVIS's own observations from previous session
@@ -2153,25 +2163,33 @@ class LiveAPIAdapter:
             except Exception:
                 pass
 
-            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost.{handoff_section}Active event summaries:"]
-            for eid in active_ids[:5]:
-                event = await self._blackboard.get_event(eid)
-                if not event:
-                    continue
-                elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
-                phase = _resolve_phase(event.brain_phase)
-                turns = len(event.conversation)
-                last_action = ""
-                if event.conversation:
-                    last = event.conversation[-1]
-                    last_action = f"{last.actor}.{last.action}"
-                lines.append(
-                    f"  {eid}: phase={phase}, {turns} turns, {elapsed}m elapsed, "
-                    f"last={last_action}"
-                )
+            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost.{handoff_section}"]
+            
+            if pending_jarvis:
+                lines.append("Events waiting for stabilization watch:")
+                for eid in pending_jarvis:
+                    lines.append(f"  {eid}")
+            
+            if active_ids:
+                lines.append("Active event summaries:")
+                for eid in active_ids[:5]:
+                    event = await self._blackboard.get_event(eid)
+                    if not event:
+                        continue
+                    elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
+                    phase = _resolve_phase(event.brain_phase)
+                    turns = len(event.conversation)
+                    last_action = ""
+                    if event.conversation:
+                        last = event.conversation[-1]
+                        last_action = f"{last.actor}.{last.action}"
+                    lines.append(
+                        f"  {eid}: phase={phase}, {turns} turns, {elapsed}m elapsed, "
+                        f"last={last_action}"
+                    )
             if len(lines) > 1:
-                await self._session.send(input="\n".join(lines), end_of_turn=True)
-                logger.info("Cortex reconnect: replayed context for %d events (handoff=%s)", len(lines) - 1, bool(handoff_section))
+                await self._session.send(input=_redact_pii("\n".join(lines)), end_of_turn=True)
+                logger.info("Cortex reconnect: replayed context for %d lines (handoff=%s)", len(lines) - 1, bool(handoff_section))
                 # Send startup protocol — JARVIS must rebuild context before monitoring
                 await self._session.send(input=SESSION_STARTUP_PROTOCOL, end_of_turn=True)
                 logger.info("Cortex reconnect: sent startup protocol")
@@ -2225,3 +2243,22 @@ class LiveAPIAdapter:
                 )
             except Exception as e:
                 logger.debug("Cortex summary injection failed: %s", e)
+
+    def is_operational_peer_ready(self) -> bool:
+        return bool(not getattr(self, "_stopped", False) and not self._shadow)
+
+    async def request_stabilization_watch(self, event_id: str, summary: str, snapshot: dict) -> bool:
+        try:
+            if not self.is_operational_peer_ready():
+                return False
+            if self._session is None:
+                await self._connect()
+            if self._session is None:
+                return False
+            
+            prompt = f"[FRIDAY STABILIZATION HANDOFF for {event_id}]\nSummary: {summary}\nSnapshot: {json.dumps(snapshot, default=str)}\nInstructions: call check_system_stability and wake via send_event_message(event_id=\"{event_id}\", message=\"[STABILIZATION WAKE] ...\")"
+            async with asyncio.timeout(15.0):
+                await self._session.send(input=_redact_pii(prompt), end_of_turn=True)
+            return True
+        except Exception:
+            return False

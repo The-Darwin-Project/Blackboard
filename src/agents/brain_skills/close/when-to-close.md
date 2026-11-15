@@ -104,7 +104,7 @@ taken, and whether anyone needs to follow up. For chat/slack sources this
 is a reply the user sees in-thread. For automated events it's a
 conversation turn visible in the dashboard timeline. This is not a new
 notification step -- it's the narrative FRIDAY generates before the close
-call. The existing `notify_user_slack` and `notify_gitlab_result` steps
+call. The existing notification and `notify_gitlab_result` steps
 in the Close Sequence remain unchanged.
 
 ## Mechanical Closure Rule
@@ -136,7 +136,7 @@ A merged MR is only the beginning of deployment:
    more. A process that resolved during your evaluation doesn't need an
    incident. If budget is exhausted, proceed on last-known state.
 4. `set_phase("escalate")`
-5. `notify_user_slack` (each maintainer)
+5. `notify_user_slack` (ONLY IF `CHAOTIC` domain, `P1` outage, or mandatory synchronous human-action block; skip for routine `P2`/`P3`/`P4` pipeline failures)
 6. `report_incident`
 7. `notify_gitlab_result` (if GitLab-sourced)
 7.5. For events involving pipelines or builds: record the final observed duration as an observation before closing. You have the timing data from your last state refresh -- capture it so future events can calibrate their sampling interval from measured history instead of guessing.
