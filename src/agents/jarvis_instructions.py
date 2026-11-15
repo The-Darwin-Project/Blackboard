@@ -786,12 +786,17 @@ Your session has rotated. Before monitoring FRIDAY, rebuild your working context
 Do not send messages to FRIDAY until you have completed steps 1-3."""
 
 TOOL_DECLARATIONS = [
-        {
-            "name": "check_system_stability",
-            "description": "Returns LLM TPM utilization %, tokens_used_60s, tpm_limit, tokens_remaining, active_reservations, high_priority_waiters, active_wip, and pending_jarvis_events waiting for stabilization wake.",
-            "parameters": {"type": "object", "properties": {}},
-            "behavior": "BLOCKING"
-        },
+    {
+        "name": "check_system_stability",
+        "description": (
+            "Returns LLM TPM utilization %, tokens_used_60s, tpm_limit, tokens_remaining, "
+            "active_reservations, high_priority_waiters, active_wip, pending_jarvis_events "
+            "(all events waiting on JARVIS), and pending_stabilization_events (events waiting "
+            "for stabilization wake)."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+        "behavior": "BLOCKING",
+    },
 
     # --- Intervention tools (primary purpose) ---
     {

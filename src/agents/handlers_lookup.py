@@ -19,6 +19,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn
+from ..utils.jarvis_ack import safe_score as _safe_score
 from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
 from .handler_utils import _safe_int
@@ -33,17 +34,6 @@ def _safe_seconds(val: object) -> int:
         return int(fval) if math.isfinite(fval) else 0
     except (TypeError, ValueError, OverflowError):
         return 0
-
-
-def _safe_score(val: object) -> float:
-    """Coerce a payload similarity score to a finite float; bool/None/non-numeric/nan/inf -> 0.0."""
-    if isinstance(val, bool) or val is None:
-        return 0.0
-    try:
-        fval = float(val)  # type: ignore[arg-type]
-        return fval if math.isfinite(fval) else 0.0
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
 
 
 if TYPE_CHECKING:

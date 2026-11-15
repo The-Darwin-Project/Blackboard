@@ -612,6 +612,8 @@ async def close_event_by_user(
         await brain.cancel_active_task(event_id, f"User force-close: {body.reason}")
         brain.cancel_subscription(event_id)
         brain.clear_cycle_id(event_id)
+        brain.clear_waiting(event_id)
+        brain.cleanup_jarvis_event_state(event_id)
     except RuntimeError:
         pass  # Brain not initialized
     token_usage = None

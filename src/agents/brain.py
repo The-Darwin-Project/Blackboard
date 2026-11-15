@@ -318,7 +318,7 @@ from ..models import (
     _resolve_domain,
     _resolve_phase,
 )
-from ..ports import BroadcastPort
+from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
@@ -1257,7 +1257,7 @@ class Brain:
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
-        self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
+        self._live_adapter: JarvisPeerPort | None = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
         self._memory_reflex_enabled = os.getenv("BRAIN_MEMORY_REFLEX", "false").lower() == "true"
         self._reflex_fired_for: set[str] = set()  # event IDs with gate already fired this cycle
         self._response_emitted_for: set[str] = set()  # event IDs with response already emitted this cycle
@@ -5875,6 +5875,12 @@ class Brain:
         """Public facade for _clear_jarvis_wait. Satisfies BrainLifecyclePort."""
         self._clear_jarvis_wait(event_id)
 
+    def cleanup_jarvis_event_state(self, event_id: str) -> None:
+        """Release all in-memory JARVIS wait/stabilization state for a closing or stale event."""
+        self._clear_jarvis_wait(event_id)
+        self._jarvis_wait_count.pop(event_id, None)
+        self._jarvis_recovery_rounds.pop(event_id, None)
+
     # -- BrainIntrospectionPort methods --
 
     def is_task_running(self, event_id: str) -> bool:
@@ -5900,6 +5906,7 @@ class Brain:
             "active_reservations": stats.get("active_reservations", 0),
             "high_priority_waiters": stats.get("high_priority_waiters", 0),
             "pending_jarvis_events": self.pending_jarvis_event_ids(),
+            "pending_stabilization_events": self.pending_stabilization_event_ids(),
             "active_wip": active_wip,
         }
 
@@ -5925,7 +5932,7 @@ class Brain:
         """Public facade for _broadcast. Used by main.py + nightwatcher wiring."""
         await self._broadcast(message)
 
-    def set_live_adapter(self, adapter) -> None:
+    def set_live_adapter(self, adapter: JarvisPeerPort | None) -> None:
         """Set the JARVIS LiveAPIAdapter reference."""
         self._live_adapter = adapter
 
@@ -6094,6 +6101,9 @@ class Brain:
                     break
                 await self._send_stability_telemetry(event_id)
         except asyncio.CancelledError:
+            if self._jarvis_wait_tasks.get(event_id) is me:
+                self._stabilization_waits.pop(event_id, None)
+                self._waiting_for_jarvis.pop(event_id, None)
             return
         except Exception as e:
             logger.warning("Stabilization loop for %s failed unexpectedly: %s", event_id, e, exc_info=True)
@@ -6126,6 +6136,13 @@ class Brain:
         if assigned == 0:
             logger.info("Stabilization wake for %s skipped: event missing or closed", event_id)
             return
+        if assigned == -1:
+            try:
+                if await self._is_event_closed(event_id):
+                    logger.info("Stabilization wake fallback for %s skipped: event closed", event_id)
+                    return
+            except Exception:
+                pass
         self.enqueue_for_processing(event_id)
 
     async def _handoff_transient_error_to_jarvis(self, event_id: str, summary: str, snapshot: dict) -> bool:
@@ -6137,6 +6154,10 @@ class Brain:
         """
         rounds = self._jarvis_recovery_rounds.get(event_id, 0) + 1
         if rounds > _STABILIZATION_MAX_ROUNDS:
+            logger.info(
+                "Stabilization handoff round cap (%d) exhausted for %s; falling through to human escalation",
+                _STABILIZATION_MAX_ROUNDS, event_id,
+            )
             return False
 
         wait_turn = ConversationTurn(
@@ -6176,6 +6197,10 @@ class Brain:
             # Re-validate after the await: a fast reply, close or newer round may have replaced our wait.
             if self._stabilization_waits.get(event_id) == token and event_id not in self._jarvis_wait_tasks:
                 timeout_s = _STABILIZATION_HANDOFF_TIMEOUT_S if handed_off else _STABILIZATION_FALLBACK_TIMEOUT_S
+                logger.info(
+                    "Stabilization handoff registered for %s (round=%d/%d, peer_delivered=%s, timeout_s=%g)",
+                    event_id, rounds, _STABILIZATION_MAX_ROUNDS, handed_off, timeout_s,
+                )
                 self._jarvis_wait_tasks[event_id] = asyncio.create_task(
                     self._jarvis_stabilization_loop(event_id, timeout_s=timeout_s)
                 )
@@ -6243,8 +6268,7 @@ class Brain:
 
     def _has_active_agent_task(self, event_id: str) -> bool:
         """True if a (non-parallel) agent worker task is currently running for this event."""
-        task = self._active_tasks.get(event_id)
-        return task is not None and not task.done()
+        return self.is_task_running(event_id)
 
     def _escalation_blocked(self, event_id: str) -> bool:
         """True if a worker task or the per-event lock became active since the scan loaded the event.
@@ -6252,8 +6276,7 @@ class Brain:
         The scan re-reads state across awaits; escalating (wait_for_user + Slack DM) on top of a live
         worker would double-escalate. Checked synchronously right before _escalate_to_human.
         """
-        task = self._active_tasks.get(event_id)
-        if task is not None and not task.done():
+        if self.is_task_running(event_id):
             return True
         lock = self._event_locks.get(event_id)
         return lock is not None and lock.locked()
@@ -6320,6 +6343,7 @@ class Brain:
         """Close an event and broadcast the closure to UI."""
         event = await self.blackboard.get_event(event_id)
         if not event or event.status.value == "closed":
+            self.cleanup_jarvis_event_state(event_id)
             return
         if self._ephemeral_provisioner:
             await self._ephemeral_provisioner.terminate_agent(event_id)
@@ -6375,9 +6399,7 @@ class Brain:
         self._waiting_for_user.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
         self._waiting_for_agent.pop(event_id, None)
-        self._clear_jarvis_wait(event_id)
-        self._jarvis_wait_count.pop(event_id, None)
-        self._jarvis_recovery_rounds.pop(event_id, None)
+        self.cleanup_jarvis_event_state(event_id)
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._orphan_last_attempt.pop(event_id, None)
@@ -6784,8 +6806,7 @@ class Brain:
                 if last_turn.waitingFor == "user" and last_turn.action in ("wait", "response"):
                     logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
                     continue
-                self._clear_jarvis_wait(eid)
-                self._jarvis_wait_count.pop(eid, None)
+                self.cleanup_jarvis_event_state(eid)
                 self._recall_lessons.pop(eid, None)
                 stale_summary = (
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
