@@ -501,7 +501,7 @@ class Archivist:
             logger.info(
                 f"Archived event {event.id} -> Qdrant "
                 f"(service={event.service}, turns={len(event.conversation)}, "
-                f"facts={len(summary.get('reference_facts', []))})"
+                f"facts={len(summary.get('reference_facts') or [])})"
             )
 
             await self._extract_and_store_graph(summary, event.service, event.id)

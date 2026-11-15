@@ -969,7 +969,7 @@ class _BrainToolContext:
         return self._b.get_system_stability_snapshot()
 
     def has_jarvis_waiters(self) -> bool:
-        return bool(self._b._waiting_for_jarvis)
+        return self._b.has_jarvis_waiters()
 
     def get_active_meta_event_id(self) -> str | None:
         return self._b._active_meta_event_id
@@ -5904,8 +5904,12 @@ class Brain:
         }
 
     def has_jarvis_waiters(self) -> bool:
-        """True if any event is currently waiting for JARVIS."""
-        return bool(self._waiting_for_jarvis)
+        """True if any event is in an ordinary wait_for_jarvis wait.
+
+        Stabilization handoffs are excluded: they are FRIDAY->JARVIS watches that last up to 180s, and
+        counting them would make JARVIS's create_system_review fail with "FRIDAY is waiting for your response".
+        """
+        return any(eid not in self._stabilization_waits for eid in self._waiting_for_jarvis)
 
     def pending_jarvis_event_ids(self) -> list[str]:
         """Event IDs currently waiting for JARVIS response."""

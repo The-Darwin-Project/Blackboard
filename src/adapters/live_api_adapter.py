@@ -9,7 +9,8 @@
 # 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only send_event_message reaches her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
-# 8b. [Pattern]: _try_reconnect preserves _waiting_for_jarvis across reconnects and replays active events plus events
+# 8b. [Pattern]: _try_reconnect clears ordinary wait_for_jarvis waits (stale after session loss) but PRESERVES active
+#     stabilization watches, and replays active events plus events
 #     in a stabilization handoff (Brain.pending_stabilization_event_ids) via _replay_pending_context, then sends
 #     SESSION_STARTUP_PROTOCOL directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
 # 8c. [Constraint]: [STABILIZATION WAKE] is a trusted marker. send_event_message adds it (and bypasses content dedup) ONLY
@@ -2166,11 +2167,32 @@ class LiveAPIAdapter:
                 try:
                     await self._connect()
                     if self._session:
+                        self._clear_non_stabilization_jarvis_waits()
                         await self._replay_pending_context()
                         return
                 except Exception as e:
                     logger.warning("Cortex reconnect failed: %s", e)
         logger.info("Cortex: no recent activity, staying idle until next pulse")
+
+    def _clear_non_stabilization_jarvis_waits(self) -> None:
+        """On reconnect, drop stale ordinary wait_for_jarvis waits (JARVIS lost the context they were waiting on).
+
+        Active FRIDAY->JARVIS stabilization watches are preserved: they are re-announced by
+        _replay_pending_context and expire on their own timer. Never raises.
+        """
+        brain = getattr(self, "_brain", None)
+        if not brain:
+            return
+        try:
+            stabilizing = set(self._pending_stabilization_ids())
+            stale = [eid for eid in (brain.pending_jarvis_event_ids() or ()) if eid not in stabilizing]
+            for eid in stale:
+                brain.clear_jarvis_wait(eid)
+            if stale:
+                logger.info("Cortex reconnect: cleared %d stale JARVIS wait state(s), kept %d stabilization watch(es)",
+                            len(stale), len(stabilizing))
+        except Exception as e:
+            logger.warning("Cortex reconnect: clearing stale JARVIS waits failed (non-fatal): %s", e)
 
     async def _replay_pending_context(self) -> None:
         """After reconnect, re-send active event summaries + last handoff so JARVIS can resume."""

@@ -694,7 +694,10 @@ def _msg_defer_wake_iter0(tool: str, _ctx: GateContext) -> str:
 
 
 def _msg_idle_agent_wait(tool: str, _ctx: GateContext) -> str:
-    return f"[GATE] {tool} unavailable. wait_for_agent requires a running agent task for this event; none is in flight."
+    return (
+        f"[GATE] {tool} unavailable. State: no agent task is running for this event. "
+        "Prerequisite: dispatch an agent with select_agent first."
+    )
 
 
 def _msg_intermediate(tool: str, _ctx: GateContext) -> str:

@@ -34,8 +34,14 @@ def is_stabilization_wake(text: str | None) -> bool:
 
 
 def strip_stabilization_wake_prefix(text: str) -> str:
-    """Remove a leading stabilization-wake marker (and following whitespace) from text."""
+    """Remove ALL leading stabilization-wake markers (and the whitespace/newlines between them) from text.
+
+    Looping matters: a single strip would leave "[STABILIZATION WAKE] x" behind for a doubled marker, and the
+    gates would then treat a real JARVIS question as an acknowledgment.
+    """
     stripped = text.strip()
-    if stripped.startswith(STABILIZATION_WAKE_PREFIX):
-        return stripped[len(STABILIZATION_WAKE_PREFIX):].strip()
-    return text
+    if not stripped.startswith(STABILIZATION_WAKE_PREFIX):
+        return text
+    while stripped.startswith(STABILIZATION_WAKE_PREFIX):
+        stripped = stripped[len(STABILIZATION_WAKE_PREFIX):].lstrip()
+    return stripped

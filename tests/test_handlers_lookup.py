@@ -271,3 +271,77 @@ async def test_search_knowledge_none_payload_does_not_raise():
     arch = _archivist_with_store(search_results=[{"id": "k", "score": 0.4, "payload": None}])
     results = await arch.search_knowledge("q")
     assert len(results) == 1 and not results[0].get("stale")
+
+
+# ---------------------------------------------------------------------------
+# Archivist archive/store summary paths: `or []` guards (pattern/instance keywords, reference_facts)
+# ---------------------------------------------------------------------------
+
+def _closed_event():
+    from src.models import ConversationTurn, EventDocument
+
+    turns = [ConversationTurn(turn=1, actor="brain", action="think", thoughts="x"),
+             ConversationTurn(turn=2, actor="brain", action="close", thoughts="done")]
+    return EventDocument(id="evt-arch", source="headhunter", conversation=turns, status="closed",
+                         service="svc", event={"reason": "r", "evidence": "e"})
+
+
+def _archivist_for_summary(summary: dict, *, claude: bool):
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    arch = _archivist_with_store()
+    arch._extract_and_store_graph = AsyncMock()
+    arch.store_knowledge = AsyncMock()
+    response = MagicMock()
+    response.usage = MagicMock()
+    if claude:
+        response.function_call = SimpleNamespace(args=dict(summary))
+        response.text = ""
+    else:
+        response.function_call = None
+        response.text = json.dumps(summary)
+    adapter = MagicMock()
+    adapter.generate = AsyncMock(return_value=response)
+    arch._get_claude_adapter = AsyncMock(return_value=adapter if claude else None)
+    arch._get_adapter = AsyncMock(return_value=adapter)
+    return arch
+
+
+_NULLY_SUMMARY = {
+    "symptom": "s", "root_cause": "r", "fix_action": "f", "outcome": "resolved",
+    "pattern_keywords": None, "keywords": None, "instance_keywords": None, "reference_facts": None,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claude", [True, False], ids=["claude_path", "gemini_fallback_path"])
+async def test_archive_event_tolerates_null_keywords_and_reference_facts(claude):
+    arch = _archivist_for_summary(_NULLY_SUMMARY, claude=claude)
+
+    await arch.archive_event(_closed_event())
+
+    arch._vector_store.upsert.assert_awaited_once()
+    embed_text = arch._embed.await_args.args[0]
+    assert "None" not in embed_text
+    assert embed_text.split() == ["s", "r", "f", "resolved"]
+    arch.store_knowledge.assert_not_awaited()
+    # Graph extraction runs after the facts loop / summary log line -- proves neither aborted on None.
+    arch._extract_and_store_graph.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claude", [True, False], ids=["claude_path", "gemini_fallback_path"])
+async def test_archive_event_stores_reference_facts_and_keyword_fallbacks(claude):
+    summary = dict(_NULLY_SUMMARY, pattern_keywords=None, keywords=["kw-a", "kw-b"], instance_keywords=["inst-1"],
+                   reference_facts=[{"topic": "t", "scope": "convention", "fact": "f1", "service": "svc"}])
+    arch = _archivist_for_summary(summary, claude=claude)
+
+    await arch.archive_event(_closed_event())
+
+    embed_text = arch._embed.await_args.args[0]
+    assert "kw-a kw-b" in embed_text and "inst-1" in embed_text
+    arch.store_knowledge.assert_awaited_once()
+    assert arch.store_knowledge.await_args.kwargs["topic"] == "t"
+    arch._extract_and_store_graph.assert_awaited_once()

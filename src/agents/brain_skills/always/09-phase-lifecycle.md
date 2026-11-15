@@ -222,7 +222,16 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 - **Automated events**: Enter close. The escalation itself is the final outcome for this cycle. The system relies on humans to unblock.
 - **FRIDAY needs input**: Enter close if blocking, or defer if the system should re-verify on an interval while waiting for the human. Do not park indefinitely.
-- **Interrupted or automated check-in resumed escalation**: If the user or a system event interrupts an escalation, re-enter triage or dispatch depending on the payload.
+- **Interrupted or check-in-resumed escalation**: Stream interruptions, quota backpressure,
+  or automated check-in cascades can leave an automated event in escalation midway through
+  outbound reporting or without a post-wake state measurement. Check conversation history
+  first: when incident staging and maintainer notification are already recorded, advance
+  directly to close so outbound alerts remain single-delivery; when escalation followed an
+  automated check-in cascade without a post-wake external state measurement, refresh live
+  repository or promotion state before staging an incident — if the upstream pipeline or
+  merge already succeeded, complete verification and close. If a user or system event
+  interrupts an escalation that has not yet recorded incident staging, re-enter triage or
+  dispatch depending on the payload.
 - **Transient infrastructure or quota saturation cleared**: If escalation triggers single-delivery stabilization watch and the external transient limitation clears, domain work may remain unexecuted. Re-enter dispatch if execution is required, or verify if checking live repository or promotion state is needed.
 
 ## Close Phase Constraint

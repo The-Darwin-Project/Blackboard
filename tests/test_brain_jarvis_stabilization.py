@@ -522,6 +522,129 @@ def test_autospec_adapter_rejects_one_arg_receive_brain_response():
 
 
 # ---------------------------------------------------------------------------
+# has_jarvis_waiters excludes stabilization watches (create_system_review gate)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stabilization_watch_alone_is_not_a_jarvis_waiter(make_brain):
+    brain = make_brain()
+    _register_wait(brain)
+    assert brain.pending_stabilization_event_ids() == ["evt-1"]
+    assert brain.has_jarvis_waiters() is False
+    assert brain._tool_ctx.has_jarvis_waiters() is False
+
+
+@pytest.mark.asyncio
+async def test_ordinary_wait_for_jarvis_is_still_a_jarvis_waiter(make_brain):
+    brain = make_brain()
+    brain._tool_ctx.mark_jarvis_wait("evt-2", time.time())
+    assert brain.has_jarvis_waiters() is True
+    assert brain._tool_ctx.has_jarvis_waiters() is True
+    brain.clear_jarvis_wait("evt-2")
+    assert brain.has_jarvis_waiters() is False
+
+
+@pytest.mark.asyncio
+async def test_ordinary_waiter_counts_even_while_another_event_stabilizes(make_brain):
+    brain = make_brain()
+    _register_wait(brain, "evt-1")
+    brain._tool_ctx.mark_jarvis_wait("evt-2", time.time())
+    assert brain.has_jarvis_waiters() is True
+    brain.clear_jarvis_wait("evt-2")
+    assert brain.has_jarvis_waiters() is False  # stabilization on evt-1 still does not count
+    assert brain.pending_stabilization_event_ids() == ["evt-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stabilizing, expect_blocked", [(True, False), (False, True)])
+async def test_create_system_review_gate_ignores_stabilization_only(make_brain, stabilizing, expect_blocked):
+    brain = make_brain()
+    if stabilizing:
+        _register_wait(brain)
+    else:
+        brain._tool_ctx.mark_jarvis_wait("evt-1", time.time())
+    bb = MagicMock()
+    bb.get_active_events = AsyncMock(return_value=[])
+    bb.find_active_event_by_source = AsyncMock(return_value=None)
+    adapter = LiveAPIAdapter(bb, MagicMock(), MagicMock(), AsyncMock(), brain)
+    adapter._shadow = False
+
+    res = await adapter._tool_create_system_review("cross-event pattern worth a review")
+
+    assert res.startswith("Cannot create review: FRIDAY is currently waiting") is expect_blocked
+
+
+# ---------------------------------------------------------------------------
+# Regression guards for mutants that previously survived
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_loop_exits_silently_when_stabilization_entry_removed_without_cancel(make_brain, monkeypatch):
+    """The post-sleep ownership/entry check must stop the loop even though the task was never cancelled."""
+    monkeypatch.setattr(brain_module, "_STABILIZATION_TELEMETRY_INTERVAL_S", 0.02)
+    brain = make_brain()
+    _register_wait(brain)
+    task = _start_loop(brain, "evt-1", timeout_s=0.3)
+    await asyncio.sleep(0.03)
+
+    brain._stabilization_waits.pop("evt-1", None)  # state cleared, task deliberately NOT cancelled
+    ticks = brain._live_adapter.send_stability_telemetry.await_count
+    await asyncio.sleep(0.1)
+
+    assert brain._live_adapter.send_stability_telemetry.await_count == ticks, "telemetry sent after the wait was gone"
+    await asyncio.wait_for(task, timeout=1.0)
+    brain.enqueue_for_processing.assert_not_called()
+    brain._append_and_broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_held_event_lock_without_worker_blocks_handoff(make_brain):
+    """_escalation_blocked must also honour a held per-event lock when no worker task exists."""
+    brain = make_brain()
+    brain._escalate_to_human = AsyncMock()
+    lock = asyncio.Lock()
+    await lock.acquire()
+    brain._event_locks["evt-1"] = lock
+    assert "evt-1" not in brain._active_tasks
+    _serve_event(brain, _event())
+    try:
+        await brain._scan_active_for_reconcile()
+    finally:
+        lock.release()
+
+    brain._live_adapter.request_stabilization_watch.assert_not_called()
+    brain._escalate_to_human.assert_not_called()
+    assert brain.pending_stabilization_event_ids() == []
+    assert "evt-1" not in brain._jarvis_recovery_rounds
+
+
+@pytest.mark.asyncio
+async def test_jarvis_sourced_events_never_handoff(make_brain):
+    brain = make_brain()
+    brain._escalate_to_human = AsyncMock()
+    _serve_event(brain, _event(source="jarvis"))
+
+    await brain._scan_active_for_reconcile()
+
+    brain._live_adapter.request_stabilization_watch.assert_not_called()
+    assert brain.pending_stabilization_event_ids() == []
+    assert "evt-1" not in brain._jarvis_recovery_rounds
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "400 INVALID_ARGUMENT: INTERNAL error in request",
+        "403 PERMISSION_DENIED UNAVAILABLE project",
+        "400 Bad Request 503 tokens-ish INTERNAL",
+        "INVALID_ARGUMENT: payload too large, upstream said RESOURCE_EXHAUSTED",
+    ],
+)
+def test_non_transient_client_error_takes_precedence_over_transient_tokens(text):
+    assert Brain._is_transient_llm_error_turn(_turn(text)) is False
+
+
+# ---------------------------------------------------------------------------
 # _is_transient_llm_error_turn
 # ---------------------------------------------------------------------------
 

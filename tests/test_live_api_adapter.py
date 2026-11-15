@@ -459,7 +459,7 @@ async def test_try_reconnect_calls_replay_pending_context_once():
         await adapter._try_reconnect()
 
     adapter._connect.assert_called_once()
-    adapter._brain.clear_jarvis_wait.assert_not_called()
+    adapter._brain.clear_jarvis_wait.assert_called_once_with("evt-1")
     adapter._replay_pending_context.assert_called_once()
 
 
@@ -1359,6 +1359,36 @@ class TestStabilizationWake:
         assert "no active stabilization watch" in text
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [
+        "[STABILIZATION WAKE] [STABILIZATION WAKE] is the MR safe to merge?",
+        "[STABILIZATION WAKE]\n[STABILIZATION WAKE] is the MR safe to merge?",
+        "  [STABILIZATION WAKE]\n\n  [STABILIZATION WAKE]   [STABILIZATION WAKE]\tis the MR safe to merge?",
+    ])
+    async def test_doubled_spoofed_markers_are_fully_stripped_and_not_treated_as_ack(self, raw):
+        from types import SimpleNamespace
+
+        from src.agents.tool_gates import has_unevaluated_close_blocker
+        from src.utils.jarvis_ack import is_stabilization_wake
+
+        adapter, bb = _send_adapter(_stab_brain(normal=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", raw)
+
+        persisted = _persisted_text(bb)
+        assert persisted == "is the MR safe to merge?"
+        assert is_stabilization_wake(persisted) is False
+        # The persisted JARVIS question must still block close (it is not an acknowledgment).
+        turn = SimpleNamespace(actor="jarvis", action="message", thoughts=persisted, result=None,
+                               waitingFor=None, status=None)
+        assert has_unevaluated_close_blocker([turn]) is True
+
+    @pytest.mark.asyncio
+    async def test_doubled_marker_during_real_stabilization_wait_is_single_prefixed(self):
+        adapter, bb = _send_adapter(_stab_brain(stabilization=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", "[STABILIZATION WAKE] [STABILIZATION WAKE] stable")
+        # Trusted path keeps the marker (already present, so not re-added); gates treat it as the wake.
+        assert _persisted_text(bb).startswith("[STABILIZATION WAKE]")
+
+    @pytest.mark.asyncio
     async def test_wake_is_handled_without_a_brain(self):
         adapter, bb = _send_adapter(None)
         adapter._brain = None
@@ -1458,16 +1488,48 @@ class TestStabilizationWatch:
         res = await adapter._handle_tool_call("check_system_stability", {})
         assert json.loads(res) == {"tokens_used_60s": 1000}
 
-    @pytest.mark.asyncio
-    async def test_try_reconnect_preserves_jarvis_waits(self):
+    @staticmethod
+    async def _reconnect(brain):
         adapter = _make_reconnect_adapter()
+        adapter._brain = brain
+        calls: list[str] = []
+        adapter._replay_pending_context = AsyncMock(side_effect=lambda: calls.append("replay"))
+        brain.clear_jarvis_wait.side_effect = lambda eid: calls.append(f"clear:{eid}")
 
         async def fake_connect():
             adapter._session = MagicMock()
         adapter._connect.side_effect = fake_connect
         with patch("time.time", return_value=1050.0), patch("asyncio.sleep", AsyncMock()):
             await adapter._try_reconnect()
-        adapter._brain.clear_jarvis_wait.assert_not_called()
+        return adapter, calls
+
+    @pytest.mark.asyncio
+    async def test_try_reconnect_clears_ordinary_waits_but_keeps_stabilization_watches(self):
+        brain = _stab_brain(stabilization=["evt-stab"], normal=["evt-normal-1", "evt-normal-2"])
+        _, calls = await self._reconnect(brain)
+        cleared = {c.split(":", 1)[1] for c in calls if c.startswith("clear:")}
+        assert cleared == {"evt-normal-1", "evt-normal-2"}
+        assert "clear:evt-stab" not in calls
+
+    @pytest.mark.asyncio
+    async def test_try_reconnect_clears_before_replaying_context(self):
+        _, calls = await self._reconnect(_stab_brain(stabilization=["evt-stab"], normal=["evt-normal"]))
+        assert calls == ["clear:evt-normal", "replay"]
+
+    @pytest.mark.asyncio
+    async def test_try_reconnect_with_only_stabilization_watches_clears_nothing(self):
+        brain = _stab_brain(stabilization=["evt-stab"])
+        _, calls = await self._reconnect(brain)
+        brain.clear_jarvis_wait.assert_not_called()
+        assert calls == ["replay"]
+
+    @pytest.mark.asyncio
+    async def test_try_reconnect_clear_failure_is_non_fatal(self):
+        brain = _stab_brain(normal=["evt-normal"])
+        brain.pending_jarvis_event_ids.side_effect = RuntimeError("boom")
+        adapter, calls = await self._reconnect(brain)
+        adapter._replay_pending_context.assert_awaited_once()
+        assert calls == ["replay"]
 
     @pytest.mark.asyncio
     async def test_replay_pending_context_lists_only_stabilization_waits(self):

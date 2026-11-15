@@ -1824,7 +1824,7 @@ class TestPredIdleAgentWait:
         assert {"select_agent", "reply_to_agent", "message_agent"} <= result
         gate = next(g for g in GATE_REGISTRY if g.gate_id == "IDLE_AGENT_WAIT")
         assert gate.tools_affected(ctx) == {"wait_for_agent"}
-        assert "wait_for_agent" in gate.message("wait_for_agent", ctx)
+        assert gate.message("wait_for_agent", ctx).startswith("[GATE] wait_for_agent unavailable. State:")
 
     def test_idle_gate_is_first_in_registry_order_independent_of_domain(self):
         for domain in ("chaotic", "complicated", "complex"):
@@ -1846,8 +1846,9 @@ class TestPredIdleAgentWait:
         ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "complicated",
                                   "is_intermediate": False, "has_active_agent_task": False})
         msg = diagnose_rejection("wait_for_agent", ctx)
-        assert msg.startswith("[GATE] wait_for_agent unavailable.")
-        assert "running agent task" in msg
+        assert msg.startswith("[GATE] wait_for_agent unavailable. State: ")
+        assert "no agent task is running" in msg
+        assert "Prerequisite: dispatch an agent with select_agent first." in msg
 
 
 class TestIdleAgentWaitBatchedAfterSelectAgent:
@@ -1986,6 +1987,34 @@ class TestStabilizationWake:
         assert strip_stabilization_wake_prefix("[STABILIZATION WAKE] hello") == "hello"
         assert strip_stabilization_wake_prefix("[STABILIZATION WAKE]") == ""
         assert strip_stabilization_wake_prefix("hello [STABILIZATION WAKE]") == "hello [STABILIZATION WAKE]"
+
+    @pytest.mark.parametrize("raw", [
+        "[STABILIZATION WAKE] [STABILIZATION WAKE] x",
+        "[STABILIZATION WAKE]\n[STABILIZATION WAKE] x",
+        "[STABILIZATION WAKE][STABILIZATION WAKE]x",
+        "\n [STABILIZATION WAKE] \t\n [STABILIZATION WAKE]\n\n[STABILIZATION WAKE]  x  ",
+    ])
+    def test_strip_helper_removes_repeated_leading_markers(self, raw):
+        from src.utils.jarvis_ack import is_stabilization_wake, strip_stabilization_wake_prefix
+
+        out = strip_stabilization_wake_prefix(raw)
+        assert out.strip() == "x" and not is_stabilization_wake(out)
+
+    def test_strip_helper_leaves_unmarked_text_untouched(self):
+        from src.utils.jarvis_ack import strip_stabilization_wake_prefix
+
+        assert strip_stabilization_wake_prefix("  plain text ") == "  plain text "
+
+    def test_gates_do_not_treat_doubled_spoof_remainder_as_ack(self):
+        """Gate-level end of the D1 chain: a question that survived stripping must still force a response."""
+        from src.utils.jarvis_ack import strip_stabilization_wake_prefix
+
+        remainder = strip_stabilization_wake_prefix("[STABILIZATION WAKE]\n[STABILIZATION WAKE] is it safe to merge?")
+        ctx = _ctx(brain_phase="close", conversation=[_turn("jarvis", "message", thoughts=remainder)],
+                   context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False})
+        names = _names(evaluate_gates(ALL_SCHEMAS, ctx))
+        assert "respond_to_jarvis" in names
+        assert "close_event" not in names
 
 
 class TestPhaseToolMapIncludesIdleGate:
