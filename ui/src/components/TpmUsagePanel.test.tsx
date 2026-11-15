@@ -75,15 +75,20 @@ describe('TpmUsagePanel', () => {
     expect(screen.queryByTestId('tpm-limit-ref-line')).toBeNull();
   });
 
-  it('mounts inside FlowHistoryPage (WIP tab)', () => {
+  it('mounts inside a scrollable FlowHistoryPage (WIP tab)', () => {
     vi.mocked(useFlowHistory).mockReturnValue({
       data: [makeSnapshot({ tpm_used: 600_000, tpm_limit: 3_000_000, tpm_utilization_pct: 20.0, quota_throttle_delta: 0 })],
       isLoading: false, error: null,
     } as unknown as ReturnType<typeof useFlowHistory>);
-    render(<FlowHistoryPage />);
+    const { container } = render(<FlowHistoryPage />);
 
+    const panel = screen.getByTestId('tpm-usage-panel');
+    const queueCard = screen.getByText('Queue Depth');
+    expect(container.firstElementChild?.className).toContain('h-full');
+    expect(container.firstElementChild?.className).toContain('overflow-y-auto');
     expect(screen.getByText('Flow Health')).toBeInTheDocument();
-    expect(screen.getByTestId('tpm-usage-panel')).toBeInTheDocument();
+    expect(panel).toBeInTheDocument();
+    expect(panel.compareDocumentPosition(queueCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText('600.0K')).toBeInTheDocument();
   });
 });
