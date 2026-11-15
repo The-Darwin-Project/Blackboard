@@ -1,20 +1,33 @@
-# src/utils/jarvis_ack.py
+# BlackBoard/src/utils/jarvis_ack.py
 # @ai-rules:
 # 1. [Constraint]: Pure helper. No Redis, no Brain import, no LLM.
 # 2. [Pattern]: Matches bare observations and acknowledgments from JARVIS.
 # 3. [Constraint]: STABILIZATION_WAKE_PREFIX is a TRUSTED marker. Only LiveAPIAdapter.send_event_message may add it,
-#    and only while Brain.pending_stabilization_event_ids() contains the event. For every other JARVIS message the adapter
-#    strips the prefix (strip_stabilization_wake_prefix) so tool_gates can key ack handling on the prefix alone.
+#    and only while Brain.pending_stabilization_event_ids() contains the event AND the message is not a question/concern.
+#    For every other JARVIS message the adapter strips the prefix (strip_stabilization_wake_prefix) so tool_gates can key
+#    ack handling on the prefix alone.
 # 4. [Gotcha]: A stabilization wake is a "recovered" signal, not a question -- tool_gates treat it like an acknowledgment.
-"""JARVIS acknowledgment detection helper."""
+"""JARVIS acknowledgment and payload coercion helpers."""
 from __future__ import annotations
 
+import math
 import re
 
 _JARVIS_ACK_PATTERN = re.compile(
     r"^(?:silently\s+observing|watching|acknowledged|confirmed|understood|no\s+observations|noted|ok)[\s.!,]*$",
     re.IGNORECASE,
 )
+
+
+def safe_score(val: object) -> float:
+    """Coerce a payload similarity score to a finite float; bool/None/non-numeric/nan/inf -> 0.0."""
+    if isinstance(val, bool) or val is None:
+        return 0.0
+    try:
+        fval = float(val)  # type: ignore[arg-type]
+        return fval if math.isfinite(fval) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def is_jarvis_acknowledgment(text: str | None) -> bool:

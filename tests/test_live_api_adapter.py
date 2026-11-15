@@ -1395,6 +1395,14 @@ class TestStabilizationWake:
         res = await adapter._tool_send_event_message("evt-1", "hello")
         assert "Message delivered to" in res
 
+    @pytest.mark.asyncio
+    async def test_question_during_stabilization_wait_is_not_rewritten_as_wake(self):
+        adapter, bb = _send_adapter(_stab_brain(stabilization=["evt-1"]))
+        await adapter._tool_send_event_message("evt-1", "Should we roll back the deployment first?")
+        persisted = _persisted_text(bb)
+        assert persisted == "Should we roll back the deployment first?"
+        assert not persisted.startswith("[STABILIZATION WAKE]")
+
 
 class TestStabilizationWatch:
     @staticmethod
@@ -1546,7 +1554,8 @@ class TestStabilizationWatch:
 
         first_msg = adapter._session.send.await_args_list[0].kwargs["input"]
         assert "Events waiting for stabilization watch:" in first_msg
-        assert "evt-stab" in first_msg
+        assert "[FRIDAY STABILIZATION HANDOFF for evt-stab]" in first_msg
+        assert "check_system_stability" in first_msg
         assert "evt-normal" not in first_msg
 
     @pytest.mark.asyncio

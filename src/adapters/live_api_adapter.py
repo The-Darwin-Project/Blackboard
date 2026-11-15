@@ -96,6 +96,7 @@ from ..utils import redact_pii as _redact_pii
 from ..utils.jarvis_ack import (
     STABILIZATION_WAKE_PREFIX,
     is_stabilization_wake,
+    safe_score as _safe_score,
     strip_stabilization_wake_prefix,
 )
 
@@ -149,7 +150,8 @@ _REPORT_REFS = _build_skill_refs(["shift-report"])
 _RESUME_REFS = _build_skill_refs(["shared-context", "darwin-ecosystem"])
 
 # Overall bound for connect+send of a stabilization handoff prompt (seconds).
-_STABILIZATION_WATCH_TIMEOUT_S = 20.0
+# Sized above _connect()'s internal 15s open + 5s setup budget so slow connects are not torn down mid-send.
+_STABILIZATION_WATCH_TIMEOUT_S = 30.0
 
 
 async def _is_event_closed_or_missing(blackboard: Any, event_id: str) -> bool:
@@ -171,17 +173,6 @@ async def _is_event_closed_or_missing(blackboard: Any, event_id: str) -> bool:
     except Exception as exc:
         logger.warning("Failed to verify event %s status: %s", event_id, exc)
         return True
-
-
-def _safe_score(val: object) -> float:
-    """Coerce a Qdrant payload score to a finite float; bool/None/non-numeric/nan/inf -> 0.0."""
-    if isinstance(val, bool) or val is None:
-        return 0.0
-    try:
-        fval = float(val)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-    return fval if math.isfinite(fval) else 0.0
 
 
 class LiveAPIAdapter:
@@ -1405,9 +1396,14 @@ class LiveAPIAdapter:
         # if rate_err: return rate_err
 
         if self._is_stabilization_waiter(event_id):
-            # Active FRIDAY->JARVIS stabilization handoff: the wake must reach FRIDAY even if its text repeats.
-            if not is_stabilization_wake(message):
-                message = f"{STABILIZATION_WAKE_PREFIX} {message.strip()}"
+            # Active FRIDAY->JARVIS stabilization handoff: wake messages bypass dedup.
+            # Substantive questions (ending in '?' without an explicit wake prefix) are preserved as real concerns
+            # so tool_gates do not treat a genuine JARVIS question as an acknowledgment.
+            stripped_msg = message.strip()
+            if is_stabilization_wake(stripped_msg):
+                message = f"{STABILIZATION_WAKE_PREFIX} {strip_stabilization_wake_prefix(stripped_msg)}".strip()
+            elif not stripped_msg.endswith("?"):
+                message = f"{STABILIZATION_WAKE_PREFIX} {stripped_msg}"
         else:
             # Normal flows: the marker is trusted only during a stabilization handoff, so never persist a spoofed one.
             if is_stabilization_wake(message):
@@ -2220,7 +2216,10 @@ class LiveAPIAdapter:
             if pending_stabilization:
                 lines.append("Events waiting for stabilization watch:")
                 for eid in pending_stabilization:
-                    lines.append(f"  {eid}")
+                    lines.append(
+                        f"  [FRIDAY STABILIZATION HANDOFF for {eid}] — call check_system_stability and wake via "
+                        f"send_event_message(event_id=\"{eid}\", message=\"[STABILIZATION WAKE] System stability restored\")"
+                    )
 
             if active_ids:
                 lines.append("Active event summaries:")

@@ -111,10 +111,13 @@ async def test_scan_three_transient_errors_hands_off_to_jarvis(make_brain):
 @pytest.mark.asyncio
 async def test_snapshot_exposes_stabilization_keys(make_brain):
     brain = make_brain()
+    _register_wait(brain, "evt-stab")
     snap = brain.get_system_stability_snapshot()
     for key in ("tokens_used_60s", "tpm_limit", "tokens_remaining", "utilization_pct",
-                "active_reservations", "high_priority_waiters", "pending_jarvis_events", "active_wip"):
+                "active_reservations", "high_priority_waiters", "pending_jarvis_events",
+                "pending_stabilization_events", "active_wip"):
         assert key in snap
+    assert snap["pending_stabilization_events"] == ["evt-stab"]
 
 
 @pytest.mark.asyncio
@@ -697,3 +700,39 @@ def test_transient_error_turn_accepts_dicts():
         {"actor": "brain", "action": "error", "thoughts": "429 RESOURCE_EXHAUSTED"}
     ) is True
     assert Brain._is_transient_llm_error_turn({"actor": "brain", "action": "error", "thoughts": None}) is False
+
+
+@pytest.mark.asyncio
+async def test_external_task_cancel_cleans_stabilization_wait_dicts(make_brain, monkeypatch):
+    monkeypatch.setattr(brain_module, "_STABILIZATION_TELEMETRY_INTERVAL_S", 0.05)
+    brain = make_brain()
+    _register_wait(brain, "evt-1")
+    task = _start_loop(brain, "evt-1", timeout_s=30.0)
+    await asyncio.sleep(0.01)
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert brain._jarvis_wait_tasks == {}
+    assert brain._stabilization_waits == {}
+    assert brain._waiting_for_jarvis == {}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_jarvis_event_state_clears_all_dicts_and_already_closed_event(make_brain):
+    brain = make_brain()
+    _register_wait(brain, "evt-1")
+    brain._jarvis_wait_count["evt-1"] = 2
+    brain._jarvis_recovery_rounds["evt-1"] = 1
+    _start_loop(brain, "evt-1", timeout_s=30.0)
+    brain.blackboard.get_event = AsyncMock(return_value=None)
+
+    await brain._close_and_broadcast("evt-1", "Already gone", None)
+    await asyncio.sleep(0)
+
+    assert "evt-1" not in brain._jarvis_wait_count
+    assert "evt-1" not in brain._jarvis_recovery_rounds
+    assert brain._stabilization_waits == {}
+    assert brain._waiting_for_jarvis == {}
+    assert brain._jarvis_wait_tasks == {}
+

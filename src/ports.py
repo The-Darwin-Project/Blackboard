@@ -72,7 +72,7 @@ class BrainIntrospectionPort(Protocol):
 
 
 class JarvisPeerPort(Protocol):
-    """Brain-facing port for the JARVIS peer's stabilization-watch handoff."""
+    """Brain-facing port for the JARVIS peer's stabilization-watch handoff and lifecycle hooks."""
 
     def is_operational_peer_ready(self) -> bool: ...
 
@@ -81,3 +81,7 @@ class JarvisPeerPort(Protocol):
     async def send_stability_telemetry(self, event_id: str, snapshot: dict) -> bool:
         """Deliver a periodic telemetry tick without arming the FRIDAY-DIRECT reply state."""
         ...
+
+    async def receive_brain_response(self, event_id: str, response: str) -> None: ...
+
+    def on_meta_event_closed(self, event_id: str) -> None: ...
