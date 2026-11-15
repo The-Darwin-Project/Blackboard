@@ -129,6 +129,20 @@ describe('agy buildCLICommand: model and effort normalization', () => {
     assert.equal(args[effortIdx + 1], 'low');
   });
 
+  it('normalizes suffixed model names e.g. gemini-4-hydrogen-xhigh into model and effort', () => {
+    setEnv('AGENT_CLI', 'agy');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('test task', { model: 'gemini-4-hydrogen-xhigh' });
+
+    const modelIdx = args.indexOf('--model');
+    assert.notEqual(modelIdx, -1);
+    assert.equal(args[modelIdx + 1], 'gemini-4-hydrogen');
+
+    const effortIdx = args.indexOf('--effort');
+    assert.notEqual(effortIdx, -1);
+    assert.equal(args[effortIdx + 1], 'xhigh');
+  });
+
   it('respects explicit options.effort over default', () => {
     setEnv('AGENT_CLI', 'agy');
     const { buildCLICommand } = freshModules();
@@ -439,7 +453,7 @@ describe('resolveModel routing and role fallback', () => {
     assert.equal(selected, 'gemini-3.8-flash-explorer-custom');
   });
 
-  it('falls back to gemini-3.8-flash for agy when no AGENT_MODEL or role override is set', () => {
+  it('falls back to gemini-4-argon for agy when no AGENT_MODEL or role override is set', () => {
     setEnv('AGENT_CLI', 'agy');
     setEnv('AGENT_ROLE', undefined);
     setEnv('AGENT_MODEL', undefined);
@@ -447,7 +461,7 @@ describe('resolveModel routing and role fallback', () => {
     const { resolveModel } = freshModules();
 
     const selected = resolveModel({}, 'agy');
-    assert.equal(selected, 'gemini-3.8-flash');
+    assert.equal(selected, 'gemini-4-argon');
   });
 });
 
@@ -554,7 +568,7 @@ describe('getRetryOptions retry bounding and model fallback', () => {
     assert.equal(result.options._retryCount, 1);
   });
 
-  it('falls back to gemini-3.8-flash under agy CLI for explorer role', () => {
+  it('falls back to gemini-4-argon under agy CLI for explorer role with explicit model', () => {
     const { getRetryOptions } = freshModules();
     const result = getRetryOptions(
       { role: 'explorer', model: 'invalid-model' },
@@ -563,9 +577,52 @@ describe('getRetryOptions retry bounding and model fallback', () => {
       'agy'
     );
     assert.notEqual(result, null);
-    assert.equal(result.options.model, 'gemini-3.8-flash');
+    assert.equal(result.options.model, 'gemini-4-argon');
     assert.equal(result.options._retriedModel, true);
     assert.equal(result.options._retryCount, 1);
+  });
+
+  it('steps down from default gemini-4-argon to gemini-4-hydrogen under agy CLI', () => {
+    setEnv('AGENT_CLI', 'agy');
+    setEnv('AGENT_MODEL', undefined);
+    setEnv('GEMINI_MODEL', undefined);
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      {},
+      1,
+      'Model not found: gemini-4-argon',
+      'agy'
+    );
+    assert.notEqual(result, null);
+    assert.equal(result.options.model, 'gemini-4-hydrogen');
+    assert.equal(result.options._retriedModel, true);
+    assert.equal(result.options._retryCount, 1);
+  });
+
+  it('falls back from explicit gemini-4-carbon to gemini-4-argon under agy CLI', () => {
+    setEnv('AGENT_CLI', 'agy');
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      { model: 'gemini-4-carbon' },
+      1,
+      'Model not found: gemini-4-carbon',
+      'agy'
+    );
+    assert.notEqual(result, null);
+    assert.equal(result.options.model, 'gemini-4-argon');
+    assert.equal(result.options._retriedModel, true);
+    assert.equal(result.options._retryCount, 1);
+  });
+
+  it('fails closed (returns null) for unknown agentCli even when role is explorer', () => {
+    const { getRetryOptions } = freshModules();
+    const result = getRetryOptions(
+      { role: 'explorer', model: 'invalid-model' },
+      1,
+      'Model not found: invalid-model',
+      'unknown-cli'
+    );
+    assert.equal(result, null);
   });
 });
 

@@ -175,7 +175,7 @@ async def generate_observations_report(
     from ..reports.observations_reporter import generate_report, render_pdf
     from fastapi.responses import Response
 
-    model = os.getenv("LLM_MODEL_OBSERVATIONS_REPORT", "gemini-3.5-flash-lite")
+    model = os.getenv("LLM_MODEL_OBSERVATIONS_REPORT", "gemini-4-hydrogen")
     try:
         async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
             result = await generate_report(blackboard, client, model, body.series_names, body.context)

@@ -60,7 +60,7 @@ function resolveModel(options, agentCli) {
   if (effectiveRole === 'explorer' && process.env.EPHEMERAL_MODEL_EXPLORER) {
     return process.env.EPHEMERAL_MODEL_EXPLORER;
   }
-  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-sonnet-5-5' : 'gemini-3.8-flash');
+  return AGENT_MODEL || (agentCli === 'claude' ? 'claude-sonnet-5-5' : 'gemini-4-argon');
 }
 
 // Per-role native permission files (Claude Code engine-enforced deny rules).
@@ -99,7 +99,7 @@ function spawnEnv(workStyle) {
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
 const FALLBACK_MODEL = {
     claude: 'claude-sonnet-5-5',
-    agy: 'gemini-3.8-flash',
+    agy: 'gemini-4-argon',
 };
 
 // Minimum load-bearing deny rules the settings-validity check requires (below) --
@@ -911,13 +911,13 @@ function getRetryOptions(options, exitCode, stderr, agentCli = AGENT_CLI) {
         };
     }
     if (!options._retriedModel && isInvalidModelError(stderr)) {
-        const effectiveRole = String(options.role || AGENT_ROLE || '').trim().toLowerCase();
-        // Explorer falls back to flash on Gemini/Agy, or claude default on Claude CLI
-        const fallbackModel = (effectiveRole === 'explorer' && agentCli !== 'claude')
-            ? 'gemini-3.8-flash'
-            : FALLBACK_MODEL[agentCli];
+        const currentModel = resolveModel(options, agentCli);
+        const primaryFallback = FALLBACK_MODEL[agentCli];
+        const fallbackModel = (agentCli === 'agy' && currentModel === primaryFallback)
+            ? 'gemini-4-hydrogen'
+            : primaryFallback;
         // Retrying the model that just failed (e.g. claude already on the default) is pointless.
-        if (fallbackModel && fallbackModel !== resolveModel(options, agentCli)) {
+        if (fallbackModel && fallbackModel !== currentModel) {
             return {
                 reason: `Invalid model error, retrying with ${fallbackModel}`,
                 options: { ...options, model: fallbackModel, _retriedModel: true, _retryCount: retryCount + 1 },

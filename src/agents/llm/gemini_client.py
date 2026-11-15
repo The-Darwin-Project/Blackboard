@@ -603,6 +603,8 @@ class GeminiAdapter:
                 thinking_kwargs["thinking_level"] = "LOW"
             elif raw_level in ("LOW", "MEDIUM", "HIGH"):
                 thinking_kwargs["thinking_level"] = raw_level
+            elif raw_level == "XHIGH" and "hydrogen" in model_lower:
+                thinking_kwargs["thinking_level"] = "XHIGH"
             elif raw_level:
                 logger.warning(
                     "Gemini 4 unsupported thinking_level=%r for model %s; normalizing to 'LOW'",

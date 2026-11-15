@@ -26,7 +26,7 @@
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
 Cron-triggered (default 06:00/18:00 UTC). Leases pending escalations,
-runs a phase-gated Gemini Flash tool-calling session to cluster and
+runs a phase-gated gemini-4-argon tool-calling session to cluster and
 consolidate, writes deduplicated incidents to Jira, posts a
 shift summary to Slack, and persists a ShiftReport for the Shifts UI.
 """
@@ -177,7 +177,7 @@ class NightwatcherObserver:
                 from ..agents.llm import create_adapter
                 project = os.getenv("GCP_PROJECT", "")
                 location = os.getenv("GCP_LOCATION", "global")
-                model = os.getenv("LLM_MODEL_NIGHTWATCHER", "gemini-3.7-flash")
+                model = os.getenv("LLM_MODEL_NIGHTWATCHER", "gemini-4-argon")
                 self._adapter = create_adapter("gemini", project, location, model)
                 logger.info("Nightwatcher LLM adapter: gemini/%s", model)
             except Exception as e:

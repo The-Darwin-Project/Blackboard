@@ -1297,6 +1297,58 @@ class TestBrainDefaultModelMatchesHelm:
 
         assert m.group(1) == helm_max_tokens == "65536"
 
+    def test_all_gemini_component_defaults_match_helm_values(self):
+        values = yaml.safe_load((_REPO_ROOT / "helm" / "values.yaml").read_text())
+        llm_vals = values["gcp"]["llm"]
+
+        expected_helm = {
+            "brain": "gemini-4-carbon",
+            "aligner": "gemini-4-argon",
+            "archivist": "gemini-4-argon",
+            "headhunter": "gemini-4-argon",
+            "timekeeper": "gemini-4-hydrogen",
+            "nightwatcher": "gemini-4-argon",
+            "jenkinsObserver": "gemini-4-hydrogen",
+        }
+        for comp, expected_model in expected_helm.items():
+            assert llm_vals[comp]["model"] == expected_model, f"Helm gcp.llm.{comp}.model mismatch"
+        assert values["googleSearch"]["model"] == "gemini-4-hydrogen"
+
+        code_checks = [
+            ("src/agents/aligner.py", r'os\.getenv\(\s*"LLM_MODEL_ALIGNER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-argon"),
+            ("src/agents/archivist.py", r'os\.getenv\(\s*"LLM_MODEL_ARCHIVIST"\s*,\s*"([^"]+)"\s*\)', "gemini-4-argon"),
+            ("src/agents/headhunter.py", r'os\.getenv\(\s*"LLM_MODEL_HEADHUNTER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-argon"),
+            ("src/observers/nightwatcher.py", r'os\.getenv\(\s*"LLM_MODEL_NIGHTWATCHER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-argon"),
+            ("src/agents/jenkins_observer.py", r'os\.getenv\(\s*"LLM_MODEL_JENKINS_OBSERVER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/agents/entity_extractor.py", r'os\.getenv\(\s*"LLM_MODEL_KG_EXTRACTOR"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/agents/event_namer.py", r'os\.getenv\(\s*"LLM_MODEL_EVENT_NAMER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/agents/handlers_lookup.py", r'os\.getenv\(\s*"GOOGLE_SEARCH_GROUNDING_MODEL"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/adapters/live_api_adapter.py", r'os\.getenv\(\s*"GOOGLE_SEARCH_GROUNDING_MODEL"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/routes/observations_mgmt.py", r'os\.getenv\(\s*"LLM_MODEL_OBSERVATIONS_REPORT"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+            ("src/routes/timekeeper.py", r'os\.getenv\(\s*"LLM_MODEL_TIMEKEEPER"\s*,\s*"([^"]+)"\s*\)', "gemini-4-hydrogen"),
+        ]
+        for rel_path, pattern, expected_model in code_checks:
+            src = (_REPO_ROOT / rel_path).read_text()
+            m = re.search(pattern, src)
+            assert m is not None, f"Fallback pattern not found in {rel_path}"
+            assert m.group(1) == expected_model, f"Mismatch in {rel_path}: {m.group(1)} != {expected_model}"
+
+    def test_gemini4_hydrogen_allows_xhigh_thinking_level(self, caplog):
+        hyd = GeminiAdapter.__new__(GeminiAdapter)
+        hyd._model_name = "gemini-4-hydrogen"
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            cfg = hyd._build_config("sys", None, 0.3, 0.95, 4096, thinking_level="xhigh")
+        assert str(cfg.thinking_config.thinking_level).endswith("XHIGH")
+        assert caplog.records == []
+
+        arg = GeminiAdapter.__new__(GeminiAdapter)
+        arg._model_name = "gemini-4-argon"
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            cfg_arg = arg._build_config("sys", None, 0.3, 0.95, 4096, thinking_level="xhigh")
+        assert str(cfg_arg.thinking_config.thinking_level).endswith("LOW")
+        assert any("unsupported thinking_level=" in r.getMessage() and "xhigh" in r.getMessage().lower() for r in caplog.records)
+
 
 class TestPerStreamRetryOptionsAndSyncStreamDelegator:
     """T-6 (Probe 4a): Synchronous generate_stream delegator, per-call HttpRetryOptions(attempts=1),

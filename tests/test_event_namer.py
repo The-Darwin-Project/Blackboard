@@ -71,6 +71,8 @@ async def test_generate_event_title_success():
     assert "contents" in kwargs
     assert "<user_request>" in kwargs["contents"]
     assert "</user_request>" in kwargs["contents"]
+    assert kwargs.get("thinking_level") == "low"
+    assert kwargs.get("max_output_tokens") == 256
 
     # Verifies update_event_title_if_not_user was called with cleaned title
     mock_blackboard.update_event_title_if_not_user.assert_awaited_once_with(

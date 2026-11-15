@@ -86,7 +86,7 @@ if (!SUPPORTED_AGENT_CLIS.includes(AGENT_CLI)) {
   throw new Error(`Unsupported AGENT_CLI: ${AGENT_CLI}. Supported runtimes: ${SUPPORTED_AGENT_CLIS.map((c) => `'${c}'`).join(', ')}`);
 }
 const AGY_CLI = process.env.AGY_CLI || process.env.ANTIGRAVITY_CLI || 'agy';
-const AGENT_MODEL = process.env.AGENT_MODEL || (AGENT_CLI === 'agy' ? 'gemini-3.8-flash' : '');
+const AGENT_MODEL = process.env.AGENT_MODEL || (AGENT_CLI === 'agy' ? 'gemini-4-argon' : '');
 // Claude Code effort level -- controls adaptive reasoning depth (low|medium|high|max)
 const AGENT_EFFORT_LEVEL = process.env.AGENT_EFFORT_LEVEL || '';
 

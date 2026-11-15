@@ -177,7 +177,7 @@ def _env_vars(**overrides):
         "JENKINS_CIRCUIT_BREAKER_THRESHOLD": "3",
         "SKILLS_CATALOG_URL": "https://skills.example.com",
         "SKILLS_CATALOG_SKILLS": "cnv-gating-workflow",
-        "LLM_MODEL_JENKINS_OBSERVER": "gemini-3.5-flash-lite",
+        "LLM_MODEL_JENKINS_OBSERVER": "gemini-4-hydrogen",
         "LLM_TEMPERATURE_JENKINS_OBSERVER": "0.3",
         "LLM_MAX_TOKENS_JENKINS_OBSERVER": "4096",
     }

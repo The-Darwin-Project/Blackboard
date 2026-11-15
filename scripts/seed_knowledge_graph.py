@@ -1,13 +1,13 @@
 # BlackBoard/scripts/seed_knowledge_graph.py
 # @ai-rules:
 # 1. [Constraint]: One-time bulk seed script. Run manually to populate KG from all Qdrant archives.
-# 2. [Pattern]: Same entity extraction as entity_extractor.py (Flash Lite + responseSchema).
+# 2. [Pattern]: Same entity extraction as entity_extractor.py (gemini-4-hydrogen + responseSchema).
 # 3. [Gotcha]: Requires GOOGLE_APPLICATION_CREDENTIALS, KG_POSTGRES_URL, and Qdrant access.
 # 4. [Pattern]: Rate-limited (1s between events) to avoid LLM quota issues.
 """
 Bulk-seed the Knowledge Graph from all archived events in Qdrant.
 
-Reads every archived event, runs entity extraction via Flash Lite,
+Reads every archived event, runs entity extraction via gemini-4-hydrogen,
 and writes to Postgres kg_entities + kg_relationships tables.
 
 Usage:
@@ -57,7 +57,7 @@ async def main():
         location=os.environ["GCP_LOCATION"],
     )
 
-    model = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-3.5-flash-lite")
+    model = os.getenv("LLM_MODEL_KG_EXTRACTOR", "gemini-4-hydrogen")
 
     from src.agents.archivist import Archivist
     archivist = Archivist()
@@ -136,14 +136,17 @@ async def main():
 
         try:
             start = time.time()
+            config_kwargs = {
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+                "response_schema": _RESPONSE_SCHEMA,
+            }
+            if "gemini-4" in (model or "").lower():
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
             response = await client.aio.models.generate_content(
                 model=model,
                 contents=f"{_EXTRACTION_PROMPT}\n\n---\n{summary_text}",
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=_RESPONSE_SCHEMA,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             elapsed = time.time() - start
 
