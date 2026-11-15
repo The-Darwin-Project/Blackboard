@@ -762,6 +762,10 @@ class FlowSnapshot(BaseModel):
     token_total_delta: int = 0
     token_calls_delta: int = 0
     token_total_cumulative: int = 0
+    tpm_used: int = 0
+    tpm_limit: int = 0
+    tpm_utilization_pct: float = 0.0
+    quota_throttle_delta: int = 0
     tampering_strikes: int = 0
     quota_shed_tier1_total: int = 0
     quota_shed_tier2_total: int = 0

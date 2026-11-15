@@ -27,15 +27,32 @@ from .types import (
 from .quota_tracker import QuotaExhaustedError, QuotaTracker, RequestExceedsBurstError
 
 __all__ = [
-    "create_adapter", "get_quota_tracker", "get_token_meter", "record_token_usage", "resolve_stream_timeouts",
-    "derive_llm_priority", "sanitize_call_syntax", "FunctionCall", "LLMResponse", "LLMChunk", "LLMPort", "TokenUsage",
-    "LLMStreamTimeoutError", "LLMStreamTTFBTimeoutError", "LLMStreamInterChunkTimeoutError", "LLMStreamTotalTimeoutError",
-    "BRAIN_TOOL_SCHEMAS", "NIGHTWATCHER_TOOL_SCHEMAS",
-    "QuotaTracker", "QuotaExhaustedError", "RequestExceedsBurstError",
+    "DEFAULT_TPM_LIMIT", "create_adapter", "get_quota_tracker", "get_token_meter", "record_token_usage",
+    "resolve_stream_timeouts", "derive_llm_priority", "sanitize_call_syntax", "FunctionCall", "LLMResponse",
+    "LLMChunk", "LLMPort", "TokenUsage", "LLMStreamTimeoutError", "LLMStreamTTFBTimeoutError",
+    "LLMStreamInterChunkTimeoutError", "LLMStreamTotalTimeoutError", "BRAIN_TOOL_SCHEMAS",
+    "NIGHTWATCHER_TOOL_SCHEMAS", "QuotaTracker", "QuotaExhaustedError", "RequestExceedsBurstError",
 ]
 
+DEFAULT_TPM_LIMIT = 3_000_000
 _quota_tracker: QuotaTracker | None = None
 _token_meter: "TokenMeter | None" = None
+
+
+def _parse_tpm_limit() -> int:
+    """Parse LLM_TPM_LIMIT env var with fallback to DEFAULT_TPM_LIMIT on missing/invalid/non-positive values."""
+    raw = os.getenv("LLM_TPM_LIMIT")
+    if raw is None or not raw.strip():
+        return DEFAULT_TPM_LIMIT
+    try:
+        val = int(raw.strip())
+    except ValueError:
+        _logger.warning("Invalid LLM_TPM_LIMIT=%r; falling back to %d", raw, DEFAULT_TPM_LIMIT)
+        return DEFAULT_TPM_LIMIT
+    if val <= 0:
+        _logger.warning("Non-positive LLM_TPM_LIMIT=%r; falling back to %d", raw, DEFAULT_TPM_LIMIT)
+        return DEFAULT_TPM_LIMIT
+    return val
 
 
 def get_quota_tracker() -> QuotaTracker | None:
@@ -75,7 +92,7 @@ def create_adapter(provider: str, project: str, location: str, model_name: str) 
         return ClaudeAdapter(project, location, model_name)
 
     if _quota_tracker is None:
-        tpm = int(os.getenv("LLM_TPM_LIMIT", "500000"))
+        tpm = _parse_tpm_limit()
         _quota_tracker = QuotaTracker(tpm_limit=tpm)
 
     from .gemini_client import GeminiAdapter

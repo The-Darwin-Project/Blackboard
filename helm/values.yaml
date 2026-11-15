@@ -195,7 +195,7 @@ gcp:
       model: "gemini-3.5-flash-lite" # CI gating triage (lightweight, fast)
       temperature: "0.3"
       maxOutputTokens: "6144" # Raised from 4096 for Phase 1 narrative analysis (summary/probable_cause/signals/suggested_next_step) alongside per-job triage.
-  tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
+  tpmLimit: "3000000" # Vertex AI tokens-per-minute quota (GCP base-model cap is 4M; 3M leaves 1M headroom for sidecars). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
   existingSecret: "" # e.g., "gcp-sa-key"

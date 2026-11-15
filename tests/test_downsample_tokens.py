@@ -1,5 +1,8 @@
-# tests/test_downsample_tokens.py
-"""Verify _downsample_snapshots preserves token fields and WIP fields."""
+# BlackBoard/tests/test_downsample_tokens.py
+# @ai-rules:
+# 1. [Pattern]: Unit tests for BlackboardState._downsample_snapshots bucket aggregation invariants.
+# 2. [Constraint]: Verifies gauges (avg), setpoints/counters (max), deltas (sum), and full FlowSnapshot field coverage.
+"""Verify _downsample_snapshots preserves token fields, TPM gauges/setpoint, and WIP fields."""
 from src.models import FlowSnapshot
 from src.state.blackboard import BlackboardState
 
@@ -17,19 +20,14 @@ def test_downsample_preserves_token_deltas():
     ]
     result = bb._downsample_snapshots(snapshots, bucket_seconds=600)
     assert len(result) == 1
-    assert result[0].token_input_delta == 30
-    assert result[0].token_output_delta == 15
-    assert result[0].token_total_delta == 45
-    assert result[0].token_calls_delta == 3
+    assert (result[0].token_input_delta, result[0].token_output_delta) == (30, 15)
+    assert (result[0].token_total_delta, result[0].token_calls_delta) == (45, 3)
 
 
 def test_downsample_preserves_token_cumulative():
     """Cumulative fields aggregate via max()."""
     bb = BlackboardState.__new__(BlackboardState)
-    snapshots = [
-        _snap(100, token_total_cumulative=1000),
-        _snap(200, token_total_cumulative=1500),
-    ]
+    snapshots = [_snap(100, token_total_cumulative=1000), _snap(200, token_total_cumulative=1500)]
     result = bb._downsample_snapshots(snapshots, bucket_seconds=600)
     assert result[0].token_total_cumulative == 1500
 
@@ -44,22 +42,16 @@ def test_downsample_preserves_wip_fields():
               waiting_approval_events=4, headhunter_pending=5),
     ]
     result = bb._downsample_snapshots(snapshots, bucket_seconds=600)
-    assert result[0].wip_used == 12  # round((10+14)/2)
-    assert result[0].wip_cap == 20
-    assert result[0].wip_utilization_pct == 60.0
-    assert result[0].wip_available == 8
-    assert result[0].waiting_approval_events == 3
-    assert result[0].headhunter_pending == 4
+    assert (result[0].wip_used, result[0].wip_cap, result[0].wip_utilization_pct) == (12, 20, 60.0)
+    assert (result[0].wip_available, result[0].waiting_approval_events, result[0].headhunter_pending) == (8, 3, 4)
 
 
 def test_downsample_single_snapshot():
     """Single snapshot passes through unchanged."""
     bb = BlackboardState.__new__(BlackboardState)
-    snapshots = [_snap(100, token_total_delta=42, wip_used=5)]
-    result = bb._downsample_snapshots(snapshots, bucket_seconds=600)
+    result = bb._downsample_snapshots([_snap(100, token_total_delta=42, wip_used=5)], bucket_seconds=600)
     assert len(result) == 1
-    assert result[0].token_total_delta == 42
-    assert result[0].wip_used == 5
+    assert (result[0].token_total_delta, result[0].wip_used) == (42, 5)
 
 
 def test_downsample_empty():
@@ -77,8 +69,23 @@ def test_downsample_preserves_quota_shedding_cumulative_counters():
     ]
     result = bb._downsample_snapshots(snapshots, bucket_seconds=300)
     assert len(result) == 1
-    assert result[0].quota_shed_tier1_total == 9
-    assert result[0].quota_shed_tier2_total == 6
+    assert (result[0].quota_shed_tier1_total, result[0].quota_shed_tier2_total) == (9, 6)
+
+
+def test_downsample_preserves_tpm_gauges_and_throttle_delta():
+    """TPM gauges average, tpm_limit takes max() against cold-start 0, and quota_throttle_delta sums."""
+    bb = BlackboardState.__new__(BlackboardState)
+    snapshots = [
+        _snap(100, tpm_used=300_000, tpm_limit=0, tpm_utilization_pct=10.0, quota_throttle_delta=1),
+        _snap(150, tpm_used=600_000, tpm_limit=3_000_000, tpm_utilization_pct=20.0, quota_throttle_delta=0),
+        _snap(200, tpm_used=1_200_000, tpm_limit=3_000_000, tpm_utilization_pct=40.0, quota_throttle_delta=2),
+    ]
+    result = bb._downsample_snapshots(snapshots, bucket_seconds=300)
+    assert len(result) == 1
+    assert result[0].tpm_used == 700_000
+    assert result[0].tpm_limit == 3_000_000
+    assert result[0].tpm_utilization_pct == 23.3
+    assert result[0].quota_throttle_delta == 3
 
 
 def test_downsample_covers_all_flow_snapshot_fields():

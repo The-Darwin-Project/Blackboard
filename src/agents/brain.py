@@ -6726,7 +6726,7 @@ class Brain:
             pass
         hh = self.agents.get("_headhunter")
         aligner_ref = self.agents.get("_aligner")
-        from .llm import get_token_meter
+        from .llm import get_quota_tracker, get_token_meter
         self._flow_collector = FlowCollector(
             scheduler=self._scheduler,
             blackboard=self.blackboard,
@@ -6736,6 +6736,7 @@ class Brain:
             jenkins_observer=self.agents.get("_jenkins_observer"),
             provisioner=self._ephemeral_provisioner,
             token_meter=get_token_meter(),
+            quota_tracker=get_quota_tracker,
             interval=60.0,
         )
         await self._flow_collector.start()

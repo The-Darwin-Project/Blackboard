@@ -1,4 +1,7 @@
 # BlackBoard/tests/test_flow_collector.py
+# @ai-rules:
+# 1. [Pattern]: 4-Layer Farley ATDD specification for FlowCollector telemetry, TPM quota stats, and downsampling.
+# 2. [Constraint]: Tests exercise protocol drivers and Domain DSL without direct Redis/network side effects.
 """
 4-Layer Farley ATDD Executable Acceptance Specification
 Scenario T-8: Tampering Strike Telemetry & ATDD Cycle Time Downsampling
@@ -243,3 +246,81 @@ class TestFlowCollectorScenarioT8:
         snapshot_err = await collector._build_snapshot()
         assert snapshot_err.quota_shed_tier1_total == 0
         assert snapshot_err.quota_shed_tier2_total == 0
+
+    @pytest.mark.asyncio
+    async def test_flow_collector_quota_tracker_metrics_and_reset_guard(self):
+        """Scenario: FlowCollector populates TPM usage, limit, utilization, and interval throttle delta."""
+        from src.observers.flow_collector import FlowCollector
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(return_value={"queue_depth": 0, "waiting_approval_events": 0})
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.redis = None
+
+        # Cold-start: callable returning None before first Gemini call -> all zeros
+        cold_collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+            quota_tracker=lambda: None,
+        )
+        s0 = await cold_collector._build_snapshot()
+        assert (s0.tpm_used, s0.tpm_limit, s0.tpm_utilization_pct, s0.quota_throttle_delta) == (0, 0, 0.0, 0)
+
+        tracker = MagicMock()
+        tracker.get_stats.side_effect = [
+            {"tokens_used_60s": 1_200_000, "tpm_limit": 3_000_000, "utilization_pct": 40.0, "throttle_events": 2},
+            {"tokens_used_60s": 1_800_000, "tpm_limit": 3_000_000, "utilization_pct": 60.0, "throttle_events": 5},
+            {"tokens_used_60s": 300_000, "tpm_limit": 3_000_000, "utilization_pct": 10.0, "throttle_events": 1},
+            RuntimeError("stats broken"),
+            {"tokens_used_60s": 900_000, "tpm_limit": 3_000_000, "utilization_pct": 30.0, "throttle_events": 4},
+        ]
+        collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+            quota_tracker=lambda: tracker,
+        )
+
+        s1 = await collector._build_snapshot()
+        assert (s1.tpm_used, s1.tpm_limit, s1.tpm_utilization_pct, s1.quota_throttle_delta) == (1_200_000, 3_000_000, 40.0, 2)
+
+        s2 = await collector._build_snapshot()
+        assert (s2.tpm_used, s2.tpm_limit, s2.tpm_utilization_pct, s2.quota_throttle_delta) == (1_800_000, 3_000_000, 60.0, 3)
+
+        # Counter reset (new tracker / restart): must not emit negative throttle delta
+        s3 = await collector._build_snapshot()
+        assert s3.quota_throttle_delta == 1
+
+        # Exception resilience
+        s4 = await collector._build_snapshot()
+        assert (s4.tpm_used, s4.tpm_limit, s4.tpm_utilization_pct, s4.quota_throttle_delta) == (0, 0, 0.0, 0)
+
+        # Direct instance DI (non-callable QuotaTracker)
+        direct_collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+            quota_tracker=tracker,
+        )
+        s5 = await direct_collector._build_snapshot()
+        assert (s5.tpm_used, s5.tpm_limit, s5.tpm_utilization_pct, s5.quota_throttle_delta) == (900_000, 3_000_000, 30.0, 4)
+
+    def test_default_tpm_limit_matches_helm_values(self, monkeypatch):
+        """Scenario: Helm gcp.tpmLimit and llm.create_adapter default agree on 3,000,000 TPM."""
+        from pathlib import Path
+        import yaml
+        import src.agents.llm as llm_pkg
+
+        repo_root = Path(__file__).resolve().parent.parent
+        values = yaml.safe_load((repo_root / "helm" / "values.yaml").read_text())
+        assert str(values["gcp"]["tpmLimit"]) == str(llm_pkg.DEFAULT_TPM_LIMIT) == "3000000"
+
+        for bad_env in (None, "", "-5", "bad"):
+            if bad_env is None:
+                monkeypatch.delenv("LLM_TPM_LIMIT", raising=False)
+            else:
+                monkeypatch.setenv("LLM_TPM_LIMIT", bad_env)
+            monkeypatch.setattr(llm_pkg, "_quota_tracker", None)
+            with patch("src.agents.llm.gemini_client.GeminiAdapter") as mock_adapter_cls:
+                llm_pkg.create_adapter("gemini", "proj", "global", "gemini-4-carbon")
+            assert mock_adapter_cls.call_args.kwargs["quota_tracker"].get_stats()["tpm_limit"] == 3_000_000

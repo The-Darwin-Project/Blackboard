@@ -4,8 +4,9 @@
 # 2. [Pattern]: External observer — reads scheduler.metrics (pull-only public API) + blackboard state.
 # 3. [Gotcha]: Must survive Redis errors — try/except per cycle, log + continue.
 # 4. [Pattern]: Maintains _prev_* counters for delta computation across snapshots.
-# 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence. TokenMeter via DI is permitted (counter, not LLM code).
+# 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence. TokenMeter / QuotaTracker via DI is permitted (counters, not LLM code).
 # 6. [Pattern]: aligner.pending_count is a sync property (in-memory counter) read unawaited — mirrors headhunter.pending_count pattern.
+# 7. [Pattern]: quota_tracker supports either an instance or lazy getter callable so FlowCollector sees QuotaTracker once initialized.
 """FlowCollector: periodic snapshot of system flow health, persisted to Redis."""
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..agents.agent_registry import AgentRegistry
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
     from ..agents.jenkins_observer import JenkinsObserver
+    from ..agents.llm.quota_tracker import QuotaTracker
     from ..agents.llm.token_meter import TokenMeter
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
@@ -47,6 +49,7 @@ class FlowCollector:
         jenkins_observer: "JenkinsObserver | None" = None,
         provisioner: "EphemeralProvisioner | None" = None,
         token_meter: "TokenMeter | None" = None,
+        quota_tracker: "QuotaTracker | Callable[[], QuotaTracker | None] | None" = None,
         interval: float = 60.0,
     ):
         self._scheduler = scheduler
@@ -57,11 +60,13 @@ class FlowCollector:
         self._jenkins_observer = jenkins_observer
         self._provisioner = provisioner
         self._token_meter = token_meter
+        self._quota_tracker = quota_tracker
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._running = False
         self._prev_reconcile_count = 0
         self._prev_error_count = 0
+        self._prev_quota_throttles = 0
 
     async def start(self) -> None:
         if self._task is not None:
@@ -203,6 +208,7 @@ class FlowCollector:
         # Token meter: snapshot() returns interval deltas, get_platform_totals() returns cumulative
         token_snap = self._token_meter.snapshot() if self._token_meter else {}
         platform_totals = self._token_meter.get_platform_totals() if self._token_meter else {}
+        tpm_used, tpm_limit, tpm_util, quota_throttle_delta = self._collect_quota_stats()
 
         # Quota shedding telemetry counters
         quota_shed_tier1 = 0
@@ -269,8 +275,40 @@ class FlowCollector:
             token_total_delta=token_snap.get("total_tokens", 0),
             token_calls_delta=token_snap.get("calls", 0),
             token_total_cumulative=platform_totals.get("total_tokens", 0),
+            tpm_used=tpm_used,
+            tpm_limit=tpm_limit,
+            tpm_utilization_pct=tpm_util,
+            quota_throttle_delta=quota_throttle_delta,
             tampering_strikes=tampering_strikes,
             quota_shed_tier1_total=quota_shed_tier1,
             quota_shed_tier2_total=quota_shed_tier2,
             atdd_cycle_sec=avg_cycle,
         )
+
+    def _collect_quota_stats(self) -> tuple[int, int, float, int]:
+        """Read QuotaTracker rolling 60s usage, limit, utilization %, and interval throttles."""
+        if self._quota_tracker is None:
+            return (0, 0, 0.0, 0)
+        try:
+            tracker = (
+                self._quota_tracker
+                if hasattr(self._quota_tracker, "get_stats")
+                else (self._quota_tracker() if callable(self._quota_tracker) else None)
+            )
+            if tracker is None:
+                return (0, 0, 0.0, 0)
+            stats = tracker.get_stats()
+            if not isinstance(stats, dict):
+                return (0, 0, 0.0, 0)
+            tokens_used = int(stats.get("tokens_used_60s", 0) or 0)
+            tpm_limit = int(stats.get("tpm_limit", 0) or 0)
+            utilization_pct = float(stats.get("utilization_pct", 0.0) or 0.0)
+            current_throttles = int(stats.get("throttle_events", 0) or 0)
+            if current_throttles < self._prev_quota_throttles:
+                self._prev_quota_throttles = 0
+            throttle_delta = current_throttles - self._prev_quota_throttles
+            self._prev_quota_throttles = current_throttles
+            return (tokens_used, tpm_limit, utilization_pct, throttle_delta)
+        except Exception as e:
+            logger.debug("FlowCollector: quota stats unavailable: %s", e)
+            return (0, 0, 0.0, 0)
