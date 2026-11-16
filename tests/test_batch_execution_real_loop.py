@@ -942,3 +942,49 @@ class TestBatchGateReEvalUsesLiveEvidence:
         )
         # fetch_jira_issue is disallowed under DOMAIN_CASUAL -> rejected, only classify_event's turns.
         assert not any("fetch_jira_issue" in (t.thoughts or "") for t in _turns(brain) if t.actor == "brain" and t.action == "tool_result")
+
+
+class TestBatchGateReEvalClassifiedFlag:
+    """brain_has_classified at FC[1+] must come from live evidence (brain_domain set by FC[0] classify_event)."""
+
+    @pytest.mark.asyncio
+    async def test_fc1_gate_sees_classified_after_fc0_classify_despite_stale_flag(self):
+        fcs = [
+            _fc("classify_event", {"domain": "complicated"}),
+            _fc("fetch_jira_issue", {"issue_key": "VMER-1"}),
+        ]
+        stream = MockStream([_Chunk(text="Checking Jira.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.domain = None
+        event.event.evidence.brain_domain = None
+        _wire_mutable_event(brain, event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"event_domain": "complicated", "brain_has_classified": False}
+        )
+
+        async def _exec(_eid, name, _args, **_kw):
+            if name == "classify_event":
+                event.event.evidence.domain = "complicated"
+                event.event.evidence.brain_domain = "complicated"
+            return True
+
+        brain._execute_function_call = AsyncMock(side_effect=_exec)
+
+        from src.agents.tool_gates import build_gate_context as real_build
+
+        seen_flags: list[dict] = []
+
+        def _spy(**kwargs):
+            seen_flags.append(dict(kwargs["context_flags"]))
+            return real_build(**kwargs)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                patch("src.agents.tool_gates.build_gate_context", side_effect=_spy):
+            await brain._process_with_llm("evt-test", event)
+
+        assert seen_flags[0]["brain_has_classified"] is False
+        assert seen_flags[-1]["brain_has_classified"] is True
+        assert [c.args[1] for c in brain._execute_function_call.await_args_list] == [
+            "classify_event", "fetch_jira_issue",
+        ]
