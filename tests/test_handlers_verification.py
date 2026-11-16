@@ -1,3 +1,7 @@
+# tests/test_handlers_verification.py
+# @ai-rules:
+# 1. [Constraint]: Pure unit tests for verification and phase-transition handlers -- no Redis, no Brain import.
+# 2. [Pattern]: Mock ToolContext and Blackboard to verify handle_set_phase and can_transition_to_close admissibility.
 """Tests for verification phase handlers."""
 from types import SimpleNamespace
 import pytest
@@ -78,4 +82,43 @@ async def test_close_rejected_when_reclassified_after_verify():
     appended_turn = ctx.append_and_broadcast.call_args[0][1]
     assert appended_turn.actor == "system"
     assert "Cannot transition to 'close'" in appended_turn.result
+
+
+def test_can_transition_to_close_admissibility():
+    """T-9: Direct unit test for can_transition_to_close(event_doc) covering clear/casual
+    allowed vs complicated/complex without PHASE: VERIFY rejected."""
+    from src.agents.handlers_verification import can_transition_to_close
+
+    for domain in ("clear", "casual", "chaotic"):
+        doc = SimpleNamespace(
+            event=SimpleNamespace(evidence=SimpleNamespace(brain_domain=domain)),
+            conversation=[],
+        )
+        allowed, reason = can_transition_to_close(doc)
+        assert allowed is True
+        assert reason is None
+
+    for domain in ("complicated", "complex"):
+        unverified_doc = SimpleNamespace(
+            event=SimpleNamespace(evidence=SimpleNamespace(brain_domain=domain)),
+            conversation=[],
+        )
+        allowed, reason = can_transition_to_close(unverified_doc)
+        assert allowed is False
+        assert reason is not None
+        assert f"Cannot transition to 'close' from '{domain}'" in reason
+
+        verified_doc = SimpleNamespace(
+            event=SimpleNamespace(evidence=SimpleNamespace(brain_domain=domain)),
+            conversation=[
+                ConversationTurn(
+                    turn=1, actor="brain", action="phase",
+                    thoughts="Phase: VERIFY", waitingFor="set_phase",
+                ),
+            ],
+        )
+        allowed_v, reason_v = can_transition_to_close(verified_doc)
+        assert allowed_v is True
+        assert reason_v is None
+
 

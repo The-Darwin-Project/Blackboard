@@ -505,10 +505,10 @@ def is_defer_event_available(ctx: GateContext) -> bool:
 
 
 def _pred_hard_strip_wait_user(ctx: GateContext) -> bool:
-    if ctx.brain_phase == "triage":
-        return True
     if ctx.event_source in ("chat", "slack"):
         return False
+    if ctx.brain_phase == "triage":
+        return True
     has_user_turn = any(
         (t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)) == "user"
         for t in ctx.conversation
@@ -841,7 +841,10 @@ def _msg_hard_strip_defer(tool: str, ctx: GateContext) -> str:
 
 
 def _msg_hard_strip_wait_user(tool: str, ctx: GateContext) -> str:
-    return f"[GATE] {tool} unavailable. State: source={ctx.event_source}. Constraint: only available for user-facing events past triage."
+    return (
+        f"[GATE] {tool} unavailable. State: phase={ctx.brain_phase}, source={ctx.event_source}. "
+        f"Constraint: only available for chat/slack events, or past triage when a user turn exists."
+    )
 
 
 # ---------------------------------------------------------------------------

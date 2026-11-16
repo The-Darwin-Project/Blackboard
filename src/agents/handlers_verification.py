@@ -19,6 +19,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger("darwin.brain")
 
 
+def can_transition_to_close(event_doc) -> tuple[bool, str | None]:
+    """Return (allowed, rejection_reason) for transitioning event_doc to 'close'."""
+    domain = resolve_event_domain(event_doc)
+    if domain in ("complicated", "complex"):
+        has_verify = False
+        for t in reversed((event_doc.conversation if event_doc else None) or []):
+            actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+            action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+            thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
+            waiting_for = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+            if actor == "brain":
+                if action == "phase":
+                    thoughts_upper = str(thoughts or "").upper()
+                    if thoughts_upper.startswith("PHASE: VERIFY"):
+                        has_verify = True
+                        break
+                    elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
+                        break
+                elif action in ("triage", "route") or waiting_for == "classify_event":
+                    # Domain reclassification (classify_event) or new agent dispatch
+                    # marks a work cycle boundary; any earlier PHASE: VERIFY is stale and
+                    # cannot satisfy verification for this cycle.
+                    break
+        if not has_verify:
+            return False, f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."
+    return True, None
+
+
 async def handle_set_phase(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
@@ -26,40 +54,19 @@ async def handle_set_phase(
     reasoning = args.get("reasoning", "")
     bb = ctx.get_blackboard()
     event_doc = await bb.get_event(event_id)
-    
+
     if phase == "close":
-        domain = resolve_event_domain(event_doc)
-        if domain in ("complicated", "complex"):
-            has_verify = False
-            for t in reversed(event_doc.conversation or []):
-                actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
-                action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
-                thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
-                waiting_for = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
-                if actor == "brain":
-                    if action == "phase":
-                        thoughts_upper = str(thoughts or "").upper()
-                        if thoughts_upper.startswith("PHASE: VERIFY"):
-                            has_verify = True
-                            break
-                        elif thoughts_upper.startswith("PHASE: DISPATCH") or thoughts_upper.startswith("PHASE: TRIAGE"):
-                            break
-                    elif action in ("triage", "route") or waiting_for == "classify_event":
-                        # Domain reclassification (classify_event) or new agent dispatch
-                        # marks a work cycle boundary; any earlier PHASE: VERIFY is stale and
-                        # cannot satisfy verification for this cycle.
-                        break
-            if not has_verify:
-                reject_msg = f"Cannot transition to 'close' from '{domain}' domain without first entering 'verify' phase."
-                turn = ConversationTurn(
-                    turn=(await ctx.next_turn_number(event_id)),
-                    actor="system",
-                    action="error",
-                    result=reject_msg,
-                    timestamp=time.time(),
-                )
-                await ctx.append_and_broadcast(event_id, turn)
-                return True
+        allowed, reject_msg = can_transition_to_close(event_doc)
+        if not allowed:
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="system",
+                action="error",
+                result=reject_msg,
+                timestamp=time.time(),
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
 
     current_phase = _resolve_phase(event_doc.brain_phase) if event_doc else None
     if current_phase is not None and phase == current_phase:

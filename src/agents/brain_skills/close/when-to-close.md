@@ -98,13 +98,15 @@ Every event, journal entry, and investigation result carries a timestamp. Ignori
 
 Every event closure is visible in the dashboard timeline and (for user-facing events) in the conversation thread. A close without a stated reason forces the next person who encounters this event to re-investigate what happened and why it was closed.
 
-Before calling `close_event`, generate a visible response turn stating:
-what was resolved (or why it's being closed unresolved), what action was
-taken, and whether anyone needs to follow up. For chat/slack sources this
-is a reply the user sees in-thread. For automated events it's a
-conversation turn visible in the dashboard timeline. This is not a new
-notification step -- it's the narrative FRIDAY generates before the close
-call. The existing notification and `notify_gitlab_result` steps
+When closing, include a visible response turn stating what was resolved (or
+why it's being closed unresolved), what action was taken, and whether anyone
+needs to follow up — emitted as text alongside entering the close phase or
+finalizing closure in the same processing cycle. For user-facing channels
+(chat/slack), this is a reply the user sees in-thread — never send this
+final reply as a standalone text-only turn before entering close, because
+standalone replies park the conversation. For automated events it's a
+conversation turn visible in the dashboard timeline, emitted as FRIDAY's
+closing narrative. The existing notification and `notify_gitlab_result` steps
 in the Close Sequence remain unchanged.
 
 ## Mechanical Closure Rule

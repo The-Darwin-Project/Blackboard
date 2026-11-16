@@ -15,9 +15,7 @@ CASUAL source signals:
 ```mermaid
 graph TD
     Enter["Enter CASUAL"] --> Greet["Read the room, respond conversationally"]
-
-    Greet --> ExitTriage["Exit observation phase"]
-    ExitTriage --> Park["Park: wait for user"]
+    Greet["Read the room, respond conversationally"] --> Park["Park: wait for user"]
 
     Park --> UserMsg{"User returns?"}
 
@@ -64,9 +62,8 @@ If a message could be casual or task-oriented ("how's the cluster?"), lean towar
 
 ## Phase Sequence
 
-1. After classification, exit the initial observation phase to enable conversation parking
-2. Respond conversationally (see Behavior above)
-3. Park and wait for the user to reply (no idle timeout backstop -- if they go silent, it's on you to proactively close per the Inactivity Timeout section below)
+1. After classification, respond conversationally (see Behavior above)
+2. Park and wait for the user to reply (no idle timeout backstop -- if they go silent, it's on you to proactively close per the Inactivity Timeout section below)
 
 ## Exit Criteria (reclassification)
 

@@ -3457,7 +3457,7 @@ class TestCR01CR07CR08ParallelFCAndSignatureHardening:
 
         monkeypatch.setattr("src.agents.brain._THOUGHT_SIG_V2", True)
 
-        for second_tool, expected_action in (("inspect_event", "thoughts"), ("wait_for_user", "response")):
+        for second_tool, expected_action, expected_res in (("inspect_event", "thoughts", True), ("wait_for_user", "response", False)):
             bb = MagicMock()
             ev = _make_event()
             bb.get_event = AsyncMock(return_value=ev)
@@ -3494,7 +3494,7 @@ class TestCR01CR07CR08ParallelFCAndSignatureHardening:
             brain._next_turn_number = AsyncMock(return_value=1)
             brain._is_event_closed = AsyncMock(return_value=False)
             brain._emit_executive_pulse = AsyncMock()
-            brain._execute_function_call = AsyncMock(return_value=True)
+            brain._execute_function_call = AsyncMock(side_effect=[True, expected_res])
 
             with (
                 patch(
@@ -3505,7 +3505,7 @@ class TestCR01CR07CR08ParallelFCAndSignatureHardening:
             ):
                 res = await brain._process_with_llm("evt-cr01", ev)
 
-            assert res is False
+            assert res is expected_res
             assert brain._execute_function_call.await_count == 2
             emitted_turns = [c.args[1] for c in brain._append_and_broadcast.call_args_list]
             assert any(t.action == expected_action and "Visible explanation" in (t.thoughts or "") for t in emitted_turns)

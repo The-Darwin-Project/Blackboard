@@ -581,7 +581,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "escalate: issue needs human awareness. "
                         "Gate: enter only after verify confirms the issue persists. "
                         "For CHAOTIC events, enter immediately from triage -- act first. "
-                        "close: wrap up. Enter ONLY after you have replied to the user. "
+                        "close: wrap up. For user-facing events, enter when the conversation is ready to close "
+                        "(user confirmed/signed off or terminal answer); emit your final user reply alongside "
+                        "set_phase(phase='close') or close_event -- never as a standalone text-only turn before "
+                        "set_phase('close'), which parks the conversation. "
                         "Gate: terminal phase. Reopen requires a new event. "
                         "investigate: legacy alias for dispatch (auto-resolved). "
                         "execute: legacy alias for dispatch (auto-resolved)."
@@ -669,9 +672,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "close_event",
         "description": (
             "Close the event as resolved. "
-            "For user-initiated events (chat, slack): you MUST have sent a visible reply "
-            "to the user before calling this. The close summary is an internal record -- "
-            "the user needs YOUR response in the conversation, not just a closure notification. "
+            "For user-initiated events (chat, slack): ensure the user receives a visible reply "
+            "(either generated as text alongside this close_event call or emitted earlier in the "
+            "current cycle alongside set_phase(phase='close')). The close summary is an internal "
+            "record -- the user needs YOUR response in the conversation, not just a closure notification. "
             "For automated events (headhunter, aligner, timekeeper): close directly after verification."
         ),
         "input_schema": {
@@ -782,7 +786,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Park the conversation until the user sends their next message. "
             "ONLY available for chat and slack events. "
-            "CRITICAL: you MUST generate a visible text response BEFORE calling this tool. "
+            "CRITICAL: you MUST generate a visible text response BEFORE or alongside calling this tool. "
             "Every user message deserves an answer — never park silently. "
             "The summary parameter is internal only (user will NOT see it). "
             "If you have nothing substantive to say, at minimum acknowledge the user's message."

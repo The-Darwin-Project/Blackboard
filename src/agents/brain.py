@@ -458,6 +458,7 @@ from src.agents.handlers_integration import (
     _JENKINS_RETRIGGER_COOLDOWN,
     jenkins_retrigger_cooldown_key,
 )
+from .handlers_verification import can_transition_to_close
 
 # Actors permitted to emit a `jenkins_retrigger` team_send_results signal.
 # Mirrors dispatch.py's lowercase agent-name dictionary (`AGENT_VOLUME_PATHS`).
@@ -617,6 +618,81 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "select_agent", "wait_for_agent",
     "request_user_approval",
 })
+
+
+def _is_close_phase_fc(
+    name: str, args: dict | None, event: EventDocument | None = None,
+) -> bool:
+    """True when set_phase transitions to 'close' and close transition is admissible."""
+    if name != "set_phase" or not isinstance(args, dict):
+        return False
+    raw_phase = args.get("phase")
+    if not (isinstance(raw_phase, str) and _resolve_phase(raw_phase) == "close"):
+        return False
+    allowed, _ = can_transition_to_close(event)
+    return allowed
+
+
+def _batch_is_terminal_for_flush(
+    batch_fcs: list[dict],
+    event: EventDocument | None,
+    active_tool_names: set[str],
+) -> bool:
+    """True when pre-batch text is a user-visible response (terminal FC or admissible close)."""
+    if any(fc["functionCall"]["name"] in _CYCLE_ENDING_TOOLS for fc in batch_fcs):
+        return True
+    if not batch_fcs or batch_fcs[0]["functionCall"]["name"] not in active_tool_names:
+        return False
+    set_phase_allowed = "set_phase" in active_tool_names
+    simulated_non_verify = False
+    simulated_verified = False
+    simulated_blocked = False
+    close_admissible = False
+    for fc in batch_fcs:
+        fc_name = fc["functionCall"]["name"]
+        fc_args = fc["functionCall"].get("args")
+        if fc_name == "classify_event" and "classify_event" in active_tool_names:
+            raw_dom = fc_args.get("domain", "complicated") if isinstance(fc_args, dict) else "complicated"
+            resolved_dom = _resolve_domain(raw_dom) if isinstance(raw_dom, str) else "disorder"
+            if resolved_dom in ("complicated", "complex"):
+                simulated_non_verify = False
+                simulated_verified = False
+                simulated_blocked = True
+                set_phase_allowed = True
+                close_admissible = False
+            elif resolved_dom == "casual":
+                if event is not None and event.source in ("chat", "slack"):
+                    simulated_non_verify = True
+                    simulated_blocked = False
+                    set_phase_allowed = False
+                    close_admissible = False
+                else:
+                    simulated_non_verify = False
+                    simulated_verified = False
+                    simulated_blocked = True
+                    close_admissible = False
+            else:
+                simulated_non_verify = True
+                simulated_blocked = False
+                set_phase_allowed = True
+        elif fc_name == "set_phase" and set_phase_allowed and isinstance(fc_args, dict):
+            raw_phase = fc_args.get("phase")
+            if isinstance(raw_phase, str):
+                resolved_phase = _resolve_phase(raw_phase)
+                if resolved_phase == "close":
+                    if not simulated_blocked and (
+                        simulated_non_verify or simulated_verified or can_transition_to_close(event)[0]
+                    ):
+                        close_admissible = True
+                else:
+                    close_admissible = False
+                    if resolved_phase == "verify":
+                        simulated_verified = True
+                        simulated_blocked = False
+                    elif resolved_phase in ("dispatch", "triage") and not simulated_non_verify:
+                        simulated_verified = False
+                        simulated_blocked = True
+    return close_admissible
 
 # Tools the memory-reflex (RECALL) gate must never block (@ai-rules #40).
 # Currently only classify_event: a state mutation that must execute or the event
@@ -1916,6 +1992,8 @@ class Brain:
                         event_id, assigned, MessageStatus.PROCESSED,
                     )
             raise
+        finally:
+            self._response_emitted_for.discard(event_id)
 
     async def _process_with_llm(
         self,
@@ -2535,7 +2613,8 @@ class Brain:
         if _THOUGHT_SIG_V2 and len(function_calls) > 1:
             batch_fcs = function_calls[:_MAX_BATCH_SIZE]
             batch_size = len(batch_fcs)
-            is_terminal = any(fc["functionCall"]["name"] in _CYCLE_ENDING_TOOLS for fc in batch_fcs)
+            active_names = {t["name"] for t in active_tools}
+            is_terminal = _batch_is_terminal_for_flush(batch_fcs, event, active_names)
             # Flush text before batch
             clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
             if clean_accumulated and not response_emitted:
@@ -2616,6 +2695,8 @@ class Brain:
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
 
+            batch_halted = False
+            last_result = False
             for i, fc_part in enumerate(batch_fcs):
                 fc_name = fc_part["functionCall"]["name"]
                 fc_args = fc_part["functionCall"].get("args", {})
@@ -2635,15 +2716,39 @@ class Brain:
                 # (e.g. classify_event firing before select_agent).
                 try:
                     if i == 0:
-                        valid_names = {t["name"] for t in active_tools}
+                        valid_names = set(active_names)
+                        if (
+                            fc_name == "wait_for_user"
+                            and "wait_for_user" not in valid_names
+                            and event_id in self._response_emitted_for
+                        ):
+                            from .tool_gates import _pred_hard_strip_wait_user
+                            if not _pred_hard_strip_wait_user(gate_ctx):
+                                valid_names.add("wait_for_user")
                     else:
                         event = await self.blackboard.get_event(event_id)
                         from .tool_gates import evaluate_gates, build_gate_context
+                        from ..models import EventEvidence
                         brain_phase = _resolve_phase(event.brain_phase)
-                        # FC[0] (e.g. select_agent) may have just started a worker; refresh the live-agent flag so
-                        # IDLE_AGENT_WAIT does not strip a batched wait_for_agent using the pre-dispatch snapshot.
+                        ev_evidence = event.event.evidence if (event and event.event) else None
+                        evidence_overrides = (
+                            {
+                                "event_domain": ev_evidence.brain_domain or ev_evidence.domain,
+                                "domain_confidence": ev_evidence.domain_confidence,
+                                "brain_has_classified": bool(
+                                    ev_evidence.brain_domain is not None
+                                    or context_flags.get("brain_has_classified")
+                                ),
+                            }
+                            if isinstance(ev_evidence, EventEvidence)
+                            else {}
+                        )
+                        # FC[0] (e.g. select_agent or classify_event) may have just started a worker or
+                        # mutated domain state; refresh live-agent and domain flags so subsequent FCs
+                        # evaluate gates against fresh post-FC[0..i-1] state.
                         batch_flags = {
                             **context_flags,
+                            **evidence_overrides,
                             "has_active_agent_task": self._has_active_agent_task(event_id),
                         }
                         gate_ctx = build_gate_context(
@@ -2676,6 +2781,7 @@ class Brain:
                         response_parts=captured_parts if i == 0 else None,
                     )
                     await batch_ctx.append_and_broadcast(event_id, error_turn)
+                    batch_halted = True
                     break
 
                 if fc_name not in valid_names:
@@ -2683,6 +2789,7 @@ class Brain:
                         "Batch FC[%d] %s rejected by gate%s",
                         i, fc_name, "" if i == 0 else f" after FC[{i - 1}]",
                     )
+                    batch_halted = True
                     break
 
                 grounding = grounding_evidence if i == 0 else None
@@ -2694,13 +2801,16 @@ class Brain:
                     grounding_evidence=grounding,
                     _ctx_override=batch_ctx,
                 )
+                last_result = bool(result)
 
                 if not result:
+                    batch_halted = True
                     break
                 if await self._is_event_closed(event_id):
+                    batch_halted = True
                     break
 
-            return False
+            return bool(last_result and not batch_halted)
 
         # Process the final result (single-FC path)
         if function_call:
@@ -2728,7 +2838,14 @@ class Brain:
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
-            is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
+            valid_tool_names = {t["name"] for t in active_tools}
+            is_terminal = (
+                function_call.name in _CYCLE_ENDING_TOOLS
+                or (
+                    "set_phase" in valid_tool_names
+                    and _is_close_phase_fc(function_call.name, function_call.args, event)
+                )
+            )
             clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
             if clean_accumulated and not response_emitted:
                 if is_terminal:
@@ -2753,7 +2870,6 @@ class Brain:
                     )
                     await self._append_and_broadcast(event_id, narration_turn)
 
-            valid_tool_names = {t["name"] for t in active_tools}
             # SILENT_PARK invalidation: if we just flushed a brain.response above,
             # wait_for_user is now valid (the gate's "no response after user message"
             # premise was satisfied by the flush). Re-admit to prevent false rejection
