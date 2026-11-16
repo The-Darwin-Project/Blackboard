@@ -151,14 +151,19 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `HEADHUNTER_GITHUB_ENABLED` | Enable GitHub PR polling | `false` |
 | `HEADHUNTER_GITHUB_POLL_INTERVAL` | PR poll interval (seconds) | (see code) |
 | `HEADHUNTER_GITHUB_REPOS` | Comma-separated `owner/repo` list (empty = auto-discover from installation) | (empty) |
-| `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Comma-separated trigger reasons | `review_requested` |
+| `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Action allowlist: `review_requested` (label flow), `review_feedback`, `mention` | `review_requested,review_feedback,mention` |
+| `HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED` | Respond to PR reviews / `@darwin-project-ai` mentions from trusted humans | `false` |
+| `HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS` | `author_association` values allowed to instruct Darwin | `OWNER,MEMBER,COLLABORATOR` |
+| `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS` | CI/robot logins that never trigger (even if COLLABORATOR) | `openshift-ci-robot,openshift-merge-robot` |
+| `HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC` | Quiet period before a feedback batch becomes an event | `120` |
+| `HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS` | Auto-response rounds per PR before asking for human direction | `5` |
 | `HEADHUNTER_GITHUB_LABEL` | Label-based trigger (alternative to review requests) | `darwin-review` |
 | `GITHUB_APP_ID` | GitHub App ID (via K8s Secret) | (required if enabled) |
 | `GITHUB_INSTALLATION_ID` | GitHub App Installation ID (via K8s Secret) | (required if enabled) |
 | `GITHUB_APP_SLUG` | GitHub App slug for bot detection | `darwin-project-ai` |
 | `HEADHUNTER_MAINTAINERS` | Comma-separated maintainer usernames for notifications | (empty) |
 
-Helm block: `headhunter.github.enabled`, `headhunter.github.pollInterval`, `headhunter.github.repos`, `headhunter.github.triggerReasons`. GitHub App credentials via `github.existingSecret`.
+Helm block: `headhunter.github.enabled`, `headhunter.github.pollInterval`, `headhunter.github.repos`, `headhunter.github.triggerReasons`, `headhunter.github.reviewResponse.{enabled,trustedAssociations,ignoreLogins,debounceSec,maxRounds}`. GitHub App credentials via `github.existingSecret`.
 
 ### Headhunter Jira (Jira Missions)
 

@@ -149,6 +149,10 @@ Before dispatching an agent to push any commit to any MR/PR branch:
 3. After the pipeline validates the fix, request human approval to merge or
    re-enable auto-merge.
 
+The same rule applies to review-response pushes on GitHub PRs (Headhunter
+`review_feedback` / `mention` events): disable `autoMergeRequest` first, push, verify,
+then reply; see mr-lifecycle.md GitHub Review-Response Loop.
+
 "Merge an already-validated MR" in the table above applies ONLY to MR/PRs
 where Darwin has NOT pushed any commits. An MR/PR that contains agent-authored
 code is a source mutation delivery regardless of who created it originally.

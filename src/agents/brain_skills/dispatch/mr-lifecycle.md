@@ -178,6 +178,27 @@ When the pipeline is green but the MR is blocked only on a mandatory human merge
 `notify_user_slack` to ask the maintainer to merge: this is a direct synchronous human-action
 block, so the Slack ping is warranted even though routine failures go to `report_incident`.
 
+## GitHub Review-Response Loop
+
+For Headhunter events with `action: review_feedback` / `mention` on a GitHub PR (see
+source/headhunter.md), the lifecycle is fix -> verify -> reply on the PR's own head branch:
+
+1. **Fix (developer):** check out `head_branch`, run the merge guard first (check
+   `autoMergeRequest`; if armed, `disablePullRequestAutoMerge` BEFORE the push, per
+   execution-method.md Auto-Merge Bypass Vector), apply one fix per feedback item, push normal
+   commits.
+2. **Verify (qe):** tests/lint on the pushed head SHA; only then reply.
+3. **Reply (developer):** one summary comment mapping feedback item -> commit SHA, plus an
+   in-thread reply on each inline comment. Unclear/declined items get a reason or question.
+   Never resolve review threads.
+
+**Prow merge-guard:** on Prow-managed repos (`openshift-ci-robot` comments, `/lgtm` workflow)
+Darwin never posts `/lgtm`, `/approve` or `/hold cancel`, and never asks a bot to. Merging stays
+a human decision; the Auto-Merge Invalidation exception above applies to these commits too.
+
+A human push after Darwin's reply, or a new review, is a new round (capped by
+`HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS`); Headhunter creates that event, not Brain.
+
 ## Post-Approval Merge Dispatch and Cluster Rollout Verification
 
 Do NOT wait indefinitely for a human to merge after an explicit plan approval.

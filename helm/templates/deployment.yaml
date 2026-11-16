@@ -301,6 +301,16 @@ spec:
               value: "{{ .Values.headhunter.github.labelQueued }}"
             - name: HEADHUNTER_GITHUB_LABEL_WORK
               value: "{{ .Values.headhunter.github.labelWork }}"
+            - name: HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED
+              value: "{{ .Values.headhunter.github.reviewResponse.enabled | default false }}"
+            - name: HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS
+              value: {{ .Values.headhunter.github.reviewResponse.trustedAssociations | default "OWNER,MEMBER,COLLABORATOR" | quote }}
+            - name: HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS
+              value: {{ .Values.headhunter.github.reviewResponse.ignoreLogins | default "openshift-ci-robot,openshift-merge-robot" | quote }}
+            - name: HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC
+              value: {{ .Values.headhunter.github.reviewResponse.debounceSec | default "120" | quote }}
+            - name: HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS
+              value: {{ .Values.headhunter.github.reviewResponse.maxRounds | default "5" | quote }}
             {{- range $label, $url := .Values.headhunter.github.skills }}
             - name: "HEADHUNTER_GITHUB_SKILL_{{ $label | upper }}"
               value: {{ $url | quote }}

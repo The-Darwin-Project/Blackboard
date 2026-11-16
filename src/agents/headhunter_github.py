@@ -29,6 +29,16 @@
 #     _last_queued_issues for /headhunter/pending REST endpoint.
 # 20. [Pattern]: create_issue_event removes both darwin-work AND darwin-queued on promote --
 #     the queued removal is a no-op (silenced 404) for issues that were never queued.
+# 21. [Pattern]: Review-response (HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED, default off) polls
+#     reviews + inline comments + issue comments per PR. Cursor HASH + per-item SET NX live in
+#     BlackboardState. Items are marked seen and the cursor advanced ONLY after create_event
+#     succeeds (create_review_feedback_event), never at poll time (debounce must not consume them).
+# 22. [Constraint]: Trust gate (_feedback_reject_reason) is fail-closed: Darwin's own login, any
+#     [bot]/Bot-type login, HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS and untrusted
+#     author_association are dropped. Same gate filters fetch_context recent_comments.
+# 23. [Constraint]: Review-response events NEVER touch darwin-* labels or the pr_sha re-trigger
+#     store (would start an unintended darwin-review on Darwin's own PR). See _NO_LABEL_ACTIONS.
+# 24. [Pattern]: 429/5xx from the feedback poll propagate (circuit breaker); 404/422 per PR skip it.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -43,6 +53,7 @@ import os
 import re
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,7 +62,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +113,71 @@ Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify)
 Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 """
 
-# GitHub App slug for the bot (used in search queries)
+# GitHub App slug for the bot (login is f"{slug}[bot]"; used for self-ignore + mention detection)
 _APP_SLUG = os.getenv("GITHUB_APP_SLUG", "darwin-project-ai")
+
+# --- Review-response (issue #340) -------------------------------------------------
+_REVIEW_ACTIONS = ("review_feedback", "mention")
+# Actions whose events must not enter the darwin-review label state machine.
+_NO_LABEL_ACTIONS = frozenset({"review_feedback", "mention", "review_round_cap"})
+_ACTIONABLE_REVIEW_STATES = frozenset({"CHANGES_REQUESTED", "COMMENTED"})
+_NON_ACTIONABLE_PARENT_STATES = frozenset({"APPROVED", "DISMISSED", "PENDING"})
+_DIFF_HUNK_CAP = 1500
+_FEEDBACK_BODY_CAP = 5000
+_FEEDBACK_ITEM_CAP = 20
+_FEEDBACK_AGGREGATE_CAP = _COMMENT_LIMIT * 10
+_FEEDBACK_TAIL_BODY_CAP = 200
+_FEEDBACK_PAGE_SIZE = 100
+_FEEDBACK_MAX_PAGES = 5
+_FEEDBACK_POLL_CONCURRENCY = 5
+_DEFAULT_TRIGGER_REASONS = "review_requested,review_feedback,mention"
+_PR_REF_URL = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
+_PR_REF_SHORT = re.compile(r"(?<![\w/.-])([\w.-]+)/([\w.-]+)#(\d+)")
+
+
+def _csv_env(name: str, default: str) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+
+def _review_trusted_associations() -> set[str]:
+    return {a.upper() for a in _csv_env("HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS", "OWNER,MEMBER,COLLABORATOR")}
+
+
+def _review_ignore_logins() -> set[str]:
+    return {
+        a.lower()
+        for a in _csv_env("HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS", "openshift-ci-robot,openshift-merge-robot")
+    }
+
+
+def _bot_login() -> str:
+    return f"{_APP_SLUG}[bot]"
+
+
+def _mention_pattern() -> "re.Pattern[str]":
+    return re.compile(rf"(?<![\w@-])@{re.escape(_APP_SLUG)}(?:\[bot\])?(?![\w-])", re.IGNORECASE)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_slash_command_only(body: str) -> bool:
+    """True when every non-blank line is a Prow/ChatOps slash command (e.g. /retest, /lgtm)."""
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    return bool(lines) and all(ln.startswith("/") for ln in lines)
 
 
 def _get_static_maintainer_emails() -> list[str]:
@@ -125,8 +199,9 @@ class GitHubPlatform:
         repos_env = os.getenv("HEADHUNTER_GITHUB_REPOS", "")
         if repos_env.strip():
             self._repos = [r.strip() for r in repos_env.split(",") if r.strip()]
+        # Action allowlist: review_requested (label flow, never gated), review_feedback, mention.
         self._trigger_reasons: set[str] = set(
-            os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", "review_requested").split(",")
+            (r.strip() for r in os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", _DEFAULT_TRIGGER_REASONS).split(",") if r.strip())
         )
         self._trigger_label = os.getenv("HEADHUNTER_GITHUB_LABEL", "darwin-review")
         self._active_label = os.getenv("HEADHUNTER_GITHUB_LABEL_ACTIVE", "darwin-active")
@@ -145,6 +220,9 @@ class GitHubPlatform:
         # label → (content, expiry_epoch): 5-min TTL, 404 does NOT reset TTL
         self._issue_skill_cache: dict[str, tuple[str, float]] = {}
         self._repo_tombstones: dict[str, float] = {}
+        # Open PRs discovered by the most recent poll_work_items(); reused by the
+        # review-feedback poll so it does not re-list /pulls (saves 1 GET per repo/cycle).
+        self._last_open_prs: list[dict] = []
 
     def _is_tombstoned(self, repo_full: str, endpoint: str) -> bool:
         """Check if an endpoint for a repo is tombstoned (404/422 cooldown). Lazy eviction."""
@@ -242,19 +320,28 @@ class GitHubPlatform:
             await self._manager.close_all()
             self._manager = None
 
-    async def get_active_keys(self) -> set[tuple[str, str, int]]:
-        """Get (owner, repo, number) for all active/deferred headhunter events.
+    async def _collect_active_refs(
+        self, include_non_headhunter: bool = False,
+    ) -> list[tuple[tuple[str, str, int], str, str]]:
+        """Scan active events -> [((owner, repo, number), event_id, kind)], kind in {pr, issue}.
 
-        Reads both github_context (PR) and github_issue_context (Issue).
-        3-tuple format is safe: GitHub issues and PRs share a monotonic counter per repo.
+        Headhunter events are matched via github_context / github_issue_context.
+        With include_non_headhunter, Slack/chat/etc. events are matched by PR references
+        (github.com/<o>/<r>/pull/<n> or <o>/<r>#<n>) in their reason, display text and
+        first/last turns, so a human-relayed request on a PR also blocks a duplicate event.
         """
         active_ids = await self.blackboard.get_active_events()
-        keys: set[tuple[str, str, int]] = set()
+        refs: list[tuple[tuple[str, str, int], str, str]] = []
         for eid in active_ids:
             event = await self.blackboard.get_event(eid)
-            if not event or event.source != "headhunter":
+            if not event:
                 continue
             if event.status.value not in ("new", "active", "deferred"):
+                continue
+            if event.source != "headhunter":
+                if include_non_headhunter:
+                    for key in self._extract_pr_refs(event):
+                        refs.append((key, eid, "pr"))
                 continue
             evidence = event.event.evidence if event.event else None
             if evidence is None:
@@ -266,7 +353,7 @@ class GitHubPlatform:
                 repo = ctx.get("repo", "") if isinstance(ctx, dict) else getattr(ctx, "repo", "")
                 pr_num = ctx.get("pr_number", 0) if isinstance(ctx, dict) else getattr(ctx, "pr_number", 0)
                 if owner and repo and pr_num:
-                    keys.add((owner, repo, pr_num))
+                    refs.append(((owner, repo, pr_num), eid, "pr"))
             # Issue context
             issue_ctx = getattr(evidence, "github_issue_context", None)
             if issue_ctx:
@@ -274,8 +361,52 @@ class GitHubPlatform:
                 repo = issue_ctx.get("repo", "") if isinstance(issue_ctx, dict) else getattr(issue_ctx, "repo", "")
                 issue_num = issue_ctx.get("issue_number", 0) if isinstance(issue_ctx, dict) else getattr(issue_ctx, "issue_number", 0)
                 if owner and repo and issue_num:
-                    keys.add((owner, repo, issue_num))
-        return keys
+                    refs.append(((owner, repo, issue_num), eid, "issue"))
+        return refs
+
+    @staticmethod
+    def _extract_pr_refs(event: object) -> set[tuple[str, str, int]]:
+        """Best-effort PR references from a non-headhunter event's text."""
+        texts: list[str] = []
+        ev_input = getattr(event, "event", None)
+        if ev_input is not None:
+            texts.append(str(getattr(ev_input, "reason", "") or ""))
+            evidence = getattr(ev_input, "evidence", None)
+            if isinstance(evidence, str):
+                texts.append(evidence)
+            elif evidence is not None:
+                texts.append(str(getattr(evidence, "display_text", "") or ""))
+        turns = list(getattr(event, "conversation", None) or [])
+        for t in turns[:3] + turns[-3:]:
+            for attr in ("thoughts", "result", "evidence"):
+                val = getattr(t, attr, None)
+                if isinstance(val, str):
+                    texts.append(val)
+        found: set[tuple[str, str, int]] = set()
+        for text in texts:
+            for rx in (_PR_REF_URL, _PR_REF_SHORT):
+                for m in rx.finditer(text):
+                    found.add((m.group(1), m.group(2), int(m.group(3))))
+        return found
+
+    async def get_active_keys(self, include_non_headhunter: bool = False) -> set[tuple[str, str, int]]:
+        """Get (owner, repo, number) for all active/deferred headhunter events.
+
+        Reads both github_context (PR) and github_issue_context (Issue).
+        3-tuple format is safe: GitHub issues and PRs share a monotonic counter per repo.
+        include_non_headhunter additionally covers Slack/chat events that reference a PR.
+        """
+        refs = await self._collect_active_refs(include_non_headhunter)
+        return {key for key, _eid, _kind in refs}
+
+    async def get_active_pr_events(self) -> dict[tuple[str, str, int], str]:
+        """Map lower-cased (owner, repo, pr) -> active event id, across ALL event sources."""
+        refs = await self._collect_active_refs(include_non_headhunter=True)
+        return {
+            (o.lower(), r.lower(), n): eid
+            for (o, r, n), eid, kind in refs
+            if kind == "pr"
+        }
 
     async def poll_work_items(self) -> list[dict]:
         """Discover PRs from all repos across all discovered installations.
@@ -307,6 +438,7 @@ class GitHubPlatform:
             *[_poll_one(inst_id, client, repos) for inst_id, client, repos in installations],
         )
         prs = [pr for batch in results for pr in batch]
+        self._last_open_prs = prs
 
         active_keys = await self.get_active_keys()
         result: list[dict] = []
@@ -349,23 +481,6 @@ class GitHubPlatform:
             f"{skipped_same_sha} same-sha, {len(result)} new"
         )
         return result
-
-    async def _search_review_requested(self, client) -> list[dict]:
-        """Use GitHub Search API: is:pr is:open review-requested:<bot>."""
-        query = f"is:pr is:open review-requested:{_APP_SLUG}[bot]"
-        try:
-            resp = await client.get("/search/issues", params={"q": query, "per_page": "50"})
-            items = resp.json().get("items", [])
-            results = [self._normalize_search_item(item) for item in items]
-            if self._repos:
-                allowed = set(self._repos)
-                results = [pr for pr in results if f"{pr['owner']}/{pr['repo']}" in allowed]
-            return results
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 422:
-                logger.warning("GitHub search returned 422 — app slug may not be indexed yet")
-                return []
-            raise
 
     async def _list_from_repos(self, client, repos: list[str], installation_id: str) -> list[dict]:
         """List open PRs from the given repos.
@@ -541,26 +656,6 @@ class GitHubPlatform:
         return _EMERGENCY_ISSUE_SI, None
 
     @staticmethod
-    def _normalize_search_item(item: dict) -> dict:
-        """Normalize a search API result to our internal work item shape."""
-        repo_url = item.get("repository_url", "")
-        parts = repo_url.rstrip("/").split("/")
-        owner = parts[-2] if len(parts) >= 2 else ""
-        repo = parts[-1] if len(parts) >= 1 else ""
-        return {
-            "owner": owner,
-            "repo": repo,
-            "number": item["number"],
-            "title": item.get("title", ""),
-            "state": item.get("state", "open"),
-            "user": item.get("user", {}).get("login", ""),
-            "labels": [l.get("name", "") for l in item.get("labels", [])],
-            "html_url": item.get("html_url", ""),
-            "created_at": item.get("created_at", ""),
-            "head_sha": "",
-        }
-
-    @staticmethod
     def _normalize_pr_data(repo_full: str, pr_data: dict, installation_id: str = "") -> dict:
         """Normalize a repo PR list item to our internal work item shape."""
         parts = repo_full.split("/", 1)
@@ -578,6 +673,8 @@ class GitHubPlatform:
             "html_url": pr_data.get("html_url", ""),
             "created_at": pr_data.get("created_at", ""),
             "head_sha": (pr_data.get("head") or {}).get("sha", ""),
+            "draft": bool(pr_data.get("draft")),
+            "updated_at": pr_data.get("updated_at", ""),
         }
 
     async def fetch_context(self, work_item: dict) -> dict:
@@ -600,8 +697,9 @@ class GitHubPlatform:
             "labels": work_item.get("labels", []),
             "pr_url": work_item.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
             "head_sha": work_item.get("head_sha", ""),
-            "action": "review_requested",
+            "action": work_item.get("action", "review_requested"),
         }
+        self._attach_review_feedback(context, work_item)
 
         try:
             pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{number}")
@@ -647,14 +745,19 @@ class GitHubPlatform:
                 params={"per_page": "10", "direction": "desc"},
             )
             comments = comments_resp.json()
-            bot_name = f"{_APP_SLUG}[bot]"
+            bot_name = _bot_login().lower()
             recent = []
             total_len = 0
             for c in comments:
-                login = c.get("user", {}).get("login", "")
-                is_bot = login.endswith("[bot]")
-                if is_bot and login != bot_name:
-                    continue
+                user = c.get("user") or {}
+                login = user.get("login", "")
+                # Darwin's own comments are kept for context; everyone else must pass the
+                # same fail-closed trust gate as review feedback (prompt-injection surface).
+                if login.lower() != bot_name:
+                    reason = self._feedback_reject_reason(user, c.get("author_association", ""))
+                    if reason:
+                        logger.debug(f"Dropping PR comment from {login or '?'} ({reason}) on {owner}/{repo}#{number}")
+                        continue
                 entry = f"[{login or '?'}]: {(c.get('body') or '')[:5000]}"
                 total_len += len(entry)
                 if total_len > _COMMENT_LIMIT:
@@ -672,7 +775,7 @@ class GitHubPlatform:
     @staticmethod
     def _minimal_context(work_item: dict) -> dict:
         """Fallback when client is unavailable."""
-        return {
+        ctx = {
             "owner": work_item.get("owner", ""),
             "repo": work_item.get("repo", ""),
             "pr_number": work_item.get("number", 0),
@@ -680,9 +783,11 @@ class GitHubPlatform:
             "pr_state": work_item.get("state", "open"),
             "author": work_item.get("user", ""),
             "labels": work_item.get("labels", []),
-            "action": "review_requested",
+            "action": work_item.get("action", "review_requested"),
             "check_status": "unknown",
         }
+        GitHubPlatform._attach_review_feedback(ctx, work_item)
+        return ctx
 
     @staticmethod
     def _aggregate_check_status(check_runs: list[dict]) -> str:
@@ -721,6 +826,41 @@ class GitHubPlatform:
             return "warning"
         return "info"
 
+    def _base_github_context(self, work_item: dict, context: dict) -> dict:
+        """Shared github_context payload for PR events (label flow and review-response)."""
+        owner = work_item["owner"]
+        repo = work_item["repo"]
+        pr_number = work_item["number"]
+        check_status = context.get("check_status", "unknown")
+        return {
+            "owner": owner,
+            "repo": repo,
+            "installation_id": work_item.get("installation_id", ""),
+            "pr_number": pr_number,
+            "pr_title": context.get("pr_title", ""),
+            "pr_state": context.get("pr_state", "open"),
+            "pr_url": context.get("pr_url", f"https://github.com/{owner}/{repo}/pull/{pr_number}"),
+            "check_status": check_status,
+            "check_run_url": context.get("check_run_url", ""),
+            "head_sha": context.get("head_sha", ""),
+            "head_branch": context.get("head_branch", ""),
+            "base_branch": context.get("base_branch", ""),
+            "author": context.get("author", ""),
+            "labels": context.get("labels", []),
+            "changed_files": context.get("changed_files", []),
+            "maintainer": self._resolve_maintainer(),
+        }
+
+    @staticmethod
+    def _clean_plan(plan_text: str) -> str:
+        """Strip a wrapping markdown code fence from an LLM plan."""
+        clean_plan = plan_text.strip()
+        if clean_plan.startswith("```"):
+            clean_plan = clean_plan.split("\n", 1)[1] if "\n" in clean_plan else clean_plan
+        if clean_plan.endswith("```"):
+            clean_plan = clean_plan[:-3].rstrip()
+        return clean_plan
+
     async def create_platform_event(
         self,
         work_item: dict,
@@ -737,8 +877,6 @@ class GitHubPlatform:
         action = context.get("action", "review_requested")
         check_status = context.get("check_status", "unknown")
         severity = self.classify_severity(action, check_status)
-        maintainer = self._resolve_maintainer()
-
         evidence = EventEvidence(
             display_text=f"GitHub: {action} on #{pr_number} in {owner}/{repo}",
             source_type="headhunter",
@@ -746,33 +884,11 @@ class GitHubPlatform:
             domain="disorder",
             domain_confidence="default",
             severity=severity,
-            github_context={
-                "owner": owner,
-                "repo": repo,
-                "installation_id": installation_id,
-                "pr_number": pr_number,
-                "pr_title": context.get("pr_title", ""),
-                "pr_state": context.get("pr_state", "open"),
-                "pr_url": context.get("pr_url", f"https://github.com/{owner}/{repo}/pull/{pr_number}"),
-                "action": action,
-                "check_status": check_status,
-                "check_run_url": context.get("check_run_url", ""),
-                "head_sha": context.get("head_sha", ""),
-                "head_branch": context.get("head_branch", ""),
-                "base_branch": context.get("base_branch", ""),
-                "author": context.get("author", ""),
-                "labels": context.get("labels", []),
-                "changed_files": context.get("changed_files", []),
-                "maintainer": maintainer,
-            },
+            github_context={**self._base_github_context(work_item, context), "action": action},
         )
 
         service = repo or "general"
-        clean_plan = plan_text.strip()
-        if clean_plan.startswith("```"):
-            clean_plan = clean_plan.split("\n", 1)[1] if "\n" in clean_plan else clean_plan
-        if clean_plan.endswith("```"):
-            clean_plan = clean_plan[:-3].rstrip()
+        clean_plan = self._clean_plan(plan_text)
 
         event_id = await self.blackboard.create_event(
             source="headhunter",
@@ -940,6 +1056,19 @@ class GitHubPlatform:
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
         close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
 
+        action = gh_ctx.get("action", "")
+        if action in _NO_LABEL_ACTIONS:
+            # Review-response events never entered the darwin-review state machine: no
+            # darwin-active/done labels and no pr_sha store (a stored SHA + darwin-done
+            # would let a later human push start an unintended full darwin-review).
+            if action != "review_round_cap" and close_reason not in ("stale", "duplicate"):
+                await self._post_comment(
+                    installation_id, owner, repo, pr_number,
+                    self._build_feedback_comment(event, close_reason),
+                )
+            await self.blackboard.mark_feedback_sent(event.id)
+            return
+
         await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
         await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
 
@@ -1083,6 +1212,457 @@ class GitHubPlatform:
         if ".." in owner or ".." in repo or "/" in owner or "/" in repo:
             return None
         return owner, repo, int(pr_str)
+
+    # =========================================================================
+    # Review-Feedback Response (issue #340)
+    # =========================================================================
+
+    @staticmethod
+    def review_response_enabled() -> bool:
+        """Feature flag (default off). Read at call time so tests/ops can flip it."""
+        return os.getenv("HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED", "false").strip().lower() == "true"
+
+    @staticmethod
+    def _feedback_reject_reason(user: dict | None, association: str | None) -> str | None:
+        """Fail-closed trust gate. Returns None when the author may instruct Darwin, else why not.
+
+        Rejects: no login, Darwin's own bot login (self-event / loop guard), any [bot] login or
+        user.type == "Bot", logins in HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS (CI robots that are
+        COLLABORATORs, e.g. openshift-ci-robot), and author_association outside
+        HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS.
+        """
+        user = user or {}
+        login = (user.get("login") or "").strip()
+        if not login:
+            return "no_login"
+        lowered = login.lower()
+        if lowered == _bot_login().lower():
+            return "self"
+        if user.get("type") == "Bot" or lowered.endswith("[bot]"):
+            return "bot"
+        if lowered in _review_ignore_logins():
+            return "ignored_login"
+        if (association or "").upper() not in _review_trusted_associations():
+            return "untrusted_association"
+        return None
+
+    @staticmethod
+    def _attach_review_feedback(context: dict, work_item: dict) -> None:
+        """Copy review-feedback fields from a feedback work item into a PR context dict."""
+        action = work_item.get("action", "review_requested")
+        if action not in _REVIEW_ACTIONS:
+            return
+        items = work_item.get("review_feedback") or []
+        context["review_feedback"] = items
+        if action == "mention":
+            mention = next((i for i in reversed(items) if i.get("mentions_darwin")), None)
+            if mention:
+                context["mention_comment"] = mention.get("body", "")
+                context["mention_author"] = mention.get("author", "unknown")
+
+    @staticmethod
+    def _cap_feedback_items(items: list[dict]) -> list[dict]:
+        """Cap item count + aggregate body size. Never drops ids silently within the item cap:
+        once the aggregate budget is spent, later bodies are shortened (truncated=True)."""
+        out: list[dict] = []
+        used = 0
+        for item in items[:_FEEDBACK_ITEM_CAP]:
+            item = dict(item)
+            body = item.get("body", "")
+            remaining = _FEEDBACK_AGGREGATE_CAP - used
+            if len(body) > remaining:
+                body = body[: max(remaining, _FEEDBACK_TAIL_BODY_CAP)]
+                item["truncated"] = True
+            used += len(body)
+            item["body"] = body
+            out.append(item)
+        return out
+
+    async def _get_paged(self, client, path: str, params: dict | None = None) -> list[dict]:
+        """GET a list endpoint with per_page=100, following pages until a short page."""
+        out: list[dict] = []
+        for page in range(1, _FEEDBACK_MAX_PAGES + 1):
+            resp = await client.get(
+                path,
+                params={**(params or {}), "per_page": str(_FEEDBACK_PAGE_SIZE), "page": str(page)},
+            )
+            data = resp.json()
+            if not isinstance(data, list):
+                break
+            out.extend(data)
+            if len(data) < _FEEDBACK_PAGE_SIZE:
+                break
+        return out
+
+    def _build_feedback_item(self, kind: str, raw: dict, review_state: str | None = None) -> dict:
+        """Normalize a review / inline comment / issue comment into the review_feedback shape."""
+        user = raw.get("user") or {}
+        body = (raw.get("body") or "")
+        item = {
+            "kind": kind,
+            "id": raw.get("id"),
+            "review_id": raw.get("id") if kind == "review" else raw.get("pull_request_review_id"),
+            "author": user.get("login", ""),
+            "author_association": raw.get("author_association", ""),
+            "state": (raw.get("state") or review_state or "").upper() if kind != "issue_comment" else "",
+            "path": raw.get("path", "") if kind == "review_comment" else "",
+            "line": (raw.get("line") or raw.get("original_line")) if kind == "review_comment" else None,
+            "diff_hunk": (raw.get("diff_hunk") or "")[:_DIFF_HUNK_CAP] if kind == "review_comment" else "",
+            "body": body[:_FEEDBACK_BODY_CAP],
+            "html_url": raw.get("html_url", ""),
+            "in_reply_to_id": raw.get("in_reply_to_id") if kind == "review_comment" else None,
+            "created_at": raw.get("submitted_at") or raw.get("created_at") or "",
+        }
+        item["mentions_darwin"] = bool(_mention_pattern().search(body))
+        return item
+
+    def _action_allowed(self, action: str) -> bool:
+        return action in self._trigger_reasons
+
+    async def poll_review_feedback_all_installations(self, prs: list[dict] | None = None) -> list[dict]:
+        """Detect actionable review feedback / @mentions across discovered open PRs.
+
+        Returns one work item per PR (debounced batch) -- NOT yet marked as handled; marks and
+        cursor advance happen in create_review_feedback_event after the event exists.
+        Uses the PR list cached by poll_work_items() unless prs is given.
+        429/5xx HTTP errors propagate (circuit breaker); other per-PR errors are isolated.
+        """
+        if not self.review_response_enabled():
+            return []
+        candidates = list(self._last_open_prs if prs is None else prs)
+        if not candidates:
+            return []
+        bot = _bot_login().lower()
+        wanted: list[dict] = []
+        for pr in candidates:
+            if pr.get("state") in ("closed", "merged") or pr.get("draft"):
+                continue
+            is_darwin = (pr.get("user") or "").lower() == bot
+            if is_darwin and not self._action_allowed("review_feedback"):
+                continue
+            if not is_darwin and not self._action_allowed("mention"):
+                continue
+            wanted.append(pr)
+        if not wanted:
+            return []
+
+        active_events = await self.get_active_pr_events()
+        sem = asyncio.Semaphore(_FEEDBACK_POLL_CONCURRENCY)
+
+        async def _one(pr: dict) -> dict | None:
+            async with sem:
+                client = await self._resolve_client(pr.get("installation_id", ""), pr["owner"], pr["repo"])
+                if not client:
+                    return None
+                return await self._poll_pr_feedback(client, pr, active_events)
+
+        results = await asyncio.gather(*[_one(pr) for pr in wanted], return_exceptions=True)
+        items: list[dict] = []
+        fatal: httpx.HTTPStatusError | None = None
+        for pr, res in zip(wanted, results):
+            if isinstance(res, httpx.HTTPStatusError):
+                code = res.response.status_code
+                if code == 429 or code >= 500:
+                    fatal = fatal or res
+                else:
+                    logger.warning(
+                        f"GitHub review-feedback poll {code} for {pr['owner']}/{pr['repo']}#{pr['number']}"
+                    )
+            elif isinstance(res, BaseException):
+                logger.warning(
+                    f"GitHub review-feedback poll failed for {pr['owner']}/{pr['repo']}#{pr['number']}: {res}"
+                )
+            elif res:
+                items.append(res)
+        if fatal is not None:
+            raise fatal
+        items.sort(key=lambda i: i.get("created_at", ""))
+        return items
+
+    async def _poll_pr_feedback(
+        self, client, pr: dict, active_events: dict[tuple[str, str, int], str],
+    ) -> dict | None:
+        """Per-PR feedback poll. <=3 GETs in steady state (reviews, inline, issue comments)."""
+        owner, repo, number = pr["owner"], pr["repo"], pr["number"]
+        is_darwin = (pr.get("user") or "").lower() == _bot_login().lower()
+        bb = self.blackboard
+        cursor = await bb.get_github_pr_feedback_cursor(owner, repo, number)
+
+        # Non-Darwin PRs are only scanned for @mentions: skip when nothing changed since the cursor.
+        if cursor is not None and not is_darwin:
+            pr_updated = _parse_ts(pr.get("updated_at"))
+            cursor_ts = _parse_ts(cursor.get("ts"))
+            if pr_updated and cursor_ts and pr_updated <= cursor_ts:
+                return None
+
+        poll_started = datetime.now(timezone.utc)
+        base = f"/repos/{owner}/{repo}"
+        since_params = {"since": cursor["ts"]} if cursor and cursor.get("ts") else {}
+        reviews = await self._get_paged(client, f"{base}/pulls/{number}/reviews")
+        inline = await self._get_paged(client, f"{base}/pulls/{number}/comments", since_params)
+        issue_comments = await self._get_paged(client, f"{base}/issues/{number}/comments", since_params)
+
+        def _max_id(rows: list[dict], floor: int) -> int:
+            return max([floor] + [int(r["id"]) for r in rows if r.get("id") is not None])
+
+        cur = cursor or {}
+        new_cursor = {
+            "review_id": _max_id(reviews, int(cur.get("review_id", 0) or 0)),
+            "review_comment_id": _max_id(inline, int(cur.get("review_comment_id", 0) or 0)),
+            "issue_comment_id": _max_id(issue_comments, int(cur.get("issue_comment_id", 0) or 0)),
+            # 5s slack: `since` filters on updated_at; ids (not ts) are the exactly-once guard.
+            "ts": _iso(poll_started - timedelta(seconds=5)),
+        }
+
+        if cursor is None:
+            # Bootstrap without backfill: deploying the feature must not replay old reviews.
+            await bb.set_github_pr_feedback_cursor(owner, repo, number, new_cursor)
+            logger.info(f"GitHub review-feedback cursor bootstrapped for {owner}/{repo}#{number}")
+            return None
+
+        items = await self._collect_feedback_items(
+            owner, repo, number, cursor, reviews, inline, issue_comments, is_darwin,
+        )
+
+        if not items:
+            await bb.set_github_pr_feedback_cursor(owner, repo, number, new_cursor)
+            return None
+
+        # Debounce: wait until the newest trusted item has settled (aggregate a burst).
+        newest = max((t for t in (_parse_ts(i["created_at"]) for i in items) if t), default=None)
+        debounce = _safe_int("HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC", 120)
+        if newest is not None and (poll_started - newest).total_seconds() < debounce:
+            logger.debug(f"Review feedback on {owner}/{repo}#{number} still inside {debounce}s debounce window")
+            return None
+
+        # An active event (any source) already owns this PR: append instead of a second event.
+        active_id = active_events.get((owner.lower(), repo.lower(), number))
+        if active_id:
+            await self._append_feedback_to_event(active_id, owner, repo, number, items)
+            await self._commit_feedback(owner, repo, number, items, new_cursor)
+            await self._acknowledge(pr.get("installation_id", ""), owner, repo, items)
+            return None
+
+        max_rounds = _safe_int("HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS", 5)
+        rounds = await bb.get_github_pr_feedback_rounds(owner, repo, number)
+        if rounds >= max_rounds:
+            await self._handle_round_cap(pr, rounds, max_rounds)
+            await self._commit_feedback(owner, repo, number, items, new_cursor)
+            return None
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "installation_id": pr.get("installation_id", ""),
+            "number": number,
+            "title": pr.get("title", ""),
+            "state": pr.get("state", "open"),
+            "user": pr.get("user", ""),
+            "labels": pr.get("labels", []),
+            "html_url": pr.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
+            "created_at": max(i["created_at"] for i in items),
+            "head_sha": pr.get("head_sha", ""),
+            "action": "review_feedback" if is_darwin else "mention",
+            "review_feedback": self._cap_feedback_items(items),
+            "_all_items": items,
+            "_cursor": new_cursor,
+        }
+
+    async def _collect_feedback_items(
+        self, owner: str, repo: str, number: int, cursor: dict,
+        reviews: list[dict], inline: list[dict], issue_comments: list[dict], is_darwin: bool,
+    ) -> list[dict]:
+        """Apply cursor, state, trust and mention gating; return new actionable items (oldest first)."""
+        bb = self.blackboard
+        cur_review = int(cursor.get("review_id", 0) or 0)
+        cur_inline = int(cursor.get("review_comment_id", 0) or 0)
+        cur_issue = int(cursor.get("issue_comment_id", 0) or 0)
+        review_states = {r.get("id"): (r.get("state") or "").upper() for r in reviews}
+        items: list[dict] = []
+
+        async def _consider(kind: str, raw: dict, review_state: str | None = None) -> None:
+            reason = self._feedback_reject_reason(raw.get("user"), raw.get("author_association"))
+            if reason:
+                logger.info(
+                    f"Ignoring {kind} {raw.get('id')} on {owner}/{repo}#{number} "
+                    f"from {(raw.get('user') or {}).get('login', '?')}: {reason}"
+                )
+                return
+            if await bb.is_github_pr_feedback_seen(owner, repo, number, kind, raw["id"]):
+                return
+            item = self._build_feedback_item(kind, raw, review_state)
+            if not is_darwin and not item["mentions_darwin"]:
+                return  # non-Darwin PRs: explicit @mention only
+            items.append(item)
+
+        for rv in reviews:
+            if rv.get("id") is None or int(rv["id"]) <= cur_review:
+                continue
+            state = (rv.get("state") or "").upper()
+            if state not in _ACTIONABLE_REVIEW_STATES or not (rv.get("body") or "").strip():
+                continue  # APPROVED/DISMISSED/PENDING, or an empty COMMENTED wrapper
+            await _consider("review", rv)
+        for c in inline:
+            if c.get("id") is None or int(c["id"]) <= cur_inline:
+                continue
+            parent = review_states.get(c.get("pull_request_review_id"))
+            if parent in _NON_ACTIONABLE_PARENT_STATES or not (c.get("body") or "").strip():
+                continue
+            await _consider("review_comment", c, parent)
+        for c in issue_comments:
+            if c.get("id") is None or int(c["id"]) <= cur_issue:
+                continue
+            body = (c.get("body") or "").strip()
+            if not body or _is_slash_command_only(body):
+                continue
+            await _consider("issue_comment", c)
+
+        items.sort(key=lambda i: (i["created_at"], i["id"]))
+        return items
+
+    async def _commit_feedback(
+        self, owner: str, repo: str, number: int, items: list[dict], cursor: dict,
+    ) -> None:
+        """Mark items handled (SET NX) then advance the cursor. Call only after the event exists."""
+        for item in items:
+            await self.blackboard.mark_github_pr_feedback_seen(owner, repo, number, item["kind"], item["id"])
+        await self.blackboard.set_github_pr_feedback_cursor(owner, repo, number, cursor)
+
+    async def _append_feedback_to_event(
+        self, event_id: str, owner: str, repo: str, number: int, items: list[dict],
+    ) -> None:
+        """Append new review feedback as an evidence turn on the already-active event."""
+        from ..models import ConversationTurn
+
+        lines = [f"New GitHub review feedback on {owner}/{repo}#{number} (trusted authors only):"]
+        for it in self._cap_feedback_items(items):
+            loc = f" {it['path']}:{it['line']}" if it.get("path") else ""
+            lines.append(f"- [{it['kind']} #{it['id']} by {it['author']}{loc}] {it['body']}")
+        turn = ConversationTurn(
+            turn=0, actor="headhunter", action="evidence", evidence="\n".join(lines),
+        )
+        await self.blackboard.append_turn(event_id, turn)
+        logger.info(f"Appended {len(items)} review feedback item(s) to active event {event_id}")
+
+    async def _handle_round_cap(self, pr: dict, rounds: int, max_rounds: int) -> None:
+        """Stop auto-responding: one PR comment + one maintainer-notification event (NX-guarded)."""
+        owner, repo, number = pr["owner"], pr["repo"], pr["number"]
+        if not await self.blackboard.mark_github_pr_feedback_cap_notified(owner, repo, number):
+            logger.info(f"Review-response round cap already notified for {owner}/{repo}#{number}")
+            return
+        installation_id = pr.get("installation_id", "")
+        logger.warning(f"Review-response round cap ({rounds}/{max_rounds}) reached on {owner}/{repo}#{number}")
+        await self._post_comment(
+            installation_id, owner, repo, number,
+            f"**Darwin** has already responded to review feedback on this PR {rounds} times "
+            f"(limit {max_rounds}). Automatic responses are paused -- a maintainer needs to give "
+            "direction before I make further changes.",
+        )
+        from ..models import EventEvidence
+
+        evidence = EventEvidence(
+            display_text=f"GitHub: review-response round cap reached on #{number} in {owner}/{repo}",
+            source_type="headhunter",
+            triggered_by="github-app",
+            domain="disorder",
+            domain_confidence="default",
+            severity="warning",
+            github_context={
+                "owner": owner, "repo": repo, "installation_id": installation_id,
+                "pr_number": number, "pr_title": pr.get("title", ""), "pr_state": "open",
+                "pr_url": pr.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
+                "action": "review_round_cap", "review_round": rounds, "review_max_rounds": max_rounds,
+                "head_sha": pr.get("head_sha", ""), "author": pr.get("user", ""),
+                "labels": pr.get("labels", []), "maintainer": self._resolve_maintainer(),
+            },
+        )
+        plan = (
+            f"---\nplan: Notify maintainer: review-response round cap reached on {owner}/{repo}#{number}\n"
+            f"service: {repo}\nrepository: {owner}/{repo}\nrisk: low\n"
+            f"reasoning: Darwin answered {rounds} review rounds on this PR (cap {max_rounds}); "
+            "auto-response paused until a human gives direction. Do not modify code.\n"
+            f"steps:\n  - id: \"1\"\n    agent: architect\n"
+            f"    summary: \"Read-only: summarise the outstanding review feedback on {owner}/{repo}#{number} "
+            "for the maintainer and notify them. Make no code changes.\"\n---"
+        )
+        await self.blackboard.create_event(
+            source="headhunter", service=repo or "general", reason=plan, evidence=evidence,
+        )
+
+    async def _acknowledge(
+        self, installation_id: str, owner: str, repo: str, items: list[dict],
+    ) -> None:
+        """Best-effort eyes reaction on triggering comments (reviews have no reactions API)."""
+        client = await self._resolve_client(installation_id, owner, repo)
+        if not client:
+            return
+        for item in items[:5]:
+            if item["kind"] == "review_comment":
+                path = f"/repos/{owner}/{repo}/pulls/comments/{item['id']}/reactions"
+            elif item["kind"] == "issue_comment":
+                path = f"/repos/{owner}/{repo}/issues/comments/{item['id']}/reactions"
+            else:
+                continue
+            try:
+                await client.post(path, json={"content": "eyes"})
+            except Exception as e:  # best-effort, never raise
+                logger.debug(f"Reaction failed for {item['kind']} {item['id']}: {e}")
+
+    async def create_review_feedback_event(self, work_item: dict, plan_text: str, context: dict) -> str:
+        """Create the Darwin event for a review-feedback / mention batch.
+
+        Ordering: create_event -> mark items seen + advance cursor + count round -> side effects
+        (reaction, single tracking comment). NO darwin-* labels (see _NO_LABEL_ACTIONS).
+        """
+        from ..models import EventEvidence
+
+        owner, repo, pr_number = work_item["owner"], work_item["repo"], work_item["number"]
+        installation_id = work_item.get("installation_id", "")
+        action = work_item.get("action", "review_feedback")
+        gh_ctx = self._base_github_context(work_item, context)
+        gh_ctx["action"] = action
+        gh_ctx["review_feedback"] = work_item.get("review_feedback", [])
+        evidence = EventEvidence(
+            display_text=f"GitHub: {action} on #{pr_number} in {owner}/{repo}",
+            source_type="headhunter",
+            triggered_by="github-app",
+            domain="disorder",
+            domain_confidence="default",
+            severity="info",
+            github_context=gh_ctx,
+        )
+        clean_plan = self._clean_plan(plan_text)
+        event_id = await self.blackboard.create_event(
+            source="headhunter", service=repo or "general", reason=clean_plan, evidence=evidence,
+        )
+        logger.info(f"GitHub review-feedback event created: {event_id} ({action}) on #{pr_number} in {owner}/{repo}")
+
+        all_items = work_item.get("_all_items") or work_item.get("review_feedback", [])
+        await self._commit_feedback(owner, repo, pr_number, all_items, work_item["_cursor"])
+        await self.blackboard.incr_github_pr_feedback_rounds(owner, repo, pr_number)
+
+        await self._acknowledge(installation_id, owner, repo, all_items)
+        cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
+        if cortex_url and cortex_url.startswith(("https://", "http://")):
+            link = f" [{event_id}]({cortex_url}/events/{event_id})"
+        else:
+            link = f" `{event_id}`"
+        await self._post_comment(
+            installation_id, owner, repo, pr_number,
+            f"**Darwin** picked up {len(all_items)} review item(s) on this PR. Tracking as{link}.",
+        )
+        return event_id
+
+    def load_review_response_instruction(self) -> str:
+        """Load the review-response triage SI (falls back to the PR triage SI)."""
+        skill_path = _SKILLS_DIR / "github-pr-review-response.md"
+        try:
+            content = skill_path.read_text(encoding="utf-8")
+            if content.strip():
+                return content
+        except OSError as e:
+            logger.warning(f"GitHub review-response skill not loadable ({e}), using PR triage SI")
+        return self.load_triage_instruction()
 
     # =========================================================================
     # Queue Helpers

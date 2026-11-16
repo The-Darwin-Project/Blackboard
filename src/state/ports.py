@@ -488,6 +488,36 @@ class EventRepository(Protocol):
 
     async def mark_feedback_sent(self, event_id: str, ttl: int = 172800) -> None: ...
 
+    # --- GitHub PR review-feedback tracking (cursor, per-item NX dedup, round cap) ---
+
+    async def get_github_pr_feedback_cursor(
+        self, owner: str, repo: str, pr_number: int,
+    ) -> dict | None: ...
+
+    async def set_github_pr_feedback_cursor(
+        self, owner: str, repo: str, pr_number: int, cursor: dict,
+    ) -> None: ...
+
+    async def is_github_pr_feedback_seen(
+        self, owner: str, repo: str, pr_number: int, kind: str, item_id: int | str,
+    ) -> bool: ...
+
+    async def mark_github_pr_feedback_seen(
+        self, owner: str, repo: str, pr_number: int, kind: str, item_id: int | str,
+    ) -> bool: ...
+
+    async def get_github_pr_feedback_rounds(
+        self, owner: str, repo: str, pr_number: int,
+    ) -> int: ...
+
+    async def incr_github_pr_feedback_rounds(
+        self, owner: str, repo: str, pr_number: int,
+    ) -> int: ...
+
+    async def mark_github_pr_feedback_cap_notified(
+        self, owner: str, repo: str, pr_number: int,
+    ) -> bool: ...
+
     # --- Defer timestamps ---
 
     async def resolve_defer_timestamps(

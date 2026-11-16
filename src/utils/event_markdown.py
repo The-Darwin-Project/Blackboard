@@ -148,6 +148,15 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
                 emails = maintainer.get("emails", [])
                 lines.append(f"- **Maintainer Emails:** {_esc_join(emails) if emails else 'none'}")
                 lines.append(f"- **Maintainer Source:** {_esc(maintainer.get('source', ''))}")
+            feedback = gc.get("review_feedback") or []
+            if feedback:
+                lines.append(f"- **Review Feedback ({len(feedback)} item(s), trusted authors only):**")
+                for fb in feedback[:20]:
+                    loc = f" {_esc(fb.get('path', ''))}:{_esc(fb.get('line', ''))}" if fb.get("path") else ""
+                    lines.append(
+                        f"  - [{_esc(fb.get('kind', ''))} #{_esc(fb.get('id', ''))} by "
+                        f"{_esc(fb.get('author', ''))}{loc}] {_esc((fb.get('body') or '')[:500].replace(chr(10), ' '))}"
+                    )
         issue_ctx = getattr(evidence, "github_issue_context", None)
         if issue_ctx:
             lines.append("")

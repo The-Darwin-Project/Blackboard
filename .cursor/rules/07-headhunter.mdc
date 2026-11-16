@@ -54,12 +54,26 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 
 ## Dedup Layers
 
-| Layer | What it catches | Crash-safe? |
-|---|---|---|
-| `_processed_todos` (in-memory) | Same MR within pod lifetime | No |
-| `_is_recently_processed()` (Redis) | Same MR closed in last 30 min | Yes |
-| Flow gate (`max_active`) | Concurrent events | Yes |
-| GitLab auto-resolve | `review_requested` cleared on bot interaction | Yes |
+| Layer | Platform | What it catches | Crash-safe? |
+|---|---|---|---|
+| `get_active_keys()` (Blackboard active events) | GitLab `(project, mr)`, GitHub `(owner, repo, number)` | Second event for an MR/PR/Issue that already has an active/deferred headhunter event | Yes |
+| Flow gate (`MAX_ACTIVE_EVENTS`) | both | Concurrent events beyond the global WIP cap | Yes |
+| GitLab todo `mark_as_done` | GitLab | Re-processing the same todo after the event closes | Yes |
+| GitHub label truth table (`darwin-active` > `darwin-review` > `darwin-queued` > `darwin-done`) + `darwin:github:pr_sha` | GitHub PR | Re-trigger only on a new head SHA after `darwin-done` | Yes |
+| `darwin:github:issue:{o}:{r}:{n}` (7d) | GitHub Issue | Re-processing an Issue after a label API failure | Yes |
+| `darwin:github:pr_feedback_cursor` + per-item `darwin:github:pr_feedback:{o}:{r}:{pr}:{kind}:{id}` (SET NX, 7d) | GitHub review feedback | Exactly-once handling of each review / inline / issue comment | Yes |
+
+## GitHub Review-Response Trigger (flag: `HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED`, default off)
+
+* **Trigger A (`review_feedback`):** trusted `CHANGES_REQUESTED` / `COMMENTED` (non-empty body) reviews, inline `/pulls/{n}/comments`, and issue comments on open, non-draft PRs authored by `{GITHUB_APP_SLUG}[bot]`.
+* **Trigger B (`mention`):** a trusted comment/review containing `@darwin-project-ai` on any open PR in an installed repo.
+* **Trust gate (fail-closed):** `author_association` in `HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS` (default `OWNER,MEMBER,COLLABORATOR`) AND not `user.type == "Bot"` AND not `*[bot]` AND not in `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS` (default `openshift-ci-robot,openshift-merge-robot`). Darwin's own login is always ignored (loop guard). The same gate filters `fetch_context().recent_comments`.
+* **Bootstrap:** first sight of a PR sets the cursor to the current max ids, no event (no backfill).
+* **Debounce / rounds:** event only when the newest item is >= `HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC` old; after `HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS` rounds one PR comment + one `review_round_cap` notification event, then silence. Reset a PR: `HDEL darwin:github:pr_feedback_rounds {o}:{r}:{n}` and `DEL darwin:github:pr_feedback_cap:{o}:{r}:{n}`.
+* **Active event:** if any active event (Slack/chat included) references the PR, feedback is appended to it as an `evidence` turn instead of creating a second event.
+* **No labels:** review-response events never apply `darwin-*` labels or write `pr_sha` (see `_NO_LABEL_ACTIONS`).
+* **Plan shape:** `headhunter_skills/github-pr-review-response.md` (developer fix -> qe verify -> developer reply). Merge safety (disable auto-merge before push, no Prow `/lgtm`/`/approve`) lives in that skill and `brain_skills/dispatch/mr-lifecycle.md`.
+* **Phase D** in `_github_poll_and_process` (after issues), only with the flow gate open. API budget: <=3 GETs per Darwin PR per cycle; non-Darwin PRs are only rescanned when `updated_at` moved past the cursor.
 
 ## Brain Tool: `refresh_gitlab_context`
 
@@ -97,7 +111,7 @@ Brain can override via `classify_event(severity=...)` -> stored in `brain_severi
 
 ## Prompt Injection Defense
 
-* XML fence sanitization via `_sanitize_xml_fence()` in `headhunter.py`. Strips closing tags for all prompt XML fences (`</description>`, `</job_log>`, `</comments>`, `</mention_request>`, `</issue_body>`) from user-controlled content before embedding.
+* XML fence sanitization via `_sanitize_xml_fence()` in `headhunter.py`. Strips closing tags for all prompt XML fences (`</description>`, `</job_log>`, `</comments>`, `</mention_request>`, `</issue_body>`, `</review_feedback>`) from user-controlled content before embedding.
 * `mention_author` sanitized (quote stripping) before XML attribute insertion.
 * `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default 100K) prevents degenerate descriptions from consuming excessive tokens.
 
