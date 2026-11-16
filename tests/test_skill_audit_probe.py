@@ -645,3 +645,49 @@ class TestVmer2383NotificationPolicyAndSkillHardening:
             lines = _skill_text(*rel).splitlines()
             for n, heading in _headings_outside_fences("\n".join(lines)):
                 assert n == 0 or lines[n - 1].strip() in ("", "---"), f"{rel[-1]}:{n + 1} heading lacks a blank line before: {heading!r}"
+
+
+class TestVmer2391CasualTriageWaitAndCloseReplyProbe:
+    """T-8: Probe gate for VMER-2391 casual triage wait_for_user and close-reply alignment."""
+
+    def test_casual_skill_omits_exit_triage_detour(self, loader):
+        casual_body = _skill(loader, "domain/casual.md")
+        assert "ExitTriage" not in casual_body
+        assert "exit the initial observation phase" not in casual_body.lower()
+        assert 'Greet["Read the room, respond conversationally"] --> Park["Park: wait for user"]' in casual_body
+
+    def test_phase_lifecycle_close_constraint_reclassifies_casual_and_scopes_user_park(self, loader):
+        sec = _section(_skill(loader, "always/09-phase-lifecycle.md"), "## Close Phase Constraint")
+        sec_lower = sec.lower()
+        assert "close immediately after your final message" not in sec_lower
+        assert "for casual events" in sec_lower and "reclassify to clear" in sec_lower
+        assert "for user-facing events (chat/slack), never emit a final reply as a standalone text-only turn before entering close" in sec_lower
+
+    def test_when_to_close_closure_reason_turn_avoids_set_phase_and_keeps_gitlab_note(self, loader):
+        sec = _section(_skill(loader, "close/when-to-close.md"), "## Closure Reason Turn")
+        sec_lower = sec.lower()
+        assert "set_phase" not in sec
+        assert "emitted as text alongside entering the close phase or finalizing closure in the same processing cycle" in sec_lower
+        assert "never send this final reply as a standalone text-only turn before entering close" in sec_lower
+        assert "notify_gitlab_result" in sec
+
+    def test_tool_schemas_align_close_and_wait_for_user_reply_timing(self):
+        from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
+
+        schemas_by_name = {t["name"]: t for t in BRAIN_TOOL_SCHEMAS}
+        set_phase_phase_desc = (
+            schemas_by_name["set_phase"]["input_schema"]["properties"]["phase"]["description"]
+        )
+        assert "Enter ONLY after you have replied to the user" not in set_phase_phase_desc
+        assert "Enter ONLY after you have replied to the user" not in schemas_by_name["set_phase"]["description"]
+        assert "alongside" in set_phase_phase_desc
+        assert "standalone text-only turn" in set_phase_phase_desc
+        assert "emit your final user reply alongside set_phase(phase='close') or close_event" in set_phase_phase_desc
+
+        close_desc = schemas_by_name["close_event"]["description"]
+        assert "you MUST have sent a visible reply to the user before calling this" not in close_desc
+        assert "either generated as text alongside this close_event call or emitted earlier in the current cycle alongside set_phase(phase='close')" in close_desc
+
+        wait_desc = schemas_by_name["wait_for_user"]["description"]
+        assert "BEFORE or alongside calling this tool" in wait_desc
+

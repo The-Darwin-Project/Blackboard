@@ -89,6 +89,15 @@ class TestContentStructure:
                 return
         pytest.fail("PRE_CLASSIFICATION allow row not found")
 
+    def test_hard_strip_wait_user_condition_summary(self):
+        """T-4: HARD_STRIP_WAIT_USER row reflects boolean-exact non-user source condition."""
+        body = self.data["body"]
+        for line in body.split("\n"):
+            if "HARD_STRIP_WAIT_USER" in line and "| strip |" in line:
+                assert "non-user source AND (triage OR no user turn)" in line
+                return
+        pytest.fail("HARD_STRIP_WAIT_USER strip row not found")
+
     def test_ooda_overlay_rendered(self):
         """T-1: OODA tables rendered into markdown body."""
         from src.skill_reconciler.generate_map import _PHASE_OODA_MAP, _DOMAIN_OODA_MAP

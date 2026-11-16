@@ -376,15 +376,27 @@ class TestDomainCasual:
         assert "[GATE]" in msg
         assert "CASUAL" in msg
 
-    def test_triage_strips_wait_for_user(self):
-        """HARD_STRIP_WAIT_USER removes wait_for_user in triage even for casual."""
-        ctx = _ctx(
+    def test_triage_allows_wait_for_user_when_responded(self):
+        """T-1 & T-2: chat/slack in triage allows wait_for_user once brain.response exists,
+        while SILENT_PARK strips wait_for_user when only an unanswered user.message exists."""
+        ctx_responded = _ctx(
             brain_phase="triage",
             event_source="chat",
             context_flags={"brain_has_classified": True, "event_domain": "casual"},
+            conversation=[_turn("user", "message"), _turn("brain", "response")],
         )
-        result = evaluate_gates(ALL_SCHEMAS, ctx)
-        assert "wait_for_user" not in _names(result)
+        result_responded = evaluate_gates(ALL_SCHEMAS, ctx_responded)
+        assert "wait_for_user" in _names(result_responded)
+
+        ctx_unanswered = _ctx(
+            brain_phase="triage",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+            conversation=[_turn("user", "message")],
+        )
+        result_unanswered = evaluate_gates(ALL_SCHEMAS, ctx_unanswered)
+        assert "wait_for_user" not in _names(result_unanswered)
+        assert "No visible response generated" in diagnose_rejection("wait_for_user", ctx_unanswered)
 
     def test_fail_open_non_chat_source(self):
         """Casual gate doesn't fire for non-chat/slack -- fail-open to full tools."""
@@ -559,6 +571,39 @@ class TestHardStripWaitUser:
         ctx = _ctx(event_source="slack")
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "wait_for_user" in _names(result)
+
+    def test_keeps_for_chat_in_triage(self):
+        """T-1: chat source in triage keeps wait_for_user once SILENT_PARK is satisfied."""
+        ctx = _ctx(
+            brain_phase="triage",
+            event_source="chat",
+            conversation=[_turn("user", "message"), _turn("brain", "response")],
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "wait_for_user" in _names(result)
+
+    def test_keeps_for_slack_in_triage(self):
+        """T-1: slack source in triage keeps wait_for_user once SILENT_PARK is satisfied."""
+        ctx = _ctx(
+            brain_phase="triage",
+            event_source="slack",
+            conversation=[_turn("user", "message"), _turn("brain", "response")],
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "wait_for_user" in _names(result)
+
+    def test_strips_in_triage_for_non_user_source_even_with_user_turn(self):
+        """T-3: non-user source in triage strips wait_for_user even when a user turn exists."""
+        for source in ("aligner", "headhunter", "jarvis", "timekeeper"):
+            ctx = _ctx(
+                brain_phase="triage",
+                event_source=source,
+                conversation=[_turn("user", "message")],
+            )
+            result = evaluate_gates(ALL_SCHEMAS, ctx)
+            assert "wait_for_user" not in _names(result)
+            msg = diagnose_rejection("wait_for_user", ctx)
+            assert "only available for chat/slack events, or past triage when a user turn exists" in msg
 
 
 # ---------------------------------------------------------------------------

@@ -438,6 +438,34 @@ class TestSingleFCTerminalNarrationSplit:
         assert response.thoughts == "I'll defer this while CI runs."
         assert "evt-test" in brain._response_emitted_for
 
+    @pytest.mark.asyncio
+    async def test_single_fc_set_phase_close_flushes_accumulated_text_as_response(self):
+        """T-5: set_phase(phase='close') on an admissible (clear) event flushes
+        accumulated_text as 'response' and arms _response_emitted_for."""
+        chunk = _Chunk(
+            text="Closing out the thread — talk soon!",
+            function_call=SimpleNamespace(name="set_phase", args={"phase": "close"}),
+        )
+        stream = MockStream([chunk])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack")
+        event.event.evidence.domain = "clear"
+        event.event.evidence.brain_domain = "clear"
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+
+        with _gate_patch(["set_phase"]), _gate_ctx_patch():
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        assert should_continue is True
+        turns = _turns(brain)
+        assert turns, "expected at least the response turn + set_phase's own turn"
+        response = turns[0]
+        assert response.action == "response", (
+            f"admissible set_phase(close) text flush should be a response turn, got {response.action!r}"
+        )
+        assert response.thoughts == "Closing out the thread — talk soon!"
+        assert "evt-test" in brain._response_emitted_for
+
 
 # ---------------------------------------------------------------------------
 # evt-996e33ec Batch D2: RECALL gate never blocks a batch containing classify_event
@@ -517,3 +545,312 @@ class TestBatchReflexExempt:
         assert "evt-test" in brain._reflex_fired_for
         assert brain._recall_lessons["evt-test"][0]["payload"]["title"] == "past incident"
         brain.blackboard.update_event_domain.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# VMER-2391 (T-10 & T-12): Parallel FC batch close-phase flush & continuation
+# ---------------------------------------------------------------------------
+
+def _wire_mutable_event(brain: Brain, event: EventDocument) -> None:
+    """Wire bb.get_event, update_event_domain, update_event_phase,
+    _extract_context_flags, and brain._append_and_broadcast to mutate and
+    reflect the live EventDocument in place."""
+    brain.blackboard.get_event = AsyncMock(side_effect=lambda _eid: event)
+
+    async def _set_domain(_eid: str, domain: str):
+        event.event.evidence.domain = domain
+        event.event.evidence.brain_domain = domain
+
+    async def _set_phase(_eid: str, phase: str):
+        event.brain_phase = phase
+
+    async def _append_turn(_eid: str, turn, _event=None):
+        turn.turn = len(event.conversation) + 1
+        event.conversation.append(turn)
+        return turn.turn
+
+    async def _extract_flags(_ev, **_kwargs):
+        ev_evidence = _ev.event.evidence
+        return {
+            "event_domain": ev_evidence.brain_domain or ev_evidence.domain,
+            "domain_confidence": ev_evidence.domain_confidence,
+            "brain_has_classified": ev_evidence.brain_domain is not None,
+        }
+
+    brain.blackboard.update_event_domain = AsyncMock(side_effect=_set_domain)
+    brain.blackboard.update_event_phase = AsyncMock(side_effect=_set_phase)
+    brain._append_and_broadcast = AsyncMock(side_effect=_append_turn)
+    brain._extract_context_flags = AsyncMock(side_effect=_extract_flags)
+
+
+class TestBatchClosePhaseFlush:
+    """T-10 & T-12: Parallel batch close-phase response flush, order-aware verify guard,
+    wait_for_user fast-match retention, and global continuation for completed batches."""
+
+    @pytest.mark.asyncio
+    async def test_batch_classify_clear_and_set_phase_close_flushes_response_and_continues(self):
+        """T-10: [classify_event('clear'), set_phase('close')] + text with dynamic bb.get_event
+        flushes pre-batch text as action='response', arms _response_emitted_for, and returns True."""
+        fcs = [
+            _fc("classify_event", {"domain": "clear"}),
+            _fc("set_phase", {"phase": "close"}),
+        ]
+        stream = MockStream([_Chunk(text="Will do — talk soon!", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.domain = "casual"
+        event.event.evidence.brain_domain = "casual"
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        turns = _turns(brain)
+        assert turns[0].action == "response"
+        assert turns[0].thoughts == "Will do — talk soon!"
+        assert "evt-test" in brain._response_emitted_for
+        assert event.event.evidence.brain_domain == "clear"
+        assert event.brain_phase == "close"
+        assert should_continue is True
+
+    @pytest.mark.asyncio
+    async def test_batch_classify_complicated_and_set_phase_close_keeps_thoughts(self):
+        """T-10: downward/unverified [classify_event('complicated'), set_phase('close')] + text
+        keeps pre-batch text as action='thoughts', does not arm _response_emitted_for,
+        and handle_set_phase rejects the close transition."""
+        fcs = [
+            _fc("classify_event", {"domain": "complicated"}),
+            _fc("set_phase", {"phase": "close"}),
+        ]
+        stream = MockStream([_Chunk(text="Premature close text.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.domain = "clear"
+        event.event.evidence.brain_domain = "clear"
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            await brain._process_with_llm("evt-test", event)
+
+        turns = _turns(brain)
+        assert turns[0].action == "thoughts"
+        assert turns[0].thoughts == "Premature close text."
+        assert "evt-test" not in brain._response_emitted_for
+        assert any(t.actor == "system" and t.action == "error" for t in turns)
+        assert event.brain_phase != "close"
+
+    @pytest.mark.asyncio
+    async def test_batch_wrong_order_set_phase_close_then_classify_clear_complicated_safe(self):
+        """T-10: wrong-order [set_phase('close'), classify_event('clear')] on unverified
+        complicated flushes text as 'thoughts', rejects set_phase, classifies to 'clear',
+        and does not arm _response_emitted_for."""
+        fcs = [
+            _fc("set_phase", {"phase": "close"}),
+            _fc("classify_event", {"domain": "clear"}),
+        ]
+        stream = MockStream([_Chunk(text="Wrong order text.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="dispatch")
+        event.event.evidence.domain = "complicated"
+        event.event.evidence.brain_domain = "complicated"
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        assert should_continue is True
+        turns = _turns(brain)
+        assert turns[0].action == "thoughts"
+        assert turns[0].thoughts == "Wrong order text."
+        assert "evt-test" not in brain._response_emitted_for
+        assert any(t.actor == "system" and t.action == "error" for t in turns)
+        assert event.event.evidence.brain_domain == "clear"
+        assert event.brain_phase == "dispatch"
+
+    @pytest.mark.asyncio
+    async def test_batch_classify_and_wait_for_user_retains_response_flush(self):
+        """T-10: [classify_event('clear'), wait_for_user] for chat/slack flushes pre-batch
+        text as action='response' (satisfying SILENT_PARK for FC[1]) and returns False."""
+        from src.models import ConversationTurn
+
+        fcs = [
+            _fc("classify_event", {"domain": "clear"}),
+            _fc("wait_for_user", {"summary": "waiting for user reply"}),
+        ]
+        stream = MockStream([_Chunk(text="Hello! How can I help?", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.conversation = [
+            ConversationTurn(turn=1, actor="user", action="message", thoughts="Morning!"),
+        ]
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        assert should_continue is False
+        turns = _turns(brain)
+        assert turns[0].action == "response"
+        assert turns[0].thoughts == "Hello! How can I help?"
+        assert "evt-test" in brain._response_emitted_for
+        assert any(t.action == "wait" and t.waitingFor == "user" for t in turns)
+
+    @pytest.mark.asyncio
+    async def test_batch_preparatory_non_close_returns_true_to_continue(self):
+        """T-12: [classify_event('clear'), set_phase('dispatch')] completing without break
+        returns True (confirming L2703 global continuation for preparatory batches)."""
+        fcs = [
+            _fc("classify_event", {"domain": "clear"}),
+            _fc("set_phase", {"phase": "dispatch"}),
+        ]
+        stream = MockStream([_Chunk(text="Classifying and moving to dispatch.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        assert should_continue is True
+        turns = _turns(brain)
+        assert turns[0].action == "thoughts"
+        assert "evt-test" not in brain._response_emitted_for
+        assert event.event.evidence.brain_domain == "clear"
+        assert event.brain_phase == "dispatch"
+
+    @pytest.mark.asyncio
+    async def test_batch_3fc_casual_to_clear_set_phase_close_and_close_event_succeeds(self):
+        """CF-1: starting from domain='casual', brain_domain='casual' on a slack event,
+        a 3-FC batch [classify_event('clear'), set_phase('close'), close_event] flushes
+        pre-batch text as action='response', updates domain to 'clear' and phase to 'close',
+        and executes close_event (FC[2]) without DOMAIN_CASUAL rejecting it."""
+        fcs = [
+            _fc("classify_event", {"domain": "clear"}),
+            _fc("set_phase", {"phase": "close"}),
+            _fc("close_event", {"summary": "done"}),
+        ]
+        stream = MockStream([_Chunk(text="Glad that helped — closing out!", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.domain = "casual"
+        event.event.evidence.brain_domain = "casual"
+        _wire_mutable_event(brain, event)
+        brain.blackboard.close_event = AsyncMock(return_value=True)
+        brain._close_and_broadcast = AsyncMock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            should_continue = await brain._process_with_llm("evt-test", event)
+
+        assert should_continue is False
+        turns = _turns(brain)
+        assert turns[0].action == "response"
+        assert turns[0].thoughts == "Glad that helped — closing out!"
+        assert "evt-test" in brain._response_emitted_for
+        assert event.event.evidence.brain_domain == "clear"
+        assert event.brain_phase == "close"
+        brain._close_and_broadcast.assert_awaited_once_with("evt-test", "done", close_reason=None)
+
+    @pytest.mark.asyncio
+    async def test_batch_reclassify_to_casual_gates_subsequent_fc(self):
+        """CF-1 & CF-2: starting from domain='complicated', brain_domain='complicated' on a slack
+        event, batch [classify_event('casual'), set_phase('close')] with text keeps pre-batch text
+        as action='thoughts' and does not arm _response_emitted_for; and a subsequent non-casual FC
+        (e.g. fetch_jira_issue) in a casual reclassification batch is rejected by refreshed DOMAIN_CASUAL."""
+        fcs = [
+            _fc("classify_event", {"domain": "casual"}),
+            _fc("set_phase", {"phase": "close"}),
+        ]
+        stream = MockStream([_Chunk(text="Switching to casual.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="dispatch")
+        event.event.evidence.domain = "complicated"
+        event.event.evidence.brain_domain = "complicated"
+        _wire_mutable_event(brain, event)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            await brain._process_with_llm("evt-test", event)
+
+        turns = _turns(brain)
+        assert turns[0].action == "thoughts"
+        assert turns[0].thoughts == "Switching to casual."
+        assert "evt-test" not in brain._response_emitted_for
+        assert event.event.evidence.brain_domain == "casual"
+
+        # Also verify FC[1] gate rejection when FC[0] reclassifies to casual and FC[1] is a tool
+        # disallowed by DOMAIN_CASUAL (e.g. fetch_jira_issue).
+        fcs_gated = [
+            _fc("classify_event", {"domain": "casual"}),
+            _fc("fetch_jira_issue", {"issue_key": "VMER-1"}),
+        ]
+        stream2 = MockStream([_Chunk(text="Checking Jira.", raw_parts=fcs_gated)])
+        brain2 = _make_brain(stream_factory=lambda **kw: stream2)
+        event2 = _make_event(source="slack", brain_phase="triage")
+        event2.event.evidence.domain = "complicated"
+        event2.event.evidence.brain_domain = "complicated"
+        _wire_mutable_event(brain2, event2)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            res2 = await brain2._process_with_llm("evt-test", event2)
+
+        assert res2 is False
+        assert event2.event.evidence.brain_domain == "casual"
+        turns2 = _turns(brain2)
+        assert len(turns2) == 3  # 1 thoughts turn + 2 classify_event turns; fetch_jira_issue halted by DOMAIN_CASUAL
+
+    def test_batch_intra_batch_ordering_and_default_domain_guards(self):
+        """CF-2 & CF-3: _batch_is_terminal_for_flush returns False for default complicated
+        domain, non-close phase transitions after verify, non-user casual rejection, and
+        set_phase('close') followed by set_phase('dispatch')."""
+        from src.agents.brain import _batch_is_terminal_for_flush
+        from src.models import ConversationTurn
+
+        active = {"classify_event", "set_phase"}
+
+        # 1) [classify_event({}), set_phase('close')] on a clear event (omitted domain -> complicated)
+        clear_event = _make_event(source="slack", brain_phase="dispatch")
+        clear_event.event.evidence.domain = "clear"
+        clear_event.event.evidence.brain_domain = "clear"
+        assert _batch_is_terminal_for_flush(
+            [_fc("classify_event", {}), _fc("set_phase", {"phase": "close"})],
+            clear_event,
+            active,
+        ) is False
+
+        # 2) [set_phase('dispatch'), set_phase('close')] on a verified complicated event
+        verified_event = _make_event(source="slack", brain_phase="verify")
+        verified_event.event.evidence.domain = "complicated"
+        verified_event.event.evidence.brain_domain = "complicated"
+        verified_event.conversation = [
+            ConversationTurn(
+                turn=1, actor="brain", action="phase",
+                thoughts="Phase: VERIFY", waitingFor="set_phase",
+            ),
+        ]
+        assert _batch_is_terminal_for_flush(
+            [_fc("set_phase", {"phase": "dispatch"}), _fc("set_phase", {"phase": "close"})],
+            verified_event,
+            active,
+        ) is False
+
+        # 3) [classify_event('casual'), set_phase('close')] on a verified complicated aligner event
+        verified_aligner = _make_event(source="aligner", brain_phase="verify")
+        verified_aligner.event.evidence.domain = "complicated"
+        verified_aligner.event.evidence.brain_domain = "complicated"
+        verified_aligner.conversation = [
+            ConversationTurn(
+                turn=1, actor="brain", action="phase",
+                thoughts="Phase: VERIFY", waitingFor="set_phase",
+            ),
+        ]
+        assert _batch_is_terminal_for_flush(
+            [_fc("classify_event", {"domain": "casual"}), _fc("set_phase", {"phase": "close"})],
+            verified_aligner,
+            active,
+        ) is False
+
+        # 4) [set_phase('close'), set_phase('dispatch')] on a clear event
+        assert _batch_is_terminal_for_flush(
+            [_fc("set_phase", {"phase": "close"}), _fc("set_phase", {"phase": "dispatch"})],
+            clear_event,
+            active,
+        ) is False

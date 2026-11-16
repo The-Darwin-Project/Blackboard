@@ -2,8 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: Direct _process_with_llm tests with targeted stubs (matches test_stream_timeout.py).
 # 2. [Pattern]: AsyncMock adapter with MockStream for controlled async iteration -- copied harness.
-# 3. [Constraint]: _execute_function_call is mocked -- these tests verify emission/guard behavior only,
-#    not tool execution side effects.
+# 3. [Constraint]: _execute_function_call is mocked by default -- these tests verify emission/guard
+#    behavior only, except in explicit handler-rejection integration tests (T-9).
 """Regression tests for evt-cc105cc5: empty FC guard double-message bug.
 
 Verifies the is_terminal split in _process_with_llm's FC-path emission:
@@ -1052,3 +1052,232 @@ async def test_no_valid_content_warning_logs_raw_length_but_not_raw_text():
     assert f"raw length {len(raw)}" in matching[0]
     assert secret not in matching[0]
     assert "[!call:" not in matching[0]
+
+
+# ---------------------------------------------------------------------------
+# VMER-2391: set_phase(phase="close") response flush, verify guard, and cycle cleanup
+# ---------------------------------------------------------------------------
+
+def _make_domain_event(
+    event_id: str = "evt-cc105cc5",
+    source: str = "slack",
+    domain: str = "clear",
+    brain_phase: str = "dispatch",
+) -> EventDocument:
+    evidence = EventEvidence(
+        display_text="test", source_type=source, domain=domain, brain_domain=domain, severity="info",
+    )
+    return EventDocument(
+        id=event_id, source=source, service="test-svc", brain_phase=brain_phase,
+        event=EventInput(reason="test", evidence=evidence),
+        conversation=[],
+    )
+
+
+class TestClosePhaseTransitionFlushesResponse:
+    """T-5, T-6, T-7, T-9, T-11: Admissible set_phase(phase='close') flushes pre-FC text as
+    brain.response and arms _response_emitted_for; unverified complicated/complex or non-close
+    phase transitions keep text as brain.thoughts; _process_event_inner cleans up in finally."""
+
+    @pytest.mark.asyncio
+    async def test_set_phase_close_flushes_text_as_response_and_arms_emitted_flag(self):
+        """T-5 (single-FC): set_phase(phase='close') on clear domain flushes action='response',
+        sets _response_emitted_for, and fires executive pulse."""
+        chunks = [
+            _Chunk(text="Will do — talk soon!"),
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "close"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_domain_event(domain="clear")
+
+        with _gate_patch(["set_phase"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        response_turns = _turns_by_action(brain, "response")
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        assert len(response_turns) == 1
+        assert response_turns[0].thoughts == "Will do — talk soon!"
+        assert len(thoughts_turns) == 0
+        assert "evt-cc105cc5" in brain._response_emitted_for
+        brain._emit_executive_pulse.assert_awaited_once_with(
+            "evt-cc105cc5", [("tool:brain_response", "tool")]
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_phase_close_followed_by_close_event_emits_single_response(self):
+        """T-5 (2-iter): iter 0 text + set_phase(phase='close'), iter 1 text + close_event
+        emits exactly one brain.response turn (suppressing duplicate farewell on iter 1)."""
+        iter0_chunks = [
+            _Chunk(text="Will do — talk soon!"),
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "close"})),
+        ]
+        iter1_chunks = [
+            _Chunk(text="Duplicate farewell that must be suppressed."),
+            _Chunk(function_call=FunctionCall(name="close_event", args={"summary": "user signed off"})),
+        ]
+        streams = iter([MockStream(iter0_chunks), MockStream(iter1_chunks)])
+        brain = _make_brain(stream_factory=lambda **kw: next(streams))
+        event = _make_domain_event(domain="clear")
+
+        with _gate_patch(["set_phase", "close_event"]), _gate_ctx_patch():
+            should_continue = await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=0, response_emitted=False,
+            )
+            assert should_continue is True
+            response_emitted = "evt-cc105cc5" in brain._response_emitted_for
+            assert response_emitted is True
+
+            await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=1, response_emitted=response_emitted,
+            )
+
+        response_turns = _turns_by_action(brain, "response")
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        assert len(response_turns) == 1
+        assert response_turns[0].thoughts == "Will do — talk soon!"
+        assert len(thoughts_turns) == 0
+
+    @pytest.mark.asyncio
+    async def test_set_phase_close_without_text_allows_close_event_to_emit_response(self):
+        """T-6: iter 0 set_phase(phase='close') with no text, iter 1 text + close_event
+        flushes iter 1 text as brain.response."""
+        iter0_chunks = [
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "close"})),
+        ]
+        iter1_chunks = [
+            _Chunk(text="Closing this thread now."),
+            _Chunk(function_call=FunctionCall(name="close_event", args={"summary": "closed"})),
+        ]
+        streams = iter([MockStream(iter0_chunks), MockStream(iter1_chunks)])
+        brain = _make_brain(stream_factory=lambda **kw: next(streams))
+        event = _make_domain_event(domain="clear")
+
+        with _gate_patch(["set_phase", "close_event"]), _gate_ctx_patch():
+            should_continue = await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=0, response_emitted=False,
+            )
+            assert should_continue is True
+            response_emitted = "evt-cc105cc5" in brain._response_emitted_for
+            assert response_emitted is False
+
+            await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=1, response_emitted=response_emitted,
+            )
+
+        response_turns = _turns_by_action(brain, "response")
+        assert len(response_turns) == 1
+        assert response_turns[0].thoughts == "Closing this thread now."
+
+    @pytest.mark.asyncio
+    async def test_set_phase_non_close_still_flushes_as_thoughts(self):
+        """T-7: set_phase(phase='dispatch') with text still flushes action='thoughts'
+        and does not arm _response_emitted_for."""
+        chunks = [
+            _Chunk(text="Transitioning to dispatch phase."),
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "dispatch"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_domain_event(domain="clear", brain_phase="triage")
+
+        with _gate_patch(["set_phase"]), _gate_ctx_patch():
+            await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        response_turns = _turns_by_action(brain, "response")
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        assert len(response_turns) == 0
+        assert len(thoughts_turns) == 1
+        assert thoughts_turns[0].thoughts == "Transitioning to dispatch phase."
+        assert "evt-cc105cc5" not in brain._response_emitted_for
+
+    @pytest.mark.asyncio
+    async def test_set_phase_close_rejected_by_verify_guard_keeps_text_as_thoughts(self):
+        """T-9: real unmocked handle_set_phase with domain='complicated' and no PHASE: VERIFY
+        flushes pre-FC text as action='thoughts', does NOT arm _response_emitted_for,
+        appends system.error, and leaves brain_phase non-close."""
+        chunks = [
+            _Chunk(text="Premature closing message that must not leak to user."),
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "close"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_domain_event(domain="complicated", brain_phase="dispatch")
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.update_event_phase = AsyncMock()
+        # Restore real _execute_function_call (unmocked handle_set_phase)
+        brain._execute_function_call = Brain._execute_function_call.__get__(brain, Brain)
+
+        with _gate_patch(["set_phase"]), _gate_ctx_patch():
+            result = await brain._process_with_llm("evt-cc105cc5", event, response_emitted=False)
+
+        assert result is True
+        response_turns = _turns_by_action(brain, "response")
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        error_turns = _turns_by_action(brain, "error")
+        assert len(response_turns) == 0
+        assert len(thoughts_turns) == 1
+        assert thoughts_turns[0].thoughts == "Premature closing message that must not leak to user."
+        assert "evt-cc105cc5" not in brain._response_emitted_for
+        assert len(error_turns) == 1
+        assert error_turns[0].actor == "system"
+        assert "Cannot transition to 'close'" in (error_turns[0].result or "")
+        brain.blackboard.update_event_phase.assert_not_awaited()
+        assert event.brain_phase == "dispatch"
+
+    @pytest.mark.asyncio
+    async def test_process_event_inner_clears_response_emitted_for_on_exit(self):
+        """T-11: _process_event_inner hitting max_llm_iterations (or non-close exit)
+        clears event_id from brain._response_emitted_for via finally."""
+        from src.models import ConversationTurn, EventStatus
+
+        event_id = "evt-cc105cc5"
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        event = _make_domain_event(event_id=event_id, source="slack", domain="clear")
+        event.status = EventStatus.ACTIVE
+        event.processing_started_at = 1000.0
+        event.conversation = [
+            ConversationTurn(turn=1, actor="user", action="message", thoughts="bye"),
+        ]
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.mark_turns_evaluated = AsyncMock()
+        brain.blackboard.mark_turns_status = AsyncMock()
+        brain._broadcast_status_update = AsyncMock()
+        brain._get_adapter = AsyncMock(return_value=brain._adapter)
+
+        async def _fake_process_with_llm(eid, ev, **kwargs):
+            brain._response_emitted_for.add(eid)
+            return True  # force loop until max_llm_iterations
+
+        brain._process_with_llm = AsyncMock(side_effect=_fake_process_with_llm)
+
+        await brain._process_event_inner(event_id, prefetched_event=event)
+
+        assert brain._process_with_llm.await_count == 5
+        assert event_id not in brain._response_emitted_for
+
+    @pytest.mark.asyncio
+    async def test_set_phase_close_when_gated_out_flushes_as_thoughts(self):
+        """CF-2: when set_phase is gated out of active_tools (e.g., is_intermediate=True),
+        single-FC set_phase(phase='close') with text flushes action='thoughts' (not 'response')
+        and does not add event.id to brain._response_emitted_for."""
+        chunks = [
+            _Chunk(text="Attempting close while intermediate agent is active."),
+            _Chunk(function_call=FunctionCall(name="set_phase", args={"phase": "close"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_domain_event(domain="clear", brain_phase="dispatch")
+        brain._extract_context_flags = AsyncMock(
+            return_value={"is_intermediate": True, "event_domain": "clear", "brain_has_classified": True}
+        )
+
+        result = await brain._process_with_llm(event.id, event, response_emitted=False)
+
+        assert result is True
+        response_turns = _turns_by_action(brain, "response")
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        tool_result_turns = _turns_by_action(brain, "tool_result")
+        assert len(response_turns) == 0
+        assert len(thoughts_turns) == 1
+        assert thoughts_turns[0].thoughts == "Attempting close while intermediate agent is active."
+        assert event.id not in brain._response_emitted_for
+        assert len(tool_result_turns) == 1
+        assert "[GATE]" in (tool_result_turns[0].thoughts or "")
+        brain._execute_function_call.assert_not_awaited()
