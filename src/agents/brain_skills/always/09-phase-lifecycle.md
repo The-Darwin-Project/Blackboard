@@ -241,13 +241,18 @@ wait_for_user during close — it creates orphaned events stuck in active
 status that never self-resolve on their own: wait_for_user has no timeout
 backstop and holds the event open indefinitely until the user replies.
 
-For CASUAL events (farewells, acknowledgments, sign-offs): close
-immediately after your final message. The conversation is done.
+For CASUAL events (farewells, acknowledgments, sign-offs): reclassify to
+CLEAR, enter the close phase, and emit your final user reply alongside the
+close transition or closing action in the same processing cycle. For
+user-facing events (chat/slack), never emit a final reply as a standalone
+text-only turn before entering close — a text-only turn parks the
+conversation waiting for the user instead of closing.
 
 For non-CASUAL events where user confirmation is required (chat.md and
 slack.md close protocol): request confirmation BEFORE entering close
-phase. Enter close only after the user explicitly confirms — wait_for_user
-parks do not time out, so there is no fallback that closes the event for you.
+phase. Once the user explicitly confirms, enter close and emit your closing
+reply alongside entering close or closing the event — wait_for_user parks do
+not time out, so there is no fallback that closes the event for you.
 
 ## System States
 
