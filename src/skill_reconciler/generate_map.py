@@ -82,7 +82,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "UNEVALUATED_CLOSE": "unevaluated jarvis/user message exists",
     "SILENT_PARK": "no brain.response after last user.message (chat/slack only)",
     "HARD_STRIP_DEFER": "triage phase OR jarvis source",
-    "HARD_STRIP_WAIT_USER": "triage phase OR non-user source",
+    "HARD_STRIP_WAIT_USER": "non-user source AND (triage OR no user turn)",
 }
 
 _MERMAID_DIAGRAM = (
