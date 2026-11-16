@@ -854,3 +854,91 @@ class TestBatchClosePhaseFlush:
             clear_event,
             active,
         ) is False
+
+
+class TestBatchFC0WaitForUserReadmission:
+    """M5: FC[0] `wait_for_user` re-admission after a response was already emitted
+    (SILENT_PARK) is governed by `_pred_hard_strip_wait_user(gate_ctx)`."""
+
+    @staticmethod
+    def _readmission_brain(source: str, phase: str, with_user_turn: bool):
+        gate_ctx = SimpleNamespace(
+            event_source=source,
+            brain_phase=phase,
+            conversation=[{"actor": "user"}] if with_user_turn else [],
+        )
+        fcs = [_fc("wait_for_user", {"summary": "waiting"}), _fc("classify_event", {"domain": "clear"})]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._response_emitted_for = {"evt-test"}
+        # Falsy result halts the batch right after FC[0]; we only observe admission.
+        brain._execute_function_call = AsyncMock(return_value=False)
+        return brain, _make_event(source=source, brain_phase=phase), gate_ctx
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["slack", "chat"])
+    async def test_fc0_wait_for_user_readmitted_on_user_facing_source_after_response(self, source):
+        brain, event, gate_ctx = self._readmission_brain(source, "triage", with_user_turn=True)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["classify_event"]), _gate_ctx_patch(return_value=gate_ctx):
+            await brain._process_with_llm("evt-test", event)
+
+        brain._execute_function_call.assert_awaited_once()
+        assert brain._execute_function_call.await_args.args[1] == "wait_for_user"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["headhunter", "aligner"])
+    async def test_fc0_wait_for_user_not_readmitted_on_non_user_source_after_response(self, source):
+        brain, event, gate_ctx = self._readmission_brain(source, "triage", with_user_turn=False)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["classify_event"]), _gate_ctx_patch(return_value=gate_ctx):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is False
+        brain._execute_function_call.assert_not_awaited()
+
+
+class TestBatchGateReEvalUsesLiveEvidence:
+    """M6: the FC[1+] gate re-evaluation must take domain flags from live EventEvidence
+    (`evidence_overrides`), not from the stale pre-batch `context_flags`."""
+
+    @pytest.mark.asyncio
+    async def test_fc1_gate_sees_post_classify_domain_despite_stale_context_flags(self):
+        fcs = [
+            _fc("classify_event", {"domain": "casual"}),
+            _fc("fetch_jira_issue", {"issue_key": "VMER-1"}),
+        ]
+        stream = MockStream([_Chunk(text="Checking Jira.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.domain = "complicated"
+        event.event.evidence.brain_domain = "complicated"
+        _wire_mutable_event(brain, event)
+        # Pin flags to the stale pre-batch domain; only live evidence can supply "casual".
+        brain._extract_context_flags = AsyncMock(
+            return_value={"event_domain": "complicated", "brain_has_classified": True}
+        )
+
+        from src.agents.tool_gates import build_gate_context as real_build
+
+        seen_flags: list[dict] = []
+
+        def _spy(**kwargs):
+            seen_flags.append(dict(kwargs["context_flags"]))
+            return real_build(**kwargs)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                patch("src.agents.tool_gates.build_gate_context", side_effect=_spy):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is False
+        assert event.event.evidence.brain_domain == "casual"
+        assert len(seen_flags) >= 2
+        assert seen_flags[0]["event_domain"] == "complicated"
+        assert seen_flags[-1]["event_domain"] == "casual", (
+            "FC[1] gate re-eval must use refreshed evidence_overrides, not stale context_flags"
+        )
+        # fetch_jira_issue is disallowed under DOMAIN_CASUAL -> rejected, only classify_event's turns.
+        assert not any("fetch_jira_issue" in (t.thoughts or "") for t in _turns(brain) if t.actor == "brain" and t.action == "tool_result")
