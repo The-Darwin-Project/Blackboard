@@ -68,7 +68,14 @@ architect step.
 
 - Before ANY push, check the PR for armed auto-merge (GraphQL `autoMergeRequest`); if set, run
   `disablePullRequestAutoMerge` BEFORE pushing. On GitHub auto-merge is not invalidated by a
-  push from a writer, so this is the only safety net.
+  push from a writer, so this is the only safety net. The mutation needs the PR's GraphQL node
+  ID (not the PR number):
+
+  ```bash
+  gh pr view <n> --repo <owner/repo> --json id,autoMergeRequest
+  # if autoMergeRequest is not null:
+  gh api graphql -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number autoMergeRequest { enabledAt } } } }' -f id=<id from above>
+  ```
 - Agent-authored commits are never merged, auto-merged, or re-armed for auto-merge without
   explicit human approval.
 - On Prow-managed repositories NEVER post `/lgtm`, `/approve`, `/hold cancel`, `/override`, or

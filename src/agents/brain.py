@@ -628,6 +628,18 @@ _REFLEX_EXEMPT = frozenset({"classify_event"})
 _BLANK_USER_EVENT_GRACE_SECONDS = 10.0
 
 
+def _is_external_input_turn(turn: ConversationTurn) -> bool:
+    """True for turns that carry new outside input a parked event must react to.
+
+    ``actor == "user"`` (authenticated chat/slack ingestion) plus ``actor == "headhunter"`` /
+    ``action == "evidence"``: trusted-author GitHub review feedback that Headhunter appends to an
+    event already active on that PR. Loop safety: the turn is consumed by the normal
+    DELIVERED -> PROCESSED path (_compute_processed_up_to), and the deferred check below is
+    anchored on the last ``brain.defer`` turn, so it never re-fires after Brain responds.
+    """
+    return turn.actor == "user" or (turn.actor == "headhunter" and turn.action == "evidence")
+
+
 def _is_seed_turn(turn: ConversationTurn) -> bool:
     """True for turns that do not represent Brain/agent processing output.
 
@@ -7147,12 +7159,12 @@ class Brain:
                          if t.actor == "brain" and t.action == "defer"), None
                     )
                     user_after_defer = last_defer_idx is not None and any(
-                        t.actor == "user"
+                        _is_external_input_turn(t)
                         for t in event.conversation[len(event.conversation) - last_defer_idx:]
                     )
                     if not user_after_defer:
                         continue
-                    logger.info(f"User message interrupted defer for {eid} -- waking early")
+                    logger.info(f"User message or headhunter evidence interrupted defer for {eid} -- waking early")
                 logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
                 woke = await self._wake_deferred_event(eid)
                 if self._state_watcher:
@@ -7357,14 +7369,14 @@ class Brain:
             # park time -- it strands messages that land during the final LLM call (enqueue is
             # dropped while the event is in flight; user parks have no idle backstop).
             has_user_unread = has_unread and any(
-                t.status.value == "delivered" and t.actor == "user"
+                t.status.value == "delivered" and _is_external_input_turn(t)
                 for t in event.conversation[-10:]
             )
             if has_user_unread and is_waiting:
                 logger.info(
-                    "Scan bypass: delivered user turn(s) %s cleared wait_for_user for %s",
+                    "Scan bypass: delivered user/headhunter-evidence turn(s) %s cleared wait_for_user for %s",
                     [t.turn for t in event.conversation[-10:]
-                     if t.actor == "user" and t.status.value == "delivered"],
+                     if _is_external_input_turn(t) and t.status.value == "delivered"],
                     eid,
                 )
                 self.clear_waiting(eid)

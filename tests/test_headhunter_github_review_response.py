@@ -8,6 +8,7 @@
 """Issue #340: GitHub PR review-feedback response (Headhunter)."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -358,8 +359,11 @@ class TestDetection:
         paths = {p.rsplit("/", 1)[-1] for p, _ in client.get_calls}
         assert paths == {"reviews", "comments"}
         # `since` filtering on both comment endpoints
-        comment_params = [params for p, params in client.get_calls if p.endswith("/comments")]
-        assert all(params.get("since") == "2020-01-01T00:00:00Z" for params in comment_params)
+        # Issue comments use `since`; reviews/inline are fetched unfiltered so a late-submitted
+        # pending review (older id/created_at) is still visible.
+        by_path = {p: params for p, params in client.get_calls}
+        assert by_path["/repos/org/repo/issues/42/comments"].get("since") == "2020-01-01T00:00:00Z"
+        assert "since" not in by_path["/repos/org/repo/pulls/42/comments"]
 
 
 # ---------------------------------------------------------------------------
@@ -678,12 +682,22 @@ class TestPromptFencing:
         assert "Action: review_feedback" in prompt
         assert "<review_feedback>" in prompt and "please fix" in prompt
 
-    def test_aggregate_cap_shortens_but_keeps_items(self):
+    def test_select_deliverable_bounds_batch_and_reports_remainder(self):
         big = [{"kind": "issue_comment", "id": i, "body": "x" * 5000} for i in range(10)]
-        capped = GitHubPlatform._cap_feedback_items(big)
-        assert len(capped) == 10
-        assert any(c.get("truncated") for c in capped)
-        assert len(GitHubPlatform._cap_feedback_items([{"id": i, "body": "x"} for i in range(50)])) == 20
+        delivered, more = GitHubPlatform._select_deliverable(big)
+        assert more is True
+        assert [d["id"] for d in delivered] == list(range(len(delivered)))  # oldest-first prefix
+        assert sum(len(d["body"]) for d in delivered) <= 20000
+        assert all(len(d["body"]) == 5000 for d in delivered)  # bodies never silently shortened
+        delivered, more = GitHubPlatform._select_deliverable([{"id": i, "body": "x"} for i in range(50)])
+        assert len(delivered) == 20 and more is True
+        delivered, more = GitHubPlatform._select_deliverable([{"id": i, "body": "x"} for i in range(3)])
+        assert len(delivered) == 3 and more is False
+
+    def test_select_deliverable_always_makes_progress(self, monkeypatch):
+        monkeypatch.setattr("src.agents.headhunter_github._FEEDBACK_AGGREGATE_CAP", 10)
+        delivered, more = GitHubPlatform._select_deliverable([{"id": 1, "body": "y" * 50}, {"id": 2, "body": "z"}])
+        assert [d["id"] for d in delivered] == [1] and more is True
 
 
 # ---------------------------------------------------------------------------
@@ -786,3 +800,95 @@ class TestBlackboardPrimitives:
         assert await bb.get_github_pr_feedback_rounds("o", "r", 1) == 2
         assert await bb.mark_github_pr_feedback_cap_notified("o", "r", 1) is True
         assert await bb.mark_github_pr_feedback_cap_notified("o", "r", 1) is False
+
+
+# ---------------------------------------------------------------------------
+# QE findings F1 / F3 follow-ups (no id floor, bounded batches, nothing lost)
+# ---------------------------------------------------------------------------
+
+class TestBoundedBatchesAcrossCycles:
+    @pytest.mark.asyncio
+    async def test_overflow_items_arrive_next_cycle_exactly_once(self, platform, bb):
+        client = FakeGitHubClient(
+            issue_comments=[_issue_comment(1000 + i, body=f"nit {i}", age=3600 - i) for i in range(25)]
+        )
+        _wire(platform, client)
+        await _prime_cursor(bb)
+        item = (await _poll(platform, [_pr()]))[0]
+        assert [f["id"] for f in item["review_feedback"]] == [1000 + i for i in range(20)]
+        event_id = await platform.create_review_feedback_event(
+            item, "---\nplan: x\n---", await platform.fetch_context(item))
+        # cursor ts must not move past undelivered items
+        cursor = await bb.get_github_pr_feedback_cursor("org", "repo", 42)
+        assert cursor["ts"] == "2020-01-01T00:00:00Z" and cursor["issue_comment_id"] == 1019
+        # next cycle: the remaining 5 are appended to the active event, nothing re-delivered
+        assert await _poll(platform, [_pr()]) == []
+        ev = await bb.get_event(event_id)
+        appended = "\n".join(t.evidence or "" for t in ev.conversation if t.actor == "headhunter")
+        assert all(f"#{1000 + i} " in appended for i in range(20, 25))
+        assert not any(f"#{1000 + i} " in appended for i in range(20))
+        assert await _poll(platform, [_pr()]) == []
+        assert len([t for t in (await bb.get_event(event_id)).conversation if t.actor == "headhunter"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_oversized_batch_by_bytes_is_split_not_truncated(self, platform, bb):
+        client = FakeGitHubClient(
+            issue_comments=[_issue_comment(700 + i, body="x" * 5000, age=3600 - i) for i in range(10)])
+        _wire(platform, client)
+        await _prime_cursor(bb)
+        item = (await _poll(platform, [_pr()]))[0]
+        assert 0 < len(item["review_feedback"]) < 10
+        assert all(len(f["body"]) == 5000 for f in item["review_feedback"])
+
+
+class TestNoIdFloor:
+    @pytest.mark.asyncio
+    async def test_late_submitted_review_with_lower_id_is_detected(self, platform, bb):
+        await _prime_cursor(bb, review_id=205)
+        client = FakeGitHubClient(reviews=[_review(200, "late submitted review", state="CHANGES_REQUESTED")])
+        _wire(platform, client)
+        items = await _poll(platform, [_pr()])
+        assert items and items[0]["review_feedback"][0]["id"] == 200
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_marks_existing_so_edits_or_refetch_never_replay(self, platform, bb):
+        client = FakeGitHubClient(reviews=[_review(101, "old")], inline=[_inline(501, 101)],
+                                  issue_comments=[_issue_comment(601)])
+        _wire(platform, client)
+        assert await _poll(platform, [_pr()]) == []  # bootstrap
+        for kind, i in (("review", 101), ("review_comment", 501), ("issue_comment", 601)):
+            assert await bb.is_github_pr_feedback_seen("org", "repo", 42, kind, i)
+        # Server returns the same old rows again (unfiltered fetch / edited comment bumped updated_at)
+        for _ in range(2):
+            assert await _poll(platform, [_pr()]) == []
+
+    @pytest.mark.asyncio
+    async def test_items_older_than_seen_ttl_window_never_replay(self, platform, bb):
+        await _prime_cursor(bb)
+        client = FakeGitHubClient(inline=[_inline(501, age=7 * 86400)])  # older than 6d cutoff, no seen key
+        _wire(platform, client)
+        assert await _poll(platform, [_pr()]) == []
+
+    @pytest.mark.asyncio
+    async def test_untrusted_items_are_logged_once_not_every_cycle(self, platform, bb, caplog):
+        await _prime_cursor(bb)
+        client = FakeGitHubClient(inline=[_inline(501, assoc="NONE", login="rando")])
+        _wire(platform, client)
+        with caplog.at_level("INFO", logger="src.agents.headhunter_github"):
+            for _ in range(3):
+                assert await _poll(platform, [_pr()]) == []
+        assert sum("Ignoring review_comment 501" in r.message for r in caplog.records) == 1
+
+
+class TestWaitingApprovalOwnsPr:
+    @pytest.mark.asyncio
+    async def test_waiting_approval_event_counts_as_active_for_pr(self, platform, bb):
+        from src.models import EventEvidence, EventStatus
+        eid = await bb.create_event(
+            source="headhunter", service="repo", reason="plan",
+            evidence=EventEvidence(display_text="x", source_type="headhunter",
+                                   github_context={"owner": "org", "repo": "repo", "pr_number": 42}))
+        ev = await bb.get_event(eid)
+        ev.status = EventStatus.WAITING_APPROVAL
+        await bb.redis.set(f"{bb.EVENT_PREFIX}{eid}", json.dumps(ev.model_dump()))
+        assert ("org", "repo", 42) in await platform.get_active_keys()

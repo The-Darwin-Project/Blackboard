@@ -30,9 +30,11 @@
 # 20. [Pattern]: create_issue_event removes both darwin-work AND darwin-queued on promote --
 #     the queued removal is a no-op (silenced 404) for issues that were never queued.
 # 21. [Pattern]: Review-response (HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED, default off) polls
-#     reviews + inline comments + issue comments per PR. Cursor HASH + per-item SET NX live in
-#     BlackboardState. Items are marked seen and the cursor advanced ONLY after create_event
-#     succeeds (create_review_feedback_event), never at poll time (debounce must not consume them).
+#     reviews + inline comments + issue comments per PR. Exactly-once = per-item SET NX seen keys
+#     (BlackboardState); there is NO id floor (a submitted pending review can have an older id).
+#     Bootstrap pre-marks existing items seen. Items are marked seen and the cursor advanced ONLY
+#     after create_event/append succeeds, never at poll time (debounce must not consume them), and
+#     ONLY for items actually delivered (_select_deliverable): leftovers keep the old cursor ts.
 # 22. [Constraint]: Trust gate (_feedback_reject_reason) is fail-closed: Darwin's own login, any
 #     [bot]/Bot-type login, HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS and untrusted
 #     author_association are dropped. Same gate filters fetch_context recent_comments.
@@ -126,7 +128,9 @@ _DIFF_HUNK_CAP = 1500
 _FEEDBACK_BODY_CAP = 5000
 _FEEDBACK_ITEM_CAP = 20
 _FEEDBACK_AGGREGATE_CAP = _COMMENT_LIMIT * 10
-_FEEDBACK_TAIL_BODY_CAP = 200
+# Seen-keys live 7 days (BlackboardState._PR_FEEDBACK_TTL); anything older than this age is never
+# (re)considered, so an expired seen-key can not replay old feedback now that ids no longer gate.
+_FEEDBACK_MAX_AGE = timedelta(days=6)
 _FEEDBACK_PAGE_SIZE = 100
 _FEEDBACK_MAX_PAGES = 5
 _FEEDBACK_POLL_CONCURRENCY = 5
@@ -336,7 +340,8 @@ class GitHubPlatform:
             event = await self.blackboard.get_event(eid)
             if not event:
                 continue
-            if event.status.value not in ("new", "active", "deferred"):
+            # waiting_approval: a PR event parked on a human is still the PR's owner event.
+            if event.status.value not in ("new", "active", "deferred", "waiting_approval"):
                 continue
             if event.source != "headhunter":
                 if include_non_headhunter:
@@ -1261,22 +1266,22 @@ class GitHubPlatform:
                 context["mention_author"] = mention.get("author", "unknown")
 
     @staticmethod
-    def _cap_feedback_items(items: list[dict]) -> list[dict]:
-        """Cap item count + aggregate body size. Never drops ids silently within the item cap:
-        once the aggregate budget is spent, later bodies are shortened (truncated=True)."""
-        out: list[dict] = []
+    def _select_deliverable(items: list[dict]) -> tuple[list[dict], bool]:
+        """Pick the oldest-first prefix that fits the item-count and aggregate-size budgets.
+
+        Returns (delivered, more_remaining). Only delivered items may be marked seen; the rest
+        stay unseen and are picked up on the next cycle (appended to the now-active event).
+        Always delivers at least one item so a single oversized item can not wedge the queue.
+        """
+        delivered: list[dict] = []
         used = 0
-        for item in items[:_FEEDBACK_ITEM_CAP]:
-            item = dict(item)
-            body = item.get("body", "")
-            remaining = _FEEDBACK_AGGREGATE_CAP - used
-            if len(body) > remaining:
-                body = body[: max(remaining, _FEEDBACK_TAIL_BODY_CAP)]
-                item["truncated"] = True
-            used += len(body)
-            item["body"] = body
-            out.append(item)
-        return out
+        for item in items:
+            size = len(item.get("body", ""))
+            if delivered and (len(delivered) >= _FEEDBACK_ITEM_CAP or used + size > _FEEDBACK_AGGREGATE_CAP):
+                break
+            delivered.append(item)
+            used += size
+        return delivered, len(delivered) < len(items)
 
     async def _get_paged(self, client, path: str, params: dict | None = None) -> list[dict]:
         """GET a list endpoint with per_page=100, following pages until a short page."""
@@ -1397,31 +1402,40 @@ class GitHubPlatform:
 
         poll_started = datetime.now(timezone.utc)
         base = f"/repos/{owner}/{repo}"
-        since_params = {"since": cursor["ts"]} if cursor and cursor.get("ts") else {}
+        # Reviews and inline comments are fetched WITHOUT `since`: a pending (drafted) review gets
+        # its id/created_at at draft time, so once submitted it can look older than the cursor.
+        # Issue comments are visible immediately, so `since` is safe there.
+        issue_since = {"since": cursor["ts"]} if cursor and cursor.get("ts") else {}
         reviews = await self._get_paged(client, f"{base}/pulls/{number}/reviews")
-        inline = await self._get_paged(client, f"{base}/pulls/{number}/comments", since_params)
-        issue_comments = await self._get_paged(client, f"{base}/issues/{number}/comments", since_params)
+        inline = await self._get_paged(client, f"{base}/pulls/{number}/comments")
+        issue_comments = await self._get_paged(client, f"{base}/issues/{number}/comments", issue_since)
 
         def _max_id(rows: list[dict], floor: int) -> int:
             return max([floor] + [int(r["id"]) for r in rows if r.get("id") is not None])
 
         cur = cursor or {}
         new_cursor = {
+            # Informational high-water marks; exactly-once is enforced by the per-item seen keys.
             "review_id": _max_id(reviews, int(cur.get("review_id", 0) or 0)),
             "review_comment_id": _max_id(inline, int(cur.get("review_comment_id", 0) or 0)),
             "issue_comment_id": _max_id(issue_comments, int(cur.get("issue_comment_id", 0) or 0)),
-            # 5s slack: `since` filters on updated_at; ids (not ts) are the exactly-once guard.
+            # 5s slack: `since` filters on updated_at.
             "ts": _iso(poll_started - timedelta(seconds=5)),
         }
 
         if cursor is None:
-            # Bootstrap without backfill: deploying the feature must not replay old reviews.
+            # Bootstrap without backfill: mark everything that exists NOW as seen so deploying the
+            # feature (or discovering a PR) never replays old reviews.
+            for kind, rows in (("review", reviews), ("review_comment", inline), ("issue_comment", issue_comments)):
+                for row in rows:
+                    if row.get("id") is not None:
+                        await bb.mark_github_pr_feedback_seen(owner, repo, number, kind, row["id"])
             await bb.set_github_pr_feedback_cursor(owner, repo, number, new_cursor)
             logger.info(f"GitHub review-feedback cursor bootstrapped for {owner}/{repo}#{number}")
             return None
 
         items = await self._collect_feedback_items(
-            owner, repo, number, cursor, reviews, inline, issue_comments, is_darwin,
+            owner, repo, number, reviews, inline, issue_comments, is_darwin,
         )
 
         if not items:
@@ -1435,17 +1449,33 @@ class GitHubPlatform:
             logger.debug(f"Review feedback on {owner}/{repo}#{number} still inside {debounce}s debounce window")
             return None
 
+        # Deliver a bounded batch; only delivered items are marked seen. If more remain, keep the
+        # old `ts` so the next cycle's `since` still returns them (they are appended to the event
+        # created/updated now, since it is active by then).
+        delivered, more = self._select_deliverable(items)
+        if more:
+            # Never let the cursor (ids or ts) move past an undelivered item.
+            batch_cursor = {**new_cursor, "ts": cursor["ts"]}
+            for kind, field in (("review", "review_id"), ("review_comment", "review_comment_id"),
+                                ("issue_comment", "issue_comment_id")):
+                batch_cursor[field] = max(
+                    [int(cur.get(field, 0) or 0)] + [int(i["id"]) for i in delivered if i["kind"] == kind]
+                )
+        else:
+            batch_cursor = new_cursor
+
         # An active event (any source) already owns this PR: append instead of a second event.
         active_id = active_events.get((owner.lower(), repo.lower(), number))
         if active_id:
-            await self._append_feedback_to_event(active_id, owner, repo, number, items)
-            await self._commit_feedback(owner, repo, number, items, new_cursor)
-            await self._acknowledge(pr.get("installation_id", ""), owner, repo, items)
+            await self._append_feedback_to_event(active_id, owner, repo, number, delivered)
+            await self._commit_feedback(owner, repo, number, delivered, batch_cursor)
+            await self._acknowledge(pr.get("installation_id", ""), owner, repo, delivered)
             return None
 
         max_rounds = _safe_int("HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS", 5)
         rounds = await bb.get_github_pr_feedback_rounds(owner, repo, number)
         if rounds >= max_rounds:
+            # Deliberately ignoring this feedback: consume every item and advance fully.
             await self._handle_round_cap(pr, rounds, max_rounds)
             await self._commit_feedback(owner, repo, number, items, new_cursor)
             return None
@@ -1460,57 +1490,63 @@ class GitHubPlatform:
             "user": pr.get("user", ""),
             "labels": pr.get("labels", []),
             "html_url": pr.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
-            "created_at": max(i["created_at"] for i in items),
+            "created_at": max(i["created_at"] for i in delivered),
             "head_sha": pr.get("head_sha", ""),
             "action": "review_feedback" if is_darwin else "mention",
-            "review_feedback": self._cap_feedback_items(items),
-            "_all_items": items,
-            "_cursor": new_cursor,
+            "review_feedback": delivered,
+            "_cursor": batch_cursor,
         }
 
     async def _collect_feedback_items(
-        self, owner: str, repo: str, number: int, cursor: dict,
+        self, owner: str, repo: str, number: int,
         reviews: list[dict], inline: list[dict], issue_comments: list[dict], is_darwin: bool,
     ) -> list[dict]:
-        """Apply cursor, state, trust and mention gating; return new actionable items (oldest first)."""
+        """State, age, mention, seen and trust gating; return new actionable items (oldest first).
+
+        No id floor: exactly-once comes from the per-item seen keys (bootstrap pre-marks existing
+        items; delivered items are marked after the event exists). Untrusted authors are marked
+        seen here so they are logged and evaluated once, never forever.
+        """
         bb = self.blackboard
-        cur_review = int(cursor.get("review_id", 0) or 0)
-        cur_inline = int(cursor.get("review_comment_id", 0) or 0)
-        cur_issue = int(cursor.get("issue_comment_id", 0) or 0)
         review_states = {r.get("id"): (r.get("state") or "").upper() for r in reviews}
+        oldest = datetime.now(timezone.utc) - _FEEDBACK_MAX_AGE
         items: list[dict] = []
 
         async def _consider(kind: str, raw: dict, review_state: str | None = None) -> None:
+            created = _parse_ts(raw.get("submitted_at") or raw.get("created_at"))
+            if created is not None and created < oldest:
+                return  # beyond seen-key TTL: never replay
+            item = self._build_feedback_item(kind, raw, review_state)
+            if not is_darwin and not item["mentions_darwin"]:
+                return  # non-Darwin PRs: explicit @mention only
+            if await bb.is_github_pr_feedback_seen(owner, repo, number, kind, raw["id"]):
+                return
             reason = self._feedback_reject_reason(raw.get("user"), raw.get("author_association"))
             if reason:
                 logger.info(
                     f"Ignoring {kind} {raw.get('id')} on {owner}/{repo}#{number} "
                     f"from {(raw.get('user') or {}).get('login', '?')}: {reason}"
                 )
+                await bb.mark_github_pr_feedback_seen(owner, repo, number, kind, raw["id"])
                 return
-            if await bb.is_github_pr_feedback_seen(owner, repo, number, kind, raw["id"]):
-                return
-            item = self._build_feedback_item(kind, raw, review_state)
-            if not is_darwin and not item["mentions_darwin"]:
-                return  # non-Darwin PRs: explicit @mention only
             items.append(item)
 
         for rv in reviews:
-            if rv.get("id") is None or int(rv["id"]) <= cur_review:
+            if rv.get("id") is None:
                 continue
             state = (rv.get("state") or "").upper()
             if state not in _ACTIONABLE_REVIEW_STATES or not (rv.get("body") or "").strip():
                 continue  # APPROVED/DISMISSED/PENDING, or an empty COMMENTED wrapper
             await _consider("review", rv)
         for c in inline:
-            if c.get("id") is None or int(c["id"]) <= cur_inline:
+            if c.get("id") is None:
                 continue
             parent = review_states.get(c.get("pull_request_review_id"))
             if parent in _NON_ACTIONABLE_PARENT_STATES or not (c.get("body") or "").strip():
                 continue
             await _consider("review_comment", c, parent)
         for c in issue_comments:
-            if c.get("id") is None or int(c["id"]) <= cur_issue:
+            if c.get("id") is None:
                 continue
             body = (c.get("body") or "").strip()
             if not body or _is_slash_command_only(body):
@@ -1535,7 +1571,7 @@ class GitHubPlatform:
         from ..models import ConversationTurn
 
         lines = [f"New GitHub review feedback on {owner}/{repo}#{number} (trusted authors only):"]
-        for it in self._cap_feedback_items(items):
+        for it in items:
             loc = f" {it['path']}:{it['line']}" if it.get("path") else ""
             lines.append(f"- [{it['kind']} #{it['id']} by {it['author']}{loc}] {it['body']}")
         turn = ConversationTurn(
@@ -1621,7 +1657,8 @@ class GitHubPlatform:
         action = work_item.get("action", "review_feedback")
         gh_ctx = self._base_github_context(work_item, context)
         gh_ctx["action"] = action
-        gh_ctx["review_feedback"] = work_item.get("review_feedback", [])
+        delivered = work_item.get("review_feedback", [])
+        gh_ctx["review_feedback"] = delivered
         evidence = EventEvidence(
             display_text=f"GitHub: {action} on #{pr_number} in {owner}/{repo}",
             source_type="headhunter",
@@ -1637,7 +1674,8 @@ class GitHubPlatform:
         )
         logger.info(f"GitHub review-feedback event created: {event_id} ({action}) on #{pr_number} in {owner}/{repo}")
 
-        all_items = work_item.get("_all_items") or work_item.get("review_feedback", [])
+        # Mark ONLY what this event carries; items beyond the per-cycle budget stay unseen.
+        all_items = delivered
         await self._commit_feedback(owner, repo, pr_number, all_items, work_item["_cursor"])
         await self.blackboard.incr_github_pr_feedback_rounds(owner, repo, pr_number)
 

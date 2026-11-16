@@ -71,7 +71,7 @@ Darwin -- that is the reviewer's call.
   `autoMergeRequest` and disables auto-merge first. See dispatch/execution-method.md Auto-Merge
   Bypass Vector. Agent-authored commits are never merged or re-armed for auto-merge without
   human approval.
-- **Prow repositories:** never post `/lgtm`, `/approve`, or `/hold cancel`.
+- **Prow repositories:** never post `/lgtm`, `/approve`, `/hold cancel`, or `/override`.
 - **No `darwin-*` labels** are applied or removed for these events -- they stay outside the
   `darwin-review` state machine (a `darwin-done` + new SHA would otherwise start an unintended
   full review of Darwin's own PR when a human pushes).

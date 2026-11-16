@@ -193,7 +193,7 @@ source/headhunter.md), the lifecycle is fix -> verify -> reply on the PR's own h
    Never resolve review threads.
 
 **Prow merge-guard:** on Prow-managed repos (`openshift-ci-robot` comments, `/lgtm` workflow)
-Darwin never posts `/lgtm`, `/approve` or `/hold cancel`, and never asks a bot to. Merging stays
+Darwin never posts `/lgtm`, `/approve`, `/hold cancel` or `/override`, and never asks a bot to. Merging stays
 a human decision; the Auto-Merge Invalidation exception above applies to these commits too.
 
 A human push after Darwin's reply, or a new review, is a new round (capped by
