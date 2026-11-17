@@ -351,7 +351,12 @@ class TestResolveLiveHeadShaDispatcher:
 
         gl_ctx = {"mr_iid": "42", "project_id": "100", "head_sha": "fallback_sha"}
         with (
-            patch("os.path.exists", side_effect=lambda p: p == "/etc/pki/tls/certs/ca-bundle.crt"),
+            # Host-independent: _usable_ca_file is the only filesystem probe, so patch it rather than
+            # relying on /etc/pki existing (RHEL) -- ubuntu-latest only ships /etc/ssl/certs.
+            patch(
+                "src.utils.vcs_approval._usable_ca_file",
+                side_effect=lambda p: p == "/etc/pki/tls/certs/ca-bundle.crt",
+            ),
             patch("httpx.AsyncClient") as mock_client_cls,
         ):
             mock_client = AsyncMock()

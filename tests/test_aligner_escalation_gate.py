@@ -17,7 +17,6 @@ from src.models import (
     EventEvidence,
     EventInput,
     EventStatus,
-    Metrics,
     Service,
     StagedEscalation,
 )
@@ -594,6 +593,59 @@ async def test_kargo_refresh_updates_gitlab_context_when_mr_url_changes():
     turn = ctx.append_and_broadcast.call_args[0][1]
     assert "Promotion: promo-2" in turn.evidence
     assert "MR URL: https://gitlab.example.com/org/repo/-/merge_requests/11" in turn.evidence
+
+
+@pytest.mark.asyncio
+async def test_kargo_refresh_survives_gitlab_context_persistence_failure(caplog):
+    """F22: the secondary gitlab_context mirror is best-effort.
+
+    kargo_context.mr_url is persisted first; if the mirror raises, the refreshed promotion state the Brain
+    is waiting on must still be returned (not discarded by an unhandled exception) and the failure logged.
+    """
+    from src.agents.handlers_integration import handle_refresh_kargo_context
+    new_url = "https://gitlab.example.com/org/repo/-/merge_requests/11"
+    bb = _mock_blackboard()
+    event = MagicMock()
+    evidence = MagicMock()
+    evidence.kargo_context = {
+        "project": "proj-x",
+        "stage": "stage-y",
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/10",
+    }
+    event.event.evidence = evidence
+    bb.get_event = AsyncMock(return_value=event)
+    bb.update_event_kargo_context = AsyncMock()
+    bb.update_event_gitlab_context = AsyncMock(side_effect=RuntimeError("redis down"))
+
+    mock_kargo_observer = MagicMock()
+    mock_kargo_observer.get_stage_status = AsyncMock(return_value={
+        "mr_url": new_url,
+        "promotion": "promo-2",
+        "phase": "Running",
+        "failed_step": "N/A",
+    })
+
+    ctx = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.get_agent_instance.side_effect = lambda name: mock_kargo_observer if name == "_kargo_observer" else None
+    ctx.next_turn_number = AsyncMock(return_value=2)
+    ctx.append_and_broadcast = AsyncMock()
+    ctx.get_state_watcher.return_value = None
+
+    with caplog.at_level("WARNING"):
+        result = await handle_refresh_kargo_context(ctx, "evt-kargo-refresh", {}, None)
+
+    assert result is True
+    bb.update_event_kargo_context.assert_awaited_once_with("evt-kargo-refresh", {"mr_url": new_url})
+    bb.update_event_gitlab_context.assert_awaited_once()
+    assert any(
+        "Failed to update gitlab_context" in r.getMessage() and "redis down" in r.getMessage()
+        for r in caplog.records
+    )
+    ctx.append_and_broadcast.assert_awaited_once()
+    turn = ctx.append_and_broadcast.call_args[0][1]
+    assert "Promotion: promo-2" in turn.evidence
+    assert f"MR URL: {new_url}" in turn.evidence
 
 
 # =========================================================================

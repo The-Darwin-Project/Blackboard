@@ -542,6 +542,132 @@ class TestSteeringTurnIsNotParticipantInput:
         assert await brain._scan_active_for_reconcile() == ["evt-scan-2"]
 
 
+class TestSteeringTurnAtInlinedParticipantSites:
+    """F7 (QE mutation audit): every _is_participant_turn call site must ignore ("system","steering").
+
+    The helper itself and Guard 1 are covered above; these drive the four remaining sites through the real
+    Brain code so re-inlining an actor tuple (the regression F7 removed) is caught:
+      - _process_event_inner WAITING-FOR-AGENT guard           (brain.py ~1633)
+      - _process_event_inner has_agent_result / is_intermediate (brain.py ~1931)
+      - scan Guard 7 edge-triggered unseen check                (brain.py ~7443)
+      - scan Guard 7 level-triggered delivered check            (brain.py ~7447)
+    Each steering case has a system/notification control that MUST still count as participant input.
+    """
+
+    @staticmethod
+    def _inner_brain(event):
+        brain = _make_brain(stream_factory=lambda **kw: MockStream([]))
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain.blackboard.mark_turns_evaluated = AsyncMock()
+        brain.blackboard.mark_turns_status = AsyncMock()
+        brain._broadcast_status_update = AsyncMock()
+        brain._get_adapter = AsyncMock(return_value=brain._adapter)
+        brain._process_with_llm = AsyncMock(return_value=True)  # always ask for another iteration
+        return brain
+
+    @staticmethod
+    def _inner_event(conversation):
+        event = _make_event(event_id="evt-site-01", source="slack")
+        event.processing_started_at = 1000.0
+        event.conversation = conversation
+        return event
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_agent_guard_holds_on_delivered_steering_turn(self):
+        """~1633: a DELIVERED steering turn after the wait must not clear _waiting_for_agent / wake the loop."""
+        event = self._inner_event([
+            _turn(1, "user", "message", "processed"),
+            _turn(2, "brain", "wait", "processed"),
+            _turn(3, "system", "steering", "delivered"),
+        ])
+        brain = self._inner_brain(event)
+        brain._waiting_for_agent["evt-site-01"] = ("developer", 2)
+
+        await brain._process_event_inner("evt-site-01", prefetched_event=event)
+
+        assert "evt-site-01" in brain._waiting_for_agent
+        brain._process_with_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_agent_guard_clears_on_delivered_notification_control(self):
+        event = self._inner_event([
+            _turn(1, "user", "message", "processed"),
+            _turn(2, "brain", "wait", "processed"),
+            _turn(3, "system", "notification", "delivered"),
+        ])
+        brain = self._inner_brain(event)
+        brain._waiting_for_agent["evt-site-01"] = ("developer", 2)
+
+        await brain._process_event_inner("evt-site-01", prefetched_event=event)
+
+        assert "evt-site-01" not in brain._waiting_for_agent
+        assert brain._process_with_llm.await_count >= 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("actor", "action", "expected_iterations"),
+        [
+            ("system", "steering", 2),      # no agent result -> still intermediate (max 2 iterations)
+            ("developer", "result", 5),     # real agent output -> not intermediate (max 5)
+            ("system", "notification", 5),  # control: notifications still count as agent output
+        ],
+    )
+    async def test_steering_turn_is_not_agent_result_for_intermediate_iteration_cap(
+        self, actor, action, expected_iterations,
+    ):
+        """~1931: with an agent task running, a steering turn after the routing turn is not an agent result."""
+        event = self._inner_event([
+            _turn(1, "user", "message", "processed"),
+            _turn(2, "brain", "route", "processed"),
+            _turn(3, actor, action, "delivered"),
+        ])
+        brain = self._inner_brain(event)
+        brain._active_tasks["evt-site-01"] = MagicMock(done=MagicMock(return_value=False))
+        brain._routing_turn_for_event["evt-site-01"] = 2
+
+        await brain._process_event_inner("evt-site-01", prefetched_event=event)
+
+        assert brain._process_with_llm.await_count == expected_iterations
+
+    @staticmethod
+    def _guard7_brain(conversation):
+        """Scan brain whose running-task check passes Guard 1 (done) but is live at Guard 7 (interleaving)."""
+        brain = TestSteeringTurnIsNotParticipantInput._scan_brain()
+        event = _make_event(event_id="evt-g7", source="headhunter")
+        event.conversation = conversation
+        brain.blackboard.get_active_events_with_status.return_value = {"evt-g7": "active"}
+        brain.blackboard.get_event.return_value = event
+        brain._waiting_for_agent["evt-g7"] = ("developer", 1)
+        calls = {"n": 0}
+
+        def done():
+            calls["n"] += 1
+            return calls["n"] == 1  # Guard 1 sees it finished; Guard 7 sees it running again
+
+        brain._active_tasks["evt-g7"] = MagicMock(done=done)
+        return brain
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("action", "expected"), [("steering", []), ("notification", ["evt-g7"])])
+    async def test_guard7_edge_triggered_unseen_check(self, action, expected):
+        """~7443: a freshly SENT steering turn is not participant input for a waiting-for-agent event."""
+        brain = self._guard7_brain([
+            _turn(1, "brain", "wait", "processed"),
+            _turn(2, "system", action, "sent"),
+        ])
+        assert await brain._scan_active_for_reconcile() == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("action", "expected"), [("steering", []), ("notification", ["evt-g7"])])
+    async def test_guard7_level_triggered_delivered_check(self, action, expected):
+        """~7447: an already-DELIVERED steering turn after the wait point is not participant input."""
+        brain = self._guard7_brain([
+            _turn(1, "brain", "wait", "processed"),
+            _turn(2, "system", action, "delivered"),
+        ])
+        assert await brain._scan_active_for_reconcile() == expected
+
+
 class TestSlackSteeringSuppression:
     """T-4: Slack channel isolation of internal steering turns."""
 
