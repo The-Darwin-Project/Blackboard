@@ -161,6 +161,26 @@ _CALL_CLOSE = "!]"
 _CALL_NAME_RE = re.compile(r"[A-Za-z0-9_]+:")  # anchored via .match(); bounded by the name run
 MAX_STREAM_CALL_SYNTAX_BUFFER = 16384  # cap on a held-back unterminated [!call: tail (chars)
 
+_CONTROL_TOKENS_RE = re.compile(
+    r"<\/?(?:end_of_image|start_of_turn|end_of_turn|internal_model_call)\s*>|<\/?(?:image|thought|think)\s*>",
+    re.IGNORECASE,
+)
+_CONTROL_TOKEN_PREFIXES = (
+    "<end_of_",
+    "</thought",
+    "</think",
+    "<image",
+    "</image",
+    "<end_",
+    "<start_",
+    "<thought",
+    "<think",
+    "<internal_",
+    "</end_",
+    "</start_",
+    "</internal_",
+)
+
 
 def scan_call_syntax(text: str) -> tuple[str, list[tuple[str, str]], str]:
     """Split text into (clean_text, complete_calls, unterminated_tail) in one linear pass.
@@ -192,13 +212,18 @@ def scan_call_syntax(text: str) -> tuple[str, list[tuple[str, str]], str]:
 
 
 def sanitize_call_syntax(text: str | None, *, warn: bool = True) -> str | None:
-    """Strip hallucinated [!call:...!] blocks from LLM output so users receive clean text.
+    """Strip hallucinated [!call:...!] blocks and control tokens from LLM output.
 
     Also strips a trailing unterminated [!call:... fragment (e.g. truncated mid-tag).
     Pass warn=False when the caller already logged the strip for this response.
     """
     if not text:
         return text
+    for _ in range(4):
+        new_text = _CONTROL_TOKENS_RE.sub("", text)
+        if new_text == text:
+            break
+        text = new_text
     cleaned, _calls, tail = scan_call_syntax(text)
     if tail and warn:
         logger.warning(
@@ -212,12 +237,20 @@ def sanitize_call_syntax(text: str | None, *, warn: bool = True) -> str | None:
 def split_stream_call_syntax(buffer: str) -> tuple[str, str, bool]:
     """Streaming holdback core. Returns (safe_to_yield, held_back, overflowed).
 
-    Completed tags are stripped. An unterminated ``[!call:`` tail (or a partial prefix of
-    the opener at the end of the buffer) is held back for the next chunk. If the held tail
-    exceeds MAX_STREAM_CALL_SYNTAX_BUFFER the fragment is DISCARDED (never flushed):
-    only the safe prefix is returned, held_back is "" and overflowed is True. The caller
-    must then stop emitting/accumulating text for the rest of the stream.
+    Completed tags and control tokens are stripped. An unterminated ``[!call:`` tail
+    (or a partial prefix of a control token at the end of the buffer) is held back
+    for the next chunk. If the held tail exceeds MAX_STREAM_CALL_SYNTAX_BUFFER the
+    fragment is DISCARDED (never flushed): only the safe prefix is returned, held_back
+    is "" and overflowed is True. The caller must then stop emitting/accumulating text
+    for the rest of the stream.
     """
+    if not buffer:
+        return "", "", False
+    for _ in range(4):
+        new_buf = _CONTROL_TOKENS_RE.sub("", buffer)
+        if new_buf == buffer:
+            break
+        buffer = new_buf
     if not buffer:
         return "", "", False
     clean, _calls, tail = scan_call_syntax(buffer)
@@ -228,6 +261,10 @@ def split_stream_call_syntax(buffer: str) -> tuple[str, str, bool]:
     for length in range(min(len(clean), len(_CALL_OPEN) - 1), 0, -1):
         suffix = clean[-length:]
         if _CALL_OPEN.startswith(suffix):
+            return clean[:-length], suffix, False
+    for length in range(min(len(clean), 32), 0, -1):
+        suffix = clean[-length:]
+        if any(p.startswith(suffix.lower()) for p in _CONTROL_TOKEN_PREFIXES):
             return clean[:-length], suffix, False
     return clean, "", False
 

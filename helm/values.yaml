@@ -322,6 +322,12 @@ gitlab:
   # - host: GitLab instance hostname (e.g., gitlab.example.com)
   existingSecret: "" # e.g., "darwin-gitlab-token"
 # =============================================================================
+# OpenShift Trusted CA Bundle (injected corporate proxy / root certificates)
+# =============================================================================
+trustedCaBundle:
+  enabled: false
+  configMapName: "config-trusted-cabundle"
+# =============================================================================
 # ArgoCD CLI Credentials (for agent ArgoCD API access)
 # =============================================================================
 argocd:

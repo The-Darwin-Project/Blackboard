@@ -270,6 +270,43 @@ async def test_kargo_gate_blocks_when_flag_set():
     bb.create_event.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_kargo_handle_failed_promotion_seeds_gitlab_context():
+    """T-6: handle_failed_promotion uses GitLabPlatform.parse_mr_url (2-tuple) to seed evidence.gitlab_context."""
+    bb = _mock_blackboard()
+    bb.get_active_events.return_value = []
+    bb.get_escalation_flag.return_value = None
+    created_events = []
+
+    async def mock_create_event(**kwargs):
+        created_events.append(kwargs)
+        return "evt-kargo-123"
+
+    bb.create_event = mock_create_event
+    aligner = _make_aligner(bb)
+
+    mr_url = "https://gitlab.example.com/openshift-virtualization/downstream-configuration/-/merge_requests/25"
+    result = await aligner.handle_failed_promotion(
+        service="svc-a",
+        project="downstream-configuration",
+        stage="staging",
+        promotion="p1",
+        freight="f1",
+        phase="failed",
+        message="Promotion failed on step verification",
+        failed_step="verify-step",
+        mr_url=mr_url,
+    )
+
+    assert result == "evt-kargo-123"
+    assert len(created_events) == 1
+    evidence = created_events[0]["evidence"]
+    assert evidence.gitlab_context is not None
+    assert evidence.gitlab_context["target_url"] == mr_url
+    assert evidence.gitlab_context["project_id"] == "openshift-virtualization/downstream-configuration"
+    assert evidence.gitlab_context["mr_iid"] == 25
+
+
 # =========================================================================
 # 10. Kargo hash lifecycle: HSET/HGET/HDEL
 # =========================================================================
@@ -505,3 +542,55 @@ async def test_sync_drift_gate_uses_direct_hget():
     bb.get_escalation_flag.assert_called_once_with("openshift-gitops/argocd-app", scope="sync")
     # Importantly: get_service was NOT called (it returns None for synthetic keys)
     bb.get_service.assert_not_called()
+
+
+# =========================================================================
+# 22. Kargo Context Refresh updates gitlab_context on MR URL change
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_kargo_refresh_updates_gitlab_context_when_mr_url_changes():
+    """handlers_integration.handle_refresh_kargo_context parses new mr_url and updates gitlab_context."""
+    from src.agents.handlers_integration import handle_refresh_kargo_context
+    bb = _mock_blackboard()
+    event = MagicMock()
+    evidence = MagicMock()
+    evidence.kargo_context = {
+        "project": "proj-x",
+        "stage": "stage-y",
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/10",
+    }
+    event.event.evidence = evidence
+    bb.get_event = AsyncMock(return_value=event)
+    bb.update_event_kargo_context = AsyncMock()
+    bb.update_event_gitlab_context = AsyncMock()
+
+    mock_kargo_observer = MagicMock()
+    mock_kargo_observer.get_stage_status = AsyncMock(return_value={
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+        "promotion": "promo-2",
+        "phase": "Running",
+        "failed_step": "N/A",
+    })
+
+    ctx = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.get_agent_instance.side_effect = lambda name: mock_kargo_observer if name == "_kargo_observer" else None
+    ctx.next_turn_number = AsyncMock(return_value=2)
+    ctx.append_and_broadcast = AsyncMock()
+    ctx.get_state_watcher.return_value = None
+
+    result = await handle_refresh_kargo_context(ctx, "evt-kargo-refresh", {}, None)
+
+    assert result is True
+    bb.update_event_kargo_context.assert_awaited_once_with("evt-kargo-refresh", {
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+    })
+    bb.update_event_gitlab_context.assert_awaited_once_with("evt-kargo-refresh", {
+        "target_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+        "project_id": "org/repo",
+        "mr_iid": 11,
+    })
+    turn = ctx.append_and_broadcast.call_args[0][1]
+    assert "Promotion: promo-2" in turn.evidence
+    assert "MR URL: https://gitlab.example.com/org/repo/-/merge_requests/11" in turn.evidence

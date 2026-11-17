@@ -84,6 +84,8 @@ from .types import (
     MAX_STREAM_CALL_SYNTAX_BUFFER,
     PRIORITY_NORMAL,
     TokenUsage,
+    _CONTROL_TOKEN_PREFIXES,
+    _CONTROL_TOKENS_RE,
     _MAX_TIMEOUT_ENV_S,
     _TIMEOUT_ENV_WARNED as _TYPES_TIMEOUT_ENV_WARNED,
     _TIMEOUT_ORDER_WARNED as _TYPES_TIMEOUT_ORDER_WARNED,
@@ -175,7 +177,7 @@ def _clone_part_with_sig(part: Any, sig_bytes: bytes) -> Any:
         cloned = {k: v for k, v in part.items() if k != "thoughtSignature"}
         cloned["thought_signature"] = sig_bytes
         return cloned
-    if hasattr(part, "model_copy"):
+    if hasattr(type(part), "model_copy"):
         return part.model_copy(update={"thought_signature": sig_bytes})
     cloned = copy.copy(part)
     setattr(cloned, "thought_signature", sig_bytes)
@@ -209,6 +211,69 @@ def _attach_signature_to_parts(parts: list, sig_bytes: bytes) -> list:
         updated[-1] = _clone_part_with_sig(parts[-1], sig_bytes)
         return updated
     return parts
+
+
+def _clone_part_with_text(part: Any, new_text: str | None) -> Any:
+    """Clone part with new text without mutating the original."""
+    if isinstance(part, dict):
+        cloned = dict(part)
+        if new_text is not None:
+            cloned["text"] = new_text
+        else:
+            cloned.pop("text", None)
+        return cloned
+    if hasattr(type(part), "model_copy"):
+        return part.model_copy(update={"text": new_text})
+    cloned = copy.copy(part)
+    setattr(cloned, "text", new_text)
+    return cloned
+
+
+def _sanitize_candidate_parts(parts: list | None) -> list | None:
+    """Sanitize candidate parts: scrub control tokens from text on a copy, preserve thought signatures, drop empty text parts."""
+    if parts is None:
+        return None
+    sanitized: list[Any] = []
+    for part in parts:
+        has_sig = (
+            _extract_part_signature(part) is not None
+            or getattr(part, "thought_signature", None) is not None
+            or (isinstance(part, dict) and bool(part.get("thought_signature") or part.get("thoughtSignature")))
+        )
+        if _part_has_fc(part):
+            sanitized.append(part)
+            continue
+        if GeminiAdapter._is_thought_part(part):
+            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if text is not None:
+                for _ in range(4):
+                    new_t = _CONTROL_TOKENS_RE.sub("", text)
+                    if new_t == text:
+                        break
+                    text = new_t
+                sanitized.append(_clone_part_with_text(part, text))
+            else:
+                sanitized.append(part)
+            continue
+
+        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+        if text is not None:
+            for _ in range(4):
+                new_t = _CONTROL_TOKENS_RE.sub("", text)
+                if new_t == text:
+                    break
+                text = new_t
+            if text:
+                sanitized.append(_clone_part_with_text(part, text))
+            elif has_sig:
+                sanitized.append(_clone_part_with_text(part, None))
+        elif has_sig or _is_empty_sig_carrier(part):
+            sanitized.append(part)
+        else:
+            sanitized.append(part)
+    if not sanitized and parts:
+        sanitized.append(_clone_part_with_text(parts[0], ""))
+    return sanitized
 
 
 def _is_function_response_part(part: Any) -> bool:
@@ -621,6 +686,7 @@ class GeminiAdapter:
             "top_p": top_p,
             "max_output_tokens": max_output_tokens,
             "thinking_config": types.ThinkingConfig(**thinking_kwargs),
+            "stop_sequences": ["<end_of_image>"],
         }
         if http_options is not None:
             kwargs["http_options"] = http_options
@@ -992,11 +1058,19 @@ class GeminiAdapter:
         if response.candidates:
             for candidate in response.candidates:
                 if candidate.content and candidate.content.parts:
-                    raw_parts = candidate.content.parts
+                    raw_parts = _sanitize_candidate_parts(candidate.content.parts)
+
+        raw_text = response.text
+        if raw_text:
+            for _ in range(4):
+                new_t = _CONTROL_TOKENS_RE.sub("", raw_text)
+                if new_t == raw_text:
+                    break
+                raw_text = new_t
 
         if response.function_calls:
             fc = response.function_calls[0]
-            clean_text = sanitize_call_syntax(response.text) if response.text else response.text
+            clean_text = sanitize_call_syntax(raw_text) if raw_text else raw_text
             return LLMResponse(
                 function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                 text=clean_text or None,
@@ -1004,7 +1078,7 @@ class GeminiAdapter:
                 usage=token_usage,
             )
 
-        fallback_fc, clean_text = _extract_call_syntax(response.text, tools=tools)
+        fallback_fc, clean_text = _extract_call_syntax(raw_text, tools=tools)
         if fallback_fc:
             return LLMResponse(
                 function_call=fallback_fc,
@@ -1292,15 +1366,23 @@ class GeminiAdapter:
 
             unterminated_logged = call_syntax_overflowed
             if stream_text_buffer:
-                clean_tail, _, held_fragment = scan_call_syntax(stream_text_buffer)
-                if held_fragment:
-                    unterminated_logged = True
-                    logger.warning(
-                        "Gemini stream: stripped unterminated [!call: fragment at stream end (length %d)",
-                        len(held_fragment),
-                    )
-                if clean_tail:
-                    yield LLMChunk(text=clean_tail)
+                for _ in range(4):
+                    new_buf = _CONTROL_TOKENS_RE.sub("", stream_text_buffer)
+                    if new_buf == stream_text_buffer:
+                        break
+                    stream_text_buffer = new_buf
+                if stream_text_buffer and any(p.startswith(stream_text_buffer.lower()) for p in _CONTROL_TOKEN_PREFIXES):
+                    stream_text_buffer = ""
+                if stream_text_buffer:
+                    clean_tail, _, held_fragment = scan_call_syntax(stream_text_buffer)
+                    if held_fragment:
+                        unterminated_logged = True
+                        logger.warning(
+                            "Gemini stream: stripped unterminated [!call: fragment at stream end (length %d)",
+                            len(held_fragment),
+                        )
+                    if clean_tail:
+                        yield LLMChunk(text=clean_tail)
                 stream_text_buffer = ""
 
             _sig_v2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
@@ -1335,6 +1417,8 @@ class GeminiAdapter:
             else:
                 output_parts = non_thought_parts
             all_parts = thought_parts + output_parts
+            if all_parts:
+                all_parts = _sanitize_candidate_parts(all_parts)
 
             if pending_fc is None and accumulated_stream_text and not call_syntax_overflowed:
                 fallback_fc, _ = _extract_call_syntax(

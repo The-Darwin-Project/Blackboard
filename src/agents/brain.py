@@ -1303,6 +1303,8 @@ class Brain:
         self._defer_safety_failures: int = 0
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
+        # Bounded empty output retries per event for steering recovery (VMER-2398)
+        self._empty_output_retries: dict[str, int] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
         self._defer_wake_events: set[str] = set()
         # hold_watch: zero-cost FRIDAY parking for jarvis meta-events
@@ -2949,6 +2951,7 @@ class Brain:
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
+            self._empty_output_retries.pop(event_id, None)
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
                 response_parts=captured_parts,
@@ -2968,6 +2971,7 @@ class Brain:
 
         clean_text = sanitize_call_syntax(accumulated_text)
         if clean_text:  # Text-only response is always terminal -- no tool, loop ends
+            self._empty_output_retries.pop(event_id, None)
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
@@ -2990,16 +2994,63 @@ class Brain:
                 # waiting for the user exactly like wait_for_user does, and that state must
                 # never auto-close regardless of duration (see @ai-rules #50).
                 self._waiting_for_user[event_id] = time.time()
-        elif accumulated_text:
+            self._reasoning_by_event.pop(event_id, None)
+            return False
+
+        if accumulated_text:
             logger.warning(
                 f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)})"
             )
 
         self._reasoning_by_event.pop(event_id, None)
-        if clean_text or accumulated_thoughts:
-            return False
+        retries = self._empty_output_retries.get(event_id, 0)
+        if retries < 2:
+            self._empty_output_retries[event_id] = retries + 1
+            evidence = getattr(event, "event", None) and getattr(event.event, "evidence", None)
+            current_domain = (
+                getattr(evidence, "brain_domain", None)
+                or getattr(evidence, "domain", None)
+                or context_flags.get("event_domain")
+                or "unknown"
+            )
+            eligible_names = [
+                str(t.get("name") if isinstance(t, dict) else getattr(t, "name", t))
+                for t in (active_tools or [])
+                if t
+            ]
+            steering_text = (
+                f"Empty response detected. Phase: {brain_phase}, Domain: {current_domain}. "
+                f"Eligible tools: {', '.join(eligible_names)}."
+            )
+            steering_turn = ConversationTurn(
+                turn=0,
+                actor="system",
+                action="steering",
+                thoughts=steering_text,
+            )
+            try:
+                await self._append_and_broadcast(event_id, steering_turn)
+            except Exception as e:
+                logger.warning(f"Failed to append empty output steering turn for {event_id}: {e}")
+            return True
 
-        logger.warning(f"Brain LLM returned empty response for {event_id}")
+        self._empty_output_retries.pop(event_id, None)
+        logger.warning(f"Brain LLM returned empty response for {event_id} after {retries} retries; stopping loop")
+        if getattr(event, "source", None) in ("slack", "chat"):
+            self._waiting_for_user[event_id] = time.time()
+            try:
+                error_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="response",
+                    waitingFor="user",
+                    thoughts="I encountered an issue generating a response. Please try again or rephrase your request.",
+                )
+                await self._append_and_broadcast(event_id, error_turn)
+            except Exception as e:
+                logger.warning(f"Failed to post empty output error response for {event_id}: {e}")
+        else:
+            await self._defer_event_safely(event_id, 300, reason="empty_output_retries_exhausted")
         return False
 
     @staticmethod
@@ -6525,6 +6576,7 @@ class Brain:
         self._thinking_bypass_count.pop(event_id, None)
         self._escalated_thinking_events.discard(event_id)
         self._reasoning_by_event.pop(event_id, None)
+        self._empty_output_retries.pop(event_id, None)
         self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)

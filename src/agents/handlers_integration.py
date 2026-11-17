@@ -728,6 +728,16 @@ async def handle_refresh_kargo_context(
         if new_mr_url and new_mr_url != old_mr_url:
             await bb.update_event_kargo_context(event_id, {"mr_url": new_mr_url})
             logger.info(f"Updated kargo_context.mr_url for {event_id}: {new_mr_url}")
+            from ..utils.vcs_approval import parse_mr_url
+            parsed = parse_mr_url(new_mr_url)
+            if parsed:
+                project_id, mr_iid = parsed
+                await bb.update_event_gitlab_context(event_id, {
+                    "target_url": new_mr_url,
+                    "project_id": str(project_id),
+                    "mr_iid": int(mr_iid),
+                })
+                logger.info(f"Updated gitlab_context for {event_id}: project_id={project_id}, mr_iid={mr_iid}")
         result_text = (
             f"Kargo Stage: {stage}@{project}\n"
             f"Promotion: {state.get('promotion', '?')}\n"

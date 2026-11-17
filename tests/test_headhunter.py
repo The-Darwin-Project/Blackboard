@@ -278,6 +278,28 @@ class TestEventCreation:
         ev = captured_evidence[0]
         assert ev.gitlab_context["todo_created_at"] == "2026-04-09T10:00:00Z"
 
+    @pytest.mark.asyncio
+    async def test_head_sha_flows_from_todo_target_to_evidence(self):
+        """T-7: create_headhunter_event extracts target.sha / diff_refs.head_sha and stores head_sha in gitlab_context."""
+        bb = StubBlackboard()
+        captured_evidence = []
+        async def capture_create(source, service, reason, evidence):
+            captured_evidence.append(evidence)
+            return "evt-test-0001"
+        bb.create_event = capture_create
+
+        hh = _make_headhunter(blackboard=bb)
+        todo = _make_todo()
+        todo["target"]["sha"] = "d461a00c1234567890abcdef"
+        context = {"action_name": "assigned", "pipeline_status": "success"}
+
+        await hh.create_headhunter_event(todo, "plan", context)
+
+        assert len(captured_evidence) == 1
+        ev = captured_evidence[0]
+        assert ev.gitlab_context.get("head_sha") == "d461a00c1234567890abcdef"
+        assert ev.gitlab_context.get("sha") == "d461a00c1234567890abcdef"
+
 
 # =========================================================================
 # Service Resolution Tests
@@ -410,6 +432,45 @@ class TestRefreshMrState:
         assert result["mr_state"] == "merged"
         assert result["severity"] == "info"
         bb.update_event_gitlab_context.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_mr_state_captures_head_sha_and_encodes_project_id(self):
+        """T-7: refresh_mr_state captures head_sha into result and encodes project_id with quote(safe='')."""
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context(action_name="assigned")
+        event.event.evidence.gitlab_context["project_id"] = "openshift-virtualization/downstream-configuration"
+        bb.get_event = AsyncMock(return_value=event)
+        bb.update_event_gitlab_context = AsyncMock()
+        hh = _make_headhunter(blackboard=bb)
+
+        mr_json = {
+            "state": "opened",
+            "merge_status": "can_be_merged",
+            "sha": "d461a00c1234567890abcdef",
+        }
+        pipeline_json = [{"status": "success"}]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.is_success = True; mr_resp.status_code = 200; mr_resp.json.return_value = mr_json
+            pipe_resp = MagicMock(); pipe_resp.is_success = True; pipe_resp.json.return_value = pipeline_json
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[mr_resp, pipe_resp])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-001")
+
+        assert result.get("head_sha") == "d461a00c1234567890abcdef"
+        assert result.get("sha") == "d461a00c1234567890abcdef"
+        bb.update_event_gitlab_context.assert_called_once()
+        update_payload = bb.update_event_gitlab_context.call_args[0][1]
+        assert update_payload.get("head_sha") == "d461a00c1234567890abcdef"
+
+        # Check that request URL used encoded project_id
+        mr_get_call = mock_client.get.call_args_list[0]
+        url = mr_get_call[0][0]
+        assert "openshift-virtualization%2Fdownstream-configuration" in url
 
     @pytest.mark.asyncio
     async def test_event_not_found(self):

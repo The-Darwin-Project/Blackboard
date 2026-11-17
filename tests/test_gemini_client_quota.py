@@ -2029,4 +2029,209 @@ class TestGemini4UnaryStreamTtfbTimeoutAndHelmExposure:
             )
 
 
+class TestControlTokenScrubbingAndHoldback:
+    """T-1, T-2, T-2b, T-5: Model Control Token Scrubbing, Streaming Holdback & Memory Part Sanitization."""
+
+    def test_sanitize_call_syntax_strips_control_tokens_multi_pass(self):
+        """T-1: Given raw LLM text with 23 repetitions of <end_of_image>, all are removed and result is None."""
+        from src.agents.llm.types import sanitize_call_syntax
+
+        raw = "<end_of_image>" * 23
+        cleaned = sanitize_call_syntax(raw)
+        assert cleaned is None
+
+        mixed = "<thought>internal reasoning</thought><end_of_image>Clean user response<start_of_turn>model<end_of_turn>"
+        cleaned_mixed = sanitize_call_syntax(mixed)
+        assert cleaned_mixed == "internal reasoningClean user responsemodel"
+        assert "<" not in cleaned_mixed
+        assert ">" not in cleaned_mixed
+
+    def test_prompt_sanitize_strip_xml_fences_nested_control_tokens(self):
+        """T-1: strip_xml_fences strips nested control tokens across multi-pass loop (_FENCE_MAX_PASSES = 8)."""
+        from src.utils.prompt_sanitize import strip_xml_fences
+
+        nested = "<end_<end_of_image>of_image>"
+        assert strip_xml_fences(nested) == ""
+
+        nested_tags = "<image><think>nested reasoning</think></image>"
+        assert strip_xml_fences(nested_tags) == "nested reasoning"
+
+    @pytest.mark.parametrize("suffix", ["<end_of_", "</thought", "</think", "<image", "</image"])
+    def test_split_stream_call_syntax_holds_back_control_token_prefixes(self, suffix):
+        """T-2: split_stream_call_syntax holds back open and closing control token prefixes across chunks."""
+        from src.agents.llm.types import split_stream_call_syntax
+
+        buffer = "safe to yield prefix" + suffix
+        to_yield, held_back, overflowed = split_stream_call_syntax(buffer)
+        assert to_yield == "safe to yield prefix"
+        assert held_back == suffix
+        assert overflowed is False
+
+    @pytest.mark.asyncio
+    async def test_stream_tail_flush_discards_control_token_prefix(self):
+        """T-2b: Stream tail flush discards any partial control token prefix at stream end."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        chunk1 = MagicMock()
+        chunk1.text = "Hello world<end_of_"
+        chunk1.candidates = []
+        chunk1.function_calls = []
+        chunk1.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk1
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        yielded_texts = []
+        async for chunk in adapter.generate_stream(system_prompt="sys", contents="user"):
+            if chunk.text:
+                yielded_texts.append(chunk.text)
+
+        full_output = "".join(yielded_texts)
+        assert full_output == "Hello world"
+        assert "<end_of_" not in full_output
+
+    @pytest.mark.asyncio
+    async def test_gemini_client_preserves_thought_signature_on_copy(self):
+        """T-5: raw_parts sanitization preserves parts carrying thought_signature and drops empty text parts."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        sig_part = MagicMock(function_call=None, functionCall=None)
+        sig_part.thought_signature = b"durable-sig-bytes-1234"
+        sig_part.text = None
+
+        text_part = MagicMock(function_call=None, functionCall=None)
+        text_part.thought_signature = None
+        text_part.text = "<end_of_image>"
+
+        valid_part = MagicMock(function_call=None, functionCall=None)
+        valid_part.thought_signature = None
+        valid_part.text = "Valid answer<end_of_image>"
+
+        candidate = MagicMock()
+        candidate.content.parts = [sig_part, text_part, valid_part]
+
+        chunk = MagicMock()
+        chunk.text = "Valid answer<end_of_image>"
+        chunk.candidates = [candidate]
+        chunk.function_calls = []
+        chunk.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        final_chunk = None
+        async for c in adapter.generate_stream(system_prompt="sys", contents="user"):
+            if c.done:
+                final_chunk = c
+
+        assert final_chunk is not None
+        assert final_chunk.raw_parts is not None
+        # Must preserve thought_signature carrier
+        has_sig = any(getattr(p, "thought_signature", None) == b"durable-sig-bytes-1234" for p in final_chunk.raw_parts)
+        assert has_sig is True
+        # Must scrub control tokens from all text parts
+        assert not any("<end_of_image>" in (getattr(p, "text", None) or "") for p in final_chunk.raw_parts)
+        # Must drop pure control token part (<end_of_image> scrubbed to empty), leaving sig_part and valid_part
+        assert len(final_chunk.raw_parts) == 2
+
+    @pytest.mark.asyncio
+    async def test_unary_generate_scrubs_control_tokens_from_text(self):
+        """Unary generate() scrubs control tokens from returned text and raw_parts."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+        mock_response = MagicMock()
+        mock_response.function_calls = []
+        mock_response.text = "Operational status: green<end_of_image>"
+        mock_response.candidates = []
+        mock_response.usage_metadata = None
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+        res = await adapter.generate(system_prompt="sys", contents="user")
+        assert res.text == "Operational status: green"
+        assert "<end_of_image>" not in (res.text or "")
+
+
+class TestControlTokenScrubbingInStreaming:
+    """C6-01 / C6-03 / C6-04: Test control token scrubbing and prefix holdback in split_stream_call_syntax."""
+
+    def test_split_stream_scrubs_complete_control_tokens(self):
+        from src.agents.llm.types import split_stream_call_syntax
+
+        emitted, tail, overflowed = split_stream_call_syntax("Hello world<end_of_image> how are you?")
+        assert emitted == "Hello world how are you?"
+        assert tail == ""
+        assert overflowed is False
+
+    def test_split_stream_holds_back_partial_prefix(self):
+        from src.agents.llm.types import split_stream_call_syntax
+
+        emitted, tail, overflowed = split_stream_call_syntax("Thinking about this... <end_of_")
+        assert emitted == "Thinking about this... "
+        assert tail == "<end_of_"
+        assert overflowed is False
+
+        emitted2, tail2, overflowed2 = split_stream_call_syntax(tail + "image> Done!")
+        assert emitted2 == " Done!"
+        assert tail2 == ""
+        assert overflowed2 is False
+
+    def test_split_stream_preserves_svg_and_html_image_tags(self):
+        from src.agents.llm.types import split_stream_call_syntax
+
+        svg_chunk = '<svg><image href="data:image/png;base64,123"/></svg>'
+        emitted, tail, overflowed = split_stream_call_syntax(svg_chunk)
+        assert '<image href="data:image/png;base64,123"/>' in emitted
+        assert overflowed is False
+
+    @pytest.mark.asyncio
+    async def test_stream_tail_flush_discards_partial_prefixes(self):
+        """C6-01: Tail flush on stream end discards trailing buffer if it matches any control token prefix."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        chunk = MagicMock()
+        chunk.text = "Analysis complete. </"
+        chunk.candidates = []
+        chunk.function_calls = []
+        chunk.usage_metadata = None
+
+        async def fake_stream():
+            yield chunk
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        received_texts = []
+        async for c in adapter.generate_stream(system_prompt="sys", contents="user"):
+            if c.text:
+                received_texts.append(c.text)
+
+        full_text = "".join(received_texts)
+        assert "Analysis complete." in full_text
+        assert "</" not in full_text
+
+
+
 

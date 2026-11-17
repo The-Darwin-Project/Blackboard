@@ -64,8 +64,13 @@ _FENCE_TAGS = (
 # The decay-reference OPEN tag is removed WITH its attributes (bounded, no nested quantifier): leaving
 # `turn="9" tool="x">` behind would splice garbage into whatever the tag was embedded in.
 _EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"
+_CONTROL_TOKEN_PATTERN = r"<\/?(?:end_of_image|start_of_turn|end_of_turn|internal_model_call)\s*>|<\/?(?:image|thought|think)\s*>"
 _FENCE_RE = re.compile(
-    "|".join([_EVIDENCE_OPEN] + [re.escape(t) for t in sorted(_FENCE_TAGS, key=len, reverse=True)])
+    "|".join(
+        [_EVIDENCE_OPEN, _CONTROL_TOKEN_PATTERN]
+        + [re.escape(t) for t in sorted(_FENCE_TAGS, key=len, reverse=True)]
+    ),
+    re.IGNORECASE,
 )
 _DASH_RUN_RE = re.compile(r"-{3,}")
 # Nested-split depth beyond this is adversarial; bounding the passes keeps the sanitizer O(passes * n).

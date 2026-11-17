@@ -81,6 +81,7 @@ _INTERNAL_TURNS = frozenset(
         ("brain", "hold_watch_wake"), ("brain", "think"),
         ("brain", "plan"),
         ("system", "notification"),
+        ("system", "steering"),
         ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
         ("dispatcher", "acknowledge"), ("dispatcher", "connected"),
         ("dispatcher", "paused"), ("dispatcher", "failed"),
