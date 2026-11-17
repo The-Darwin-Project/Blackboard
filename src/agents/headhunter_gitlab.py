@@ -8,6 +8,12 @@
 # 5. [Pattern]: _load_gitlab_si() loads from headhunter_skills/gitlab-mr-triage.md with emergency fallback.
 # 6. [Gotcha]: merge_status excluded from state_key (flaps during active pipelines).
 # 7. [Pattern]: GITLAB_HOST normalization: strip scheme BEFORE trailing slash.
+# 8. [Security]: Every httpx client uses verify=self._verify (vcs_approval.resolve_ca_bundle, re-read per
+#    call). TLS verification is NEVER disabled; __init__ calls resolve_ca_bundle() once so an insecure
+#    GITLAB_SSL_VERIFY=false raises ValueError at startup instead of at the first poll.
+# 9. [Gotcha]: project_id may be a numeric id OR a path ("group/proj", seeded by Kargo gitlab_context). Any
+#    URL that interpolates a gitlab_context/StateWatcher project_id MUST go through _enc_project_id()
+#    (quote(unquote(...), safe="")); a raw "/" would split the API path.
 """
 GitLab Platform Adapter for Headhunter.
 
@@ -19,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +34,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from ..utils import vcs_approval as _vcs_approval
 from .headhunter_utils import _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
@@ -115,6 +123,17 @@ class GitLabPlatform:
         self._gitlab_token: str | None = None
         self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
         self._smartsheet_cache = None
+        # Fail fast: GITLAB_SSL_VERIFY=false/0/no raises ValueError here, at startup.
+        _vcs_approval.resolve_ca_bundle(self._gitlab_host)
+
+    @property
+    def _verify(self) -> str | bool:
+        return _vcs_approval.resolve_ca_bundle(self._gitlab_host)
+
+    @staticmethod
+    def _enc_project_id(project_id: int | str) -> str:
+        """URL-encode a numeric id or path-style project id exactly once (idempotent on %2F)."""
+        return urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -151,7 +170,7 @@ class GitLabPlatform:
         page = 1
         per_page = 100
         max_pages = 20
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             while page <= max_pages:
                 resp = await client.get(
                     self._api_url("/todos"),
@@ -220,7 +239,7 @@ class GitLabPlatform:
             "target_url": todo.get("target_url", "").split("#")[0],
         }
 
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             headers = self._headers()
             changes_resp = await client.get(
                 self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/changes"),
@@ -343,6 +362,7 @@ class GitLabPlatform:
         severity = self.classify_severity(action_name, pipeline_status)
         maintainer = await self.resolve_maintainer(project_path, todo)
         logger.info(f"GitLab severity: {severity} for {action_name}/{pipeline_status}")
+        head_sha = target.get("sha") or (target.get("diff_refs") or {}).get("head_sha")
         evidence = EventEvidence(
             display_text=f"GitLab: {action_name} on !{target['iid']} in {project_path}",
             source_type="headhunter",
@@ -368,6 +388,8 @@ class GitLabPlatform:
                 "todo_created_at": todo.get("created_at", ""),
                 "mr_description": (target.get("description") or "")[:_DESC_SAFETY_CAP],
                 "maintainer": maintainer,
+                "head_sha": head_sha,
+                "sha": head_sha,
             },
         )
         resolved_service = await self._resolve_service(project_path)
@@ -407,7 +429,7 @@ class GitLabPlatform:
                 await self.blackboard.mark_feedback_sent(event.id)
                 logger.info(f"GitLab duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid}")
                 return
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
                 headers = self._headers()
                 dismiss = await client.post(
                     self._api_url(f"/todos/{todo_id}/mark_as_done"), headers=headers,
@@ -424,11 +446,12 @@ class GitLabPlatform:
             return
 
         outcome = self._build_feedback_comment(event, close_reason)
+        encoded_project_id = self._enc_project_id(project_id)
 
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             headers = self._headers()
             resp = await client.post(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/notes"),
                 headers=headers,
                 json={"body": outcome},
             )
@@ -477,12 +500,14 @@ class GitLabPlatform:
         if not project_id or not mr_iid:
             return {"error": "No MR reference available. Supply mr_url or ensure the event has gitlab_context."}
 
+        encoded_project_id = self._enc_project_id(project_id)
         state_changed_at = ""
+        head_sha = (gl_ctx or {}).get("head_sha") or (gl_ctx or {}).get("sha")
         try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
                 headers = self._headers()
                 mr_resp = await client.get(
-                    self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
+                    self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
                     headers=headers,
                 )
                 if mr_resp.status_code == 404:
@@ -500,6 +525,7 @@ class GitLabPlatform:
                     mr_data = mr_resp.json()
                     mr_state = mr_data.get("state", "unknown")
                     merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
+                    head_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha") or head_sha
                     if not source_branch:
                         source_branch = mr_data.get("source_branch", "")
                     if mr_state in ("merged", "closed"):
@@ -516,7 +542,7 @@ class GitLabPlatform:
 
                 pipeline_id = (gl_ctx or {}).get("pipeline_id")
                 pipe_resp = await client.get(
-                    self._api_url(f"/projects/{project_id}/pipelines"),
+                    self._api_url(f"/projects/{encoded_project_id}/pipelines"),
                     headers=headers,
                     params={"ref": source_branch, "order_by": "updated_at", "per_page": "1"},
                 )
@@ -541,6 +567,9 @@ class GitLabPlatform:
             "merge_status": merge_status,
             "severity": severity,
         }
+        if head_sha:
+            result["head_sha"] = head_sha
+            result["sha"] = head_sha
         if mr_state in ("merged", "closed"):
             result["merge_status"] = mr_state
             if state_changed_at:
@@ -550,16 +579,17 @@ class GitLabPlatform:
         logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}")
         return result
 
-    async def poll_gitlab_mr_status(self, project_id: int, mr_iid: int) -> dict:
+    async def poll_gitlab_mr_status(self, project_id: int | str, mr_iid: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Raises on HTTP errors."""
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        encoded_project_id = self._enc_project_id(project_id)
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             mr_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
                 headers=self._headers(),
             )
             mr_resp.raise_for_status()
             pipe_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/pipelines"),
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/pipelines"),
                 headers=self._headers(),
             )
             pipe_resp.raise_for_status()
@@ -579,11 +609,12 @@ class GitLabPlatform:
             "pipeline_status": state.get("pipeline_status", "unknown"),
         }
 
-    async def poll_gitlab_pipeline_status(self, project_id: int, pipeline_id: int) -> dict:
+    async def poll_gitlab_pipeline_status(self, project_id: int | str, pipeline_id: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Returns pipeline status."""
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        encoded_project_id = self._enc_project_id(project_id)
+        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             resp = await client.get(
-                self._api_url(f"/projects/{project_id}/pipelines/{pipeline_id}"),
+                self._api_url(f"/projects/{encoded_project_id}/pipelines/{pipeline_id}"),
                 headers=self._headers(),
             )
             resp.raise_for_status()
@@ -600,21 +631,8 @@ class GitLabPlatform:
     @staticmethod
     def parse_mr_url(url: str) -> tuple[int | str, int] | None:
         """Extract (project_id, mr_iid) from a GitLab MR URL."""
-        import re
-        from urllib.parse import unquote
-        m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        sep = "/-/merge_requests/"
-        if sep in url:
-            left, right = url.split(sep, 1)
-            mr_iid_str = right.split("/")[0].split("?")[0].split("#")[0]
-            if mr_iid_str.isdigit():
-                without_proto = left.split("://", 1)[-1]
-                project_path = without_proto.split("/", 1)[-1]
-                if project_path:
-                    return unquote(project_path), int(mr_iid_str)
-        return None
+        from ..utils.vcs_approval import parse_mr_url
+        return parse_mr_url(url)
 
     async def resolve_project_id(self, path_or_id) -> int | None:
         """Resolve a namespace/project path to a numeric project ID via GitLab API."""
@@ -628,7 +646,7 @@ class GitLabPlatform:
         from urllib.parse import quote
         encoded = quote(str(path_or_id), safe="")
         try:
-            async with httpx.AsyncClient(verify=False, timeout=15) as client:
+            async with httpx.AsyncClient(verify=self._verify, timeout=15) as client:
                 resp = await client.get(
                     self._api_url(f"/projects/{encoded}"),
                     headers=self._headers(),
@@ -693,7 +711,7 @@ class GitLabPlatform:
     async def _resolve_email_from_gitlab(self, username: str) -> str | None:
         """Lookup a GitLab user's email by username."""
         try:
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            async with httpx.AsyncClient(verify=self._verify, timeout=10) as client:
                 resp = await client.get(
                     self._api_url("/users"),
                     headers=self._headers(),

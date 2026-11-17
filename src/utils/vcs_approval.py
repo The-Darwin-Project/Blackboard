@@ -1,12 +1,16 @@
 # BlackBoard/src/utils/vcs_approval.py
 # @ai-rules:
 # 1. [Pattern]: Resolves live MR/PR HEAD commit SHA from VCS platform APIs at approval time to prevent TOCTOU.
-# 2. [Fallback]: Gracefully falls back to cached evidence context if live API query fails or is unconfigured
-#    -- on any non-2xx response or transport exception. Both branches log a warning so a sustained
-#    outage or expired token is operator-visible instead of silently degrading to the cached SHA.
+# 2. [Fail-Closed]: Fails closed returning (mr_iid, None) if live API query fails or is unconfigured
+#    -- on any non-2xx response or transport exception so merge guard refuses merge. Both branches log
+#    a warning so an outage or expired token is operator-visible. This holds for GitHub too: the
+#    cached gh_ctx["head_sha"] is NEVER substituted for a live SHA (it may be stale vs. the pushed HEAD).
 # 3. [Security]: TLS verification is NEVER disabled on these calls -- GITLAB_HOST and
 #    api.github.com are both CA-signed; verify=False would let a MITM forge the live SHA
-#    this module exists to protect against.
+#    this module exists to protect against. resolve_ca_bundle() is the SINGLE trust resolver for
+#    every VCS client (this module AND headhunter_gitlab.py): it raises ValueError on
+#    GITLAB_SSL_VERIFY=0/false/no and only accepts non-empty regular files as CA bundles (an empty
+#    or directory path is skipped, never handed to httpx). `_resolve_ca_bundle` is a back-compat alias.
 # 4. [Pattern]: verify_merge_guard() is the Python REFERENCE implementation of the approval verdict (out-of-band
 #    approval + SHA binding for category 'git_merge'; approval only for 'operational'). The sidecar enforces the same
 #    contract in JS (gemini-sidecar/hooks/merge-guard.js approvalVerdict) -- keep the two in lock-step; the parity is
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -26,6 +31,79 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 logger = logging.getLogger(__name__)
+
+
+def parse_mr_url(url: str) -> tuple[int | str, int] | None:
+    """Extract (project_id, mr_iid) from a GitLab MR URL."""
+    import re
+    from urllib.parse import unquote
+    m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    sep = "/-/merge_requests/"
+    if sep in url:
+        left, right = url.split(sep, 1)
+        mr_iid_str = right.split("/")[0].split("?")[0].split("#")[0]
+        if mr_iid_str.isdigit():
+            without_proto = left.split("://", 1)[-1]
+            project_path = without_proto.split("/", 1)[-1]
+            if project_path:
+                return unquote(project_path), int(mr_iid_str)
+    return None
+
+
+def _usable_ca_file(path: str) -> bool:
+    """True only for a non-empty regular file (an empty/dir path would break or silently weaken TLS)."""
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def resolve_ca_bundle(host: str = "") -> str | bool:
+    """Resolve the CA bundle for VCS TLS verification (path, or True for httpx's default store).
+
+    Raises ValueError when GITLAB_SSL_VERIFY disables verification: verify=False is forbidden for
+    every VCS call (approval SHA resolution and Headhunter GitLab polling alike).
+    """
+    verify_env = os.getenv("GITLAB_SSL_VERIFY")
+    if verify_env is not None:
+        cleaned = verify_env.strip().lower()
+        if cleaned in ("0", "false", "no"):
+            raise ValueError(
+                f"Insecure TLS verification (GITLAB_SSL_VERIFY={verify_env}) is forbidden for VCS API calls"
+            )
+        if cleaned in ("1", "true", "yes"):
+            pass
+        elif _usable_ca_file(verify_env.strip()):
+            return verify_env.strip()
+        else:
+            logger.warning(
+                "GITLAB_SSL_VERIFY path %s does not exist or is not a non-empty file; "
+                "falling back to standard CA search", verify_env,
+            )
+
+    for env_var in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        val = os.getenv(env_var)
+        if val:
+            val_clean = val.strip()
+            if _usable_ca_file(val_clean):
+                return val_clean
+            logger.warning(
+                "%s path %s does not exist or is not a non-empty file; falling back to standard CA search",
+                env_var, val,
+            )
+
+    for std_path in (
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/certs/ca-certificates.crt",
+    ):
+        if _usable_ca_file(std_path):
+            return std_path
+
+    return True
+
+
+# Back-compat alias (tests / older call sites import the underscore name).
+_resolve_ca_bundle = resolve_ca_bundle
 
 
 async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
@@ -40,11 +118,27 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
 
     gl_ctx = getattr(evidence, "gitlab_context", None)
     if isinstance(gl_ctx, dict) and gl_ctx:
-        return await _resolve_gitlab_head(gl_ctx)
+        project_id = gl_ctx.get("project_id")
+        mr_iid = str(gl_ctx.get("mr_iid") or gl_ctx.get("iid") or "")
+        if project_id and mr_iid:
+            return await _resolve_gitlab_head(gl_ctx)
 
     gh_ctx = getattr(evidence, "github_context", None)
     if isinstance(gh_ctx, dict) and gh_ctx:
         return await _resolve_github_head(gh_ctx)
+
+    kargo_ctx = getattr(evidence, "kargo_context", None)
+    if isinstance(kargo_ctx, dict) and kargo_ctx.get("mr_url"):
+        parsed = parse_mr_url(kargo_ctx["mr_url"])
+        if parsed:
+            project_id, mr_iid = parsed
+            return await _resolve_gitlab_head({
+                "project_id": project_id,
+                "mr_iid": mr_iid,
+            })
+
+    if isinstance(gl_ctx, dict) and gl_ctx:
+        return await _resolve_gitlab_head(gl_ctx)
 
     return None, None
 
@@ -52,11 +146,11 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
 async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
     mr_iid = str(gl_ctx.get("mr_iid") or gl_ctx.get("iid") or "")
     project_id = gl_ctx.get("project_id")
-    fallback_sha = gl_ctx.get("head_sha") or gl_ctx.get("sha") or gl_ctx.get("last_commit_id")
 
     if not project_id or not mr_iid:
-        return (mr_iid or None, fallback_sha)
+        return (mr_iid or None, None)
 
+    encoded_project_id = urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
     host = os.getenv("GITLAB_HOST", "").removeprefix("https://").removeprefix("http://").rstrip("/")
     token = ""
     try:
@@ -71,10 +165,10 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
 
     if host and token:
         try:
-            ca_bundle = os.getenv("REQUESTS_CA_BUNDLE") or os.getenv("SSL_CERT_FILE") or True
+            ca_bundle = resolve_ca_bundle(host)
             async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
                 resp = await client.get(
-                    f"https://{host}/api/v4/projects/{project_id}/merge_requests/{mr_iid}",
+                    f"https://{host}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}",
                     headers={"PRIVATE-TOKEN": token},
                 )
                 if resp.is_success:
@@ -84,23 +178,27 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
                         return mr_iid, live_sha
                 else:
                     logger.warning(
-                        "Live GitLab HEAD SHA query for MR !%s returned HTTP %s -- falling back to cached SHA",
+                        "Live GitLab HEAD SHA query for MR !%s returned HTTP %s -- merge guard will refuse unverified SHA",
                         mr_iid, resp.status_code,
                     )
         except Exception as e:
-            logger.warning("Failed live GitLab HEAD SHA query for MR !%s: %s", mr_iid, e)
+            logger.warning("Failed live GitLab HEAD SHA query for MR !%s: %s -- merge guard will refuse unverified SHA", mr_iid, e)
 
-    return mr_iid, fallback_sha
+    return mr_iid, None
 
 
 async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
+    """Resolve the live PR HEAD SHA. Fails closed: (pr_number, None) on ANY failure.
+
+    The cached ``gh_ctx["head_sha"]`` is deliberately ignored -- it is the SHA seen when the event
+    was created and can be stale after a force-push, which is exactly the TOCTOU this module guards.
+    """
     pr_number = str(gh_ctx.get("pr_number") or gh_ctx.get("number") or "")
     owner = gh_ctx.get("owner")
     repo = gh_ctx.get("repo")
-    fallback_sha = gh_ctx.get("head_sha")
 
     if not owner or not repo or not pr_number:
-        return (pr_number or None, fallback_sha)
+        return (pr_number or None, None)
 
     token = os.getenv("GITHUB_TOKEN", "")
     headers = {"Accept": "application/vnd.github+json"}
@@ -108,7 +206,7 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        ca_bundle = os.getenv("REQUESTS_CA_BUNDLE") or os.getenv("SSL_CERT_FILE") or True
+        ca_bundle = resolve_ca_bundle()
         async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
             resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
@@ -119,15 +217,19 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
                 live_sha = (pr_data.get("head") or {}).get("sha")
                 if live_sha:
                     return pr_number, live_sha
+                logger.warning(
+                    "Live GitHub HEAD SHA query for PR #%s returned no head.sha -- merge guard will refuse unverified SHA",
+                    pr_number,
+                )
             else:
                 logger.warning(
-                    "Live GitHub HEAD SHA query for PR #%s returned HTTP %s -- falling back to cached SHA",
+                    "Live GitHub HEAD SHA query for PR #%s returned HTTP %s -- merge guard will refuse unverified SHA",
                     pr_number, resp.status_code,
                 )
     except Exception as e:
-        logger.warning("Failed live GitHub HEAD SHA query for PR #%s: %s", pr_number, e)
+        logger.warning("Failed live GitHub HEAD SHA query for PR #%s: %s -- merge guard will refuse unverified SHA", pr_number, e)
 
-    return pr_number, fallback_sha
+    return pr_number, None
 
 
 def verify_merge_guard(

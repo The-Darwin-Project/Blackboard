@@ -278,6 +278,28 @@ class TestEventCreation:
         ev = captured_evidence[0]
         assert ev.gitlab_context["todo_created_at"] == "2026-04-09T10:00:00Z"
 
+    @pytest.mark.asyncio
+    async def test_head_sha_flows_from_todo_target_to_evidence(self):
+        """T-7: create_headhunter_event extracts target.sha / diff_refs.head_sha and stores head_sha in gitlab_context."""
+        bb = StubBlackboard()
+        captured_evidence = []
+        async def capture_create(source, service, reason, evidence):
+            captured_evidence.append(evidence)
+            return "evt-test-0001"
+        bb.create_event = capture_create
+
+        hh = _make_headhunter(blackboard=bb)
+        todo = _make_todo()
+        todo["target"]["sha"] = "d461a00c1234567890abcdef"
+        context = {"action_name": "assigned", "pipeline_status": "success"}
+
+        await hh.create_headhunter_event(todo, "plan", context)
+
+        assert len(captured_evidence) == 1
+        ev = captured_evidence[0]
+        assert ev.gitlab_context.get("head_sha") == "d461a00c1234567890abcdef"
+        assert ev.gitlab_context.get("sha") == "d461a00c1234567890abcdef"
+
 
 # =========================================================================
 # Service Resolution Tests
@@ -410,6 +432,45 @@ class TestRefreshMrState:
         assert result["mr_state"] == "merged"
         assert result["severity"] == "info"
         bb.update_event_gitlab_context.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_mr_state_captures_head_sha_and_encodes_project_id(self):
+        """T-7: refresh_mr_state captures head_sha into result and encodes project_id with quote(safe='')."""
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context(action_name="assigned")
+        event.event.evidence.gitlab_context["project_id"] = "openshift-virtualization/downstream-configuration"
+        bb.get_event = AsyncMock(return_value=event)
+        bb.update_event_gitlab_context = AsyncMock()
+        hh = _make_headhunter(blackboard=bb)
+
+        mr_json = {
+            "state": "opened",
+            "merge_status": "can_be_merged",
+            "sha": "d461a00c1234567890abcdef",
+        }
+        pipeline_json = [{"status": "success"}]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.is_success = True; mr_resp.status_code = 200; mr_resp.json.return_value = mr_json
+            pipe_resp = MagicMock(); pipe_resp.is_success = True; pipe_resp.json.return_value = pipeline_json
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[mr_resp, pipe_resp])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-001")
+
+        assert result.get("head_sha") == "d461a00c1234567890abcdef"
+        assert result.get("sha") == "d461a00c1234567890abcdef"
+        bb.update_event_gitlab_context.assert_called_once()
+        update_payload = bb.update_event_gitlab_context.call_args[0][1]
+        assert update_payload.get("head_sha") == "d461a00c1234567890abcdef"
+
+        # Check that request URL used encoded project_id
+        mr_get_call = mock_client.get.call_args_list[0]
+        url = mr_get_call[0][0]
+        assert "openshift-virtualization%2Fdownstream-configuration" in url
 
     @pytest.mark.asyncio
     async def test_event_not_found(self):
@@ -723,3 +784,138 @@ class TestPollIssuesAllInstallations:
         hh._github.poll_issues_all_installations.assert_called_once()
         assert hh._github.create_issue_event.call_count == 2
         assert hh._github_issue_pending == 2
+
+
+# =========================================================================
+# TLS verification wiring + path-style project_id quoting (VMER-2398 F3/F12)
+# =========================================================================
+
+def _ok_response(payload=None):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.is_success = True
+    resp.text = ""
+    resp.json.return_value = payload if payload is not None else {}
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _patched_client(*, get=None, post=None):
+    client = AsyncMock()
+    if get is not None:
+        client.get = AsyncMock(side_effect=get)
+    if post is not None:
+        client.post = AsyncMock(side_effect=post)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
+
+
+class TestGitLabTlsVerifyWiring:
+    @pytest.mark.asyncio
+    async def test_clients_use_resolved_ca_bundle_never_false(self, tmp_path):
+        """Every GitLab httpx client gets verify=<resolved CA bundle>, not the former verify=False."""
+        ca = str(tmp_path / "ca.pem")
+        hh = _make_headhunter()
+        with (
+            patch("src.utils.vcs_approval.resolve_ca_bundle", return_value=ca),
+            patch("httpx.AsyncClient") as mock_cls,
+        ):
+            mock_cls.return_value = _patched_client(get=lambda *a, **k: _ok_response({"status": "success"}))
+            await hh._gitlab.poll_gitlab_pipeline_status(100, 7)
+
+        assert mock_cls.call_args.kwargs["verify"] == ca
+        assert mock_cls.call_args.kwargs["verify"] is not False
+
+    def test_verify_property_tracks_environment_per_call(self, monkeypatch, tmp_path):
+        """_verify is re-resolved per access, so a CA bundle rotated in via env is picked up."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("cert")
+        for k in ("GITLAB_SSL_VERIFY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+            monkeypatch.delenv(k, raising=False)
+        hh = _make_headhunter()
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca))
+        assert hh._gitlab._verify == str(ca)
+
+    @pytest.mark.parametrize("val", ["false", "0", "no", "FALSE"])
+    def test_insecure_gitlab_ssl_verify_fails_fast_at_startup(self, val):
+        """GITLAB_SSL_VERIFY=false must raise at construction, not on the first poll."""
+        from src.agents.headhunter_gitlab import GitLabPlatform
+
+        with patch.dict(os.environ, {"GITLAB_HOST": "gitlab.example.com", "GITLAB_SSL_VERIFY": val}):
+            with pytest.raises(ValueError, match="Insecure TLS verification"):
+                GitLabPlatform(StubBlackboard())
+            with pytest.raises(ValueError, match="Insecure TLS verification"):
+                Headhunter(StubBlackboard())
+
+
+class TestGitLabPathStyleProjectIdQuoting:
+    PATH_ID = "openshift-virtualization/downstream-configuration"
+    ENCODED = "openshift-virtualization%2Fdownstream-configuration"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("project_id", [PATH_ID, ENCODED])
+    async def test_poll_gitlab_pipeline_status_encodes_path_project_id(self, project_id):
+        """Path-style (or already-encoded) project ids must be encoded exactly once."""
+        hh = _make_headhunter()
+        urls: list[str] = []
+
+        async def capture_get(url, **kwargs):
+            urls.append(str(url))
+            return _ok_response({"status": "running"})
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=capture_get)
+            result = await hh._gitlab.poll_gitlab_pipeline_status(project_id, 55)
+
+        assert result == {"pipeline_status": "running"}
+        assert len(urls) == 1
+        assert f"/projects/{self.ENCODED}/pipelines/55" in urls[0]
+        assert "%252F" not in urls[0], "project id was double-encoded"
+
+    @pytest.mark.asyncio
+    async def test_poll_gitlab_pipeline_status_numeric_project_id_unchanged(self):
+        hh = _make_headhunter()
+        urls: list[str] = []
+
+        async def capture_get(url, **kwargs):
+            urls.append(str(url))
+            return _ok_response({"status": "success"})
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=capture_get)
+            await hh._gitlab.poll_gitlab_pipeline_status(100, 9)
+
+        assert urls[0].endswith("/projects/100/pipelines/9")
+
+    @pytest.mark.asyncio
+    async def test_post_feedback_encodes_path_project_id(self):
+        ev = _closed_headhunter_event("resolved", project_id=self.PATH_ID)
+        hh = _make_headhunter()
+        urls: list[str] = []
+
+        async def capture_post(url, **kwargs):
+            urls.append(str(url))
+            return _ok_response()
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(post=capture_post)
+            await hh._gitlab.post_feedback(ev)
+
+        notes = [u for u in urls if u.endswith("/notes")]
+        assert notes and f"/projects/{self.ENCODED}/merge_requests/22/notes" in notes[0]
+
+    @pytest.mark.asyncio
+    async def test_poll_gitlab_mr_status_encodes_path_project_id(self):
+        hh = _make_headhunter()
+        urls: list[str] = []
+
+        async def capture_get(url, **kwargs):
+            urls.append(str(url))
+            return _ok_response({"state": "opened", "merge_status": "can_be_merged"} if len(urls) == 1 else [])
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=capture_get)
+            await hh._gitlab.poll_gitlab_mr_status(self.PATH_ID, 5)
+
+        assert all(f"/projects/{self.ENCODED}/merge_requests/5" in u for u in urls)

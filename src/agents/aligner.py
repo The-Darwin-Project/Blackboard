@@ -731,6 +731,18 @@ class Aligner:
         if await self._check_escalation_gate(service, "kargo"):
             return None
 
+        gitlab_context = None
+        if mr_url:
+            from ..utils.vcs_approval import parse_mr_url
+            parsed = parse_mr_url(mr_url)
+            if parsed:
+                project_id, mr_iid = parsed
+                gitlab_context = {
+                    "target_url": mr_url,
+                    "project_id": str(project_id),
+                    "mr_iid": int(mr_iid),
+                }
+
         from ..models import EventEvidence
         evidence = EventEvidence(
             display_text=f"[kargo] Promotion failed: {stage}@{project} -- {message[:200]}",
@@ -739,6 +751,7 @@ class Aligner:
             domain="clear",
             domain_confidence="assessed",
             severity="warning",
+            gitlab_context=gitlab_context,
             kargo_context={
                 "project": project,
                 "stage": stage,

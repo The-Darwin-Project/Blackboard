@@ -322,6 +322,17 @@ gitlab:
   # - host: GitLab instance hostname (e.g., gitlab.example.com)
   existingSecret: "" # e.g., "darwin-gitlab-token"
 # =============================================================================
+# OpenShift Trusted CA Bundle (injected corporate proxy / root certificates)
+# =============================================================================
+# Default is OFF so a vanilla render has no dependency on an OpenShift-only ConfigMap.
+# Set enabled: true in OpenShift / internal-CA GitLab overlays (GitLab behind a private CA). When
+# enabled, the ConfigMap is mounted WITHOUT `optional: true`: a missing/empty ConfigMap fails the
+# pod at admission instead of silently mounting nothing and leaving SSL_CERT_FILE pointing at a
+# non-existent file. The ConfigMap must exist and carry key `ca-bundle.crt`.
+trustedCaBundle:
+  enabled: false
+  configMapName: "config-trusted-cabundle"
+# =============================================================================
 # ArgoCD CLI Credentials (for agent ArgoCD API access)
 # =============================================================================
 argocd:

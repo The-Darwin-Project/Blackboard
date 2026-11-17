@@ -259,8 +259,16 @@
 #     warn/close callbacks are only reachable via request_user_approval's WAITING_APPROVAL park.
 # 51. [Constraint]: Thinking pulses go through _emit_thinking_pulse ONLY (redacts the full text, then
 #     slices the tail; skips when no new chars since the last pulse). Never call _emit_executive_pulse
-#     with a raw thinking slice. Actor exclusion for participant-input checks uses
-#     _NON_PARTICIPANT_ACTORS ({brain, dispatcher}) -- do not inline actor tuples at new sites.
+#     with a raw thinking slice. Participant-input checks go through _is_participant_turn(turn)
+#     (_NON_PARTICIPANT_ACTORS ({brain, dispatcher}) + _NON_PARTICIPANT_TURNS ({("system","steering")}))
+#     -- do not inline actor tuples at new sites. _compute_processed_up_to also skips steering turns.
+# 52. [Constraint]: Empty-output steering recovery (VMER-2398) in _process_with_llm runs UNDER the
+#     non-reentrant _event_locks[event_id]: never call _defer_event_safely/execute_tool_locked there
+#     (self-deadlock) -- dispatch defer_event via _execute_function_call directly. _empty_output_retries
+#     resets ONLY on real output (single/batch FC, non-empty clean text) and terminal cleanup, never on
+#     exhaustion: non-user events get ONE 300s defer (counter bumped past the cap), then a still-empty
+#     wake records a brain/error turn and stops (no re-defer, no force-close); slack/chat park
+#     _waiting_for_user instead. Thoughts-only turns (no stripped text) stay terminal without steering.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -322,7 +330,7 @@ from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
-from ..utils.prompt_sanitize import strip_xml_fences
+from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
 from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
@@ -780,6 +788,26 @@ _MAX_BATCH_SIZE = 4
 # brain's own output and the dispatcher's synthetic routing/status turns.
 _NON_PARTICIPANT_ACTORS = frozenset({"brain", "dispatcher"})
 
+# Brain-injected recovery guidance (empty-output steering, VMER-2398). Actor is "system" so it is
+# not in _NON_PARTICIPANT_ACTORS (system notifications DO count as input), so it is excluded by
+# (actor, action) instead -- otherwise it would wake/stall the loop it is meant to steer.
+_NON_PARTICIPANT_TURNS = frozenset({("system", "steering")})
+
+# Empty-output steering recovery (VMER-2398): steering retries allowed per event before the
+# exhaustion path (user park for slack/chat, one 300s defer then a terminal error turn otherwise) runs.
+_EMPTY_OUTPUT_MAX_RETRIES = 2
+_EMPTY_OUTPUT_DEFER_SECONDS = 300
+
+
+def _is_steering_turn(turn) -> bool:
+    """True for Brain-injected steering guidance (actor=system, action=steering)."""
+    return (turn.actor, turn.action) in _NON_PARTICIPANT_TURNS
+
+
+def _is_participant_turn(turn) -> bool:
+    """True when ``turn`` is real participant input (not brain/dispatcher output or steering)."""
+    return turn.actor not in _NON_PARTICIPANT_ACTORS and not _is_steering_turn(turn)
+
 
 def _is_automated_nudge(turn) -> bool:
     """True for the Brain health-check nudge turn (actor=user, source=automated).
@@ -881,7 +909,7 @@ def _compute_processed_up_to(
     processed_up_to = turn_snapshot
     for idx in range(turn_snapshot, len(conversation)):
         t = conversation[idx]
-        if t.actor == "brain":
+        if t.actor == "brain" or _is_steering_turn(t):
             processed_up_to = idx + 1
             continue
         ack_len = acknowledged_interrupts.get(t.turn)
@@ -1303,6 +1331,8 @@ class Brain:
         self._defer_safety_failures: int = 0
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
+        # Bounded empty output retries per event for steering recovery (VMER-2398)
+        self._empty_output_retries: dict[str, int] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
         self._defer_wake_events: set[str] = set()
         # hold_watch: zero-cost FRIDAY parking for jarvis meta-events
@@ -1600,7 +1630,7 @@ class Brain:
         if event_id in self._waiting_for_agent:
             _, wait_turn = self._waiting_for_agent[event_id]
             has_response = any(
-                t.status.value == "delivered" and t.actor not in _NON_PARTICIPANT_ACTORS
+                t.status.value == "delivered" and _is_participant_turn(t)
                 for t in event.conversation[wait_turn:]
             )
             if has_response:
@@ -1898,7 +1928,7 @@ class Brain:
             if task_running:
                 routing_turn = self._routing_turn_for_event.get(event_id, 0)
                 has_agent_result = any(
-                    t.actor not in _NON_PARTICIPANT_ACTORS and t.action not in ("message", "plan_step")
+                    _is_participant_turn(t) and t.action not in ("message", "plan_step")
                     and t.turn > routing_turn
                     for t in event.conversation
                 )
@@ -2694,6 +2724,7 @@ class Brain:
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
+            self._empty_output_retries.pop(event_id, None)
 
             batch_halted = False
             last_result = False
@@ -2949,6 +2980,7 @@ class Brain:
 
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             await self._emit_thinking_pulse(event_id, accumulated_thoughts, last_thinking_pulse_len)
+            self._empty_output_retries.pop(event_id, None)
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
                 response_parts=captured_parts,
@@ -2968,6 +3000,7 @@ class Brain:
 
         clean_text = sanitize_call_syntax(accumulated_text)
         if clean_text:  # Text-only response is always terminal -- no tool, loop ends
+            self._empty_output_retries.pop(event_id, None)
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             is_user_park = event.source in ("slack", "chat")
             response_turn = ConversationTurn(
@@ -2990,16 +3023,101 @@ class Brain:
                 # waiting for the user exactly like wait_for_user does, and that state must
                 # never auto-close regardless of duration (see @ai-rules #50).
                 self._waiting_for_user[event_id] = time.time()
-        elif accumulated_text:
+            self._reasoning_by_event.pop(event_id, None)
+            return False
+
+        if accumulated_text:
             logger.warning(
                 f"Brain LLM text on {event_id} produced no valid content after call syntax sanitization (raw length {len(accumulated_text)})"
             )
 
         self._reasoning_by_event.pop(event_id, None)
-        if clean_text or accumulated_thoughts:
+        if accumulated_thoughts and not accumulated_text:
+            # Thoughts-only turn, nothing was stripped: ordinary terminal turn (pre-VMER-2398
+            # behavior). Steering only targets output that scrubbed to empty or never arrived.
             return False
 
-        logger.warning(f"Brain LLM returned empty response for {event_id}")
+        retries = self._empty_output_retries.get(event_id, 0)
+        if retries < _EMPTY_OUTPUT_MAX_RETRIES:
+            self._empty_output_retries[event_id] = retries + 1
+            evidence = getattr(event, "event", None) and getattr(event.event, "evidence", None)
+            current_domain = sanitize_prompt_text(
+                getattr(evidence, "brain_domain", None)
+                or getattr(evidence, "domain", None)
+                or context_flags.get("event_domain")
+                or "unknown",
+                max_len=PROMPT_NAME_MAX_LEN,
+            ) or "unknown"
+            eligible_names = [
+                str(t.get("name") if isinstance(t, dict) else getattr(t, "name", t))
+                for t in (active_tools or [])
+                if t
+            ]
+            steering_text = (
+                f"Empty response detected. Phase: {brain_phase}, Domain: {current_domain}. "
+                f"Eligible tools: {', '.join(eligible_names)}."
+            )
+            steering_turn = ConversationTurn(
+                turn=0,
+                actor="system",
+                action="steering",
+                thoughts=steering_text,
+            )
+            try:
+                await self._append_and_broadcast(event_id, steering_turn)
+            except Exception as e:
+                logger.warning(f"Failed to append empty output steering turn for {event_id}: {e}")
+            return True
+
+        logger.warning(f"Brain LLM returned empty response for {event_id} after {retries} retries; stopping loop")
+        if getattr(event, "source", None) in ("slack", "chat"):
+            # User park breaks the loop; the user's next message starts a fresh budget.
+            self._empty_output_retries.pop(event_id, None)
+            self._waiting_for_user[event_id] = time.time()
+            try:
+                error_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="response",
+                    waitingFor="user",
+                    thoughts="I encountered an issue generating a response. Please try again or rephrase your request.",
+                )
+                await self._append_and_broadcast(event_id, error_turn)
+            except Exception as e:
+                logger.warning(f"Failed to post empty output error response for {event_id}: {e}")
+            return False
+
+        # Non-user-facing event. The counter is deliberately NOT reset here: resetting would give
+        # every defer wake a fresh set of steering retries and loop forever. It stays at the cap
+        # (a wake gets one LLM call, no steering retries) and is bumped past it once the single
+        # exhaustion defer has been issued; a wake that is still empty after that records an error
+        # turn (same shape as stream-timeout exhaustion) and stops -- no re-defer, no force-close.
+        if retries > _EMPTY_OUTPUT_MAX_RETRIES:
+            logger.warning(
+                f"Brain LLM still empty for {event_id} after post-exhaustion defer; recording error and stopping"
+            )
+            try:
+                error_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="error",
+                    thoughts="LLM produced no tool call or valid output after steering retries and a deferred wake",
+                )
+                await self._append_and_broadcast(event_id, error_turn)
+            except Exception as e:
+                logger.warning(f"Failed to post empty output error turn for {event_id}: {e}")
+            return False
+
+        # Direct dispatch, NOT _defer_event_safely/execute_tool_locked: we already hold the
+        # non-reentrant per-event lock (_process_event_inner), so re-acquiring it would deadlock.
+        try:
+            await self._execute_function_call(
+                event_id, "defer_event",
+                {"delay_seconds": _EMPTY_OUTPUT_DEFER_SECONDS, "reason": "empty_output_retries_exhausted"},
+            )
+            self._empty_output_retries[event_id] = retries + 1
+        except Exception as e:
+            logger.warning(f"Failed to defer {event_id} after empty output retries exhausted: {e}")
         return False
 
     @staticmethod
@@ -4509,11 +4627,11 @@ class Brain:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
                     header_separated = True
-                if turn.actor not in _NON_PARTICIPANT_ACTORS:
+                if _is_participant_turn(turn):
                     last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
                 contents[-1]["parts"].extend(parts)
             else:
-                if turn.actor not in _NON_PARTICIPANT_ACTORS:
+                if _is_participant_turn(turn):
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
 
@@ -6525,6 +6643,7 @@ class Brain:
         self._thinking_bypass_count.pop(event_id, None)
         self._escalated_thinking_events.discard(event_id)
         self._reasoning_by_event.pop(event_id, None)
+        self._empty_output_retries.pop(event_id, None)
         self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)
@@ -7215,7 +7334,7 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                    has_new_input = any(t.actor not in _NON_PARTICIPANT_ACTORS for t in unseen)
+                    has_new_input = any(_is_participant_turn(t) for t in unseen)
                     if has_new_input:
                         has_huddle = any(t.action == "huddle" for t in unseen)
                         if has_huddle:
@@ -7321,11 +7440,11 @@ class Brain:
                 # scan iteration still needs participant-input gating.
                 _, wait_turn = self._waiting_for_agent[eid]
                 # Edge-triggered: fresh sent turns from this scan cycle
-                has_participant_input = any(t.actor not in _NON_PARTICIPANT_ACTORS for t in unseen)
+                has_participant_input = any(_is_participant_turn(t) for t in unseen)
                 # Level-triggered: delivered non-brain turns AFTER wait was set
                 if not has_participant_input:
                     has_participant_input = any(
-                        t.status.value == "delivered" and t.actor not in _NON_PARTICIPANT_ACTORS
+                        t.status.value == "delivered" and _is_participant_turn(t)
                         for t in event.conversation[wait_turn:]
                     )
                 if not has_participant_input:

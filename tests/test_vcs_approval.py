@@ -80,7 +80,7 @@ class TestResolveGitlabHead:
         ):
             mr_id, sha = await _resolve_gitlab_head(gl_ctx)
         assert mr_id == "7"
-        assert sha == "stale-sha"
+        assert sha is None
         assert any("401" in r.message or "HTTP" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -98,7 +98,7 @@ class TestResolveGitlabHead:
         ):
             mr_id, sha = await _resolve_gitlab_head(gl_ctx)
         assert mr_id == "7"
-        assert sha == "stale-sha"
+        assert sha is None
         assert any("Failed live GitLab" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -113,7 +113,7 @@ class TestResolveGitlabHead:
         ):
             mr_id, sha = await _resolve_gitlab_head(gl_ctx)
         assert mr_id == "7"
-        assert sha == "stale-sha"
+        assert sha is None
 
     @pytest.mark.asyncio
     async def test_missing_token_skips_network_call_and_falls_back(self):
@@ -126,7 +126,7 @@ class TestResolveGitlabHead:
         ):
             mr_id, sha = await _resolve_gitlab_head(gl_ctx)
         assert mr_id == "7"
-        assert sha == "stale-sha"
+        assert sha is None
         mock_client_cls.assert_not_called()
 
     @pytest.mark.asyncio
@@ -136,12 +136,50 @@ class TestResolveGitlabHead:
         with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
             mr_id, sha = await _resolve_gitlab_head(gl_ctx)
         assert mr_id == "7"
-        assert sha == "stale-sha"
+        assert sha is None
         mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_gitlab_head_url_encodes_namespaced_project_id(self):
+        """T-8: Given project_id with slashes, API URL path encodes with quote(safe='')."""
+        gl_ctx = {
+            "mr_iid": "7",
+            "project_id": "openshift-virtualization/downstream-configuration",
+            "head_sha": "stale-sha",
+        }
+        resp = _resp(200, {"sha": "live-sha-encoded"})
+        mock_client_cls = _mock_client(get_return=resp)
+        with (
+            patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls),
+            patch.dict("os.environ", {"GITLAB_HOST": "gitlab.example.com", "GITLAB_TOKEN": "tok"}),
+            patch("src.utils.gitlab_token.get_gitlab_auth", return_value=None),
+        ):
+            mr_id, sha = await _resolve_gitlab_head(gl_ctx)
+
+        assert mr_id == "7"
+        assert sha == "live-sha-encoded"
+        call_args = mock_client_cls.return_value.__aenter__.return_value.get.call_args
+        requested_url = call_args[0][0]
+        assert "openshift-virtualization%2Fdownstream-configuration" in requested_url
+
+    @pytest.mark.asyncio
+    async def test_resolve_gitlab_head_http_500_fails_closed_returns_mr_iid_none(self, caplog):
+        """T-10b: Given GitLab API returns HTTP 500, return (mr_iid, None) fail-closed."""
+        gl_ctx = {"mr_iid": "25", "project_id": "123", "head_sha": "stale-sha"}
+        resp = _resp(500)
+        with (
+            patch("src.utils.vcs_approval.httpx.AsyncClient", _mock_client(get_return=resp)),
+            patch.dict("os.environ", {"GITLAB_HOST": "gitlab.example.com", "GITLAB_TOKEN": "tok"}),
+            patch("src.utils.gitlab_token.get_gitlab_auth", return_value=None),
+            caplog.at_level("WARNING"),
+        ):
+            mr_id, sha = await _resolve_gitlab_head(gl_ctx)
+        assert mr_id == "25"
+        assert sha is None
 
 
 class TestResolveGithubHead:
-    """Dedicated unit coverage for _resolve_github_head's live-query + fallback branches."""
+    """Dedicated unit coverage for _resolve_github_head's live-query + fail-closed branches (F8)."""
 
     @pytest.mark.asyncio
     async def test_success_returns_live_sha(self):
@@ -153,7 +191,7 @@ class TestResolveGithubHead:
         assert sha == "live-sha-xyz"
 
     @pytest.mark.asyncio
-    async def test_non_2xx_response_falls_back_and_logs(self, caplog):
+    async def test_non_2xx_response_fails_closed_and_logs(self, caplog):
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         resp = _resp(404)  # renamed/deleted PR
         with (
@@ -162,11 +200,11 @@ class TestResolveGithubHead:
         ):
             pr_number, sha = await _resolve_github_head(gh_ctx)
         assert pr_number == "265"
-        assert sha == "stale-sha"
+        assert sha is None, "stale cached head_sha must never be substituted for a live SHA"
         assert any("404" in r.message or "HTTP" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_broad_exception_falls_back_and_logs(self, caplog):
+    async def test_broad_exception_fails_closed_and_logs(self, caplog):
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         with (
             patch(
@@ -177,17 +215,36 @@ class TestResolveGithubHead:
         ):
             pr_number, sha = await _resolve_github_head(gh_ctx)
         assert pr_number == "265"
-        assert sha == "stale-sha"
+        assert sha is None
         assert any("Failed live GitHub" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_malformed_json_body_falls_back(self):
+    async def test_malformed_json_body_fails_closed(self):
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         resp = _resp(200, json_side_effect=ValueError("not json"))
         with patch("src.utils.vcs_approval.httpx.AsyncClient", _mock_client(get_return=resp)):
             pr_number, sha = await _resolve_github_head(gh_ctx)
         assert pr_number == "265"
-        assert sha == "stale-sha"
+        assert sha is None
+
+    @pytest.mark.asyncio
+    async def test_success_without_head_sha_fails_closed(self):
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        resp = _resp(200, {"head": {}})
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", _mock_client(get_return=resp)):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+        assert (pr_number, sha) == ("265", None)
+
+    @pytest.mark.asyncio
+    async def test_insecure_gitlab_ssl_verify_fails_closed_without_network(self, monkeypatch):
+        """resolve_ca_bundle() raising ValueError (GITLAB_SSL_VERIFY=false) is caught: no live SHA, no client."""
+        monkeypatch.setenv("GITLAB_SSL_VERIFY", "false")
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
+        mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live"}}))
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+        assert (pr_number, sha) == ("265", None)
+        mock_client_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_token_still_queries_without_auth_header(self):
@@ -205,28 +262,35 @@ class TestResolveGithubHead:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("env_name", ["REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"])
-    async def test_live_sha_client_uses_ca_bundle_verify(self, monkeypatch, env_name):
+    async def test_live_sha_client_uses_ca_bundle_verify(self, monkeypatch, tmp_path, env_name):
         """GitHub live-SHA call passes the configured CA bundle as verify= and never False."""
+        ca_file = tmp_path / "ca-bundle.crt"
+        ca_file.write_text("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n")
+        monkeypatch.delenv("GITLAB_SSL_VERIFY", raising=False)
         monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-        monkeypatch.setenv(env_name, "/etc/pki/tls/certs/ca-bundle.crt")
+        monkeypatch.setenv(env_name, str(ca_file))
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
         with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
             _, sha = await _resolve_github_head(gh_ctx)
         assert sha == "live-sha-xyz"
         kwargs = mock_client_cls.call_args.kwargs
-        assert kwargs["verify"] == "/etc/pki/tls/certs/ca-bundle.crt"
+        assert kwargs["verify"] == str(ca_file)
         assert kwargs["verify"] is not False
 
     @pytest.mark.asyncio
     async def test_live_sha_client_defaults_to_system_trust_when_no_bundle(self, monkeypatch):
-        """No CA env configured: verify=True (system trust store), never disabled."""
+        """No CA env configured and no standard bundle on disk: verify=True, never disabled."""
+        monkeypatch.delenv("GITLAB_SSL_VERIFY", raising=False)
         monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
-        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
+        with (
+            patch("src.utils.vcs_approval._usable_ca_file", return_value=False),
+            patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls),
+        ):
             await _resolve_github_head(gh_ctx)
         assert mock_client_cls.call_args.kwargs["verify"] is True
 
@@ -236,7 +300,8 @@ class TestResolveGithubHead:
         mock_client_cls = _mock_client(get_return=_resp(200, {}))
         with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls):
             pr_number, sha = await _resolve_github_head(gh_ctx)
-        assert sha == "stale-sha"
+        assert pr_number is None
+        assert sha is None
         mock_client_cls.assert_not_called()
 
 
@@ -285,7 +350,15 @@ class TestResolveLiveHeadShaDispatcher:
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/etc/pki/tls/certs/ca-bundle.crt")
 
         gl_ctx = {"mr_iid": "42", "project_id": "100", "head_sha": "fallback_sha"}
-        with patch("httpx.AsyncClient") as mock_client_cls:
+        with (
+            # Host-independent: _usable_ca_file is the only filesystem probe, so patch it rather than
+            # relying on /etc/pki existing (RHEL) -- ubuntu-latest only ships /etc/ssl/certs.
+            patch(
+                "src.utils.vcs_approval._usable_ca_file",
+                side_effect=lambda p: p == "/etc/pki/tls/certs/ca-bundle.crt",
+            ),
+            patch("httpx.AsyncClient") as mock_client_cls,
+        ):
             mock_client = AsyncMock()
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_resp = MagicMock()
@@ -301,6 +374,186 @@ class TestResolveLiveHeadShaDispatcher:
             assert kwargs.get("verify") is not False
             assert sha == "live_sha_123"
 
+    @pytest.mark.asyncio
+    async def test_kargo_context_mr_url_fallback(self):
+        """T-10: Given missing gitlab_context but valid kargo_context.mr_url, resolves live HEAD."""
+        event = MagicMock()
+        event.event.evidence.gitlab_context = None
+        event.event.evidence.github_context = None
+        event.event.evidence.kargo_context = {
+            "mr_url": "https://gitlab.example.com/openshift-virtualization/downstream-configuration/-/merge_requests/25"
+        }
+        with patch(
+            "src.utils.vcs_approval._resolve_gitlab_head",
+            AsyncMock(return_value=("25", "d461a00c1234567890abcdef")),
+        ) as mock_gl:
+            result = await resolve_live_head_sha(event)
+
+        mock_gl.assert_awaited_once_with({
+            "project_id": "openshift-virtualization/downstream-configuration",
+            "mr_iid": 25,
+        })
+        assert result == ("25", "d461a00c1234567890abcdef")
+
+    @pytest.mark.asyncio
+    async def test_kargo_fallback_when_gitlab_context_has_no_project_id(self):
+        """R4-03: When gitlab_context has mr_iid but lacks project_id, falls through to kargo_context.mr_url."""
+        event = MagicMock()
+        event.event.evidence.gitlab_context = {"mr_iid": "25"}  # missing project_id
+        event.event.evidence.github_context = None
+        event.event.evidence.kargo_context = {
+            "mr_url": "https://gitlab.example.com/openshift-virtualization/downstream-configuration/-/merge_requests/25"
+        }
+        with patch(
+            "src.utils.vcs_approval._resolve_gitlab_head",
+            AsyncMock(return_value=("25", "live-sha-999")),
+        ) as mock_gl:
+            result = await resolve_live_head_sha(event)
+
+        mock_gl.assert_awaited_once_with({
+            "project_id": "openshift-virtualization/downstream-configuration",
+            "mr_iid": 25,
+        })
+        assert result == ("25", "live-sha-999")
+
+
+class TestResolveCaBundle:
+    """T-9: Tests for resolve_ca_bundle (and its _resolve_ca_bundle alias) TLS trust evaluation."""
+
+    def test_insecure_verify_env_raises_value_error(self, monkeypatch):
+        """T-9: GITLAB_SSL_VERIFY='0' or 'false' raises ValueError -- verify=False is forbidden."""
+        import src.utils.vcs_approval as vcs_mod
+        resolve_ca = getattr(vcs_mod, "resolve_ca_bundle", None)
+        assert callable(resolve_ca), "resolve_ca_bundle must be public in src.utils.vcs_approval"
+
+        for val in ("0", "false", "no", "FALSE"):
+            monkeypatch.setenv("GITLAB_SSL_VERIFY", val)
+            with pytest.raises(ValueError, match="Insecure TLS verification"):
+                resolve_ca("gitlab.cee.redhat.com")
+
+    def test_ca_bundle_returns_path_or_true_never_false(self, monkeypatch, tmp_path):
+        """T-9: _resolve_ca_bundle detects corporate CA path or falls back to True, NEVER False."""
+        import src.utils.vcs_approval as vcs_mod
+        resolve_ca = getattr(vcs_mod, "resolve_ca_bundle", None)
+        assert callable(resolve_ca), "resolve_ca_bundle must be public in src.utils.vcs_approval"
+
+        # When file exists
+        ca_file = tmp_path / "custom-ca.pem"
+        ca_file.write_text("cert")
+        monkeypatch.setenv("GITLAB_SSL_VERIFY", str(ca_file))
+        res = resolve_ca("gitlab.cee.redhat.com")
+        assert res == str(ca_file)
+
+        # When no env set and no standard paths exist, fallback is True
+        monkeypatch.delenv("GITLAB_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        with patch("os.path.isfile", return_value=False):
+            fallback_res = resolve_ca("gitlab.cee.redhat.com")
+            assert fallback_res is True
+            assert fallback_res is not False
+
+    @pytest.mark.parametrize("val", ["1", "true", "yes", "TRUE", "True", "YES"])
+    def test_boolean_strings_fall_through_to_true_not_string(self, monkeypatch, val):
+        """C6-06 / C12-02: Truthy boolean strings in GITLAB_SSL_VERIFY fall through to True, not string 'true'."""
+        import src.utils.vcs_approval as vcs_mod
+        resolve_ca = vcs_mod.resolve_ca_bundle
+        monkeypatch.setenv("GITLAB_SSL_VERIFY", val)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        with patch("os.path.isfile", return_value=False):
+            res = resolve_ca("gitlab.example.com")
+            assert res is True
+            assert not isinstance(res, str)
+
+    def test_non_existent_path_falls_back_with_warning(self, monkeypatch, caplog):
+        """C6-06: Non-existent custom CA path in REQUESTS_CA_BUNDLE warns and falls back to True or std path."""
+        import src.utils.vcs_approval as vcs_mod
+        resolve_ca = vcs_mod.resolve_ca_bundle
+        monkeypatch.delenv("GITLAB_SSL_VERIFY", raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/non/existent/path/ca.crt")
+        with patch("os.path.isfile", return_value=False), caplog.at_level("WARNING"):
+            res = resolve_ca("gitlab.example.com")
+            assert res is True
+            assert any("does not exist" in r.message for r in caplog.records)
+
+
+class TestResolveCaBundleHardening:
+    """F3/F9/F10: public resolver, empty/dir bundles rejected, generalized insecure-TLS message."""
+
+    @staticmethod
+    def _clean_env(monkeypatch):
+        for k in ("GITLAB_SSL_VERIFY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+            monkeypatch.delenv(k, raising=False)
+
+    def test_underscore_alias_is_the_public_function(self):
+        import src.utils.vcs_approval as vcs_mod
+        assert vcs_mod._resolve_ca_bundle is vcs_mod.resolve_ca_bundle
+
+    def test_insecure_message_is_not_scoped_to_approval_calls(self, monkeypatch):
+        import src.utils.vcs_approval as vcs_mod
+        monkeypatch.setenv("GITLAB_SSL_VERIFY", "false")
+        with pytest.raises(ValueError) as exc:
+            vcs_mod.resolve_ca_bundle("gitlab.example.com")
+        assert "GITLAB_SSL_VERIFY=false" in str(exc.value)
+        assert "approval" not in str(exc.value).lower()
+
+    @pytest.mark.parametrize("env_name", ["GITLAB_SSL_VERIFY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"])
+    def test_empty_bundle_file_is_rejected(self, monkeypatch, tmp_path, caplog, env_name):
+        import src.utils.vcs_approval as vcs_mod
+        self._clean_env(monkeypatch)
+        empty = tmp_path / "empty.pem"
+        empty.write_text("")
+        monkeypatch.setenv(env_name, str(empty))
+        with caplog.at_level("WARNING"):
+            res = vcs_mod.resolve_ca_bundle("gitlab.example.com")
+        assert res != str(empty)
+        assert any("non-empty file" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("env_name", ["GITLAB_SSL_VERIFY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"])
+    def test_directory_bundle_is_rejected(self, monkeypatch, tmp_path, env_name):
+        import src.utils.vcs_approval as vcs_mod
+        self._clean_env(monkeypatch)
+        monkeypatch.setenv(env_name, str(tmp_path))  # exists, but is a directory
+        res = vcs_mod.resolve_ca_bundle("gitlab.example.com")
+        assert res != str(tmp_path)
+
+    def test_empty_bundle_falls_back_to_true_when_no_standard_bundle(self, monkeypatch, tmp_path):
+        import src.utils.vcs_approval as vcs_mod
+        self._clean_env(monkeypatch)
+        empty = tmp_path / "empty.pem"
+        empty.write_text("")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(empty))
+        with patch("src.utils.vcs_approval.os.path.isfile", side_effect=lambda p: p == str(empty)):
+            assert vcs_mod.resolve_ca_bundle("gitlab.example.com") is True
+
+    def test_non_empty_bundle_file_is_accepted(self, monkeypatch, tmp_path):
+        import src.utils.vcs_approval as vcs_mod
+        self._clean_env(monkeypatch)
+        ca = tmp_path / "ca.pem"
+        ca.write_text("cert")
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+        assert vcs_mod.resolve_ca_bundle("gitlab.example.com") == str(ca)
+
+
+class TestParseMrUrl:
+    """Tests for parse_mr_url extracted helper."""
+
+    def test_standard_gitlab_mr_url(self):
+        from src.utils.vcs_approval import parse_mr_url
+        res = parse_mr_url("https://gitlab.example.com/org/group/project/-/merge_requests/42")
+        assert res == ("org/group/project", 42)
+
+    def test_projects_id_syntax(self):
+        from src.utils.vcs_approval import parse_mr_url
+        res = parse_mr_url("https://gitlab.example.com/api/v4/projects/123/merge_requests/99")
+        assert res == (123, 99)
+
+    def test_invalid_url_returns_none(self):
+        from src.utils.vcs_approval import parse_mr_url
+        assert parse_mr_url("https://gitlab.example.com/not-an-mr") is None
+        assert parse_mr_url("") is None
 
 
 class TestVerifyMergeGuard:

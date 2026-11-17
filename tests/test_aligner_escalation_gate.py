@@ -17,7 +17,6 @@ from src.models import (
     EventEvidence,
     EventInput,
     EventStatus,
-    Metrics,
     Service,
     StagedEscalation,
 )
@@ -270,6 +269,43 @@ async def test_kargo_gate_blocks_when_flag_set():
     bb.create_event.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_kargo_handle_failed_promotion_seeds_gitlab_context():
+    """T-6: handle_failed_promotion uses GitLabPlatform.parse_mr_url (2-tuple) to seed evidence.gitlab_context."""
+    bb = _mock_blackboard()
+    bb.get_active_events.return_value = []
+    bb.get_escalation_flag.return_value = None
+    created_events = []
+
+    async def mock_create_event(**kwargs):
+        created_events.append(kwargs)
+        return "evt-kargo-123"
+
+    bb.create_event = mock_create_event
+    aligner = _make_aligner(bb)
+
+    mr_url = "https://gitlab.example.com/openshift-virtualization/downstream-configuration/-/merge_requests/25"
+    result = await aligner.handle_failed_promotion(
+        service="svc-a",
+        project="downstream-configuration",
+        stage="staging",
+        promotion="p1",
+        freight="f1",
+        phase="failed",
+        message="Promotion failed on step verification",
+        failed_step="verify-step",
+        mr_url=mr_url,
+    )
+
+    assert result == "evt-kargo-123"
+    assert len(created_events) == 1
+    evidence = created_events[0]["evidence"]
+    assert evidence.gitlab_context is not None
+    assert evidence.gitlab_context["target_url"] == mr_url
+    assert evidence.gitlab_context["project_id"] == "openshift-virtualization/downstream-configuration"
+    assert evidence.gitlab_context["mr_iid"] == 25
+
+
 # =========================================================================
 # 10. Kargo hash lifecycle: HSET/HGET/HDEL
 # =========================================================================
@@ -505,3 +541,162 @@ async def test_sync_drift_gate_uses_direct_hget():
     bb.get_escalation_flag.assert_called_once_with("openshift-gitops/argocd-app", scope="sync")
     # Importantly: get_service was NOT called (it returns None for synthetic keys)
     bb.get_service.assert_not_called()
+
+
+# =========================================================================
+# 22. Kargo Context Refresh updates gitlab_context on MR URL change
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_kargo_refresh_updates_gitlab_context_when_mr_url_changes():
+    """handlers_integration.handle_refresh_kargo_context parses new mr_url and updates gitlab_context."""
+    from src.agents.handlers_integration import handle_refresh_kargo_context
+    bb = _mock_blackboard()
+    event = MagicMock()
+    evidence = MagicMock()
+    evidence.kargo_context = {
+        "project": "proj-x",
+        "stage": "stage-y",
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/10",
+    }
+    event.event.evidence = evidence
+    bb.get_event = AsyncMock(return_value=event)
+    bb.update_event_kargo_context = AsyncMock()
+    bb.update_event_gitlab_context = AsyncMock()
+
+    mock_kargo_observer = MagicMock()
+    mock_kargo_observer.get_stage_status = AsyncMock(return_value={
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+        "promotion": "promo-2",
+        "phase": "Running",
+        "failed_step": "N/A",
+    })
+
+    ctx = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.get_agent_instance.side_effect = lambda name: mock_kargo_observer if name == "_kargo_observer" else None
+    ctx.next_turn_number = AsyncMock(return_value=2)
+    ctx.append_and_broadcast = AsyncMock()
+    ctx.get_state_watcher.return_value = None
+
+    result = await handle_refresh_kargo_context(ctx, "evt-kargo-refresh", {}, None)
+
+    assert result is True
+    bb.update_event_kargo_context.assert_awaited_once_with("evt-kargo-refresh", {
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+    })
+    bb.update_event_gitlab_context.assert_awaited_once_with("evt-kargo-refresh", {
+        "target_url": "https://gitlab.example.com/org/repo/-/merge_requests/11",
+        "project_id": "org/repo",
+        "mr_iid": 11,
+    })
+    turn = ctx.append_and_broadcast.call_args[0][1]
+    assert "Promotion: promo-2" in turn.evidence
+    assert "MR URL: https://gitlab.example.com/org/repo/-/merge_requests/11" in turn.evidence
+
+
+@pytest.mark.asyncio
+async def test_kargo_refresh_survives_gitlab_context_persistence_failure(caplog):
+    """F22: the secondary gitlab_context mirror is best-effort.
+
+    kargo_context.mr_url is persisted first; if the mirror raises, the refreshed promotion state the Brain
+    is waiting on must still be returned (not discarded by an unhandled exception) and the failure logged.
+    """
+    from src.agents.handlers_integration import handle_refresh_kargo_context
+    new_url = "https://gitlab.example.com/org/repo/-/merge_requests/11"
+    bb = _mock_blackboard()
+    event = MagicMock()
+    evidence = MagicMock()
+    evidence.kargo_context = {
+        "project": "proj-x",
+        "stage": "stage-y",
+        "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/10",
+    }
+    event.event.evidence = evidence
+    bb.get_event = AsyncMock(return_value=event)
+    bb.update_event_kargo_context = AsyncMock()
+    bb.update_event_gitlab_context = AsyncMock(side_effect=RuntimeError("redis down"))
+
+    mock_kargo_observer = MagicMock()
+    mock_kargo_observer.get_stage_status = AsyncMock(return_value={
+        "mr_url": new_url,
+        "promotion": "promo-2",
+        "phase": "Running",
+        "failed_step": "N/A",
+    })
+
+    ctx = MagicMock()
+    ctx.get_blackboard.return_value = bb
+    ctx.get_agent_instance.side_effect = lambda name: mock_kargo_observer if name == "_kargo_observer" else None
+    ctx.next_turn_number = AsyncMock(return_value=2)
+    ctx.append_and_broadcast = AsyncMock()
+    ctx.get_state_watcher.return_value = None
+
+    with caplog.at_level("WARNING"):
+        result = await handle_refresh_kargo_context(ctx, "evt-kargo-refresh", {}, None)
+
+    assert result is True
+    bb.update_event_kargo_context.assert_awaited_once_with("evt-kargo-refresh", {"mr_url": new_url})
+    bb.update_event_gitlab_context.assert_awaited_once()
+    assert any(
+        "Failed to update gitlab_context" in r.getMessage() and "redis down" in r.getMessage()
+        for r in caplog.records
+    )
+    ctx.append_and_broadcast.assert_awaited_once()
+    turn = ctx.append_and_broadcast.call_args[0][1]
+    assert "Promotion: promo-2" in turn.evidence
+    assert f"MR URL: {new_url}" in turn.evidence
+
+
+# =========================================================================
+# 11. F4: Kargo/CI-gating events seeded with gitlab_context keep their own scope
+# =========================================================================
+
+@pytest.mark.parametrize(
+    ("subject_type", "expected_scope"),
+    [("kargo_stage", "kargo"), ("ci_gating", "jenkins")],
+)
+def test_resolve_escalation_scope_keeps_kargo_and_ci_scope_with_gitlab_context(subject_type, expected_scope):
+    """gitlab_context is now seeded on Kargo events; it must not flip them to scope='review'.
+
+    The Kargo gate is read under scope='kargo' (aligner.handle_failed_promotion), so a 'review'
+    flag written here would never suppress the next Kargo failure.
+    """
+    from src.agents.handlers_dispatch import _resolve_escalation_scope
+
+    doc = EventDocument(
+        id="evt-scope",
+        source="aligner",
+        service="svc-a",
+        subject_type=subject_type,
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(
+                display_text="test",
+                source_type="aligner",
+                gitlab_context={"target_url": "https://gitlab.example.com/org/repo/-/merge_requests/1",
+                                "project_id": "org/repo", "mr_iid": 1},
+            ),
+        ),
+    )
+    assert _resolve_escalation_scope(doc) == expected_scope
+
+
+def test_resolve_escalation_scope_review_context_still_wins_for_service_subject():
+    """Regression guard: the F4 exemption is limited to kargo_stage/ci_gating."""
+    from src.agents.handlers_dispatch import _resolve_escalation_scope
+
+    doc = EventDocument(
+        id="evt-scope-svc",
+        source="headhunter",
+        service="svc-a",
+        subject_type="service",
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(
+                display_text="test", source_type="headhunter",
+                gitlab_context={"project_id": "org/repo", "mr_iid": 1},
+            ),
+        ),
+    )
+    assert _resolve_escalation_scope(doc) == "review"

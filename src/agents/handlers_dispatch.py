@@ -385,13 +385,23 @@ async def handle_message_agent(
     return False
 
 
+# subject_types whose escalation scope must not be overridden by review-context evidence.
+_CONTEXT_SCOPED_SUBJECTS = frozenset({"kargo_stage", "ci_gating"})
+
+
 def _resolve_escalation_scope(event_doc: EventDocument) -> str:
     """Resolve escalation scope with review-context fallback.
 
     Events carrying gitlab_context or github_context in evidence are review-related
     and must map to scope="review", preventing review escalations from writing
     escalation_flag:health in Redis and starving ArgoCD health/sync alerts.
+
+    Kargo and CI-gating events may ALSO carry gitlab_context (the promotion/pipeline MR), but
+    their gate is read under their own scope (aligner kargo/jenkins) -- so an explicit
+    subject_type in _CONTEXT_SCOPED_SUBJECTS wins over the review-context fallback.
     """
+    if event_doc.subject_type in _CONTEXT_SCOPED_SUBJECTS:
+        return ESCALATION_SCOPE_MAP[event_doc.subject_type]
     ev = event_doc.event.evidence if event_doc.event else None
     if ev:
         if getattr(ev, "gitlab_context", None) or getattr(ev, "github_context", None):
