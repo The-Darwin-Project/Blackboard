@@ -877,7 +877,6 @@ spec:
         - name: trusted-ca-bundle
           configMap:
             name: {{ .Values.trustedCaBundle.configMapName | default "config-trusted-cabundle" }}
-            optional: true
         {{- end }}
         {{- if .Values.gcp.existingSecret }}
         - name: gcp-sa-key

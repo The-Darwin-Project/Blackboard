@@ -594,3 +594,57 @@ async def test_kargo_refresh_updates_gitlab_context_when_mr_url_changes():
     turn = ctx.append_and_broadcast.call_args[0][1]
     assert "Promotion: promo-2" in turn.evidence
     assert "MR URL: https://gitlab.example.com/org/repo/-/merge_requests/11" in turn.evidence
+
+
+# =========================================================================
+# 11. F4: Kargo/CI-gating events seeded with gitlab_context keep their own scope
+# =========================================================================
+
+@pytest.mark.parametrize(
+    ("subject_type", "expected_scope"),
+    [("kargo_stage", "kargo"), ("ci_gating", "jenkins")],
+)
+def test_resolve_escalation_scope_keeps_kargo_and_ci_scope_with_gitlab_context(subject_type, expected_scope):
+    """gitlab_context is now seeded on Kargo events; it must not flip them to scope='review'.
+
+    The Kargo gate is read under scope='kargo' (aligner.handle_failed_promotion), so a 'review'
+    flag written here would never suppress the next Kargo failure.
+    """
+    from src.agents.handlers_dispatch import _resolve_escalation_scope
+
+    doc = EventDocument(
+        id="evt-scope",
+        source="aligner",
+        service="svc-a",
+        subject_type=subject_type,
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(
+                display_text="test",
+                source_type="aligner",
+                gitlab_context={"target_url": "https://gitlab.example.com/org/repo/-/merge_requests/1",
+                                "project_id": "org/repo", "mr_iid": 1},
+            ),
+        ),
+    )
+    assert _resolve_escalation_scope(doc) == expected_scope
+
+
+def test_resolve_escalation_scope_review_context_still_wins_for_service_subject():
+    """Regression guard: the F4 exemption is limited to kargo_stage/ci_gating."""
+    from src.agents.handlers_dispatch import _resolve_escalation_scope
+
+    doc = EventDocument(
+        id="evt-scope-svc",
+        source="headhunter",
+        service="svc-a",
+        subject_type="service",
+        event=EventInput(
+            reason="test",
+            evidence=EventEvidence(
+                display_text="test", source_type="headhunter",
+                gitlab_context={"project_id": "org/repo", "mr_iid": 1},
+            ),
+        ),
+    )
+    assert _resolve_escalation_scope(doc) == "review"

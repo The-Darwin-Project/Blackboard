@@ -18,6 +18,11 @@
 #    ("</func</functionResponse>tionResponse>") cannot reassemble a fence. Callers that also redact PII MUST
 #    strip first, redact second, defang "[!call:" third, truncate LAST (a fence spliced inside a secret
 #    would otherwise defeat redaction and rejoin after the strip).
+# 7. [Security]: CONTROL_TOKEN_NAMES/CONTROL_TOKEN_PATTERN are the SINGLE definition of model control tokens
+#    (<end_of_image>, <start_of_turn>, <thought>, ...; optional "/" and whitespace before ">", case-insensitive).
+#    strip_control_tokens is the shared bounded fixed-point stripper (_CONTROL_TOKEN_MAX_PASSES, early exit when
+#    unchanged); on non-convergence it deletes every "<" so nothing can reassemble. agents/llm/types.py and
+#    gemini_client.py reuse both -- never re-inline a fixed-count strip loop.
 """Sanitize untrusted scalars (display names, CI fields) embedded in Brain/FRIDAY prompts."""
 from __future__ import annotations
 
@@ -64,10 +69,16 @@ _FENCE_TAGS = (
 # The decay-reference OPEN tag is removed WITH its attributes (bounded, no nested quantifier): leaving
 # `turn="9" tool="x">` behind would splice garbage into whatever the tag was embedded in.
 _EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"
-_CONTROL_TOKEN_PATTERN = r"<\/?(?:end_of_image|start_of_turn|end_of_turn|internal_model_call)\s*>|<\/?(?:image|thought|think)\s*>"
+# Model control tokens that must never reach users or prompts. Each matches as <name> or </name>.
+CONTROL_TOKEN_NAMES = (
+    "end_of_image", "start_of_image", "end_of_turn", "start_of_turn",
+    "internal_model_call", "image", "thought", "think",
+)
+CONTROL_TOKEN_PATTERN = r"<\/?(?:" + "|".join(CONTROL_TOKEN_NAMES) + r")\s*>"
+CONTROL_TOKEN_RE = re.compile(CONTROL_TOKEN_PATTERN, re.IGNORECASE)
 _FENCE_RE = re.compile(
     "|".join(
-        [_EVIDENCE_OPEN, _CONTROL_TOKEN_PATTERN]
+        [_EVIDENCE_OPEN, CONTROL_TOKEN_PATTERN]
         + [re.escape(t) for t in sorted(_FENCE_TAGS, key=len, reverse=True)]
     ),
     re.IGNORECASE,
@@ -75,6 +86,29 @@ _FENCE_RE = re.compile(
 _DASH_RUN_RE = re.compile(r"-{3,}")
 # Nested-split depth beyond this is adversarial; bounding the passes keeps the sanitizer O(passes * n).
 _FENCE_MAX_PASSES = 8
+
+
+# Nested-wrapper depth beyond this is adversarial (each level needs one pass to peel).
+_CONTROL_TOKEN_MAX_PASSES = 8
+
+
+def strip_control_tokens(text: str) -> str:
+    """Remove model control tokens, looping to a fixed point (bounded by _CONTROL_TOKEN_MAX_PASSES).
+
+    One pass is bypassable (``<end_<end_of_image>of_image>`` reassembles a token), so repeat until a
+    pass changes nothing -- exiting early on the common clean case. If the cap is hit while a token
+    still matches (adversarial nesting deeper than the cap), delete every ``<`` so none can form.
+    """
+    if not text:
+        return text
+    for _ in range(_CONTROL_TOKEN_MAX_PASSES):
+        cleaned = CONTROL_TOKEN_RE.sub("", text)
+        if cleaned == text:
+            return cleaned
+        text = cleaned
+    if CONTROL_TOKEN_RE.search(text):
+        return text.replace("<", "")
+    return text
 
 
 def strip_xml_fences(text: str) -> str:

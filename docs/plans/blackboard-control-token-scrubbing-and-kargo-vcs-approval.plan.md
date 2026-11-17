@@ -132,10 +132,10 @@ sequenceDiagram
 
 8. **`BlackBoard/src/utils/vcs_approval.py`**:
    - `resolve_live_head_sha`, `_resolve_gitlab_head`, `verify_merge_guard`.
-   - `@ai-rules` Rule 3: TLS verification is NEVER disabled on live approval calls. `_resolve_ca_bundle` probes env vars and `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, falling back to `True` (system store) or failing closed. Never return `False`. Live VCS resolution fails closed returning `(mr_iid, None)` if live API query fails or context is missing. Maintain 100% lockstep parity with `gemini-sidecar/hooks/merge-guard.js:approvalVerdict`.
+   - `@ai-rules` Rule 3: TLS verification is NEVER disabled on live approval calls. `resolve_ca_bundle` (public; `_resolve_ca_bundle` kept as alias) probes env vars and `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, falling back to `True` (system store) or failing closed. Never return `False`. Live VCS resolution fails closed returning `(mr_iid, None)` if live API query fails or context is missing. Maintain 100% lockstep parity with `gemini-sidecar/hooks/merge-guard.js:approvalVerdict`.
 
 9. **`BlackBoard/helm/templates/deployment.yaml` & `helm/values.yaml`**:
-   - Mount OpenShift's managed `config-trusted-cabundle` ConfigMap to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` (subPath: `ca-bundle.crt`) on both the Brain container and the `skill-reconciler` container.
+   - Gated by `trustedCaBundle.enabled` (default `false`; set `true` in OpenShift / internal-CA GitLab overlays such as `gitlab.cee.redhat.com`): mount OpenShift's managed `config-trusted-cabundle` ConfigMap to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` (subPath: `ca-bundle.crt`) on both the Brain container and the `skill-reconciler` container. The ConfigMap volume is NOT `optional`: when enabled and the ConfigMap is absent the pod fails fast rather than running with a broken `SSL_CERT_FILE`.
    - Export `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` pointing to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
 
 10. **`BlackBoard/tests/test_brain_steering_recovery.py` & `tests/test_vcs_approval.py`**:
@@ -156,7 +156,7 @@ sequenceDiagram
    - **Synchronization**: `handlers_integration.py:handle_refresh_kargo_context` updates `gitlab_context` using `bb = ctx.get_blackboard()` and canonical 2-tuple unpacking if a new promotion yields an updated `mr_url`.
    - **Refresh & Creation**: `headhunter_gitlab.py` captures `sha` and `head_sha` in both `create_event` and `refresh_mr_state`, encoding project paths with `quote(safe="")`.
    - **Approval Security**: `vcs_approval.py:resolve_live_head_sha` handles URL-encoded project paths (`quote(safe="")`), resolves corporate CA bundles safely without `verify=False` fallback, falls back to `kargo_context.mr_url` (unpacked as 2-tuple) if needed, and returns the verified HEAD SHA. If live query fails, it logs an explicit security warning and fails closed: returns `(mr_iid, None)`, preserving MR IID while denying merge approval.
-   - **Infrastructure**: `BlackBoard/helm` mounts OpenShift's `config-trusted-cabundle` ConfigMap to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Brain and skill-reconciler containers and configures `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`.
+   - **Infrastructure**: when `trustedCaBundle.enabled: true` (default `false`; required for OpenShift / internal-CA GitLab overlays), `BlackBoard/helm` mounts OpenShift's `config-trusted-cabundle` ConfigMap (non-optional) to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Brain and skill-reconciler containers and configures `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`.
    - **Sidecar Gate**: `gemini-sidecar/hooks/merge-guard.js` receives `approved_mr_sha` matching live git HEAD, authorizing clean developer merges.
 
 ---
@@ -371,7 +371,7 @@ sequenceDiagram
        - subPath: `ca-bundle.crt`
      - Export `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` pointing to `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
   3. In `BlackBoard/helm/values.yaml`:
-     - Add `trustedCaBundle: { enabled: true, configMapName: "config-trusted-cabundle" }`.
+     - Add `trustedCaBundle: { enabled: false, configMapName: "config-trusted-cabundle" }` (default off; overlays for OpenShift / internal-CA GitLab such as `gitlab.cee.redhat.com` set `enabled: true`). The ConfigMap volume must not be `optional`.
 - **Verification**: Run `cd BlackBoard && ./venv/bin/pytest tests/test_vcs_approval.py`.
 
 ### Step 7: [Complicated] Comprehensive ATDD Unit & Integration Verification

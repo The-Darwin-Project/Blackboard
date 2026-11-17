@@ -8,6 +8,12 @@
 # 5. [Pattern]: _load_gitlab_si() loads from headhunter_skills/gitlab-mr-triage.md with emergency fallback.
 # 6. [Gotcha]: merge_status excluded from state_key (flaps during active pipelines).
 # 7. [Pattern]: GITLAB_HOST normalization: strip scheme BEFORE trailing slash.
+# 8. [Security]: Every httpx client uses verify=self._verify (vcs_approval.resolve_ca_bundle, re-read per
+#    call). TLS verification is NEVER disabled; __init__ calls resolve_ca_bundle() once so an insecure
+#    GITLAB_SSL_VERIFY=false raises ValueError at startup instead of at the first poll.
+# 9. [Gotcha]: project_id may be a numeric id OR a path ("group/proj", seeded by Kargo gitlab_context). Any
+#    URL that interpolates a gitlab_context/StateWatcher project_id MUST go through _enc_project_id()
+#    (quote(unquote(...), safe="")); a raw "/" would split the API path.
 """
 GitLab Platform Adapter for Headhunter.
 
@@ -28,6 +34,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from ..utils import vcs_approval as _vcs_approval
 from .headhunter_utils import _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
@@ -116,11 +123,17 @@ class GitLabPlatform:
         self._gitlab_token: str | None = None
         self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
         self._smartsheet_cache = None
+        # Fail fast: GITLAB_SSL_VERIFY=false/0/no raises ValueError here, at startup.
+        _vcs_approval.resolve_ca_bundle(self._gitlab_host)
 
     @property
     def _verify(self) -> str | bool:
-        from ..utils.vcs_approval import _resolve_ca_bundle
-        return _resolve_ca_bundle(self._gitlab_host)
+        return _vcs_approval.resolve_ca_bundle(self._gitlab_host)
+
+    @staticmethod
+    def _enc_project_id(project_id: int | str) -> str:
+        """URL-encode a numeric id or path-style project id exactly once (idempotent on %2F)."""
+        return urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -433,11 +446,12 @@ class GitLabPlatform:
             return
 
         outcome = self._build_feedback_comment(event, close_reason)
+        encoded_project_id = self._enc_project_id(project_id)
 
         async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             headers = self._headers()
             resp = await client.post(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/notes"),
                 headers=headers,
                 json={"body": outcome},
             )
@@ -486,7 +500,7 @@ class GitLabPlatform:
         if not project_id or not mr_iid:
             return {"error": "No MR reference available. Supply mr_url or ensure the event has gitlab_context."}
 
-        encoded_project_id = urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
+        encoded_project_id = self._enc_project_id(project_id)
         state_changed_at = ""
         head_sha = (gl_ctx or {}).get("head_sha") or (gl_ctx or {}).get("sha")
         try:
@@ -567,7 +581,7 @@ class GitLabPlatform:
 
     async def poll_gitlab_mr_status(self, project_id: int | str, mr_iid: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Raises on HTTP errors."""
-        encoded_project_id = urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
+        encoded_project_id = self._enc_project_id(project_id)
         async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             mr_resp = await client.get(
                 self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
@@ -595,11 +609,12 @@ class GitLabPlatform:
             "pipeline_status": state.get("pipeline_status", "unknown"),
         }
 
-    async def poll_gitlab_pipeline_status(self, project_id: int, pipeline_id: int) -> dict:
+    async def poll_gitlab_pipeline_status(self, project_id: int | str, pipeline_id: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Returns pipeline status."""
+        encoded_project_id = self._enc_project_id(project_id)
         async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
             resp = await client.get(
-                self._api_url(f"/projects/{project_id}/pipelines/{pipeline_id}"),
+                self._api_url(f"/projects/{encoded_project_id}/pipelines/{pipeline_id}"),
                 headers=self._headers(),
             )
             resp.raise_for_status()

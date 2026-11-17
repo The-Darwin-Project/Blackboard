@@ -2235,3 +2235,159 @@ class TestControlTokenScrubbingInStreaming:
 
 
 
+
+
+class TestControlTokenSplitChunksAndDeepNesting:
+    """F14/F15/F16: full-token streaming holdback (no split-token leaks) and bounded fixed-point stripping."""
+
+    ALL_TOKENS = (
+        "<end_of_image>", "<start_of_image>", "<end_of_turn>", "<start_of_turn>",
+        "<thought>", "</thought>", "<think>", "</think>", "<image>", "</image>",
+        "<internal_model_call>", "</internal_model_call>",
+    )
+
+    @staticmethod
+    def _drive_stream(chunks):
+        """Feed chunks through split_stream_call_syntax exactly as GeminiAdapter's loop does."""
+        from src.agents.llm.types import split_stream_call_syntax
+
+        buffer, out = "", []
+        for chunk in chunks:
+            buffer += chunk
+            safe, buffer, overflowed = split_stream_call_syntax(buffer)
+            assert overflowed is False
+            out.append(safe)
+        return "".join(out), buffer
+
+    @pytest.mark.parametrize("token", ALL_TOKENS)
+    def test_token_split_at_every_boundary_never_leaks(self, token):
+        """A token split at ANY index across two chunks is fully scrubbed (reversed startswith used to leak)."""
+        for cut in range(1, len(token)):
+            emitted, held = self._drive_stream(["Hi " + token[:cut], token[cut:] + " there"])
+            assert emitted == "Hi  there", f"{token!r} cut at {cut} leaked: {emitted!r}"
+            assert held == ""
+
+    def test_issue_example_split_end_of_image(self):
+        emitted, held = self._drive_stream(["<end_of_im", "age>"])
+        assert (emitted, held) == ("", "")
+
+    def test_token_split_across_three_chunks(self):
+        emitted, held = self._drive_stream(["A<end", "_of_", "image>B"])
+        assert (emitted, held) == ("AB", "")
+
+    @pytest.mark.parametrize("token", ["<end_of_image>", "</think>", "<START_OF_TURN>"])
+    def test_whitespace_before_gt_is_held_and_scrubbed(self, token):
+        stem = token[:-1]
+        emitted, held = self._drive_stream(["x" + stem + "  ", ">y"])
+        assert (emitted, held) == ("xy", "")
+        # and the whitespace-terminated partial is held, not flushed, between chunks
+        from src.agents.llm.types import split_stream_call_syntax
+        assert split_stream_call_syntax("x" + stem + " ") == ("x", stem + " ", False)
+
+    def test_uppercase_token_is_scrubbed(self):
+        emitted, held = self._drive_stream(["<End_Of_", "Image>ok"])
+        assert (emitted, held) == ("ok", "")
+
+    @pytest.mark.parametrize("literal", ["a < b", "x <br> y", "<svg></svg>", "if (a<b) {", "<e"])
+    def test_literal_angle_brackets_are_not_swallowed(self, literal):
+        """Only (partial) control tokens are held; ordinary markup/comparisons pass through once disambiguated."""
+        emitted, held = self._drive_stream([literal, " tail"])
+        assert emitted + held == literal + " tail"
+
+    def test_stem_collision_no_longer_holds_unrelated_tag(self):
+        """'<start' (stem) must not be released early as a false positive/negative: it is a prefix of two tokens."""
+        from src.agents.llm.types import split_stream_call_syntax
+        assert split_stream_call_syntax("ok <start_of_") == ("ok ", "<start_of_", False)
+        assert split_stream_call_syntax("ok <start_of_x") == ("ok <start_of_x", "", False)
+
+    def test_start_of_image_is_a_control_token(self):
+        from src.agents.llm.types import sanitize_call_syntax
+        assert sanitize_call_syntax("<start_of_image>") is None
+        assert sanitize_call_syntax("a<start_of_image>b") == "ab"
+
+    @pytest.mark.parametrize("depth", [4, 5, 6, 7])
+    def test_deeply_nested_wrappers_strip_cleanly(self, depth):
+        """depth wrappers around one token = depth + 1 levels; the old fixed 4-pass loop failed from depth 4."""
+        from src.agents.llm.types import sanitize_call_syntax
+        from src.utils.prompt_sanitize import strip_control_tokens
+
+        token = "<end_of_image>"
+        nested = token
+        for _ in range(depth):
+            nested = "<end_of_" + nested + "image>"
+        assert strip_control_tokens(nested) == ""
+        assert sanitize_call_syntax("keep " + nested + " me") == "keep  me"
+
+    def test_beyond_cap_nesting_falls_back_to_dropping_angle_brackets(self):
+        """Adversarial nesting deeper than _CONTROL_TOKEN_MAX_PASSES must still never emit a token."""
+        from src.agents.llm.types import sanitize_call_syntax
+        from src.utils.prompt_sanitize import CONTROL_TOKEN_RE, _CONTROL_TOKEN_MAX_PASSES, strip_control_tokens
+
+        nested = "<end_of_image>"
+        for _ in range(_CONTROL_TOKEN_MAX_PASSES + 4):
+            nested = "<end_of_" + nested + "image>"
+        out = strip_control_tokens(nested)
+        assert CONTROL_TOKEN_RE.search(out) is None
+        assert "<" not in out
+        cleaned = sanitize_call_syntax(nested)
+        assert cleaned is None or CONTROL_TOKEN_RE.search(cleaned) is None
+
+    def test_strip_control_tokens_exits_early_when_clean(self):
+        from src.utils import prompt_sanitize as ps
+
+        calls = []
+        real = ps.CONTROL_TOKEN_RE
+
+        class _Spy:
+            def sub(self, repl, text):
+                calls.append(1)
+                return real.sub(repl, text)
+
+            def search(self, text):
+                return real.search(text)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ps, "CONTROL_TOKEN_RE", _Spy())
+            assert ps.strip_control_tokens("plain text") == "plain text"
+        assert len(calls) == 1
+
+    def test_strip_xml_fences_nested_start_of_image(self):
+        from src.utils.prompt_sanitize import strip_xml_fences
+        assert strip_xml_fences("<start_<start_of_image>of_image>") == ""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [("Hello<end_of_", "Hello"), ("Hello</", "Hello"), ("Hello<", "Hello<"), ("Hello<thought", "Hello"), ("Hello", "Hello")],
+    )
+    def test_end_of_stream_drops_partial_token_but_keeps_lone_bracket(self, text, expected):
+        from src.agents.llm.types import strip_trailing_partial_control_token
+        assert strip_trailing_partial_control_token(text) == expected
+
+    @pytest.mark.asyncio
+    async def test_adapter_stream_scrubs_token_split_across_chunks(self):
+        """End to end through GeminiAdapter.generate_stream: split tokens never reach the consumer."""
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter(model_name="test-gemini", project="p", location="l")
+
+        def _chunk(text):
+            c = MagicMock()
+            c.text = text
+            c.candidates = []
+            c.function_calls = []
+            c.usage_metadata = None
+            return c
+
+        async def fake_stream():
+            for t in ("Result: <end_of_im", "age>done <thi", "nk>ok</th", "ink>."):
+                yield _chunk(t)
+
+        stream_mock = MagicMock()
+        stream_mock.__aiter__ = lambda self: fake_stream()
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content_stream = AsyncMock(return_value=stream_mock)
+
+        texts = [c.text async for c in adapter.generate_stream(system_prompt="sys", contents="user") if c.text]
+        full = "".join(texts)
+        assert full == "Result: done ok."
+        assert "<" not in full and ">" not in full

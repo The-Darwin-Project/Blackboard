@@ -1012,7 +1012,9 @@ class TestTrailingFCRecordedResultBounds:
 async def test_call_syntax_stripped_to_empty_logs_warning_and_skips_turn():
     """When accumulated text consists entirely of hallucinated call syntax, sanitize strips it.
 
-    Brain must log warning and not emit a blank response turn.
+    Retry 1 (VMER-2398 steering recovery): Brain logs the strip warning, emits NO blank response turn,
+    appends exactly one internal steering turn and asks the caller to re-invoke (more is True). The
+    exhaustion warning ("returned empty response ... stopping loop") must not fire yet.
     """
     chunks = [
         _Chunk(text='[!call:broken:args!]'),
@@ -1024,13 +1026,97 @@ async def test_call_syntax_stripped_to_empty_logs_warning_and_skips_turn():
 
     with patch("src.agents.brain.logger.warning") as mock_warn:
         more = await brain._process_with_llm(event.id, event, response_emitted=False)
-        assert more is False
+        assert more is True
         warn_messages = [call.args[0] for call in mock_warn.call_args_list if call.args]
         assert any("produced no valid content after call syntax sanitization" in msg for msg in warn_messages)
-        assert any("returned empty response" in msg for msg in warn_messages)
+        assert not any("returned empty response" in msg for msg in warn_messages)
 
-    # No response turn appended
-    assert brain._append_and_broadcast.call_count == 0
+    # No response turn appended; exactly one steering turn
+    appended = [c.args[1] for c in brain._append_and_broadcast.call_args_list]
+    assert [(t.actor, t.action) for t in appended] == [("system", "steering")]
+    assert brain._empty_output_retries[event.id] == 1
+    assert event.id not in brain._waiting_for_user
+
+
+@pytest.mark.asyncio
+async def test_call_syntax_stripped_to_empty_exhausts_on_third_call_slack_parks_for_user():
+    """Calls 1-2 steer (True); call 3 exhausts: warning logged, False, error response + user park, no defer."""
+    chunks = [_Chunk(text='[!call:broken:args!]'), _Chunk(done=True)]
+    brain = _make_brain(lambda **kw: MockStream(chunks))
+    event = _make_event("evt-exhaust-slack", source="slack")
+    brain.blackboard.get_event = AsyncMock(return_value=event)
+
+    with patch("src.agents.brain.logger.warning") as mock_warn:
+        results = [
+            await brain._process_with_llm(event.id, event, response_emitted=False)
+            for _ in range(3)
+        ]
+        warn_messages = [call.args[0] for call in mock_warn.call_args_list if call.args]
+
+    assert results == [True, True, False]
+    exhaustion = [m for m in warn_messages if "returned empty response" in m]
+    assert len(exhaustion) == 1 and "after 2 retries" in exhaustion[0]
+    appended = [c.args[1] for c in brain._append_and_broadcast.call_args_list]
+    assert [t.action for t in appended] == ["steering", "steering", "response"]
+    assert appended[-1].waitingFor == "user"
+    assert event.id in brain._waiting_for_user
+    assert event.id not in brain._empty_output_retries  # user park ends the loop; next user turn starts fresh
+    brain._execute_function_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_call_syntax_stripped_to_empty_exhaustion_defers_without_deadlock_under_event_lock():
+    """F1: exhaustion runs under the non-reentrant _event_locks[event_id]; defer_event must dispatch directly.
+
+    execute_tool_locked is left REAL: if exhaustion routed through _defer_event_safely (the original bug) it
+    would re-acquire the held lock and hang -- wait_for turns that regression into a test failure.
+    """
+    chunks = [_Chunk(text='[!call:broken:args!]'), _Chunk(done=True)]
+    brain = _make_brain(lambda **kw: MockStream(chunks))
+    event = _make_event("evt-exhaust-defer", source="headhunter")
+    brain.blackboard.get_event = AsyncMock(return_value=event)
+
+    async def _three_calls_under_lock():
+        async with brain._event_locks[event.id]:
+            return [
+                await brain._process_with_llm(event.id, event, response_emitted=False)
+                for _ in range(3)
+            ]
+
+    with patch("src.agents.brain.logger.warning") as mock_warn:
+        results = await asyncio.wait_for(_three_calls_under_lock(), timeout=5)
+        warn_messages = [call.args[0] for call in mock_warn.call_args_list if call.args]
+
+    assert results == [True, True, False]
+    assert any("returned empty response" in m and "after 2 retries" in m for m in warn_messages)
+    brain._execute_function_call.assert_awaited_once_with(
+        event.id, "defer_event",
+        {"delay_seconds": 300, "reason": "empty_output_retries_exhausted"},
+    )
+    assert not brain._event_locks[event.id].locked()
+    # Exhaustion did NOT reset the budget (F5): counter is bumped past the cap as the one-defer marker.
+    assert brain._empty_output_retries[event.id] == 3
+    assert event.id not in brain._waiting_for_user
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_defer_failure_is_logged_and_does_not_raise():
+    """A failing defer_event dispatch is swallowed (warning) and the loop still terminates with False."""
+    chunks = [_Chunk(text='[!call:broken:args!]'), _Chunk(done=True)]
+    brain = _make_brain(lambda **kw: MockStream(chunks))
+    event = _make_event("evt-exhaust-defer-fail", source="headhunter")
+    brain.blackboard.get_event = AsyncMock(return_value=event)
+    brain._execute_function_call = AsyncMock(side_effect=RuntimeError("redis down"))
+
+    with patch("src.agents.brain.logger.warning") as mock_warn:
+        for _ in range(2):
+            assert await brain._process_with_llm(event.id, event, response_emitted=False) is True
+        assert await brain._process_with_llm(event.id, event, response_emitted=False) is False
+        warn_messages = [str(call.args[0]) for call in mock_warn.call_args_list if call.args]
+
+    assert any("Failed to defer" in m for m in warn_messages)
+    # The defer never landed, so the one-defer marker is NOT set: the next wake may try again.
+    assert brain._empty_output_retries[event.id] == 2
 
 
 @pytest.mark.asyncio

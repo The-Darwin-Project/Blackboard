@@ -14,6 +14,10 @@
 #    the user-turn boost only looks at the last _RECENT_USER_TURN_WINDOW turns and decays after that.
 # 9. [Constraint]: [!call:...!] fallback syntax is parsed ONLY via scan_call_syntax (single linear pass). Never
 #    reintroduce a lazy `(.*?)` + `\s*` regex over model text -- it backtracks super-linearly on unterminated input.
+# 9b. [Security]: Model control tokens (<end_of_image>, <thought>, ...) are defined ONCE in utils/prompt_sanitize
+#    (CONTROL_TOKEN_NAMES) and stripped via strip_control_tokens (bounded fixed point, handles 5+ nested wrappers).
+#    Streaming holdback (is_partial_control_token) compares the buffer tail against FULL token strings
+#    (token.startswith(tail)), never short stems, so a token split across chunks ("<end_of_im" + "age>") cannot leak.
 # 10. [Gotcha]: Holdback overflow (> MAX_STREAM_CALL_SYNTAX_BUFFER unterminated tail) DISCARDS the fragment; it must
 #    never be flushed to the stream. Streaming callers use split_stream_call_syntax and stop accumulating on overflow.
 # 11. [Pattern]: Stream/HTTP timeout constants and env resolvers (DEFAULT_STREAM_*_TIMEOUT_S, DEFAULT_HTTP_TIMEOUT_S,
@@ -39,6 +43,8 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
+
+from ...utils.prompt_sanitize import CONTROL_TOKEN_NAMES, strip_control_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -161,25 +167,44 @@ _CALL_CLOSE = "!]"
 _CALL_NAME_RE = re.compile(r"[A-Za-z0-9_]+:")  # anchored via .match(); bounded by the name run
 MAX_STREAM_CALL_SYNTAX_BUFFER = 16384  # cap on a held-back unterminated [!call: tail (chars)
 
-_CONTROL_TOKENS_RE = re.compile(
-    r"<\/?(?:end_of_image|start_of_turn|end_of_turn|internal_model_call)\s*>|<\/?(?:image|thought|think)\s*>",
-    re.IGNORECASE,
-)
-_CONTROL_TOKEN_PREFIXES = (
-    "<end_of_",
-    "</thought",
-    "</think",
-    "<image",
-    "</image",
-    "<end_",
-    "<start_",
-    "<thought",
-    "<think",
-    "<internal_",
-    "</end_",
-    "</start_",
-    "</internal_",
-)
+# Full literal control tokens (open and close forms) for streaming holdback comparison.
+_CONTROL_TOKENS = tuple(f"<{slash}{name}>" for name in CONTROL_TOKEN_NAMES for slash in ("", "/"))
+# A held tail longer than this cannot be a control token (longest name + whitespace slack).
+_CONTROL_TOKEN_HOLDBACK_MAX = 64
+
+
+def is_partial_control_token(tail: str) -> bool:
+    """True if ``tail`` (starting at a '<') is a strict prefix of a control token and may still complete.
+
+    The regex allows whitespace before '>', so ``"<think "`` is also held (only a COMPLETE name followed
+    by whitespace can still become a token). Case-insensitive. A complete token never reaches here --
+    strip_control_tokens removes it first.
+    """
+    lowered = tail.lower()
+    stem = lowered.rstrip()
+    if len(stem) != len(lowered):
+        return stem + ">" in _CONTROL_TOKENS
+    return any(tok.startswith(lowered) for tok in _CONTROL_TOKENS)
+
+
+def _split_partial_control_token(text: str) -> tuple[str, str]:
+    """Split ``text`` into (safe, held) where ``held`` is a trailing partial control token ("" if none)."""
+    idx = text.rfind("<")
+    if idx == -1 or len(text) - idx > _CONTROL_TOKEN_HOLDBACK_MAX:
+        return text, ""
+    tail = text[idx:]
+    if is_partial_control_token(tail):
+        return text[:idx], tail
+    return text, ""
+
+
+def strip_trailing_partial_control_token(text: str) -> str:
+    """Drop a trailing partial control token at END of stream (nothing more will complete it).
+
+    A lone "<" is kept: it is far more likely literal text ("a <") than a truncated token.
+    """
+    safe, held = _split_partial_control_token(text)
+    return safe if len(held) > 1 else text
 
 
 def scan_call_syntax(text: str) -> tuple[str, list[tuple[str, str]], str]:
@@ -219,11 +244,7 @@ def sanitize_call_syntax(text: str | None, *, warn: bool = True) -> str | None:
     """
     if not text:
         return text
-    for _ in range(4):
-        new_text = _CONTROL_TOKENS_RE.sub("", text)
-        if new_text == text:
-            break
-        text = new_text
+    text = strip_control_tokens(text)
     cleaned, _calls, tail = scan_call_syntax(text)
     if tail and warn:
         logger.warning(
@@ -246,11 +267,7 @@ def split_stream_call_syntax(buffer: str) -> tuple[str, str, bool]:
     """
     if not buffer:
         return "", "", False
-    for _ in range(4):
-        new_buf = _CONTROL_TOKENS_RE.sub("", buffer)
-        if new_buf == buffer:
-            break
-        buffer = new_buf
+    buffer = strip_control_tokens(buffer)
     if not buffer:
         return "", "", False
     clean, _calls, tail = scan_call_syntax(buffer)
@@ -262,10 +279,9 @@ def split_stream_call_syntax(buffer: str) -> tuple[str, str, bool]:
         suffix = clean[-length:]
         if _CALL_OPEN.startswith(suffix):
             return clean[:-length], suffix, False
-    for length in range(min(len(clean), 32), 0, -1):
-        suffix = clean[-length:]
-        if any(p.startswith(suffix.lower()) for p in _CONTROL_TOKEN_PREFIXES):
-            return clean[:-length], suffix, False
+    safe, held = _split_partial_control_token(clean)
+    if held:
+        return safe, held, False
     return clean, "", False
 
 

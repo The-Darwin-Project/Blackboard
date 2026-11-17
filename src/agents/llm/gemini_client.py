@@ -50,6 +50,10 @@
 #     under Helm defaults, while clamping any non-default override to min(ttfb_timeout, total_timeout)), breaking on
 #     done=True, propagating external task.cancel(), and reassembling multi-chunk visible text in raw_parts; on earlier
 #     Gemini models, generate() clamps unary generate_content to 32768.
+# 18. [Security]: Control-token scrubbing (unary text, candidate parts, stream tail) goes through
+#     utils.prompt_sanitize.strip_control_tokens (bounded fixed point) -- never a hand-rolled fixed-count loop. At stream
+#     end the held tail is dropped via types.strip_trailing_partial_control_token; mid-stream holdback is
+#     types.split_stream_call_syntax (full-token prefix comparison). _sanitize_candidate_parts copies, never mutates SDK parts.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -67,6 +71,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+from ...utils.prompt_sanitize import strip_control_tokens
 from .quota_tracker import Reservation
 from .types import (
     DEFAULT_CHUNK_TIMEOUT_S,
@@ -84,8 +89,6 @@ from .types import (
     MAX_STREAM_CALL_SYNTAX_BUFFER,
     PRIORITY_NORMAL,
     TokenUsage,
-    _CONTROL_TOKEN_PREFIXES,
-    _CONTROL_TOKENS_RE,
     _MAX_TIMEOUT_ENV_S,
     _TIMEOUT_ENV_WARNED as _TYPES_TIMEOUT_ENV_WARNED,
     _TIMEOUT_ORDER_WARNED as _TYPES_TIMEOUT_ORDER_WARNED,
@@ -94,6 +97,7 @@ from .types import (
     sanitize_call_syntax,
     scan_call_syntax,
     split_stream_call_syntax,
+    strip_trailing_partial_control_token,
     warn_on_timeout_misordering,
 )
 
@@ -246,11 +250,7 @@ def _sanitize_candidate_parts(parts: list | None) -> list | None:
         if GeminiAdapter._is_thought_part(part):
             text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
             if text is not None:
-                for _ in range(4):
-                    new_t = _CONTROL_TOKENS_RE.sub("", text)
-                    if new_t == text:
-                        break
-                    text = new_t
+                text = strip_control_tokens(text)
                 sanitized.append(_clone_part_with_text(part, text))
             else:
                 sanitized.append(part)
@@ -258,11 +258,7 @@ def _sanitize_candidate_parts(parts: list | None) -> list | None:
 
         text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
         if text is not None:
-            for _ in range(4):
-                new_t = _CONTROL_TOKENS_RE.sub("", text)
-                if new_t == text:
-                    break
-                text = new_t
+            text = strip_control_tokens(text)
             if text:
                 sanitized.append(_clone_part_with_text(part, text))
             elif has_sig:
@@ -1060,13 +1056,7 @@ class GeminiAdapter:
                 if candidate.content and candidate.content.parts:
                     raw_parts = _sanitize_candidate_parts(candidate.content.parts)
 
-        raw_text = response.text
-        if raw_text:
-            for _ in range(4):
-                new_t = _CONTROL_TOKENS_RE.sub("", raw_text)
-                if new_t == raw_text:
-                    break
-                raw_text = new_t
+        raw_text = strip_control_tokens(response.text) if response.text else response.text
 
         if response.function_calls:
             fc = response.function_calls[0]
@@ -1366,13 +1356,9 @@ class GeminiAdapter:
 
             unterminated_logged = call_syntax_overflowed
             if stream_text_buffer:
-                for _ in range(4):
-                    new_buf = _CONTROL_TOKENS_RE.sub("", stream_text_buffer)
-                    if new_buf == stream_text_buffer:
-                        break
-                    stream_text_buffer = new_buf
-                if stream_text_buffer and any(p.startswith(stream_text_buffer.lower()) for p in _CONTROL_TOKEN_PREFIXES):
-                    stream_text_buffer = ""
+                # The held tail is only ever a partial [!call: or partial control token; nothing more will
+                # complete it, so drop a trailing partial token instead of flushing "<end_of_" to the user.
+                stream_text_buffer = strip_trailing_partial_control_token(strip_control_tokens(stream_text_buffer))
                 if stream_text_buffer:
                     clean_tail, _, held_fragment = scan_call_syntax(stream_text_buffer)
                     if held_fragment:
