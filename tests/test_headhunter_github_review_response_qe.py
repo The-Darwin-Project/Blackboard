@@ -81,7 +81,7 @@ class TestOverCapFeedbackIsNeverLost:
         lost = []
         for i in range(N_ITEMS):
             cid = 2000 + i
-            if f"#{cid} " in appended:
+            if f"id={cid} " in appended:
                 continue
             if await bb.is_github_pr_feedback_seen("org", "repo", 42, "issue_comment", cid) \
                     or cid <= cursor["issue_comment_id"]:

@@ -80,8 +80,18 @@ _XML_CLOSE_TAG = re.compile(
 
 
 def _sanitize_xml_fence(text: str) -> str:
-    """Strip XML closing tags that could break prompt fencing."""
-    return _XML_CLOSE_TAG.sub("", text) if text else text
+    """Strip XML closing tags that could break prompt fencing.
+
+    Repeats until stable so nested payloads like ``</review_</review_feedback>feedback>``
+    cannot reassemble a closing tag after one pass.
+    """
+    if not text:
+        return text
+    prev = None
+    while prev != text:
+        prev = text
+        text = _XML_CLOSE_TAG.sub("", text)
+    return text
 
 
 _SYSTEMIC_FAILURE_MIN_BATCH = 2
@@ -260,7 +270,10 @@ class Headhunter:
         (author, path) are quote-stripped like mention_author.
         """
         def _attr(value: object) -> str:
-            return str(value if value is not None else "").replace('"', "").replace("\n", " ")[:200]
+            return (
+                str(value if value is not None else "")
+                .replace('"', "").replace("<", "").replace(">", "").replace("\n", " ")[:200]
+            )
 
         lines: list[str] = []
         for it in items:
