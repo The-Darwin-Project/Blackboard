@@ -8,8 +8,8 @@
 # 3. [Constraint]: AIR GAP: No Brain logic. Creates events via blackboard, never routes agents.
 # 4. [Pattern]: pending_count is an in-memory property updated at drain cycle start/end.
 # 5. [Pattern]: Service naming: {job_name} (pending-queue key). Board-wide outage uses
-#    view-outage:{view} as key with result=BOARD_RED. Classification is the Brain's job.
-#    checks poll the correct Jenkins view.
+#    view-outage:{view} as key with result=BOARD_RED. Outage hysteresis uses Schmitt trigger
+#    (>70% trigger, <50% recovery) and metadata fingerprinting to prevent storm loops.
 # 6. [Pattern]: Lazy skills fetch with 5-min TTL (mirrors headhunter_github._load_issue_triage_instruction).
 # 7. [Pattern]: Dry-run default — JENKINS_OBSERVER_DRY_RUN=true logs evidence but skips create_event.
 # 8. [Pattern]: Dedup tuple includes waiting_approval (deliberate improvement over Aligner).
@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import hashlib
 import json
 import logging
 import math
@@ -83,7 +84,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 if TYPE_CHECKING:
-    from ..adapters.jenkins import JenkinsAdapter
+    from ..adapters.jenkins import JenkinsAdapter, JobResult, ViewScanResult
     from ..state.blackboard import BlackboardState
 
 from ..adapters.jenkins import _strip_pipeline_annotations
@@ -94,6 +95,12 @@ from ..utils.pii_redaction import redact_pii
 logger = logging.getLogger(__name__)
 
 _DEDUP_STATUSES = ("new", "active", "deferred", "waiting_approval")
+
+# Outage Schmitt trigger hysteresis thresholds and floors (VMER-2395)
+_OUTAGE_TRIGGER_RATIO = 0.70
+_OUTAGE_RECOVERY_RATIO = 0.50
+_OUTAGE_MIN_ACTIVE_FLOOR = 3
+_OUTAGE_MIN_FAILING_FLOOR = 3
 
 # Max read->evaluate->clear passes when lazily pruning escalation flags (scoped field, then
 # legacy unscoped field, plus headroom for a lost CAS). Exhausting it fails closed.
@@ -659,6 +666,42 @@ class JenkinsObserver:
         (no build at all) maps to the "MISSING" sentinel for this check."""
         return (result or "MISSING") in self._trigger_states
 
+    def _filter_recent_active_jobs(self, jobs: list[JobResult], recency_cutoff_ms: float) -> list[JobResult]:
+        """Filter out disabled/notbuilt jobs, in-progress builds, and stale builds beyond recency cutoff.
+        Used symmetrically in both Phase 1 (_poll_and_stage) and Phase 2 (_recheck_and_filter)."""
+        eligible = [
+            j for j in (jobs or [])
+            if j.color not in ("disabled", "notbuilt", "disabled_anime", "notbuilt_anime")
+            and not (j.result is None and j.build_number is not None)
+        ]
+        return [
+            j for j in eligible
+            if not (j.timestamp is not None and j.timestamp < recency_cutoff_ms)
+        ]
+
+    def _eval_view_health(self, active_jobs: list[JobResult]) -> tuple[bool, list[JobResult], float]:
+        completed = [j for j in active_jobs if not (j.result is None and j.build_number is not None)]
+        failing = [j for j in completed if self._is_triggering_result(j.result)]
+        ratio = len(failing) / len(completed) if completed else 0.0
+        is_outage = (
+            len(completed) >= _OUTAGE_MIN_ACTIVE_FLOOR
+            and len(failing) >= _OUTAGE_MIN_FAILING_FLOOR
+            and ratio > _OUTAGE_TRIGGER_RATIO
+        )
+        return is_outage, failing, ratio
+
+    @staticmethod
+    def _compute_outage_fingerprint(failing: list[JobResult]) -> str:
+        """Compute deterministic fingerprint for an outage view."""
+        job_pairs = ",".join(
+            f"{j.job_name}:{j.build_number or 0}"
+            for j in sorted(failing, key=lambda x: x.job_name)
+        )
+        pop_hash = hashlib.sha256(job_pairs.encode()).hexdigest()[:8]
+        max_bn = max((j.build_number or 0) for j in failing) if failing else 0
+        max_ts = max((j.timestamp or 0) for j in failing) if failing else 0
+        return f"{len(failing)}:{max_bn}:{max_ts}:{pop_hash}"
+
     async def _poll_and_stage(self) -> None:
         """Phase 1: poll Jenkins views and stage failing/missing jobs.
 
@@ -685,54 +728,53 @@ class JenkinsObserver:
                 self._view_unhealthy[view] = True
                 all_views_ok = False
                 continue
-            if scan.status_code is None and not scan.jobs:
-                self._view_unhealthy[view] = False
+            if scan.status_code != 200 or scan.status_code is None:
+                logger.warning(
+                    "JenkinsObserver: view %r scan returned status %s — marking unhealthy",
+                    view, scan.status_code,
+                )
+                self._view_unhealthy[view] = True
                 all_views_ok = False
                 continue
             self._view_unhealthy[view] = False
 
-            # Filter out disabled/notbuilt and in-progress jobs
-            eligible: list = []
-            for job in scan.jobs:
-                if job.color in ("disabled", "notbuilt", "disabled_anime", "notbuilt_anime"):
-                    continue
-                if job.result is None and job.build_number is not None:
-                    continue
-                eligible.append(job)
-
-            # Recency filter: drop SUCCESS-only when stale
             recency_cutoff_ms = time.time() * 1000 - (self._recency_hours * 3600 * 1000)
-            post_recency: list = []
-            for job in eligible:
-                if job.result == "SUCCESS":
-                    if job.timestamp is not None and job.timestamp < recency_cutoff_ms:
-                        continue
-                post_recency.append(job)
-
-            # Board-wide-red detection (post-color AND post-recency)
-            # Only triggers when a significant portion of the view (>70%) is failing
-            # and there are enough jobs for "board-wide" to be meaningful (>= 3)
-            active = [j for j in post_recency if not (j.result is None and j.build_number is not None)]
-            failing = [j for j in active if self._is_triggering_result(j.result)]
+            active = self._filter_recent_active_jobs(scan.jobs, recency_cutoff_ms)
+            is_outage, failing, ratio = self._eval_view_health(active)
             scanned.append((view, active, failing))
-            if len(active) >= 3 and len(failing) / len(active) > 0.7:
-                key = f"view-outage:{view}"
-                metadata = {
-                    "job_name": key,
-                    "version": "multi",
-                    "view": view,
-                    "result": "BOARD_RED",
-                    "build_number": None,
-                    "url": "",
-                    "staged_at": time.time(),
-                    "failing_count": len(failing),
-                    "active_count": len(active),
-                }
-                await self.blackboard.stage_jenkins_signal(key, metadata)
+
+            last_fp = await self.blackboard.get_jenkins_last_outage_fingerprint(view)
+            in_outage = is_outage or (
+                last_fp is not None
+                and ratio >= _OUTAGE_RECOVERY_RATIO
+                and len(active) >= _OUTAGE_MIN_ACTIVE_FLOOR
+                and len(failing) >= _OUTAGE_MIN_FAILING_FLOOR
+            )
+            if in_outage:
+                fingerprint = self._compute_outage_fingerprint(failing)
+                if is_outage and last_fp != fingerprint:
+                    key = f"view-outage:{view}"
+                    metadata = {
+                        "job_name": key,
+                        "version": "multi",
+                        "view": view,
+                        "result": "BOARD_RED",
+                        "build_number": None,
+                        "url": "",
+                        "staged_at": time.time(),
+                        "failing_count": len(failing),
+                        "active_count": len(active),
+                        "failure_ratio": ratio,
+                        "fingerprint": fingerprint,
+                    }
+                    await self.blackboard.stage_jenkins_signal(key, metadata)
+                    # Persist fingerprint immediately at stage time so dwell flapping
+                    # cannot invert in_outage during the 180s dwell window (F-C6-1)
+                    await self.blackboard.set_jenkins_last_outage_fingerprint(view, fingerprint)
                 continue
 
             # Stage each failing/missing job individually
-            for job in post_recency:
+            for job in active:
                 if self._is_triggering_result(job.result):
                     if job.build_number is not None:
                         last_alert = await self.blackboard.get_jenkins_last_alerted_build(job.job_name)
@@ -787,8 +829,23 @@ class JenkinsObserver:
         if not scanned:
             return
         for view, active, failing in scanned:
-            if not (len(active) >= 3 and len(failing) / len(active) > 0.7):
-                await self._clear_flag_if_present(_outage_service_key(view), "board recovered")
+            ratio = len(failing) / len(active) if active else 0.0
+            if (
+                ratio < _OUTAGE_RECOVERY_RATIO
+                or len(active) < _OUTAGE_MIN_ACTIVE_FLOOR
+                or len(failing) < _OUTAGE_MIN_FAILING_FLOOR
+            ):
+                outage_key = _outage_service_key(view)
+                if not self._dry_run:
+                    had_flag = bool(await self.blackboard.get_escalation_flag(outage_key, scope="jenkins"))
+                    had_fp = bool(await self.blackboard.get_jenkins_last_outage_fingerprint(view))
+                    if had_flag or had_fp:
+                        try:
+                            await self.blackboard.commit_jenkins_signal(f"view-outage:{view}")
+                            await self.blackboard.clear_jenkins_last_outage_fingerprint(view)
+                        except Exception as e:
+                            logger.warning("Failed to clear recovery state for view %s: %s", view, e)
+                        await self._clear_flag_if_present(outage_key, "board recovered")
         if not all_views_ok:
             return
         active_by_version: dict[str, int] = {}
@@ -833,8 +890,13 @@ class JenkinsObserver:
         if not metas:
             return []
 
-        recheck_cache: dict[str, list] = {}
+        recheck_cache: dict[str, ViewScanResult] = {}
         candidates: list[tuple[str, dict]] = []
+        if not self._adapter:
+            return candidates
+
+        recency_cutoff_ms = time.time() * 1000 - (self._recency_hours * 3600 * 1000)
+
         for key, meta in metas.items():
             job_name = meta.get("job_name", "")
             view = meta.get("view", "")
@@ -845,20 +907,42 @@ class JenkinsObserver:
                 await self.blackboard.commit_jenkins_signal(key)
                 continue
 
-            # BOARD_RED entries skip recheck (aggregate, not per-job)
-            if meta.get("result") == "BOARD_RED":
-                candidates.append((key, meta))
+            if view not in recheck_cache:
+                scan = await self._adapter.scan_view(view)
+                recheck_cache[view] = scan
+            else:
+                scan = recheck_cache[view]
+
+            if scan.status_code != 200 or scan.status_code is None:
+                logger.warning(
+                    "Jenkins scan for view %s failed with status %s; restaging candidate",
+                    view, scan.status_code,
+                )
+                await self.blackboard.restage_jenkins_signal(key, meta)
                 continue
 
-            if self._adapter and job_name:
-                if view not in recheck_cache:
-                    scan = await self._adapter.scan_view(view)
-                    recheck_cache[view] = scan.jobs if scan.jobs else []
-                resolved = any(
-                    j.job_name == job_name and j.result == "SUCCESS"
-                    for j in recheck_cache[view]
-                )
-                if resolved:
+            # BOARD_RED candidates re-evaluate view health
+            if meta.get("result") == "BOARD_RED":
+                active_jobs = self._filter_recent_active_jobs(scan.jobs or [], recency_cutoff_ms)
+                is_outage, failing, ratio = self._eval_view_health(active_jobs)
+                completed_count = len(active_jobs)
+                if (
+                    ratio < _OUTAGE_RECOVERY_RATIO
+                    or completed_count < _OUTAGE_MIN_ACTIVE_FLOOR
+                    or len(failing) < _OUTAGE_MIN_FAILING_FLOOR
+                ):
+                    await self.blackboard.commit_jenkins_signal(key)
+                    await self.blackboard.clear_jenkins_last_outage_fingerprint(view)
+                    continue
+                else:
+                    candidates.append((key, meta))
+                    continue
+
+            if job_name:
+                successful_jobs = {
+                    j.job_name for j in (scan.jobs or []) if j.result == "SUCCESS"
+                }
+                if job_name in successful_jobs:
                     service_name = _service_key(job_name, meta.get("version", ""))
                     if not self._dry_run:
                         try:
@@ -911,6 +995,16 @@ class JenkinsObserver:
             if status in _DEDUP_STATUSES:
                 evt = await self.blackboard.get_event(eid)
                 if evt and evt.service == service_name:
+                    return True
+
+        waiting_eids = await self.blackboard.get_waiting_approval_events()
+        for eid in waiting_eids:
+            if eid in status_map:
+                continue
+            evt = await self.blackboard.get_event(eid)
+            if evt and evt.service == service_name:
+                evt_status = getattr(evt.status, "value", evt.status)
+                if evt_status in _DEDUP_STATUSES or evt_status == "waiting_approval":
                     return True
 
         # Bounded loop: after pruning one field (scoped, then legacy) re-read so a different
@@ -1036,6 +1130,13 @@ class JenkinsObserver:
                             )
                         except Exception as e:
                             logger.warning("Failed to set last_alerted_build for %s: %s", jn, e, exc_info=True)
+
+                    if meta.get("result") == "BOARD_RED" and meta.get("fingerprint"):
+                        view = meta.get("view", "")
+                        try:
+                            await self.blackboard.set_jenkins_last_outage_fingerprint(view, meta["fingerprint"])
+                        except Exception as e:
+                            logger.warning("Failed to record outage fingerprint for %s: %s", view, e)
 
                 for key, _ in signals:
                     await self.blackboard.commit_jenkins_signal(key)

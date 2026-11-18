@@ -85,6 +85,10 @@ def _mock_blackboard():
     bb.count_jenkins_pending = AsyncMock(return_value=0)
     bb.get_jenkins_last_alerted_build = AsyncMock(return_value=0)
     bb.set_jenkins_last_alerted_build = AsyncMock(return_value=None)
+    bb.get_waiting_approval_events = AsyncMock(return_value=[])
+    bb.get_jenkins_last_outage_fingerprint = AsyncMock(return_value=None)
+    bb.set_jenkins_last_outage_fingerprint = AsyncMock(return_value=None)
+    bb.clear_jenkins_last_outage_fingerprint = AsyncMock(return_value=None)
     bb.redis = AsyncMock()
     bb.redis.get.return_value = None
     bb.redis.hget.return_value = None
@@ -4437,3 +4441,450 @@ class TestGroupFlagRecovery:
         outage = [("view-outage:V", {"result": "BOARD_RED", "view": "V", "job_name": "view-outage:V"})]
         await obs._process_candidates([flood, outage])
         assert seen == ["ci-gating-flood|4.23", "ci-gating-outage|V"]
+
+
+# =========================================================================
+# VMER-2395: False BOARD_RED Sentinel Storms & Close-to-Re-Emit Loops (T-1 to T-10)
+# =========================================================================
+
+class TestSymmetricRecencyPruning:
+    """T-1: Symmetric recency pruning drops stale failures (>72h) alongside successes.
+
+    Given a quiet view with 30 successes (>72h) and 6 failures (>72h),
+    When _poll_and_stage executes,
+    Then all stale jobs are pruned symmetrically and no BOARD_RED candidate or
+    individual jobs are staged.
+    """
+
+    VIEW = "Quiet Gating View"
+
+    async def test_stale_failures_and_successes_pruned_symmetrically(self):
+        bb = _mock_blackboard()
+        now_ms = time.time() * 1000
+        stale_ts = int(now_ms - (73 * 3600 * 1000))  # 73h ago (>72h cutoff)
+
+        jobs = [
+            _make_job_result(f"success-job-{i}", build_number=10 + i, result="SUCCESS",
+                             timestamp=stale_ts, color="blue")
+            for i in range(30)
+        ] + [
+            _make_job_result(f"failing-job-{i}", build_number=50 + i, result="FAILURE",
+                             timestamp=stale_ts, color="red")
+            for i in range(6)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            await obs._poll_and_stage()
+
+        bb.stage_jenkins_signal.assert_not_called()
+
+
+class TestSchmittTriggerOutageHysteresis:
+    """T-2, T-3, T-5: Schmitt trigger outage hysteresis (activation >70%, deadband 50-70%, floor >=3)."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_two_failing_active_jobs_below_floor_not_staged_as_board_red(self):
+        """T-2: 2 active jobs all failing (ratio=1.0) -> BOARD_RED not staged because active < 3."""
+        bb = _mock_blackboard()
+        now_ms = int(time.time() * 1000)
+        jobs = [
+            _make_job_result(f"job-{i}", build_number=10 + i, result="FAILURE",
+                             timestamp=now_ms, color="red")
+            for i in range(2)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert not any(k.startswith("view-outage:") for k in staged_keys), \
+            f"BOARD_RED must not be staged when active jobs < 3, got {staged_keys}"
+        # Both jobs must be staged individually instead
+        assert len(staged_keys) == 2
+
+    async def test_three_failing_active_jobs_at_floor_staged_as_board_red(self):
+        """T-3: 3 active jobs all failing (ratio=1.0) -> BOARD_RED IS staged (satisfies TestTV7d floor)."""
+        bb = _mock_blackboard()
+        now_ms = int(time.time() * 1000)
+        jobs = [
+            _make_job_result(f"job-{i}", build_number=10 + i, result="FAILURE",
+                             timestamp=now_ms, color="red")
+            for i in range(3)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            await obs._poll_and_stage()
+
+        staged_keys = [
+            call.args[0] if call.args else call.kwargs.get("key", "")
+            for call in bb.stage_jenkins_signal.call_args_list
+        ]
+        assert len(staged_keys) == 1, f"Expected exactly 1 consolidated signal, got {staged_keys}"
+        assert staged_keys[0] == f"view-outage:{self.VIEW}"
+        call_meta = bb.stage_jenkins_signal.call_args[0][1]
+        assert call_meta["result"] == "BOARD_RED"
+        assert call_meta["failure_ratio"] == 1.0
+        assert "fingerprint" in call_meta
+
+    async def test_active_outage_in_deadband_ratio_sixty_percent_suppresses_individual_jobs(self):
+        """T-5: Active outage with ratio dropping to 60% (deadband) remains active and suppresses individual jobs."""
+        bb = _mock_blackboard()
+        # Active outage already recorded in Redis
+        bb.get_jenkins_last_outage_fingerprint = AsyncMock(return_value="3:102:1700000000000")
+        flags = _wire_flag_store(bb, {f"ci-gating-outage|{self.VIEW}": "evt-outage|escalated"})
+
+        now_ms = int(time.time() * 1000)
+        # 5 active jobs: 3 failing, 2 success -> ratio = 3/5 = 0.60 (deadband between 0.50 and 0.70)
+        jobs = [
+            _make_job_result(f"fail-job-{i}", build_number=100 + i, result="FAILURE",
+                             timestamp=now_ms, color="red")
+            for i in range(3)
+        ] + [
+            _make_job_result(f"ok-job-{i}", build_number=200 + i, result="SUCCESS",
+                             timestamp=now_ms, color="blue")
+            for i in range(2)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            await obs._poll_and_stage()
+
+        # In deadband (0.60): outage is NOT re-staged, individual jobs are NOT staged
+        bb.stage_jenkins_signal.assert_not_called()
+        # Outage flag must NOT be cleared because ratio >= 0.50 (Schmitt trigger threshold)
+        assert f"ci-gating-outage|{self.VIEW}" in flags
+
+
+class TestOutageFallthroughSuppression:
+    """T-4: Given active outage with fingerprint F1, identical poll suppresses outage and individual jobs."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_identical_outage_poll_suppresses_staging_and_fallthrough(self):
+        bb = _mock_blackboard()
+        now_ms = int(time.time() * 1000)
+        jobs = [
+            _make_job_result(f"fail-job-{i}", build_number=100 + i, result="FAILURE",
+                             timestamp=now_ms - (i * 1000), color="red")
+            for i in range(3)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            expected_fp = obs._compute_outage_fingerprint(jobs)
+            bb.get_jenkins_last_outage_fingerprint = AsyncMock(return_value=expected_fp)
+
+            await obs._poll_and_stage()
+
+        # Duplicate outage suppressed, and must not fall through to stage individual jobs
+        bb.stage_jenkins_signal.assert_not_called()
+
+    async def test_different_outage_fingerprint_stages_outage(self):
+        bb = _mock_blackboard()
+        now_ms = int(time.time() * 1000)
+        jobs = [
+            _make_job_result(f"fail-job-{i}", build_number=100 + i, result="FAILURE",
+                             timestamp=now_ms - (i * 1000), color="red")
+            for i in range(3)
+        ]
+
+        with patch.dict("os.environ", _env_vars(JENKINS_OBSERVER_VIEWS=self.VIEW)):
+            from src.agents.jenkins_observer import JenkinsObserver
+            obs = JenkinsObserver(blackboard=bb)
+            obs._adapter = _make_adapter()
+            obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs))
+
+            bb.get_jenkins_last_outage_fingerprint = AsyncMock(return_value="prior_different_fp")
+
+            await obs._poll_and_stage()
+
+        # Different outage fingerprint must stage view-outage signal
+        bb.stage_jenkins_signal.assert_called_once()
+        key, meta = bb.stage_jenkins_signal.call_args[0]
+        assert key == f"view-outage:{self.VIEW}"
+        assert meta["result"] == "BOARD_RED"
+        assert meta["failing_count"] == 3
+
+
+class TestOutageRecoveryPendingEviction:
+    """T-6: When outage recovers (<50%), _clear_recovered_group_flags evicts pending outage signal and clears fingerprint."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_recovery_clears_outage_flag_fingerprint_and_evicts_pending_signal(self):
+        obs, bb, flags = _flag_observer()
+        flags[f"ci-gating-outage|{self.VIEW}"] = "evt-outage|escalated"
+
+        # 5 active jobs: 2 failing, 3 success -> ratio = 2/5 = 0.40 (< 0.50 recovery threshold)
+        active = [_make_job_result(f"job-{i}", result="FAILURE" if i < 2 else "SUCCESS") for i in range(5)]
+        failing = [j for j in active if j.result == "FAILURE"]
+        scanned = [(self.VIEW, active, failing)]
+
+        await obs._clear_recovered_group_flags(scanned, all_views_ok=True)
+
+        # Flag cleared
+        assert f"ci-gating-outage|{self.VIEW}" not in flags
+        # Pending ZSET evicted
+        bb.commit_jenkins_signal.assert_called_with(f"view-outage:{self.VIEW}")
+        # Fingerprint cleared
+        bb.clear_jenkins_last_outage_fingerprint.assert_called_with(self.VIEW)
+
+
+class TestGroupRecoveryDryRunNoop:
+    """T-7: In dry-run mode (_dry_run=True), recovery performs NO Redis mutations or flag clears."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_group_recovery_dry_run_does_not_mutate_redis_or_flags(self):
+        obs, bb, flags = _flag_observer(dry_run=True)
+        flags[f"ci-gating-outage|{self.VIEW}"] = "evt-outage|escalated"
+
+        active = [_make_job_result(f"job-{i}", result="SUCCESS") for i in range(5)]
+        failing = []
+        scanned = [(self.VIEW, active, failing)]
+
+        await obs._clear_recovered_group_flags(scanned, all_views_ok=True)
+
+        bb.commit_jenkins_signal.assert_not_called()
+        bb.clear_jenkins_last_outage_fingerprint.assert_not_called()
+        bb.clear_escalation_flag.assert_not_called()
+        assert f"ci-gating-outage|{self.VIEW}" in flags
+
+
+class TestRecheckFailClosedNetworkError:
+    """T-8: Given staged candidate whose recheck returns HTTP 502/timeout, restage with backoff and do not emit."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_recheck_network_error_restages_candidate_and_does_not_emit(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        meta = _make_meta(job_name=_JOB, result="FAILURE", view=self.VIEW)
+        bb.redis.hget.return_value = json.dumps(meta)
+
+        # Adapter scan_view returns 502 Bad Gateway with empty jobs
+        obs._adapter.scan_view = AsyncMock(
+            return_value=_make_view_scan_result(jobs=[], status_code=502)
+        )
+
+        candidates = await obs._recheck_and_filter([_JOB])
+
+        # Fail-closed: candidate is restaged and NOT emitted
+        bb.restage_jenkins_signal.assert_called_once_with(_JOB, meta)
+        assert candidates == []
+
+
+class TestWaitingApprovalDedupUnion:
+    """T-9: _is_duplicate_or_escalated unions waiting_approval events with active events."""
+
+    async def test_candidate_matching_waiting_approval_event_is_duplicate(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        service = "ci-gating-outage|Gating Wrappers"
+
+        # No events in active status map
+        bb.get_active_events_with_status.return_value = {}
+        # Event is parked in waiting_approval
+        bb.get_waiting_approval_events.return_value = ["evt-parked-123"]
+
+        mock_evt = MagicMock()
+        mock_evt.service = service
+        mock_evt.status = "waiting_approval"
+        bb.get_event.return_value = mock_evt
+
+        is_dup = await obs._is_duplicate_or_escalated(service)
+
+        assert is_dup is True
+
+
+class TestBlackboardLastOutageFingerprint:
+    """T-10: BlackboardState outage fingerprint get/set/clear with byte decoding and TTL."""
+
+    async def test_get_outage_fingerprint_decodes_bytes(self):
+        import fakeredis.aioredis
+        from src.state.blackboard import BlackboardState
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        bb = BlackboardState(redis)
+
+        view = "Gating Wrappers"
+        await redis.set(f"darwin:jenkins:last_outage:{view}", b"3:102:1700000000000")
+
+        fp = await bb.get_jenkins_last_outage_fingerprint(view)
+        assert fp == "3:102:1700000000000"
+        assert isinstance(fp, str)
+
+    async def test_set_and_clear_outage_fingerprint(self):
+        import fakeredis.aioredis
+        from src.state.blackboard import BlackboardState
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        bb = BlackboardState(redis)
+
+        view = "Gating Wrappers"
+        await bb.set_jenkins_last_outage_fingerprint(view, "3:102:1700000000000")
+
+        fp = await bb.get_jenkins_last_outage_fingerprint(view)
+        assert fp == "3:102:1700000000000"
+
+        ttl = await redis.ttl(f"darwin:jenkins:last_outage:{view}")
+        assert 600000 <= ttl <= 604800
+
+        await bb.clear_jenkins_last_outage_fingerprint(view)
+        assert await bb.get_jenkins_last_outage_fingerprint(view) is None
+
+    async def test_fingerprint_methods_handle_redis_exceptions_safely(self):
+        from src.state.blackboard import BlackboardState
+        mock_redis = MagicMock()
+        mock_redis.get = AsyncMock(side_effect=ConnectionError("Redis connection lost"))
+        mock_redis.set = AsyncMock(side_effect=ConnectionError("Redis connection lost"))
+        mock_redis.delete = AsyncMock(side_effect=ConnectionError("Redis connection lost"))
+        bb = BlackboardState(mock_redis)
+
+        # None of these should raise
+        assert await bb.get_jenkins_last_outage_fingerprint("view") is None
+        await bb.set_jenkins_last_outage_fingerprint("view", "fp")
+        await bb.clear_jenkins_last_outage_fingerprint("view")
+
+
+class TestRecheckBoardRedHealthEvaluation:
+    """T-8b: BOARD_RED candidate view health re-evaluation during dwell recheck."""
+
+    VIEW = "Gating Wrappers"
+
+    async def test_recheck_board_red_recovers_and_evicts_candidate(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        key = f"view-outage:{self.VIEW}"
+        meta = {
+            "job_name": key,
+            "version": "multi",
+            "view": self.VIEW,
+            "result": "BOARD_RED",
+            "fingerprint": "3:102:12345",
+        }
+        bb.redis.hget.return_value = json.dumps(meta)
+
+        # 5 active jobs: only 1 failing, 4 success -> ratio = 0.20 (< 0.50 recovery threshold)
+        jobs = [_make_job_result(f"job-{i}", result="FAILURE" if i == 0 else "SUCCESS") for i in range(5)]
+        obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs=jobs, status_code=200))
+
+        candidates = await obs._recheck_and_filter([key])
+
+        # Candidate is evicted via commit_jenkins_signal and cleared from fingerprint
+        assert candidates == []
+        bb.commit_jenkins_signal.assert_called_once_with(key)
+        bb.clear_jenkins_last_outage_fingerprint.assert_called_once_with(self.VIEW)
+
+    async def test_recheck_board_red_persists_outage_candidate(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        key = f"view-outage:{self.VIEW}"
+        meta = {
+            "job_name": key,
+            "version": "multi",
+            "view": self.VIEW,
+            "result": "BOARD_RED",
+            "fingerprint": "3:102:12345",
+        }
+        bb.redis.hget.return_value = json.dumps(meta)
+
+        # 3 active jobs: all 3 failing -> ratio = 1.0 (>= 0.50)
+        jobs = [_make_job_result(f"job-{i}", result="FAILURE") for i in range(3)]
+        obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs=jobs, status_code=200))
+
+        candidates = await obs._recheck_and_filter([key])
+
+        assert len(candidates) == 1
+        assert candidates[0][0] == key
+        bb.commit_jenkins_signal.assert_not_called()
+
+    async def test_recheck_board_red_filters_disabled_jobs_symmetrically(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        key = f"view-outage:{self.VIEW}"
+        meta = {
+            "job_name": key,
+            "version": "multi",
+            "view": self.VIEW,
+            "result": "BOARD_RED",
+            "fingerprint": "3:102:12345",
+        }
+        bb.redis.hget.return_value = json.dumps(meta)
+
+        # 3 completed jobs: 1 failing, 2 SUCCESS, plus 5 disabled jobs with result=None
+        jobs = [
+            _make_job_result("fail-1", result="FAILURE"),
+            _make_job_result("succ-1", result="SUCCESS"),
+            _make_job_result("succ-2", result="SUCCESS"),
+        ] + [
+            _make_job_result(f"disabled-{i}", result=None, build_number=None, color="disabled")
+            for i in range(5)
+        ]
+        obs._adapter.scan_view = AsyncMock(return_value=_make_view_scan_result(jobs=jobs, status_code=200))
+
+        candidates = await obs._recheck_and_filter([key])
+
+        # Active jobs completed = 3 (1 fail / 3 total = 33% < 50%).
+        # If disabled jobs were not filtered, completed would be 8 (6 fail / 8 total = 75% > 50%).
+        # It must recover and evict!
+        assert candidates == []
+        bb.commit_jenkins_signal.assert_called_once_with(key)
+
+
+class TestProcessCandidatesOutageFingerprintPersistence:
+    """T-7b: Verify set_jenkins_last_outage_fingerprint is recorded when BOARD_RED candidate is processed."""
+
+    async def test_process_candidates_records_outage_fingerprint(self):
+        bb = _mock_blackboard()
+        obs = _make_observer(bb, _make_adapter())
+
+        key = "view-outage:Gating Wrappers"
+        fp = "3:102:1700000000000:abcd1234"
+        meta = {
+            "job_name": key,
+            "version": "multi",
+            "view": "Gating Wrappers",
+            "result": "BOARD_RED",
+            "fingerprint": fp,
+        }
+        groups = [[(key, meta)]]
+
+        await obs._process_candidates(groups)
+
+        bb.create_event.assert_called_once()
+        bb.set_jenkins_last_outage_fingerprint.assert_called_once_with("Gating Wrappers", fp)
+        bb.commit_jenkins_signal.assert_called_once_with(key)
+
