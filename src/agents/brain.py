@@ -7368,15 +7368,21 @@ class Brain:
             # seen AND answered (_compute_processed_up_to). Do NOT add a wall-clock guard vs. the
             # park time -- it strands messages that land during the final LLM call (enqueue is
             # dropped while the event is in flight; user parks have no idle backstop).
+            # WAITING_APPROVAL is a human authorization gate: untrusted-by-default external
+            # evidence (headhunter review feedback) must NOT clear it -- only a real user turn can.
+            if event.status == EventStatus.WAITING_APPROVAL:
+                _clears_wait = lambda t: t.actor == "user"  # noqa: E731
+            else:
+                _clears_wait = _is_external_input_turn
             has_user_unread = has_unread and any(
-                t.status.value == "delivered" and _is_external_input_turn(t)
+                t.status.value == "delivered" and _clears_wait(t)
                 for t in event.conversation[-10:]
             )
             if has_user_unread and is_waiting:
                 logger.info(
                     "Scan bypass: delivered user/headhunter-evidence turn(s) %s cleared wait_for_user for %s",
                     [t.turn for t in event.conversation[-10:]
-                     if _is_external_input_turn(t) and t.status.value == "delivered"],
+                     if _clears_wait(t) and t.status.value == "delivered"],
                     eid,
                 )
                 self.clear_waiting(eid)

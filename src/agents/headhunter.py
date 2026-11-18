@@ -525,6 +525,7 @@ class Headhunter:
             self._github._last_queued_prs = queued_items + newly_queued
             self._github_queued = len(self._github._last_queued_prs)
             self._github_pending = 0  # All new items moved to queued state — avoid double-count
+            self._github_feedback_pending = 0  # Phase D is skipped while the gate is closed
             try:
                 await self._github_poll_issues()
             except Exception as e:
@@ -618,15 +619,20 @@ class Headhunter:
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
 
-        # Phase D: PR review feedback / @mentions (flag-gated, flow-gate gated)
-        await self._github_poll_review_feedback()
+        # Phase D: PR review feedback / @mentions (flag-gated, flow-gate gated). Non-fatal like
+        # Phase C: an optional feature must never abort _poll_github or feed the circuit breaker
+        # that latches _github_disabled.
+        try:
+            await self._github_poll_review_feedback()
+        except Exception as e:
+            logger.warning(f"GitHub review-feedback poll failed (non-fatal): {e}")
 
     async def _github_poll_review_feedback(self) -> None:
         """Phase D: turn trusted review feedback on Darwin PRs (and @mentions) into events.
 
         Items that are not turned into an event this cycle (flow gate closed, LLM/side-effect
-        failure) are NOT marked handled, so they are retried next cycle. HTTP 429/5xx from the
-        poll propagate to the GitHub circuit breaker; per-item failures are isolated.
+        failure) are NOT marked handled, so they are retried next cycle. The caller treats any
+        error from this phase as non-fatal (logged only); per-item failures are isolated.
         """
         if not self._github.review_response_enabled():
             self._github_feedback_pending = 0

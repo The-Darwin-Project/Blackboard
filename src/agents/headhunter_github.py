@@ -40,7 +40,7 @@
 #     author_association are dropped. Same gate filters fetch_context recent_comments.
 # 23. [Constraint]: Review-response events NEVER touch darwin-* labels or the pr_sha re-trigger
 #     store (would start an unintended darwin-review on Darwin's own PR). See _NO_LABEL_ACTIONS.
-# 24. [Pattern]: 429/5xx from the feedback poll propagate (circuit breaker); 404/422 per PR skip it.
+# 24. [Pattern]: Feedback poll: one PR's 429/5xx is isolated (healthy PRs' items returned); raised only when 2+ PRs polled and ALL failed 429/5xx. Headhunter Phase D treats any error as non-fatal (never feeds the circuit breaker). 404/422 per PR skip it.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -1356,7 +1356,8 @@ class GitHubPlatform:
         Returns one work item per PR (debounced batch) -- NOT yet marked as handled; marks and
         cursor advance happen in create_review_feedback_event after the event exists.
         Uses the PR list cached by poll_work_items() unless prs is given.
-        429/5xx HTTP errors propagate (circuit breaker); other per-PR errors are isolated.
+        Per-PR errors are isolated and logged; 429/5xx is raised only when 2+ PRs were polled and
+        ALL failed with 429/5xx (systemic).
         """
         if not self.review_response_enabled():
             return []
@@ -1396,22 +1397,25 @@ class GitHubPlatform:
         results = await asyncio.gather(*[_one(pr) for pr in wanted], return_exceptions=True)
         items: list[dict] = []
         fatal: httpx.HTTPStatusError | None = None
+        fatal_count = 0
         for pr, res in zip(wanted, results):
             if isinstance(res, httpx.HTTPStatusError):
                 code = res.response.status_code
                 if code == 429 or code >= 500:
                     fatal = fatal or res
-                else:
-                    logger.warning(
-                        f"GitHub review-feedback poll {code} for {pr['owner']}/{pr['repo']}#{pr['number']}"
-                    )
+                    fatal_count += 1
+                logger.warning(
+                    f"GitHub review-feedback poll {code} for {pr['owner']}/{pr['repo']}#{pr['number']}"
+                )
             elif isinstance(res, BaseException):
                 logger.warning(
                     f"GitHub review-feedback poll failed for {pr['owner']}/{pr['repo']}#{pr['number']}: {res}"
                 )
             elif res:
                 items.append(res)
-        if fatal is not None:
+        # Same pattern as _raise_if_systemic_failure: one PR's 429/5xx is isolated (healthy PRs'
+        # items are still returned); only a fully-failed 2+ PR poll is treated as systemic.
+        if fatal is not None and len(wanted) >= 2 and fatal_count == len(wanted):
             raise fatal
         items.sort(key=lambda i: i.get("created_at", ""))
         return items
@@ -1505,7 +1509,7 @@ class GitHubPlatform:
             await self._acknowledge(pr.get("installation_id", ""), owner, repo, delivered)
             return None
 
-        max_rounds = _safe_int("HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS", 5)
+        max_rounds = max(1, _safe_int("HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS", 5))
         rounds = await bb.get_github_pr_feedback_rounds(owner, repo, number)
         if rounds >= max_rounds:
             # Deliberately ignoring this feedback: consume every item and advance fully.

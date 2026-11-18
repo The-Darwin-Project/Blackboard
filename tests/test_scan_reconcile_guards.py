@@ -550,3 +550,23 @@ class TestHeadhunterEvidenceWake:
         for _ in range(3):  # repeated scans stay quiet
             assert await brain._scan_active_for_reconcile() == []
         assert "evt-hh-w3" in brain._waiting_for_user
+
+
+    @pytest.mark.asyncio
+    async def test_waiting_approval_gate_not_cleared_by_headhunter_evidence(self):
+        """WAITING_APPROVAL is a human gate: headhunter evidence must not clear waiting_for_user."""
+        turn = self._hh_turn(1)
+        event = _make_event("evt-hh-wa1", status="waiting_approval", source="headhunter", conversation=[turn])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-wa1"] = time.time()
+        assert await brain._scan_active_for_reconcile() == []
+        assert "evt-hh-wa1" in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_waiting_approval_still_cleared_by_real_user_turn(self):
+        turn = ConversationTurn(turn=1, actor="user", action="message", status=MessageStatus.SENT)
+        event = _make_event("evt-hh-wa2", status="waiting_approval", source="headhunter", conversation=[turn])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-wa2"] = time.time()
+        assert await brain._scan_active_for_reconcile() == ["evt-hh-wa2"]
+        assert "evt-hh-wa2" not in brain._waiting_for_user

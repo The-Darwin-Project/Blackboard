@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -429,16 +432,20 @@ class TestCursorAndDedup:
         assert {f["id"] for f in items[0]["review_feedback"]} == {501, 502}  # one event, both items
 
     @pytest.mark.asyncio
-    async def test_429_and_5xx_propagate_but_404_does_not(self, platform, bb):
+    async def test_systemic_429_and_5xx_propagate_but_404_does_not(self, platform, bb):
+        # Batch 2: a fully-failed 2+ PR poll is systemic (raises); a lone PR error is isolated.
         client = FakeGitHubClient()
         _wire(platform, client)
-        await _prime_cursor(bb)
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        prs = [_pr(number=42), _pr(number=43)]
         for status in (429, 502):
             client.get_error = _http_error(status)
             with pytest.raises(httpx.HTTPStatusError):
-                await _poll(platform, [_pr()])
+                await _poll(platform, prs)
+            assert await _poll(platform, [_pr()]) == []  # single PR: isolated, not raised
         client.get_error = _http_error(404)
-        assert await _poll(platform, [_pr()]) == []
+        assert await _poll(platform, prs) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1030,3 +1037,157 @@ class TestAppendedEvidenceFencing:
         assert "<review_feedback>" in text and text.rstrip().endswith("</review_feedback>")
         assert text.count("</review_feedback>") == 1  # only the real closing fence
         assert 'author="evil"' in text
+
+
+# ---------------------------------------------------------------------------
+# Batch 2: Phase D isolation, maxRounds clamp, helm render
+# ---------------------------------------------------------------------------
+
+class PerPrClient(FakeGitHubClient):
+    """FakeGitHubClient whose list endpoints raise an HTTP error for selected PR numbers."""
+
+    def __init__(self, *args, fail: dict[int, int] | None = None, **kw):
+        super().__init__(*args, **kw)
+        self.fail = fail or {}
+
+    async def get(self, path, params=None):
+        for num, code in self.fail.items():
+            if re.search(rf"/(pulls|issues)/{num}(/|$)", path):
+                self.get_calls.append((path, dict(params or {})))
+                raise _http_error(code)
+        return await super().get(path, params)
+
+
+class TestPhaseDIsolation:
+    @pytest.mark.asyncio
+    async def test_single_pr_5xx_keeps_healthy_items(self, platform, bb):
+        client = PerPrClient(inline=[_inline(501)], fail={43: 503})
+        _wire(platform, client)
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        items = await _poll(platform, [_pr(number=42), _pr(number=43)])
+        assert [i["number"] for i in items] == [42]
+
+    @pytest.mark.asyncio
+    async def test_single_pr_429_alone_is_isolated(self, platform, bb):
+        _wire(platform, PerPrClient(fail={42: 429}))
+        await _prime_cursor(bb, 42)
+        assert await _poll(platform, [_pr(number=42)]) == []  # 1 PR polled: not systemic
+
+    @pytest.mark.asyncio
+    async def test_all_prs_5xx_is_systemic_and_raises(self, platform, bb):
+        _wire(platform, PerPrClient(fail={42: 503, 43: 429}))
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        with pytest.raises(httpx.HTTPStatusError):
+            await _poll(platform, [_pr(number=42), _pr(number=43)])
+
+    @pytest.mark.asyncio
+    async def test_mixed_4xx_and_5xx_is_not_systemic(self, platform, bb):
+        _wire(platform, PerPrClient(fail={42: 503, 43: 404}))
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        assert await _poll(platform, [_pr(number=42), _pr(number=43)]) == []
+
+    @pytest.mark.asyncio
+    async def test_cycles_never_raise_or_latch_breaker(self, platform, bb):
+        """Run-loop breaker counts exceptions escaping _github_poll_and_process: none may escape."""
+        hh = _hh()
+        hh._github = platform
+        client = PerPrClient(inline=[_inline(501)], fail={43: 503})
+        _wire(platform, client)
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        platform._last_open_prs = [_pr(number=42), _pr(number=43)]
+        platform.poll_work_items = AsyncMock(return_value=[])
+        hh._github_poll_issues = AsyncMock()
+        hh.check_flow_gate = AsyncMock(return_value=True)
+        hh.analyze_and_plan = AsyncMock(return_value="---\nplan: x\n---")
+        for _ in range(3):
+            await hh._github_poll_and_process()  # must not raise
+        # healthy PR 42 still got exactly one event despite 43 failing every cycle
+        assert len(await bb.get_active_events()) == 1
+
+    @pytest.mark.asyncio
+    async def test_total_phase_d_failure_is_non_fatal(self, platform, bb):
+        hh = _hh()
+        hh._github = platform
+        _wire(platform, PerPrClient(fail={42: 503, 43: 503}))
+        await _prime_cursor(bb, 42)
+        await _prime_cursor(bb, 43)
+        platform._last_open_prs = [_pr(number=42), _pr(number=43)]
+        platform.poll_work_items = AsyncMock(return_value=[])
+        hh._github_poll_issues = AsyncMock()
+        hh.check_flow_gate = AsyncMock(return_value=True)
+        for _ in range(3):
+            await hh._github_poll_and_process()  # systemic Phase D error is logged, not raised
+
+    @pytest.mark.asyncio
+    async def test_gate_closed_resets_feedback_pending(self, platform):
+        hh = _hh()
+        hh._github = platform
+        platform.poll_work_items = AsyncMock(return_value=[])
+        hh._github_poll_issues = AsyncMock()
+        hh.check_flow_gate = AsyncMock(return_value=False)
+        hh._github_feedback_pending = 7
+        await hh._github_poll_and_process()
+        assert hh._github_feedback_pending == 0
+
+
+class TestMaxRoundsClamp:
+    @pytest.mark.asyncio
+    async def test_zero_max_rounds_clamps_to_one(self, platform, bb, monkeypatch):
+        monkeypatch.setenv("HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS", "0")
+        client = FakeGitHubClient(inline=[_inline(501)])
+        _wire(platform, client)
+        await _prime_cursor(bb)
+        # rounds == 0 must NOT be capped (unclamped 0 >= 0 would cap immediately)
+        items = await _poll(platform, [_pr()])
+        assert len(items) == 1 and items[0]["action"] == "review_feedback"
+        assert not any("already responded" in (b.get("body") or "") for _, b in client.posts)
+        # after one round the clamped cap of 1 is reached
+        await bb.incr_github_pr_feedback_rounds("org", "repo", 42)
+        client.inline.append(_inline(502, body="again"))
+        assert await _poll(platform, [_pr()]) == []
+        assert any("already responded" in (b.get("body") or "") for _, b in client.posts)
+
+
+HELM_DIR = Path(__file__).parent.parent / "helm"
+
+
+def _render_review_env(*sets: str) -> dict[str, str]:
+    import yaml
+    cmd = ["helm", "template", "t", str(HELM_DIR), "--set", "headhunter.enabled=true",
+           "--set", "headhunter.github.enabled=true"]
+    for item in sets:
+        cmd += ["--set-string" if "=" in item and item.split("=", 1)[0].endswith(
+            ("debounceSec", "trustedAssociations", "maxRounds")) else "--set", item]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    for raw in out.split("\n---"):
+        doc = yaml.safe_load(raw) if raw.strip() else None
+        if isinstance(doc, dict) and doc.get("kind") == "Deployment":
+            for c in doc["spec"]["template"]["spec"]["containers"]:
+                env = {e["name"]: e.get("value") for e in c.get("env", [])}
+                if "HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED" in env:
+                    return env
+    raise AssertionError("review-response env not found in rendered Deployment")
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+class TestHelmReviewResponseEnv:
+    def test_defaults_off_with_values_defaults(self):
+        env = _render_review_env()
+        assert env["HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED"] == "false"
+        assert env["HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS"] == "OWNER,MEMBER,COLLABORATOR"
+        assert env["HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC"] == "120"
+        assert env["HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS"] == "5"
+
+    def test_enabled_and_zero_empty_overrides_not_clobbered(self):
+        env = _render_review_env(
+            "headhunter.github.reviewResponse.enabled=true",
+            "headhunter.github.reviewResponse.debounceSec=0",
+            "headhunter.github.reviewResponse.trustedAssociations=",
+        )
+        assert env["HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED"] == "true"
+        assert env["HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC"] == "0"
+        assert env["HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS"] == ""
