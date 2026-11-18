@@ -3145,6 +3145,7 @@ return 1
     # =========================================================================
     _JENKINS_LAST_ALERT_PREFIX = "darwin:jenkins:last_alert:"
     _JENKINS_LAST_ALERT_TTL = 604800  # 7 days
+    _JENKINS_LAST_OUTAGE_PREFIX = "darwin:jenkins:last_outage:"
 
     async def get_jenkins_last_alerted_build(self, job_name: str) -> int:
         """Return the last alerted build_number for a Jenkins job, or 0 if missing/corrupt."""
@@ -3168,6 +3169,31 @@ return 1
             await self._set_max_script(keys=[key], args=[str(build_number), str(self._JENKINS_LAST_ALERT_TTL)])
         except Exception as e:
             logger.warning("Failed to set last_alerted_build for %s: %s", job_name, e)
+
+    async def get_jenkins_last_outage_fingerprint(self, view: str) -> str | None:
+        """Return the last recorded outage fingerprint for a Jenkins view, or None."""
+        try:
+            val = await self.redis.get(f"{self._JENKINS_LAST_OUTAGE_PREFIX}{view}")
+            if val is None:
+                return None
+            return val.decode("utf-8", errors="replace") if isinstance(val, bytes) else str(val)
+        except Exception as e:
+            logger.warning("Failed to get last_outage_fingerprint for %s: %s", view, e)
+            return None
+
+    async def set_jenkins_last_outage_fingerprint(self, view: str, fingerprint: str) -> None:
+        """Record the outage fingerprint for a Jenkins view with standard alert TTL."""
+        try:
+            await self.redis.set(f"{self._JENKINS_LAST_OUTAGE_PREFIX}{view}", fingerprint, ex=self._JENKINS_LAST_ALERT_TTL)
+        except Exception as e:
+            logger.warning("Failed to set last_outage_fingerprint for %s: %s", view, e)
+
+    async def clear_jenkins_last_outage_fingerprint(self, view: str) -> None:
+        """Clear the recorded outage fingerprint for a Jenkins view upon recovery."""
+        try:
+            await self.redis.delete(f"{self._JENKINS_LAST_OUTAGE_PREFIX}{view}")
+        except Exception as e:
+            logger.warning("Failed to clear last_outage_fingerprint for %s: %s", view, e)
 
     # =========================================================================
     # Observations (FRIDAY numeric series -- event-scoped + global timeline)
