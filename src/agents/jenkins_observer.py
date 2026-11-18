@@ -769,8 +769,12 @@ class JenkinsObserver:
                     }
                     await self.blackboard.stage_jenkins_signal(key, metadata)
                     # Persist fingerprint immediately at stage time so dwell flapping
-                    # cannot invert in_outage during the 180s dwell window (F-C6-1)
-                    await self.blackboard.set_jenkins_last_outage_fingerprint(view, fingerprint)
+                    # cannot invert in_outage during the pending dwell window
+                    # (JENKINS_OBSERVER_DWELL_SECONDS, default 60s; F-C6-1).
+                    # Skipped in dry-run: no event is ever created, so latching the
+                    # 7-day fingerprint would suppress real alerts after dry_run=False.
+                    if not self._dry_run:
+                        await self.blackboard.set_jenkins_last_outage_fingerprint(view, fingerprint)
                 continue
 
             # Stage each failing/missing job individually
@@ -932,7 +936,8 @@ class JenkinsObserver:
                     or len(failing) < _OUTAGE_MIN_FAILING_FLOOR
                 ):
                     await self.blackboard.commit_jenkins_signal(key)
-                    await self.blackboard.clear_jenkins_last_outage_fingerprint(view)
+                    if not self._dry_run:
+                        await self.blackboard.clear_jenkins_last_outage_fingerprint(view)
                     continue
                 else:
                     candidates.append((key, meta))
