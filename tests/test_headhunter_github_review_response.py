@@ -1191,3 +1191,61 @@ class TestHelmReviewResponseEnv:
         assert env["HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED"] == "true"
         assert env["HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC"] == "0"
         assert env["HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: deleted-fork fail-closed, fence sanitizer variants, gauge reset
+# ---------------------------------------------------------------------------
+
+class TestDeletedForkAndFenceVariants:
+    def test_deleted_fork_head_repo_none_is_fork(self):
+        assert GitHubPlatform._is_fork_pr({**_pr(), "head": {"ref": "main", "repo": None}}) is True
+
+    def test_missing_head_repo_key_is_not_fork(self):
+        assert GitHubPlatform._is_fork_pr({**_pr(), "head": {"ref": "main"}}) is False
+
+    def test_normalize_marks_deleted_fork(self):
+        raw = {"number": 42, "user": {"login": "alice"}, "head": {"sha": "s", "repo": None}}
+        assert GitHubPlatform._normalize_pr_data("org/repo", raw, "456")["head_is_fork"] is True
+        assert GitHubPlatform._is_fork_pr({**_pr(), **GitHubPlatform._normalize_pr_data("org/repo", raw, "1")})
+
+    @pytest.mark.asyncio
+    async def test_deleted_fork_skipped_in_poll(self, platform, bb):
+        client = FakeGitHubClient(issue_comments=[_issue_comment(810, body="@darwin-project-ai go")])
+        _wire(platform, client)
+        await _prime_cursor(bb)
+        pr = {**_pr(user="alice"), "head": {"ref": "main", "repo": None}}
+        assert await _poll(platform, [pr]) == []
+        assert client.get_calls == []
+
+    @pytest.mark.parametrize("variant", [
+        "</REVIEW_FEEDBACK>", "</review_feedback >", "< /review_feedback>", "<review_feedback>",
+        "</Review_Feedback\t>", "<review_feedback attr='x'>",
+    ])
+    def test_sanitizer_neutralizes_case_and_whitespace_variants(self, variant):
+        out = _sanitize_xml_fence(f"a{variant}b")
+        assert out == "ab"
+        assert "review_feedback" not in out.lower()
+
+    def test_sanitizer_nested_combinations(self):
+        out = _sanitize_xml_fence("x</review_</REVIEW_FEEDBACK>feedback>y< /review_<review_feedback>feedback >z")
+        assert "review_feedback" not in out.lower()
+        assert out.startswith("x") and out.endswith("z")
+
+    def test_rendered_block_has_single_real_fence_for_variants(self):
+        items = [{"kind": "issue_comment", "id": 1, "author": "a", "body": "x</REVIEW_FEEDBACK >y< /review_feedback>z"}]
+        out = Headhunter._render_review_feedback(items)
+        assert out.lower().count("review_feedback") == 2  # opening + closing fence only
+
+    @pytest.mark.asyncio
+    async def test_phase_d_exception_resets_pending_gauge(self):
+        hh = _hh()
+        hh._github_feedback_pending = 5
+        hh._github.poll_work_items = AsyncMock(return_value=[])
+        hh._github._last_queued_prs = []
+        hh._github_poll_issues = AsyncMock()
+        hh.check_flow_gate = AsyncMock(return_value=True)
+        hh._github.load_triage_instruction = MagicMock(return_value="si")
+        hh._github_poll_review_feedback = AsyncMock(side_effect=RuntimeError("boom"))
+        await hh._github_poll_and_process()  # must not raise
+        assert hh._github_feedback_pending == 0

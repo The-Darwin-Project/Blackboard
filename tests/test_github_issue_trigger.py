@@ -25,6 +25,7 @@ from src.models import EventEvidence
 def _make_blackboard():
     bb = MagicMock()
     bb.get_active_events = AsyncMock(return_value=[])
+    bb.get_waiting_approval_events = AsyncMock(return_value=[])
     bb.get_event = AsyncMock(return_value=None)
     bb.get_github_pr_sha = AsyncMock(return_value=None)
     bb.get_github_issue_processed = AsyncMock(return_value=False)
@@ -147,6 +148,7 @@ async def test_get_active_keys_reads_both_contexts():
     issue_event.event.evidence.github_context = None
     issue_event.event.evidence.github_issue_context = {"owner": "o", "repo": "r", "issue_number": 9}
 
+    bb.get_waiting_approval_events = AsyncMock(return_value=[])
     bb.get_active_events = AsyncMock(return_value=["evt-pr", "evt-issue"])
     bb.get_event = AsyncMock(side_effect=lambda eid: pr_event if eid == "evt-pr" else issue_event)
 

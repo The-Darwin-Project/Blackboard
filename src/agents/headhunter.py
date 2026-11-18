@@ -35,8 +35,9 @@
 #     isolated regardless of phase.
 # 18. [Pattern]: Phase D (_github_poll_review_feedback) runs after Phase C only when the flow gate
 #     is open, behind HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED. Per-item exceptions are isolated;
-#     429/5xx from the poll propagate to the GitHub circuit breaker. Feedback is rendered into the
-#     triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
+#     any Phase D error is caught + logged in _github_poll_and_process (non-fatal, resets the
+#     pending gauge) and never feeds the GitHub circuit breaker / _github_disabled latch.
+#     Feedback is rendered into the triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -79,11 +80,17 @@ _XML_CLOSE_TAG = re.compile(
 )
 
 
-def _sanitize_xml_fence(text: str) -> str:
-    """Strip XML closing tags that could break prompt fencing.
+_REVIEW_FEEDBACK_TAG = re.compile(r"<\s*/?\s*review_feedback\b[^>]*>", re.IGNORECASE)
 
+
+def _sanitize_xml_fence(text: str) -> str:
+    """Strip XML fence tags that could break prompt fencing.
+
+    Exact closing tags for the other fences are removed by ``_XML_CLOSE_TAG``. For
+    ``review_feedback`` any case/whitespace variant of the opening or closing tag
+    (``</REVIEW_FEEDBACK>``, ``</review_feedback >``, ``< /review_feedback>``) is removed.
     Repeats until stable so nested payloads like ``</review_</review_feedback>feedback>``
-    cannot reassemble a closing tag after one pass.
+    cannot reassemble a tag after one pass.
     """
     if not text:
         return text
@@ -91,6 +98,7 @@ def _sanitize_xml_fence(text: str) -> str:
     while prev != text:
         prev = text
         text = _XML_CLOSE_TAG.sub("", text)
+        text = _REVIEW_FEEDBACK_TAG.sub("", text)
     return text
 
 
@@ -625,6 +633,7 @@ class Headhunter:
         try:
             await self._github_poll_review_feedback()
         except Exception as e:
+            self._github_feedback_pending = 0  # never leave the gauge stale after a failed poll
             logger.warning(f"GitHub review-feedback poll failed (non-fatal): {e}")
 
     async def _github_poll_review_feedback(self) -> None:

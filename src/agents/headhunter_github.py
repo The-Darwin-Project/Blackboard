@@ -685,7 +685,9 @@ class GitHubPlatform:
             "updated_at": pr_data.get("updated_at", ""),
             "head_repo_full_name": ((pr_data.get("head") or {}).get("repo") or {}).get("full_name", ""),
             "base_repo_full_name": ((pr_data.get("base") or {}).get("repo") or {}).get("full_name", ""),
-            "head_is_fork": bool(((pr_data.get("head") or {}).get("repo") or {}).get("fork")),
+            # head.repo == null (explicit) means the fork was deleted: fail closed as a fork.
+            "head_is_fork": bool(((pr_data.get("head") or {}).get("repo") or {}).get("fork"))
+            or ("repo" in (pr_data.get("head") or {}) and pr_data["head"]["repo"] is None),
         }
 
     @staticmethod
@@ -693,10 +695,12 @@ class GitHubPlatform:
         """True when the PR head lives in a different repo than its base (fork PR).
 
         Accepts the normalized work-item shape (head_repo_full_name/head_is_fork) and the raw
-        GitHub shape (head.repo / base.repo). Minimal fixtures that omit head repo info are
-        treated as same-repo.
+        GitHub shape (head.repo / base.repo). An explicit head.repo == null (deleted fork) is a
+        fork (fail closed); minimal fixtures that omit the head.repo key are treated as same-repo.
         """
         head = pr.get("head") or {}
+        if isinstance(head, dict) and "repo" in head and head["repo"] is None:
+            return True  # deleted fork: GitHub returns head.repo = null -> fail closed
         head_repo = head.get("repo") or {}
         if pr.get("head_is_fork") or head_repo.get("fork") is True:
             return True
