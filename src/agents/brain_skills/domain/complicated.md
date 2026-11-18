@@ -16,11 +16,13 @@ Ts calibration principles:
 </source_context>
 
 <severity_modulation>
+
 | Severity | Ts multiplier    | Escalation threshold     |
 |----------|-----------------|--------------------------|
 | info     | 1.0x (patient)  | 3 defers no progress     |
 | warning  | 0.5x (attentive)| 2 defers no progress     |
 | critical | 0.25x (urgent)  | 1 defer no progress      |
+
 </severity_modulation>
 
 ## Control Loop
@@ -82,8 +84,8 @@ is still progressing.
 4. **Severity multiplier**: apply from the severity_modulation table above.
 5. **Progress signal (adaptive Ts)**:
    - **Elapsed-aware scheduling**: when the baseline duration is known and process start time is available, compute `expected_remaining = median_baseline - elapsed_runtime`. Use this as the next deferral interval instead of blind scaling. Falls back to 1.5× growth when baselines lack statistical depth or start time is unknown.
-   - **Pre-failed pipeline (zero-deferral bypass)**: if `head_pipeline.status` is already in a terminal failed state, remaining runtime is zero (Ts = 0). Do not schedule a deferral with zero delay — bypassing deferral entirely, transition immediately to evaluation or remediation.
-   - **Frozen admission**: if queue admission or pipeline admission is suspended or frozen, do not calibrate against healthy execution baselines — calibrate against queue drain baselines or stall detection ceiling.
+   - **Pre-failed pipeline**: if `pipeline_status` already reports a terminal failed state, remaining runtime is zero, so skip the initial blind pipeline-completion deferral. Still refresh live state first (see `escalate/incident-tracking.md` § Temporal Drift Check) to confirm retries or recovery have not already changed it, then apply `escalate/incident-tracking.md` § Terminal Failure Gate before remediation or escalation.
+   - **Frozen admission**: if queue or pipeline admission is suspended or frozen, do not calibrate against healthy execution baselines. Read `kueue_pending_count` and `pipeline_queue_depth` from observations and calibrate against the congestion and drain baselines in deep memory, bounded by the stall detection ceiling.
    - **Progressing**: process advancing normally with no remaining-time estimate → multiply Ts by 1.5× on each successive deferral (cap at 60 minutes).
    - **Stalled**: no state change since last check → halve Ts for closer observation.
    - **State change**: process completed, errored, or shifted fundamentally → reset to baseline Ts and re-evaluate domain.

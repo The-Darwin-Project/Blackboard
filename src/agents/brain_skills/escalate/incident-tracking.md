@@ -68,9 +68,10 @@ human reviewers can compare it against future occurrences to spot trends.
 
 Cross-event root cause analysis during individual event processing is the wrong abstraction level -- you're seeing one event's perspective, not the full picture. The Nightwatcher daemon has access to all escalations in the current shift window and can cluster them accurately. Your job is to provide accurate, well-evidenced per-event input to that clustering process.
 
-When you see multiple events with the same failure signature, recognize whether the failure is service-isolated or systemic across a wave:
-- **Service-isolated failures**: When individual occurrences show no broader correlation, stage an incident with accurate, well-evidenced per-event data — Nightwatcher clusters related escalations during its sweep cycle and produces a consolidated incident.
-- **Cross-service promotion waves**: When multi-service rollouts fail concurrently with an identical leaf error signature, do not flood the queue with redundant individual incidents. Stage or link to a single consolidated incident representing the shared blocker (see always/08-flow-engineering.md § Cross-Service Systemic Blocker Fast-Path).
+When you see multiple events with the same failure signature, first establish whether the cause is verified at a shared infrastructure component or is isolated to one service. Matching error text alone does not establish a shared cause.
+
+- **Isolated or unverified**: stage an incident with accurate, well-evidenced per-event data. Nightwatcher clusters related escalations during its sweep cycle and produces a consolidated incident.
+- **Verified shared infrastructure wave**: investigation consolidation (see `always/08-flow-engineering.md` § Cross-Service Systemic Wave) is separate from incident staging. `search_open_incidents` queries Jira only, so escalations staged for Nightwatcher are invisible to it. When it returns an open incident for the shared root cause, link the event to that incident and defer on its timeline. When it returns none, stage per-event `report_incident` evidence that names the shared infrastructure component, failing step, and error signature, with a summary in the `[evt-XXXXXXX] ...` format, so Nightwatcher clusters the wave on its sweep.
 
 ### Pre-Escalation Incident Check
 
@@ -100,22 +101,21 @@ If the work was stuck in a queue (Kueue, Tekton queue, CI backlog), defer with a
 calibrated interval based on historical queue drain time. The queue clearing is the
 resolution, not the escalation filing.
 
-**Post-Resolution Promotion Boundary Guard**: When an automated event wakes after
-parent incident resolution, apply a two-phase check:
-1. **Controller sync grace period**: If no new promotion CR has started yet post-resolution
-   (`currentPromotion` is empty and `lastPromotion` completed before `incident.resolved_at`),
-   defer 60 seconds (once) for Kargo controller reconciliation rather than evaluating stale
-   status. If still empty on the next wake, inspect stage health and close if no promotion is
-   pending, or escalate if manual promotion is required.
-2. **New promotion evaluation**: On wake after parent incident resolution, check whether a
-   new promotion CR was created after the incident resolution timestamp
-   (`Promotion.metadata.creationTimestamp > incident.resolved_at`).
-   - If it succeeded, verify recovery and transition to close.
-   - If it is still running, defer on active execution.
-   - If a new promotion started and failed (whether with the same leaf error signature indicating
-     an unrecovered platform blocker, or a new/different leaf error signature), treat as a fresh
-     failure cycle and re-escalate.
-   - Do not treat old pre-resolution promotion status as an active failure.
+**Post-resolution verification**: When an automated event wakes after its tracked incident
+resolved, the incident closure is a lagging signal about the upstream cause, not proof that
+this event's work recovered. Refresh the live state of the underlying resource and compare it
+with the snapshots recorded earlier in the conversation. Close only when that fresh
+state shows recovery. A state that is still pre-recovery, or has not yet reacted to the upstream
+fix, is a fresh measurement to defer on; a state that is still failing after the system had time
+to react is a failure to report. Environment-specific recovery signals live in the
+environment skill for the resource (for example `gated/kargo-environment.md` for promotions).
+
+**Per-event incident deduplication**: `report_incident` deduplicates per event. Once an event
+has recorded an incident (staged or created), any further call on that event is skipped as a
+duplicate. When a fresh failure appears after recovery on such an event, alert maintainers
+with `notify_user_slack` (and `comment_jira_issue` on the tracked issue when an issue key is
+known from the incident search or the conversation record), citing the fresh post-recovery evidence, then close. If the failure persists, the
+observer opens a clean event that starts its own escalation cycle.
 
 ### Mandatory Triggers
 

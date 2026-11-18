@@ -18,10 +18,11 @@ visible across events remain invisible within one.
 For **automated events** (headhunter, aligner, timekeeper): deep memory
 consultation is MANDATORY during triage -- not conditional.
 
-**Exception — Active Systemic Blocker**: When an automated event matches an active
-cross-service systemic consolidation artifact or known wave blocker already tracked on
-the board, deep memory consultation is optional. The root cause is already actively
-identified; do not delay triage or anchor on stale historical baselines.
+When an automated event matches a systemic incident that is already tracked,
+consultation stays mandatory. Recalled history supplies the resolution and
+congestion duration baseline that deferral calibration and the stall detection
+ceiling depend on. What the tracked incident removes is the need for a redundant
+agent investigation of the root cause, not the recall that sizes the wait.
 
 For **user events** (chat, slack): consult when the situation involves past
 events, recurring symptoms, or operational queries. Skip only for urgent

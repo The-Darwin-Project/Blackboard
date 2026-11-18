@@ -693,132 +693,201 @@ class TestVmer2391CasualTriageWaitAndCloseReplyProbe:
 
 
 class TestVmer2409KargoSystemicConsolidationAndTsGuardProbe:
-    """T-VMER-2409: Probe gate for Kargo systemic consolidation and pre-failed pipeline Ts guard."""
+    """T-VMER-2409: Probe gate for cross-service systemic waves, the post-resolution promotion guard,
+    escalation resume precedence, and the pre-failed pipeline Ts guard.
 
-    def test_flow_engineering_systemic_consolidation_fast_path(self):
-        text = _skill_text("always", "08-flow-engineering.md")
-        sec = _md_section(text, "### Cross-Service Systemic Blocker Fast-Path")
-        assert 'step "auto-merge" timed out' in sec
-        assert "leaf error" in sec.lower()
-        assert "O(1)" in sec
-        reclass_sec = _md_section(text, "### Transient → Systemic Reclassification")
-        assert "on the same service" not in reclass_sec
+    Every test pairs an assertion on newly authored content with the invariants it must preserve, so
+    none of them can pass against a skill set that lacks the VMER-2409 remediation.
+    """
 
-    def test_deep_memory_fast_path_bypass_for_active_systemic_blockers(self):
-        text = _skill_text("always", "04-deep-memory.md")
-        sec = _md_section(text, "## Mandatory Consultation (TRIAGE phase)")
-        assert "Exception — Active Systemic Blocker" in sec
-        assert "systemic" in sec.lower() and "optional" in sec.lower()
+    _TIMING_RE = re.compile(r"\b\d+\s*(?:-\s*)?(?:seconds?|secs?|minutes?|mins?|s)\b", re.IGNORECASE)
+    _TOOL_RE = re.compile(
+        r"\b(" + "|".join(sorted(map(re.escape, _TOOL_NAMES), key=len, reverse=True)) + r")\b"
+    )
 
-    def test_incident_tracking_forbids_individual_staging_for_systemic_waves(self):
-        text = _skill_text("escalate", "incident-tracking.md")
-        flat = " ".join(text.split())
-        assert (
-            "Stage each incident individually via the normal escalation path -- the Nightwatcher daemon clusters related escalations during its sweep cycle"
-            not in flat
-        )
-        sec = _md_section(text, "### Recurring Failures Across Events")
-        assert "consolidated incident" in sec.lower()
+    @classmethod
+    def _assert_no_hardcoded_timing(cls, label: str, text: str) -> None:
+        assert cls._TIMING_RE.findall(text) == [], f"{label} embeds a hardcoded duration"
 
-    def test_incident_tracking_post_resolution_promotion_guard(self):
-        text = _skill_text("escalate", "incident-tracking.md")
-        sec = _md_section(text, "### Post-Escalation Behavior")
-        assert "Post-Resolution Promotion Boundary Guard" in sec or "post-resolution" in sec.lower()
-        assert "60 second" in sec or "60s" in sec or "60-second" in sec
-        assert "creationTimestamp > incident.resolved_at" in sec
-        assert "currentPromotion" in sec and "lastPromotion" in sec
-        assert "verify recovery and transition to close" in sec.lower()
-        assert "same leaf error signature" in sec.lower()
+    def test_flow_engineering_wave_requires_verified_cause_and_separates_staging(self, loader):
+        body = _skill(loader, "always/08-flow-engineering.md")
+        sec = _section(body, "### Cross-Service Systemic Wave")
+        low = sec.lower()
+        assert "untrusted" in low
+        assert "matching text alone does not qualify a wave" in low
+        assert "same failing step or component" in low and "same upstream dependency" in low
+        assert "invisible to the incident tracker search" in low
+        assert "nightwatcher owns cross-event clustering" in low
+        assert "skip redundant investigation dispatches" in low
+        assert "re-check live resource state" in low
+        assert "stall detection ceiling" in low and "escalate rather than waiting indefinitely" in low
+        assert "per-event escalation evidence" in low
+        # The non-existent canonical title convention and the Kargo/HTTP literals are gone.
+        assert "Cross-Service Systemic Blocker Fast-Path" not in body
+        for gone in ("[Systemic]", "canonical title", "converge on", 'step "auto-merge"', "502"):
+            assert gone not in body, f"08-flow-engineering.md still contains {gone!r}"
+        assert self._TOOL_RE.findall(_strip_frontmatter(body)) == []
+        self._assert_no_hardcoded_timing("08-flow-engineering wave section", sec)
 
-    def test_kargo_environment_inspects_current_promotion_before_last_promotion(self):
-        text = _skill_text("gated", "kargo-environment.md")
-        err_sec = _md_section(text, "## Error Natures")
-        assert "Auto-Merge Timeout" in err_sec
-        assert 'step "auto-merge" timed out' in err_sec
-        concepts_sec = _md_section(text, "## Kargo Concepts")
-        assert "currentPromotion" in concepts_sec and "lastPromotion" in concepts_sec
-        idx_curr = concepts_sec.find("currentPromotion")
-        idx_last = concepts_sec.find("lastPromotion")
-        assert idx_curr != -1 and idx_last != -1
-        assert "currentPromotion" in concepts_sec.split("lastPromotion")[0] or idx_curr < idx_last
+    def test_reclassification_keeps_service_scope_and_defers_cross_service_to_verified_cause(self, loader):
+        sec = _section(_skill(loader, "always/08-flow-engineering.md"), "### Transient → Systemic Reclassification")
+        assert "on the same service within one event" in sec
+        assert "concurrent events on the same service" in sec
+        assert "verified-cause qualification in Cross-Service Systemic Wave" in sec
 
-    def test_complicated_ts_pre_failed_and_frozen_admission_guards(self):
-        text = _skill_text("domain", "complicated.md")
-        sec = _md_section(text, "## Ts Calibration Railway")
-        assert "terminal failed state" in sec.lower() or "pre-failed" in sec.lower()
-        assert "zero-deferral" in sec.lower() or "zero delay" in sec.lower() or "bypassing deferral" in sec.lower()
-        assert "frozen" in sec.lower() or "suspended" in sec.lower()
+    def test_deep_memory_stays_mandatory_for_tracked_systemic_incidents(self, loader):
+        sec = _section(_skill(loader, "always/04-deep-memory.md"), "## Mandatory Consultation (TRIAGE phase)")
+        low = sec.lower()
+        assert "deep memory consultation is mandatory during triage" in low
+        assert "consultation stays mandatory" in low
+        assert "stall detection ceiling" in low
+        assert "redundant agent investigation" in low
+        assert "optional" not in low
+        assert self._TOOL_RE.findall(sec) == []
+
+    def test_incident_tracking_wave_staging_matches_nightwatcher_design(self, loader):
+        body = _skill(loader, "escalate/incident-tracking.md")
+        sec = _section(body, "### Recurring Failures Across Events")
+        assert "`search_open_incidents` queries Jira only" in sec
+        assert "invisible to it" in sec
+        assert "[evt-XXXXXXX]" in sec
+        assert "Nightwatcher clusters the wave on its sweep" in sec
+        assert "component, failing step, and error signature" in sec
+        for gone in ("[Systemic]", "single consolidated incident", "converge on", "Fast-Path"):
+            assert gone not in body, f"incident-tracking.md still contains {gone!r}"
+        assert "Cross-Service Systemic Wave" in sec
+
+    def test_incident_tracking_per_event_dedup_alerts_via_notification_not_second_report(self, loader):
+        body = _skill(loader, "escalate/incident-tracking.md")
+        sec = _section(body, "### Post-Escalation Behavior")
+        assert "`report_incident` deduplicates per event" in sec
+        assert "skipped as a duplicate" in sec
+        assert "`notify_user_slack`" in sec and "`comment_jira_issue`" in sec
+        assert "observer opens a clean event" in sec
+        assert not re.search(r"re-?escalat", sec, re.IGNORECASE)
+        # The generic principle stays here; Kargo specifics live in the gated skill.
+        guard_free = sec.lower()
+        for gone in ("currentpromotion", "lastpromotion", "resolved_at", "creationtimestamp"):
+            assert gone not in guard_free, f"incident-tracking.md still pins {gone!r}"
+        assert "Post-resolution verification" in sec
+        self._assert_no_hardcoded_timing("incident-tracking post-escalation section", sec)
+
+    def test_kargo_environment_owns_fail_closed_post_resolution_guard(self, loader):
+        body = _skill(loader, "gated/kargo-environment.md")
+        sec = _section(body, "## Post-Resolution Promotion Guard")
+        low = sec.lower()
+        assert "compare the reported promotion name, phase, failed step, and message" in low
+        assert "a newer promotion succeeded" in low and "close" in low
+        assert "per-event duplicate" in low and "incident-tracking.md" in sec
+        assert "controller-reconcile interval" in low and "observations and deep memory" in low
+        assert "fail closed" in low
+        assert "closing is reserved for confirmed recovery" in low
+        for gone in ("resolved_at", "creationTimestamp", "currentPromotion", "lastPromotion", "health"):
+            assert gone not in body, f"kargo-environment.md still pins unobservable {gone!r}"
+        self._assert_no_hardcoded_timing("kargo post-resolution guard", sec)
+
+    def test_kargo_environment_has_single_auto_merge_timeout_subsection(self, loader):
+        body = _skill(loader, "gated/kargo-environment.md")
+        assert body.count('step "auto-merge" timed out') == 1
+        sec = _section(body, "### Auto-Merge Timeout")
+        assert "Cross-Service Systemic Wave" in sec
+        assert "Auto-merge timeout" not in body
+        concepts = _section(body, "## Kargo Concepts")
+        assert "compare the reported promotion name" in concepts.lower()
+
+    def test_post_resolution_guard_reachable_in_verify_phase(self, loader):
+        import inspect
+        from src.agents.brain import BRAIN_PHASE_SKILLS, Brain
+
+        # Verify does not load the escalate folder, so the guard must live in the gated Kargo skill.
+        assert "escalate" not in BRAIN_PHASE_SKILLS["verify"]
+        ctx = {
+            "turn_count": 3, "source": "aligner", "service": "svc", "is_waiting": False,
+            "has_agent_result": True, "last_is_user": False, "has_related": False,
+            "has_recent_closed": False, "has_graph_edges": False, "has_aligner_turns": False,
+            "brain_has_classified": True, "event_domain": "complicated",
+            "domain_confidence": "default", "has_slack_participant": False,
+            "is_intermediate": False, "has_pending_huddle": False,
+        }
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        event.brain_phase = "verify"
+        active = Brain._match_phases(None, event, ctx)
+        assert "escalate" not in active
+        # Kargo evidence injects every skill tagged kargo, independent of the declared phase.
+        kargo_paths = loader.find_paths_by_tag("kargo")
+        assert "gated/kargo-environment.md" in kargo_paths
+        injected = "\n".join(_skill(loader, p) for p in kargo_paths)
+        assert "## Post-Resolution Promotion Guard" in injected
+        src = inspect.getsource(Brain._build_system_prompt)
+        call = src.index('find_paths_by_tag("kargo")')
+        gate = src[max(0, call - 400):call]
+        assert "kargo_context" in gate and "brain_phase" not in gate
+
+    def test_phase_lifecycle_escalation_resume_precedence_and_edges(self, loader):
+        phase_lf = _skill(loader, "always/09-phase-lifecycle.md")
+        edges = re.findall(r'POST_ESC\s*-->\|"([^"]*)"\|\s*(\w+)', phase_lf)
+        targets = [t for _, t in edges]
+        assert targets.count("VERIFY") == 1, edges
+        assert targets.count("CLOSE") == 1, edges
+        labels = dict((t, label) for label, t in edges)
+        assert "non-terminal" in labels["VERIFY"] and "verify pending" in labels["VERIFY"]
+        assert "terminal failure" in labels["CLOSE"]
+        assert {"WAIT_HUMAN", "RECLASS", "DISPATCH"} <= set(targets)
+        after = _section(phase_lf, "## After Escalation")
+        low = after.lower()
+        assert "failure terminal: advance directly to close" in low
+        assert "work still non-terminal or quota recovery pending: enter verify" in low
+        assert "transition to verify first so the live state is refreshed" in low
+        assert "same precedence" in low
+        self._assert_no_hardcoded_timing("09-phase-lifecycle After Escalation", after)
+        assert self._TOOL_RE.findall(after) == []
+
+    def test_phase_lifecycle_budget_fallback_uses_control_loop_principle_not_literals(self, loader):
+        sec = _section(_skill(loader, "always/09-phase-lifecycle.md"), "## Refresh Budget")
+        low = sec.lower()
+        assert "a second measurement dispatch on the same wake adds no information" in low
+        assert "honor the stall detection ceiling" in low
+        assert "maximum 1" not in low and "fallback measurement dispatch per" not in low
+        # The budget section legitimately states the token count and cap; only duration literals are barred.
+        self._assert_no_hardcoded_timing("09-phase-lifecycle Refresh Budget", sec)
+        assert self._TOOL_RE.findall(sec) == []
+
+    def test_complicated_ts_guards_use_observable_fields_and_keep_gates(self, loader):
+        text = _skill(loader, "domain/complicated.md")
+        sec = _section(text, "## Ts Calibration Railway")
+        assert "`pipeline_status` already reports a terminal failed state" in sec
+        assert "head_pipeline" not in text
+        assert "skip the initial blind pipeline-completion deferral" in sec
+        assert "§ Temporal Drift Check" in sec and "§ Terminal Failure Gate" in sec
+        assert "`kueue_pending_count`" in sec and "`pipeline_queue_depth`" in sec
+        assert "congestion and drain baselines in deep memory" in sec
+        assert "<severity_modulation>\n\n|" in text and "|\n\n</severity_modulation>" in text
         assert len(text.splitlines()) <= 100, f"domain/complicated.md exceeded modularity limit: {len(text.splitlines())} lines"
+        assert self._TOOL_RE.findall(sec) == []
 
-    def test_phase_lifecycle_post_esc_supports_verify_deferral(self):
-        phase_lf = _skill_text("always", "09-phase-lifecycle.md")
-        assert 'POST_ESC -->|"automated in-progress/queued: incident staged, await resolution"| VERIFY' in phase_lf
-        assert 'POST_ESC -->|"automated terminal: incident staged"| CLOSE' in phase_lf
-        assert 'POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]' in phase_lf
-        assert 'POST_ESC -->|"CHAOTIC stabilized"| RECLASS' in phase_lf
-        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*work unexecuted"\|\s*DISPATCH', phase_lf)
-        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*verify pending"\|\s*VERIFY', phase_lf)
-        after_esc = _md_section(phase_lf, "## After Escalation")
-        assert "re-enter verify to defer on the resolution timeline" in after_esc.lower()
+    def test_aligner_points_only_to_always_loaded_wave_guidance(self, loader):
+        text = _skill(loader, "source/aligner.md")
+        assert "`always/08-flow-engineering.md` § Cross-Service Systemic Wave" in text
+        assert "gated/kargo-environment.md" not in text
+        assert self._TOOL_RE.findall(_strip_frontmatter(text)) == []
+        assert "Cross-Service Systemic Wave" in _skill(loader, "always/08-flow-engineering.md")
 
-    def test_phase_lifecycle_budget_exhaustion_direct_verify_evaluation(self):
-        phase_lf = _skill_text("always", "09-phase-lifecycle.md")
-        budget_sec = _md_section(phase_lf, "## Refresh Budget")
-        assert "directly in verify" in budget_sec.lower() or "evaluate" in budget_sec.lower()
-        assert "1 fallback measurement" in budget_sec.lower() or "maximum 1" in budget_sec.lower()
-
-    def test_vmer_2409_touched_skills_tool_free_and_heading_hygiene(self):
-        tool_re = re.compile(
-            r"\b(" + "|".join(sorted(map(re.escape, _TOOL_NAMES), key=len, reverse=True)) + r")\b"
-        )
-        touched_files = [
-            ("always", "08-flow-engineering.md"),
-            ("always", "04-deep-memory.md"),
-            ("escalate", "incident-tracking.md"),
-            ("gated", "kargo-environment.md"),
-            ("domain", "complicated.md"),
-            ("always", "09-phase-lifecycle.md"),
-            ("source", "aligner.md"),
+    def test_touched_skill_headings_are_well_formed(self, loader):
+        touched = [
+            "always/08-flow-engineering.md", "always/04-deep-memory.md", "escalate/incident-tracking.md",
+            "gated/kargo-environment.md", "domain/complicated.md", "always/09-phase-lifecycle.md",
+            "source/aligner.md",
         ]
-
-        # 1. Heading formatting check for all 7 touched files
-        for rel in touched_files:
-            text = _skill_text(*rel)
+        # Anchor on newly authored headings so a skill set without the remediation fails.
+        assert "### Cross-Service Systemic Wave" in _skill(loader, "always/08-flow-engineering.md")
+        assert "## Post-Resolution Promotion Guard" in _skill(loader, "gated/kargo-environment.md")
+        for rel in touched:
+            text = _skill(loader, rel)
             lines = text.splitlines()
             for n, heading in _headings_outside_fences(text):
-                assert len(heading) <= 80, f"{rel[-1]}:{n + 1} heading > 80 chars: {heading!r}"
-                assert heading.count("`") % 2 == 0, f"{rel[-1]}:{n + 1} unbalanced code ticks: {heading!r}"
+                assert len(heading) <= 80, f"{rel}:{n + 1} heading > 80 chars: {heading!r}"
+                assert heading.count("`") % 2 == 0, f"{rel}:{n + 1} unbalanced code ticks: {heading!r}"
                 assert n == 0 or lines[n - 1].strip() in ("", "---"), (
-                    f"{rel[-1]}:{n + 1} heading lacks leading blank line: {heading!r}"
+                    f"{rel}:{n + 1} heading lacks leading blank line: {heading!r}"
                 )
-
-        # 2. Tool-free checks
-        assert tool_re.findall(_strip_frontmatter(_skill_text("always", "08-flow-engineering.md"))) == []
-        assert tool_re.findall(_strip_frontmatter(_skill_text("source", "aligner.md"))) == []
-
-        sec_04 = _md_section(_skill_text("always", "04-deep-memory.md"), "## Mandatory Consultation (TRIAGE phase)")
-        exc_04 = sec_04.split("Exception — Active Systemic Blocker")[-1]
-        assert tool_re.findall(exc_04) == []
-
-        sec_inc_recur = _md_section(_skill_text("escalate", "incident-tracking.md"), "### Recurring Failures Across Events")
-        sec_inc_post = _md_section(_skill_text("escalate", "incident-tracking.md"), "### Post-Escalation Behavior")
-        assert tool_re.findall(sec_inc_recur) == []
-        assert tool_re.findall(sec_inc_post) == []
-
-        sec_kargo_err = _md_section(_skill_text("gated", "kargo-environment.md"), "## Error Natures")
-        sec_kargo_con = _md_section(_skill_text("gated", "kargo-environment.md"), "## Kargo Concepts")
-        assert tool_re.findall(sec_kargo_err) == []
-        assert tool_re.findall(sec_kargo_con) == []
-
-        sec_comp = _md_section(_skill_text("domain", "complicated.md"), "## Ts Calibration Railway")
-        assert tool_re.findall(sec_comp) == []
-
-        sec_lf_esc = _md_section(_skill_text("always", "09-phase-lifecycle.md"), "## After Escalation")
-        sec_lf_bud = _md_section(_skill_text("always", "09-phase-lifecycle.md"), "## Refresh Budget")
-        assert tool_re.findall(sec_lf_esc) == []
-        assert tool_re.findall(sec_lf_bud) == []
-
-        # 3. Source reference contracts
-        aligner_text = _skill_text("source", "aligner.md")
-        assert "always/08-flow-engineering.md" in aligner_text
-        assert "gated/kargo-environment.md" in aligner_text

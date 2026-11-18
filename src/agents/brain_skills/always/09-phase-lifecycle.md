@@ -60,12 +60,11 @@ graph TD
     ESCALATE["ESCALATE: human awareness"]
     ESCALATE --> POST_ESC{"What happens after escalation?"}
 
-    POST_ESC -->|"automated terminal: incident staged"| CLOSE
-    POST_ESC -->|"automated in-progress/queued: incident staged, await resolution"| VERIFY
+    POST_ESC -->|"terminal failure: incident staged and notified"| CLOSE
+    POST_ESC -->|"transient infra/quota cleared or work non-terminal, verify pending"| VERIFY
     POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]
     POST_ESC -->|"CHAOTIC stabilized"| RECLASS
     POST_ESC -->|"transient infra/quota cleared, work unexecuted"| DISPATCH
-    POST_ESC -->|"transient infra/quota cleared, verify pending"| VERIFY
 
     CLOSE["CLOSE: wrap up"]
 ```
@@ -192,12 +191,11 @@ the process variable. Deferring without a fresh measurement violates
 the control loop. Instead, dispatch an investigate-mode agent to
 perform the measurement directly -- the agent's findings constitute
 the fresh observation, and the agent completion replenishes a token
-for the next cycle. Evaluate the returned measurement directly in verify
-against the process variable before deciding next actions; do not immediately
-re-invoke measurement tools on the same cycle (maximum 1 fallback measurement
-dispatch per deferral wake). If consecutive fallback measurements show no
-progression, honor the stall detection ceiling and escalate rather than
-cycling measurement dispatches.
+for the next cycle. Evaluate the returned measurement in verify against the process
+variable before deciding next actions. That measurement is the fresh observation for
+this wake, so a second measurement dispatch on the same wake adds no information. When
+consecutive measurements show no progression, honor the stall detection ceiling and
+escalate rather than cycling measurement dispatches.
 
 ## External Processes
 
@@ -226,19 +224,19 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 ## After Escalation
 
-- **Automated events**: If the failure is terminal and unresolvable without manual human intervention, enter close — the escalation itself is the final outcome for this cycle. If the incident tracks an active in-progress or queued systemic blocker, re-enter verify to defer on the resolution timeline rather than closing immediately; transition phase to verify before deferring so context refresh capabilities remain active upon wake.
+- **Automated events**: the state of the underlying work decides the next phase.
+  - Terminal failure with incident staging and maintainer notification already recorded: enter close. The escalation is the final outcome for this cycle.
+  - Non-terminal work (in progress, queued, or a tracked systemic blocker), or a transient infrastructure or quota limitation that has cleared with live verification pending: transition to verify first so the live state is refreshed, then defer on the resolution timeline as the evidence warrants.
 - **FRIDAY needs input**: Enter close if blocking, or defer if the system should re-verify on an interval while waiting for the human. Do not park indefinitely.
 - **Interrupted or check-in-resumed escalation**: Stream interruptions, quota backpressure,
   or automated check-in cascades can leave an automated event in escalation midway through
   outbound reporting or without a post-wake state measurement. Check conversation history
-  first: when incident staging and maintainer notification are already recorded, advance
-  directly to close so outbound alerts remain single-delivery; when escalation followed an
-  automated check-in cascade without a post-wake external state measurement, refresh live
-  repository or promotion state before staging an incident — if the upstream pipeline or
-  merge already succeeded, complete verification and close. If a user or system event
-  interrupts an escalation that has not yet recorded incident staging, re-enter triage or
-  dispatch depending on the payload.
-- **Transient infrastructure or quota saturation cleared**: If escalation triggers single-delivery stabilization watch and the external transient limitation clears, domain work may remain unexecuted. Re-enter dispatch if execution is required, or verify if checking live repository or promotion state is needed.
+  first and apply the same precedence as above.
+  - Incident staging and maintainer notification already recorded, failure terminal: advance directly to close so outbound alerts remain single-delivery.
+  - Incident staging and maintainer notification already recorded, work still non-terminal or quota recovery pending: enter verify to refresh live state before deciding.
+  - Escalation followed an automated check-in cascade without a post-wake external state measurement: refresh live repository or promotion state before staging an incident. If the upstream pipeline or merge already succeeded, complete verification and close.
+  - A user or system event interrupted an escalation that has not yet recorded incident staging: re-enter triage or dispatch depending on the payload.
+- **Transient infrastructure or quota saturation cleared**: Escalation can trigger a single-delivery stabilization watch. When the limitation clears, re-enter dispatch if domain work remains unexecuted, or verify if live repository or promotion state needs checking.
 
 ## Close Phase Constraint
 
