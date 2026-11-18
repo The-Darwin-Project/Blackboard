@@ -65,12 +65,19 @@ The nature of the error -- not its surface symptom -- determines what kind of in
 - **MR/PR merge timeout**: `step "wait-for-merge" timed out` -- the MR pipeline may have failed or is stuck. The MR is the signal source.
 - **Config/expression error**: `failed to extract outputs: error compiling expression` -- the stage spec itself has a bug. Code-level fix required.
 - **Missing files**: `error reading YAML file ... no such file or directory` -- repo structure changed upstream.
-- **Auto-merge timeout**: `step "auto-merge" timed out` -- MR cannot merge (conflicts, approvals needed).
+- **Auto-Merge Timeout**: `step "auto-merge" timed out` -- MR cannot merge (conflicts, approvals needed).
+
+### Auto-Merge Timeout (Systemic Promotion Wave Blocker)
+
+`step "auto-merge" timed out` indicates unmergeable PRs due to branch protection,
+missing approvals, or CI locks. When multiple promotion stages encounter this timeout
+concurrently, treat as a systemic promotion wave blocker and follow single-incident
+consolidation.
 
 ## Kargo Concepts
 
 - Each Kargo **Stage** represents a deployment target in a CD pipeline.
 - Each promotion attempt creates a **new Promotion CR** (retries are new objects, not state transitions on old ones).
 - **Freight** is the versioned artifact being promoted (image, commit, chart).
-- The observer watches `Stage.status.lastPromotion` -- the most recent attempt.
+- On early wake or verification, inspect `Stage.status.currentPromotion` (active in-flight attempt) first. Evaluate `Stage.status.lastPromotion` (last completed attempt) only when `currentPromotion` is null. Do not treat `lastPromotion` failure as evidence of current failure when `currentPromotion` is in-flight.
 - Recovery = a newer Promotion on the same Stage reaches phase=Succeeded.

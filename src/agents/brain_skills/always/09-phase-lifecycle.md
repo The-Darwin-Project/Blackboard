@@ -60,7 +60,8 @@ graph TD
     ESCALATE["ESCALATE: human awareness"]
     ESCALATE --> POST_ESC{"What happens after escalation?"}
 
-    POST_ESC -->|"automated: incident staged"| CLOSE
+    POST_ESC -->|"automated terminal: incident staged"| CLOSE
+    POST_ESC -->|"automated in-progress/queued: incident staged, await resolution"| VERIFY
     POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]
     POST_ESC -->|"CHAOTIC stabilized"| RECLASS
     POST_ESC -->|"transient infra/quota cleared, work unexecuted"| DISPATCH
@@ -191,7 +192,12 @@ the process variable. Deferring without a fresh measurement violates
 the control loop. Instead, dispatch an investigate-mode agent to
 perform the measurement directly -- the agent's findings constitute
 the fresh observation, and the agent completion replenishes a token
-for the next cycle.
+for the next cycle. Evaluate the returned measurement directly in verify
+against the process variable before deciding next actions; do not immediately
+re-invoke measurement tools on the same cycle (maximum 1 fallback measurement
+dispatch per deferral wake). If consecutive fallback measurements show no
+progression, honor the stall detection ceiling and escalate rather than
+cycling measurement dispatches.
 
 ## External Processes
 
@@ -220,7 +226,7 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 ## After Escalation
 
-- **Automated events**: Enter close. The escalation itself is the final outcome for this cycle. The system relies on humans to unblock.
+- **Automated events**: If the failure is terminal and unresolvable without manual human intervention, enter close — the escalation itself is the final outcome for this cycle. If the incident tracks an active in-progress or queued systemic blocker, re-enter verify to defer on the resolution timeline rather than closing immediately; transition phase to verify before deferring so context refresh capabilities remain active upon wake.
 - **FRIDAY needs input**: Enter close if blocking, or defer if the system should re-verify on an interval while waiting for the human. Do not park indefinitely.
 - **Interrupted or check-in-resumed escalation**: Stream interruptions, quota backpressure,
   or automated check-in cascades can leave an automated event in escalation midway through

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_skill_ci_gating_probes import _TOOL_NAMES
+from tests.test_skill_ci_gating_probes import _TOOL_NAMES, _strip_frontmatter
 
 SKILLS_DIR = Path(__file__).parent.parent / "src" / "agents" / "brain_skills"
 
@@ -691,3 +691,134 @@ class TestVmer2391CasualTriageWaitAndCloseReplyProbe:
         wait_desc = schemas_by_name["wait_for_user"]["description"]
         assert "BEFORE or alongside calling this tool" in wait_desc
 
+
+class TestVmer2409KargoSystemicConsolidationAndTsGuardProbe:
+    """T-VMER-2409: Probe gate for Kargo systemic consolidation and pre-failed pipeline Ts guard."""
+
+    def test_flow_engineering_systemic_consolidation_fast_path(self):
+        text = _skill_text("always", "08-flow-engineering.md")
+        sec = _md_section(text, "### Cross-Service Systemic Blocker Fast-Path")
+        assert 'step "auto-merge" timed out' in sec
+        assert "leaf error" in sec.lower()
+        assert "O(1)" in sec
+        reclass_sec = _md_section(text, "### Transient → Systemic Reclassification")
+        assert "on the same service" not in reclass_sec
+
+    def test_deep_memory_fast_path_bypass_for_active_systemic_blockers(self):
+        text = _skill_text("always", "04-deep-memory.md")
+        sec = _md_section(text, "## Mandatory Consultation (TRIAGE phase)")
+        assert "Exception — Active Systemic Blocker" in sec
+        assert "systemic" in sec.lower() and "optional" in sec.lower()
+
+    def test_incident_tracking_forbids_individual_staging_for_systemic_waves(self):
+        text = _skill_text("escalate", "incident-tracking.md")
+        flat = " ".join(text.split())
+        assert (
+            "Stage each incident individually via the normal escalation path -- the Nightwatcher daemon clusters related escalations during its sweep cycle"
+            not in flat
+        )
+        sec = _md_section(text, "### Recurring Failures Across Events")
+        assert "consolidated incident" in sec.lower()
+
+    def test_incident_tracking_post_resolution_promotion_guard(self):
+        text = _skill_text("escalate", "incident-tracking.md")
+        sec = _md_section(text, "### Post-Escalation Behavior")
+        assert "Post-Resolution Promotion Boundary Guard" in sec or "post-resolution" in sec.lower()
+        assert "60 second" in sec or "60s" in sec or "60-second" in sec
+        assert "creationTimestamp > incident.resolved_at" in sec
+        assert "currentPromotion" in sec and "lastPromotion" in sec
+        assert "verify recovery and transition to close" in sec.lower()
+        assert "same leaf error signature" in sec.lower()
+
+    def test_kargo_environment_inspects_current_promotion_before_last_promotion(self):
+        text = _skill_text("gated", "kargo-environment.md")
+        err_sec = _md_section(text, "## Error Natures")
+        assert "Auto-Merge Timeout" in err_sec
+        assert 'step "auto-merge" timed out' in err_sec
+        concepts_sec = _md_section(text, "## Kargo Concepts")
+        assert "currentPromotion" in concepts_sec and "lastPromotion" in concepts_sec
+        idx_curr = concepts_sec.find("currentPromotion")
+        idx_last = concepts_sec.find("lastPromotion")
+        assert idx_curr != -1 and idx_last != -1
+        assert "currentPromotion" in concepts_sec.split("lastPromotion")[0] or idx_curr < idx_last
+
+    def test_complicated_ts_pre_failed_and_frozen_admission_guards(self):
+        text = _skill_text("domain", "complicated.md")
+        sec = _md_section(text, "## Ts Calibration Railway")
+        assert "terminal failed state" in sec.lower() or "pre-failed" in sec.lower()
+        assert "zero-deferral" in sec.lower() or "zero delay" in sec.lower() or "bypassing deferral" in sec.lower()
+        assert "frozen" in sec.lower() or "suspended" in sec.lower()
+        assert len(text.splitlines()) <= 100, f"domain/complicated.md exceeded modularity limit: {len(text.splitlines())} lines"
+
+    def test_phase_lifecycle_post_esc_supports_verify_deferral(self):
+        phase_lf = _skill_text("always", "09-phase-lifecycle.md")
+        assert 'POST_ESC -->|"automated in-progress/queued: incident staged, await resolution"| VERIFY' in phase_lf
+        assert 'POST_ESC -->|"automated terminal: incident staged"| CLOSE' in phase_lf
+        assert 'POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]' in phase_lf
+        assert 'POST_ESC -->|"CHAOTIC stabilized"| RECLASS' in phase_lf
+        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*work unexecuted"\|\s*DISPATCH', phase_lf)
+        assert re.search(r'POST_ESC\s*-->\|"transient[^"]*verify pending"\|\s*VERIFY', phase_lf)
+        after_esc = _md_section(phase_lf, "## After Escalation")
+        assert "re-enter verify to defer on the resolution timeline" in after_esc.lower()
+
+    def test_phase_lifecycle_budget_exhaustion_direct_verify_evaluation(self):
+        phase_lf = _skill_text("always", "09-phase-lifecycle.md")
+        budget_sec = _md_section(phase_lf, "## Refresh Budget")
+        assert "directly in verify" in budget_sec.lower() or "evaluate" in budget_sec.lower()
+        assert "1 fallback measurement" in budget_sec.lower() or "maximum 1" in budget_sec.lower()
+
+    def test_vmer_2409_touched_skills_tool_free_and_heading_hygiene(self):
+        tool_re = re.compile(
+            r"\b(" + "|".join(sorted(map(re.escape, _TOOL_NAMES), key=len, reverse=True)) + r")\b"
+        )
+        touched_files = [
+            ("always", "08-flow-engineering.md"),
+            ("always", "04-deep-memory.md"),
+            ("escalate", "incident-tracking.md"),
+            ("gated", "kargo-environment.md"),
+            ("domain", "complicated.md"),
+            ("always", "09-phase-lifecycle.md"),
+            ("source", "aligner.md"),
+        ]
+
+        # 1. Heading formatting check for all 7 touched files
+        for rel in touched_files:
+            text = _skill_text(*rel)
+            lines = text.splitlines()
+            for n, heading in _headings_outside_fences(text):
+                assert len(heading) <= 80, f"{rel[-1]}:{n + 1} heading > 80 chars: {heading!r}"
+                assert heading.count("`") % 2 == 0, f"{rel[-1]}:{n + 1} unbalanced code ticks: {heading!r}"
+                assert n == 0 or lines[n - 1].strip() in ("", "---"), (
+                    f"{rel[-1]}:{n + 1} heading lacks leading blank line: {heading!r}"
+                )
+
+        # 2. Tool-free checks
+        assert tool_re.findall(_strip_frontmatter(_skill_text("always", "08-flow-engineering.md"))) == []
+        assert tool_re.findall(_strip_frontmatter(_skill_text("source", "aligner.md"))) == []
+
+        sec_04 = _md_section(_skill_text("always", "04-deep-memory.md"), "## Mandatory Consultation (TRIAGE phase)")
+        exc_04 = sec_04.split("Exception — Active Systemic Blocker")[-1]
+        assert tool_re.findall(exc_04) == []
+
+        sec_inc_recur = _md_section(_skill_text("escalate", "incident-tracking.md"), "### Recurring Failures Across Events")
+        sec_inc_post = _md_section(_skill_text("escalate", "incident-tracking.md"), "### Post-Escalation Behavior")
+        assert tool_re.findall(sec_inc_recur) == []
+        assert tool_re.findall(sec_inc_post) == []
+
+        sec_kargo_err = _md_section(_skill_text("gated", "kargo-environment.md"), "## Error Natures")
+        sec_kargo_con = _md_section(_skill_text("gated", "kargo-environment.md"), "## Kargo Concepts")
+        assert tool_re.findall(sec_kargo_err) == []
+        assert tool_re.findall(sec_kargo_con) == []
+
+        sec_comp = _md_section(_skill_text("domain", "complicated.md"), "## Ts Calibration Railway")
+        assert tool_re.findall(sec_comp) == []
+
+        sec_lf_esc = _md_section(_skill_text("always", "09-phase-lifecycle.md"), "## After Escalation")
+        sec_lf_bud = _md_section(_skill_text("always", "09-phase-lifecycle.md"), "## Refresh Budget")
+        assert tool_re.findall(sec_lf_esc) == []
+        assert tool_re.findall(sec_lf_bud) == []
+
+        # 3. Source reference contracts
+        aligner_text = _skill_text("source", "aligner.md")
+        assert "always/08-flow-engineering.md" in aligner_text
+        assert "gated/kargo-environment.md" in aligner_text

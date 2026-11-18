@@ -20,4 +20,5 @@ The Aligner detects two classes of anomaly from ArgoCD Application status:
 - For health degradation events: close once ArgoCD reports the resource as `Healthy` again. The Aligner itself sends a recovery notification to the event conversation when this occurs.
 - For sync drift events: close once ArgoCD reports the Application as `Synced`.
 - For Kargo promotion failures: the promotion state alone ("Failed") does not distinguish between an active failure and a stale failure whose cause has resolved. When the investigation attributes the failure to an external cause (outage, maintenance window), that cause may have its own recovery timeline.
+- When Aligner detects concurrent promotion failures across services sharing an identical platform blocker, follow always/08-flow-engineering.md for cross-service systemic fast-path consolidation and gated/kargo-environment.md for error nature resolution.
 - No user confirmation needed -- the Aligner detected it autonomously.

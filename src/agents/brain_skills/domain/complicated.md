@@ -16,13 +16,11 @@ Ts calibration principles:
 </source_context>
 
 <severity_modulation>
-
 | Severity | Ts multiplier    | Escalation threshold     |
 |----------|-----------------|--------------------------|
 | info     | 1.0x (patient)  | 3 defers no progress     |
 | warning  | 0.5x (attentive)| 2 defers no progress     |
 | critical | 0.25x (urgent)  | 1 defer no progress      |
-
 </severity_modulation>
 
 ## Control Loop
@@ -79,20 +77,19 @@ is still progressing.
 
 0. **Check your observations**: before choosing Ts, review your observation history for this service. Look for duration measurement series. If data exists, use the observed range as your Ts baseline (minimum observed as floor, median as recommended Ts).
 1. **Segment by pipeline variant**: if the event involves a pipeline or build, extract variant characteristics (multi-arch, arm64, s390x, remote-build) from pipeline metadata. Different variants have fundamentally different duration profiles — a multi-arch remote build runs 2-3x longer than a standard build. Select the variant-specific baseline, not the aggregate.
-2. **No observations? Query the source**: if no duration observations exist for this specific variant, dispatch an agent to investigate historical pipeline timing from the build system filtered by the same variant tags. Record variant-tagged observations for future events.
+2. **No observations? Query the source**: if no duration observations exist for this specific variant, dispatch an agent to investigate historical pipeline timing from the build system filtered by the same variant tags (fires once per service+variant; future events use measured data directly). Record variant-tagged observations for future events.
 3. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
 4. **Severity multiplier**: apply from the severity_modulation table above.
 5. **Progress signal (adaptive Ts)**:
    - **Elapsed-aware scheduling**: when the baseline duration is known and process start time is available, compute `expected_remaining = median_baseline - elapsed_runtime`. Use this as the next deferral interval instead of blind scaling. Falls back to 1.5× growth when baselines lack statistical depth or start time is unknown.
+   - **Pre-failed pipeline (zero-deferral bypass)**: if `head_pipeline.status` is already in a terminal failed state, remaining runtime is zero (Ts = 0). Do not schedule a deferral with zero delay — bypassing deferral entirely, transition immediately to evaluation or remediation.
+   - **Frozen admission**: if queue admission or pipeline admission is suspended or frozen, do not calibrate against healthy execution baselines — calibrate against queue drain baselines or stall detection ceiling.
    - **Progressing**: process advancing normally with no remaining-time estimate → multiply Ts by 1.5× on each successive deferral (cap at 60 minutes).
    - **Stalled**: no state change since last check → halve Ts for closer observation.
    - **State change**: process completed, errored, or shifted fundamentally → reset to baseline Ts and re-evaluate domain.
-
 6. **State change subscriptions**: defer calibration for subscription-capable resources; see always/08-flow-engineering.md § Subscription Over Blind Waits.
 7. **Scheduled-process baseline**: defer calibration for cron-driven bots; see always/06-decision-guidelines.md § Scheduled-Process Anchor.
 8. **Stall detection ceiling**: runaway-deferral prevention; see always/06-decision-guidelines.md § Stall Detection.
-
-Step 2 fires once per service+variant -- after the first variant-specific duration is observed, future events skip the agent dispatch and use measured data directly.
 
 ## Close Criteria
 

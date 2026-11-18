@@ -107,6 +107,18 @@ resolution rather than escalating independently. New events matching the
 same root cause should discover the existing artifact and join it rather
 than creating a parallel escalation.
 
+### Cross-Service Systemic Blocker Fast-Path
+
+When a promotion wave or multi-stage rollout fails across multiple distinct services
+with an identical leaf error signature (such as `step "auto-merge" timed out`, specific
+HTTP status 502, or quota rejection text), immediately reclassify as systemic.
+
+Do not dispatch redundant per-service investigations. Consolidate into a single shared
+incident referencing all affected services and stages (converting O(N) investigation
+into O(1)) and defer subsequent matching events to the unified resolution timeline. Use
+the canonical title format `Systemic Blocker: <error-nature> (<shared-root-cause>)` so
+concurrent arrivals immediately converge on the same tracked incident.
+
 ### Transient → Systemic Reclassification
 
 "Transient" is a temporal property of a first occurrence — not a permanent
@@ -126,9 +138,11 @@ calibrated wait. Do not manually defer or retry.
 **External process failures** (pipeline build errors, promotion failures,
 infrastructure timeouts post-admission) operate on infrastructure you observe
 but do not control. Apply the following threshold: two or more identical
-failure signatures on the same service within one event, or the same failure
-class appearing across two or more concurrent events on the same service,
-triggers systemic reclassification. Once reclassified, consolidate all
+failure signatures within one event, or the same failure class appearing
+across two or more concurrent events, triggers systemic reclassification. When
+concurrent failures share an identical platform leaf error signature across
+distinct services or promotion stages, bypass per-service investigation and
+use the cross-service systemic fast-path. Once reclassified, consolidate all
 affected events and defer on the resolution timeline — independent retry
 loops on individual events are forbidden.
 

@@ -68,12 +68,9 @@ human reviewers can compare it against future occurrences to spot trends.
 
 Cross-event root cause analysis during individual event processing is the wrong abstraction level -- you're seeing one event's perspective, not the full picture. The Nightwatcher daemon has access to all escalations in the current shift window and can cluster them accurately. Your job is to provide accurate, well-evidenced per-event input to that clustering process.
 
-When you see 3+ events with the same failure signature (same error, same
-service account, same infrastructure component), you do not need to analyze
-the systemic root cause yourself. Stage each incident individually via the
-normal escalation path -- the Nightwatcher daemon clusters related
-escalations during its sweep cycle and produces a consolidated incident.
-Your job is accurate evidence per event, not cross-event root cause analysis.
+When you see multiple events with the same failure signature, recognize whether the failure is service-isolated or systemic across a wave:
+- **Service-isolated failures**: When individual occurrences show no broader correlation, stage an incident with accurate, well-evidenced per-event data — Nightwatcher clusters related escalations during its sweep cycle and produces a consolidated incident.
+- **Cross-service promotion waves**: When multi-service rollouts fail concurrently with an identical leaf error signature, do not flood the queue with redundant individual incidents. Stage or link to a single consolidated incident representing the shared blocker (see always/08-flow-engineering.md § Cross-Service Systemic Blocker Fast-Path).
 
 ### Pre-Escalation Incident Check
 
@@ -102,6 +99,23 @@ confirmation, not the close reason.
 If the work was stuck in a queue (Kueue, Tekton queue, CI backlog), defer with a
 calibrated interval based on historical queue drain time. The queue clearing is the
 resolution, not the escalation filing.
+
+**Post-Resolution Promotion Boundary Guard**: When an automated event wakes after
+parent incident resolution, apply a two-phase check:
+1. **Controller sync grace period**: If no new promotion CR has started yet post-resolution
+   (`currentPromotion` is empty and `lastPromotion` completed before `incident.resolved_at`),
+   defer 60 seconds (once) for Kargo controller reconciliation rather than evaluating stale
+   status. If still empty on the next wake, inspect stage health and close if no promotion is
+   pending, or escalate if manual promotion is required.
+2. **New promotion evaluation**: On wake after parent incident resolution, check whether a
+   new promotion CR was created after the incident resolution timestamp
+   (`Promotion.metadata.creationTimestamp > incident.resolved_at`).
+   - If it succeeded, verify recovery and transition to close.
+   - If it is still running, defer on active execution.
+   - If a new promotion started and failed (whether with the same leaf error signature indicating
+     an unrecovered platform blocker, or a new/different leaf error signature), treat as a fresh
+     failure cycle and re-escalate.
+   - Do not treat old pre-resolution promotion status as an active failure.
 
 ### Mandatory Triggers
 
