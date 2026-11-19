@@ -3,6 +3,9 @@
 # 1. [Pattern]: Probe script -- tests how the Nightwatcher LLM uses AI Insights data in clustering.
 # 2. [Constraint]: Uses real escalation data from live shifts API + real AI Insights data.
 # 3. [Pattern]: Runs the analysis + declare_clusters flow locally against gemini-4-argon. No Smartsheet writes.
+# 4. [Config]: Env-driven endpoints, both default to localhost (no live host baked in):
+#    DARWIN_URL (default http://localhost:8000) -- Darwin shifts API base;
+#    AI_INSIGHTS_URL (default http://localhost:8080/ai-insights/api/insights) -- AI Insights API endpoint.
 """
 Probe: Nightwatcher with AI Insights signal.
 
@@ -12,6 +15,8 @@ better priority assignment, insights references in reasoning).
 
 Usage:
     export GCP_PROJECT=your-project
+    export DARWIN_URL=http://localhost:8000        # optional; Darwin shifts API base (default shown)
+    export AI_INSIGHTS_URL=http://localhost:8080/ai-insights/api/insights  # optional; AI Insights API (default shown)
     python3 scripts/probe_nightwatcher_insights.py
 
 Fetches real data from:
@@ -32,8 +37,8 @@ PROJECT = os.environ.get("GCP_PROJECT", "")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
 MODEL = os.environ.get("LLM_MODEL_NIGHTWATCHER", "gemini-4-argon")
 
-DARWIN_URL = "https://darwin-blackboard-brain-darwin.apps.cnv2.engineering.redhat.com"
-INSIGHTS_URL = "https://ai-insights.apps.cnv2.engineering.redhat.com/ai-insights/api/insights"
+DARWIN_URL = os.environ.get("DARWIN_URL", "http://localhost:8000")
+INSIGHTS_URL = os.environ.get("AI_INSIGHTS_URL", "http://localhost:8080/ai-insights/api/insights")
 
 DECLARE_CLUSTERS_SCHEMA = {
     "name": "declare_clusters",
@@ -179,7 +184,7 @@ async def run_probe(escalations, insights):
     from google import genai
     from google.genai import types
 
-    client = genai.Client(project=PROJECT, location=LOCATION)
+    client = genai.Client(vertexai=True, project=PROJECT, location=LOCATION)
     window_start = "2026-05-09T06:00:00+00:00"
     window_end = "2026-05-09T18:00:00+00:00"
 

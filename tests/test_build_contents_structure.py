@@ -3248,7 +3248,7 @@ class TestGemini4ParallelMultiFCSignatureAndCoercion:
 class TestGemini4TokenFloorsAndCeilings:
     """T-3 & T-4: Provider-safe 65536 token floors in Brain/Helm and model ceilings in GeminiAdapter."""
 
-    @pytest.mark.parametrize("model_name", ["gemini-4-carbon", "gemini-4-argon", "Gemini-4-Carbon"])
+    @pytest.mark.parametrize("model_name", ["gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "Gemini-4-Carbon"])
     def test_t3_gemini4_resolve_llm_params_enforces_65536_floor_and_262144_runaway_cap(
         self, monkeypatch, model_name: str
     ):
@@ -3339,6 +3339,8 @@ class TestGemini4TokenFloorsAndCeilings:
     @pytest.mark.parametrize(
         "model_name,requested,expected",
         [
+            ("gemini-4-neon", 100000, 65536),
+            ("gemini-4-neon", 65536, 65536),
             ("gemini-4-carbon", 100000, 65536),
             ("gemini-4-carbon", 65536, 65536),
             ("gemini-1.5-pro", 65536, 8192),
@@ -3355,6 +3357,34 @@ class TestGemini4TokenFloorsAndCeilings:
         adapter._model_name = model_name
         cfg = adapter._build_config("sys", None, 1.0, 0.95, requested, thinking_level="")
         assert cfg.max_output_tokens == expected
+
+    def test_t2_rollback_env_to_gemini4_carbon_initializes_model_and_normalizes_xhigh(
+        self, monkeypatch, caplog
+    ):
+        """T-2: Rollback env LLM_MODEL_BRAIN=gemini-4-carbon initializes Brain on carbon
+        and normalizes unsupported XHIGH thinking_level to LOW with a warning log.
+        """
+        import logging
+
+        monkeypatch.delenv("LLM_MODEL_BRAIN", raising=False)
+        assert Brain(blackboard=AsyncMock()).model_name == "gemini-4-neon"
+
+        monkeypatch.setenv("LLM_MODEL_BRAIN", "gemini-4-carbon")
+        brain = Brain(blackboard=AsyncMock())
+        assert brain.model_name == "gemini-4-carbon"
+
+        adapter = _gemini_adapter()
+        adapter._model_name = brain.model_name
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.gemini_client"):
+            cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="XHIGH")
+
+        assert cfg.thinking_config is not None
+        assert cfg.thinking_config.thinking_level == "LOW"
+        assert any(
+            "unsupported thinking_level=" in r.getMessage() and "xhigh" in r.getMessage().lower()
+            for r in caplog.records
+        )
 
     def test_cr13_cr14_cross_provider_runaway_ceilings_and_env_phase_resilience(self, monkeypatch):
         from unittest.mock import MagicMock
