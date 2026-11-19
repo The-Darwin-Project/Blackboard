@@ -4,8 +4,16 @@
 #    QuotaExhaustedError and RequestExceedsBurstError are imported lazily from .llm to preserve hexagonal boundaries.
 # 2. [Pattern]: Pure stateless LLM error classification for Brain retry, backoff, and JARVIS stabilization.
 # 3. [Invariant]: PEP 409 exception-graph walk + fail-closed precedence — any non-retryable cause anywhere in the
-#    graph (timeouts, SSL/mTLS, LocalProtocolError, OS/cert-file errors, non-transport GoogleAuthError, 4xx codes
-#    or client-error tokens) overrides transient/rate-limit signals.
+#    graph (timeouts, SSL/mTLS cert/handshake/config errors, LocalProtocolError, OS/cert-file errors, non-transport
+#    GoogleAuthError, structured non-transient 4xx codes or client-error tokens) overrides transient/rate-limit signals.
+# 4. [Gotcha]: Mid-stream TLS disconnects (ssl.SSLEOFError / ssl.SSLZeroReturnError) are transient transport errors,
+#    NOT cert/config failures; every other ssl.SSLError subclass stays fail-closed.
+# 5. [Gotcha]: aiohttp BadHttpMessage subclasses (TransferEncodingError, ContentLengthError, ...) carry a class-level
+#    ``.code = 400`` that is a parser-framing attribute, not an upstream HTTP status; ClientPayloadError embeds that text
+#    ("<TransferEncodingError: 400, ...>"). Neither the structured-code nor the client-error text veto may fire on them.
+# 6. [Invariant]: A node with a structured transient status (_TRANSIENT_STATUS_CODES) is never text-vetoed by
+#    _NON_TRANSIENT_CLIENT_ERR_RE (e.g. 429 "limit 400 per minute", 503 "NOT_FOUND"); structured 4xx still vetoes anywhere.
+# 7. [Contract]: TRANSIENT_ERROR_TAG is the single producer/consumer constant for Brain's "(transient):" error-turn marker.
 """Stateless transient, rate-limit, and error-turn classifiers for Brain LLM calls."""
 from __future__ import annotations
 
@@ -49,13 +57,17 @@ _TRANSIENT_STATUS_TOKENS = (
 # Structured HTTP status codes considered transient.
 _TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
 
+# Tag Brain inserts into the exhausted-retry error turn ("... after N attempts (transient): <text>").
+# Single source of truth: Brain formats the turn with it; is_transient_llm_error_turn() matches it.
+TRANSIENT_ERROR_TAG = "(transient)"
+
 # Transport disconnect phrases matched by both is_transient() and JARVIS stabilization.
 _TRANSIENT_TRANSPORT_TOKENS = ("Server disconnected",)
 
 # Markers matched on persisted brain.error turns by is_transient_llm_error_turn() without
 # exposing stream-timeout phrases to is_transient() (timeouts use dedicated timeout_retries).
 _TRANSIENT_STREAM_MARKERS = (
-    "(transient):",
+    f"{TRANSIENT_ERROR_TAG}:",
     *_TRANSIENT_TRANSPORT_TOKENS,
     "TTFB timed out",
     "inter-chunk timed out",
@@ -69,11 +81,28 @@ def _optional_exc_types(mod: Any, *names: str) -> tuple[type[BaseException], ...
     return tuple(cls for name in names if isinstance(cls := getattr(mod, name, None), type))
 
 
+# aiohttp response-parser framing errors (TransferEncodingError, ContentLengthError, ...). Their class-level
+# ``.code = 400`` describes the parser failure, not an upstream HTTP response status.
+_PARSER_FRAMING_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    *_optional_exc_types(getattr(_aiohttp, "http_exceptions", None), "BadHttpMessage"),
+)
+
+# Nodes whose message text embeds parser-framing reprs (e.g. "<TransferEncodingError: 400, ...>"),
+# so the client-error text veto must not run on them.
+_TEXT_VETO_EXEMPT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    *_PARSER_FRAMING_EXCEPTIONS,
+    *_optional_exc_types(_aiohttp, "ClientPayloadError"),
+)
+
+# Mid-stream TLS disconnects: transient transport errors, unlike cert-verification / handshake config failures.
+_TRANSIENT_SSL_DISCONNECTS: tuple[type[BaseException], ...] = (ssl.SSLEOFError, ssl.SSLZeroReturnError)
+
 _NON_RETRYABLE_DIRECT_EXCEPTIONS: tuple[type[BaseException], ...] = (
     # Timeouts (handled by dedicated timeout_retries, not transient transport retry)
     TimeoutError,
     httpx.TimeoutException,
-    # SSL / TLS / certificate verification errors
+    # SSL / TLS / certificate verification and handshake-config errors
+    # (_TRANSIENT_SSL_DISCONNECTS subclasses are excused in _has_non_retryable_cause)
     ssl.SSLError,
     # Client-side protocol errors
     httpx.LocalProtocolError,
@@ -106,6 +135,7 @@ _TRANSIENT_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
     ConnectionError,
     httpx.NetworkError,
     httpx.RemoteProtocolError,
+    *_TRANSIENT_SSL_DISCONNECTS,
     *_optional_exc_types(
         _aiohttp,
         "ServerDisconnectedError",
@@ -173,7 +203,12 @@ def _iter_exception_chain(exc: BaseException):
 
 
 def _extract_status_code(exc: BaseException) -> int | None:
-    """Extract an integer HTTP status code from exc or exc.response without triggering deprecated .code."""
+    """Extract an integer HTTP status code from exc or exc.response without triggering deprecated .code.
+
+    aiohttp BadHttpMessage parser-framing errors return None: their ``.code`` is not an upstream response status.
+    """
+    if isinstance(exc, _PARSER_FRAMING_EXCEPTIONS):
+        return None
     try:
         response = getattr(exc, "response", None)
     except Exception:
@@ -196,7 +231,7 @@ def _extract_status_code(exc: BaseException) -> int | None:
 def _has_non_retryable_cause(chain: tuple[BaseException, ...]) -> bool:
     """Fail-closed check across a materialized exception graph for non-retryable causes."""
     for node in chain:
-        if isinstance(node, _NON_RETRYABLE_DIRECT_EXCEPTIONS):
+        if isinstance(node, _NON_RETRYABLE_DIRECT_EXCEPTIONS) and not isinstance(node, _TRANSIENT_SSL_DISCONNECTS):
             return True
         mro = type(node).__mro__
         if any(_matches_mro(mro, mod, name) for mod, name in _NON_RETRYABLE_MRO_TARGETS):
@@ -209,6 +244,9 @@ def _has_non_retryable_cause(chain: tuple[BaseException, ...]) -> bool:
         code = _extract_status_code(node)
         if code is not None and 400 <= code < 500 and code not in _TRANSIENT_STATUS_CODES:
             return True
+        # Structured transient status wins over free-text 4xx tokens; parser-framing nodes carry no HTTP status.
+        if code in _TRANSIENT_STATUS_CODES or isinstance(node, _TEXT_VETO_EXEMPT_EXCEPTIONS):
+            continue
         if _NON_TRANSIENT_CLIENT_ERR_RE.search(str(node)):
             return True
     return False
@@ -285,8 +323,8 @@ def is_transient(e: Exception) -> bool:
 def is_transient_llm_error_turn(turn: Any) -> bool:
     """True if ``turn`` is a brain.error turn whose text describes a transient LLM/quota failure.
 
-    Recognizes the canonical ``"(transient):"`` marker emitted by Brain's exhausted error-turn path
-    (guaranteeing parity with ``is_transient(last_error)`` for all transport disconnects), alongside
+    Recognizes the canonical ``TRANSIENT_ERROR_TAG + ":"`` marker (checked before the client-error veto) emitted by
+    Brain's exhausted error-turn path (guaranteeing parity with ``is_transient(last_error)``), alongside
     ``_TRANSIENT_STREAM_MARKERS``, ``_TRANSIENT_STATUS_TOKENS``, and bounded ``_TRANSIENT_HTTP_CODE_RE``,
     guarded fail-closed by ``_NON_TRANSIENT_CLIENT_ERR_RE``. Accepts ConversationTurn objects or dicts.
     """
@@ -306,6 +344,10 @@ def is_transient_llm_error_turn(turn: Any) -> bool:
     if "Quota exhausted" in text:
         # A single request larger than the burst limit is never fixed by waiting for stability.
         return "exceeds the burst limit" not in text
+    if f"{TRANSIENT_ERROR_TAG}:" in text:
+        # Brain only emits the tag when is_transient(last_error) held; its sanitized text may still embed
+        # tokens like "400," (aiohttp framing) or "limit 400 per minute" that the text veto below would reject.
+        return True
     if _NON_TRANSIENT_CLIENT_ERR_RE.search(text):
         return False
     if any(token in text for token in _TRANSIENT_STATUS_TOKENS):

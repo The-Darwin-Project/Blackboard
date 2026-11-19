@@ -2773,6 +2773,192 @@ class TestStreamTimeoutTransientRetryParityAndDocs:
         assert "(transient):" not in (non_transient_turn.thoughts or "")
         assert Brain._is_transient_llm_error_turn(non_transient_turn) is False
 
+    # -------------------------------------------------------------------------
+    # PR #348 review remediation: H1 / M1 / M3 / M5 regressions
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _genai_error(cls_name: str, code: int, message: str):
+        """Build a real google.genai.errors.ClientError / ServerError with a structured .code."""
+        from google.genai import errors as genai_errors
+
+        payload = {"error": {"code": code, "message": message}}
+        return getattr(genai_errors, cls_name)(code, payload)
+
+    @staticmethod
+    def _classify(exc: BaseException) -> tuple[bool, bool]:
+        """(is_transient, is_rate_limit) via the Brain delegates."""
+        return Brain._is_transient(exc), Brain._is_rate_limit(exc)
+
+    def test_h1_truncated_aiohttp_payload_is_transient_despite_framing_code_400(self):
+        """H1a: ClientPayloadError chained to TransferEncodingError (.code=400 parser attribute and
+        '<TransferEncodingError: 400, ...>' text) must retry as a transport disconnect, not 4xx-veto."""
+        import aiohttp
+        from aiohttp import http_exceptions
+
+        for framing_cls, msg in (
+            (http_exceptions.TransferEncodingError, "Not enough data"),
+            (http_exceptions.ContentLengthError, "Not enough data for satisfy content length header."),
+        ):
+            exc = aiohttp.ClientPayloadError(
+                f"Response payload is not completed: <{framing_cls.__name__}: 400, message='{msg}'>"
+            )
+            exc.__cause__ = framing_cls(msg)
+            assert self._classify(exc) == (True, False), framing_cls.__name__
+
+    def test_h1_parser_framing_code_is_not_a_status_code_but_real_4xx_still_vetoes(self):
+        """H1a guard: BadHttpMessage .code is ignored, yet genuine aiohttp 400 responses and
+        string-only 4xx causes behind a payload error stay fail-closed."""
+        import aiohttp
+        from aiohttp import http_exceptions
+
+        from src.agents.llm_error_classifier import _extract_status_code
+
+        assert _extract_status_code(http_exceptions.TransferEncodingError("x")) is None
+        assert _extract_status_code(http_exceptions.BadHttpMessage("x")) is None
+
+        req_info = MagicMock()
+        assert self._classify(
+            aiohttp.ClientResponseError(req_info, (), status=400, message="Bad Request")
+        ) == (False, False)
+
+        wrapped = aiohttp.ClientPayloadError("Response payload is not completed")
+        wrapped.__cause__ = RuntimeError("413 Payload Too Large")
+        assert self._classify(wrapped) == (False, False)
+
+    def test_h1_structured_429_beats_free_text_400_substring(self):
+        """H1b: real google.genai ClientError(429) mentioning 'limit 400 per minute' is a rate limit."""
+        exc = self._genai_error("ClientError", 429, "Quota exceeded: limit 400 per minute for model")
+        assert self._classify(exc) == (True, True)
+
+    def test_h1_structured_503_beats_free_text_not_found(self):
+        """H1c: real google.genai ServerError(503) mentioning NOT_FOUND is transient, not a rate limit."""
+        exc = self._genai_error("ServerError", 503, "Backend NOT_FOUND while routing, retry later")
+        assert self._classify(exc) == (True, False)
+
+    def test_h1_structured_non_transient_4xx_fail_closed(self):
+        """H1d: real google.genai ClientError 400/404 (neutral text) are never transient."""
+        for code in (400, 401, 403, 404, 409, 413, 422):
+            exc = self._genai_error("ClientError", code, "neutral failure message")
+            assert self._classify(exc) == (False, False), code
+
+    def test_h1_neutral_message_matrix_for_every_transient_status_code(self):
+        """H1d: every _TRANSIENT_STATUS_CODES entry classifies transient with a neutral message;
+        only 429 is a rate limit."""
+        from src.agents.llm_error_classifier import _TRANSIENT_STATUS_CODES
+
+        assert _TRANSIENT_STATUS_CODES == frozenset({408, 429, 500, 502, 503, 504, 529})
+        for code in sorted(_TRANSIENT_STATUS_CODES):
+            cls_name = "ClientError" if code < 500 else "ServerError"
+            exc = self._genai_error(cls_name, code, "neutral failure message")
+            assert self._classify(exc) == (True, code == 429), code
+
+    def test_m1_ssl_disconnects_transient_but_cert_and_config_errors_fail_closed(self):
+        """M1: mid-stream TLS EOF / close_notify are transient; cert verification and generic handshake
+        / context errors (and aiohttp SSL subclasses) remain non-retryable."""
+        import ssl
+
+        import aiohttp
+
+        from src.agents.llm_error_classifier import _has_non_retryable_cause
+
+        for exc in (ssl.SSLEOFError(8, "EOF occurred in violation of protocol"), ssl.SSLZeroReturnError(6, "closed")):
+            assert _has_non_retryable_cause((exc,)) is False, type(exc).__name__
+            assert self._classify(exc) == (True, False), type(exc).__name__
+
+        key = aiohttp.client_reqrep.ConnectionKey("example.com", 443, True, True, None, None, None)
+        for exc in (
+            ssl.SSLCertVerificationError("cert verify failed"),
+            ssl.SSLError("invalid ssl context"),
+            aiohttp.ClientSSLError(key, ssl.SSLError("tls")),
+            aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad cert")),
+            FileNotFoundError("missing-ca.pem"),
+        ):
+            assert self._classify(exc) == (False, False), type(exc).__name__
+
+        # A TLS EOF wrapped in a transport error is still a transient disconnect.
+        wrapped = aiohttp.ClientOSError(8, "EOF")
+        wrapped.__cause__ = ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+        assert self._classify(wrapped) == (True, False)
+
+        # But an EOF chained alongside a cert failure stays fail-closed.
+        mixed = aiohttp.ClientOSError(8, "EOF")
+        mixed.__cause__ = ExceptionGroup(
+            "multi", [ssl.SSLEOFError(8, "EOF"), ssl.SSLCertVerificationError("bad cert")]
+        )
+        assert self._classify(mixed) == (False, False)
+
+    def test_m3_transient_tag_is_single_shared_constant(self):
+        """M3/L9: producer and consumer share TRANSIENT_ERROR_TAG; Brain's alias is distinct from its method."""
+        import src.agents.brain as brain_mod
+        from src.agents import llm_error_classifier as cls_mod
+
+        assert cls_mod.TRANSIENT_ERROR_TAG == "(transient)"
+        assert f"{cls_mod.TRANSIENT_ERROR_TAG}:" in cls_mod._TRANSIENT_STREAM_MARKERS
+        assert brain_mod._TRANSIENT_ERROR_TAG is cls_mod.TRANSIENT_ERROR_TAG
+        assert brain_mod._classify_transient_llm_error_turn is cls_mod.is_transient_llm_error_turn
+        assert not hasattr(brain_mod, "_is_transient_llm_error_turn")
+
+    @pytest.mark.asyncio
+    async def test_m5_exhausted_transient_turn_redacts_pii_and_keeps_tag_parity(self):
+        """M5: the exhausted retry error turn redacts email/Bearer secrets, keeps the '(transient):' marker
+        and stays in parity with is_transient_llm_error_turn, incl. wrapped transport errors and
+        errors whose text embeds 4xx-looking tokens."""
+        import aiohttp
+        import google.auth.exceptions as gae
+        import httpx
+
+        from src.agents.llm_error_classifier import TRANSIENT_ERROR_TAG, is_transient_llm_error_turn
+
+        email = "victim.user@example.com"
+        bearer = "Bearer abcdefghijklmnop1234567890"
+
+        async def _exhaust(exc: Exception):
+            def factory(**kw):
+                raise exc
+
+            brain = _make_brain(stream_factory=factory)
+            event = _make_event("evt-exhaust-redact")
+            with (
+                _gate_patch(),
+                _gate_ctx_patch(),
+                patch("src.agents.brain.asyncio.sleep", new_callable=AsyncMock),
+            ):
+                await brain._process_with_llm(event.id, event)
+            error_turns = _get_error_turns(brain)
+            assert len(error_turns) == 1
+            return error_turns[0]
+
+        def _raised_from(exc: BaseException, cause: BaseException) -> BaseException:
+            try:
+                raise exc from cause
+            except BaseException as captured:
+                return captured
+
+        cases: list[Exception] = [
+            httpx.RemoteProtocolError(f"peer closed connection for {email} with {bearer}"),
+            gae.TransportError(f"transport reset for {email} with {bearer}"),
+            _raised_from(
+                RuntimeError(f"stream failed for {email} with {bearer}"),
+                httpx.RemoteProtocolError("peer closed connection"),
+            ),
+            self._genai_error("ClientError", 429, f"limit 400 per minute for {email} with {bearer}"),
+        ]
+        payload_exc = aiohttp.ClientPayloadError(
+            f"Response payload is not completed: <TransferEncodingError: 400, message='{email} {bearer}'>"
+        )
+        payload_exc.__cause__ = aiohttp.http_exceptions.TransferEncodingError("Not enough data")
+        cases.append(payload_exc)
+
+        for exc in cases:
+            turn = await _exhaust(exc)
+            text = turn.thoughts or ""
+            label = type(exc).__name__
+            assert f"{TRANSIENT_ERROR_TAG}:" in text, f"{label}: {text!r}"
+            assert email not in text, f"{label}: email leaked: {text!r}"
+            assert "abcdefghijklmnop1234567890" not in text, f"{label}: bearer leaked: {text!r}"
+            assert is_transient_llm_error_turn(turn) is True, f"{label}: {text!r}"
+            assert Brain._is_transient_llm_error_turn(turn) is True, f"{label}: {text!r}"
+
 
 # ---------------------------------------------------------------------------
 # Activity-Based Stream Heartbeat, Carbon TTFB & HTTP Transport ATDD (T-1..T-10)

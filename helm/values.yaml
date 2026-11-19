@@ -160,7 +160,7 @@ gcp:
   # Per-component LLM configuration
   llm:
     brain:
-      model: "gemini-4-neon" # If provider=claude, set to "claude-opus-5-5". Rollback: "gemini-4-carbon"
+      model: "gemini-4-neon" # If provider=claude, set to "claude-opus-5-5". Rollback: "gemini-4-carbon" (Brain model only; the google-genai>=3.6.1 SDK bump is shared by all GeminiAdapter callers -- reverting it requires rolling back the image tag)
       temperature: "1.5"
       maxOutputTokens: "65536"
     aligner:
@@ -293,7 +293,7 @@ brain:
   contentBudgetTokens: "60000" # Conversation sliding-window compression trigger budget in tokens (BRAIN_CONTENT_BUDGET_TOKENS, clamped [2000, 1000000])
   tailBudgetTokens: "40000" # Retained recent conversation tail budget in tokens when compression fires (BRAIN_TAIL_BUDGET_TOKENS, <= contentBudgetTokens)
   fullTierMaxChars: "100000" # Per-turn ceiling in the uncompressed "full" tier -- caps one oversized message
-  streamTtfbTimeoutSec: "600" # Phase 1 (pre-substantive TTFB) streaming timeout in seconds for Carbon deep prefill (LLM_STREAM_TTFB_TIMEOUT_SEC)
+  streamTtfbTimeoutSec: "600" # Phase 1 (pre-substantive TTFB) streaming timeout in seconds for deep-prefill Gemini 4 models, Neon default / Carbon rollback (LLM_STREAM_TTFB_TIMEOUT_SEC)
   streamInterChunkTimeoutSec: "60" # Phase 2 (sliding activity/heartbeat) streaming timeout in seconds (LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC)
   streamTotalTimeoutSec: "1200" # Non-retryable outer runaway streaming sanity ceiling in seconds (LLM_STREAM_TOTAL_TIMEOUT_SEC)
   httpTimeoutSec: "1500" # Underlying Gemini SDK HTTP/aiohttp & X-Server-Timeout cap in seconds; must exceed streamTotalTimeoutSec (LLM_HTTP_TIMEOUT_SEC)

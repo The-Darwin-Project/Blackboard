@@ -81,7 +81,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `REDIS_PASSWORD` | Redis password | (empty) |
 | `GCP_PROJECT` | GCP project ID | (required) |
 | `GCP_LOCATION` | Vertex AI location | `global` |
-| `LLM_MODEL_BRAIN` | Brain model | `gemini-4-neon` (rollback: `gemini-4-carbon`) |
+| `LLM_MODEL_BRAIN` | Brain model | `gemini-4-neon` (rollback: `gemini-4-carbon`; reverts Brain's model selection only -- the `google-genai>=3.6.1` SDK bump is shared by every `GeminiAdapter` caller and is only reverted by rolling back the image tag) |
 | `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-4-argon` |
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | `3000000` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |

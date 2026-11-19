@@ -3,6 +3,9 @@
 # 1. [Pattern]: Probe script -- tests how the Nightwatcher LLM uses AI Insights data in clustering.
 # 2. [Constraint]: Uses real escalation data from live shifts API + real AI Insights data.
 # 3. [Pattern]: Runs the analysis + declare_clusters flow locally against gemini-4-argon. No Smartsheet writes.
+# 4. [Config]: Env-driven endpoints, both default to localhost (no live host baked in):
+#    DARWIN_URL (default http://localhost:8000) -- Darwin shifts API base;
+#    AI_INSIGHTS_URL (default http://localhost:8080/ai-insights/api/insights) -- AI Insights API endpoint.
 """
 Probe: Nightwatcher with AI Insights signal.
 
@@ -12,6 +15,8 @@ better priority assignment, insights references in reasoning).
 
 Usage:
     export GCP_PROJECT=your-project
+    export DARWIN_URL=http://localhost:8000        # optional; Darwin shifts API base (default shown)
+    export AI_INSIGHTS_URL=http://localhost:8080/ai-insights/api/insights  # optional; AI Insights API (default shown)
     python3 scripts/probe_nightwatcher_insights.py
 
 Fetches real data from:

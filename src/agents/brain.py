@@ -47,7 +47,8 @@
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
 #     Transient retry, rate-limit, and error-turn classification (_is_transient / _is_rate_limit /
 #     _is_transient_llm_error_turn) delegates to src/agents/llm_error_classifier.py (PEP 409 fail-closed
-#     exception-graph walk, zero-DeprecationWarning status inspection, canonical "(transient):" turn parity).
+#     exception-graph walk, zero-DeprecationWarning status inspection, canonical "(transient):" turn parity; the tag is the shared
+#     llm_error_classifier.TRANSIENT_ERROR_TAG constant, imported here as _TRANSIENT_ERROR_TAG).
 #     Repetition guard: _detect_repetition_collapse runs on BOTH accumulated text and thoughts (len > 2000) and returns a
 #     RepetitionCollapse(kind, token): 'runaway' (len > max(32000, max_output_tokens*4) or LLM_STREAM_RUNAWAY_MAX_CHARS),
 #     'micro' (4-37 char token contiguous >= 8x at the tail) or 'macro' (38-200 char phrase contiguous 4x/3x at the tail);
@@ -315,9 +316,10 @@ from src.agents.context_parts import (
     turn_to_parts as _cp_turn_to_parts,
 )
 from .llm_error_classifier import (
+    TRANSIENT_ERROR_TAG as _TRANSIENT_ERROR_TAG,
     is_rate_limit as _is_rate_limit_error,
     is_transient as _is_transient_error,
-    is_transient_llm_error_turn as _is_transient_llm_error_turn,
+    is_transient_llm_error_turn as _classify_transient_llm_error_turn,
 )
 
 from ..models import (
@@ -2599,7 +2601,7 @@ class Brain:
                 )
             else:
                 sanitized = redact_pii(_sanitize_error_text(last_error))
-                transient_tag = " (transient)" if self._is_transient(last_error) else ""
+                transient_tag = f" {_TRANSIENT_ERROR_TAG}" if self._is_transient(last_error) else ""
                 error_text = f"LLM call failed after {attempt + 1} attempts{transient_tag}: {sanitized}"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -6203,7 +6205,7 @@ class Brain:
     @staticmethod
     def _is_transient_llm_error_turn(turn: "ConversationTurn | dict | None") -> bool:
         """True if ``turn`` is a brain.error turn whose text describes a transient LLM/quota failure."""
-        return _is_transient_llm_error_turn(turn)
+        return _classify_transient_llm_error_turn(turn)
 
     def pending_stabilization_event_ids(self) -> list[str]:
         """Events in an active FRIDAY->JARVIS stabilization handoff (excludes normal wait_for_jarvis waits)."""
