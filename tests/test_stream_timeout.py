@@ -1366,6 +1366,50 @@ class TestGemini4ThinkingLevelNormalization:
         assert unknown_cfg.thinking_config.thinking_budget is None
         assert any("ultra" in r.getMessage().lower() for r in caplog.records)
 
+    @pytest.mark.parametrize(
+        "raw_level,expected",
+        [
+            ("minimal", "LOW"),
+            ("none", "LOW"),
+            ("low", "LOW"),
+            ("medium", "MEDIUM"),
+            ("high", "HIGH"),
+            ("xhigh", "XHIGH"),
+            ("XHIGH", "XHIGH"),
+            (" xhigh ", "XHIGH"),
+        ],
+    )
+    def test_t4_gemini4_neon_thinking_level_normalization_and_invalid_fallback(
+        self, raw_level: str, expected: str, caplog
+    ):
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-neon"
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="src.agents.llm.gemini_client"):
+            cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level=raw_level)
+
+        assert cfg.thinking_config is not None
+        assert cfg.thinking_config.thinking_level == expected
+        assert cfg.thinking_config.thinking_budget is None
+        assert "thinking_budget" not in cfg.thinking_config.model_dump(exclude_none=True)
+        assert caplog.records == []
+
+    def test_t4_gemini4_neon_invalid_thinking_level_falls_back_to_low(self, caplog):
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-neon"
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="src.agents.llm.gemini_client"):
+            bad_cfg = adapter._build_config("sys", None, 1.0, 0.95, 65536, thinking_level="ultra")
+
+        assert bad_cfg.thinking_config is not None
+        assert bad_cfg.thinking_config.thinking_level == "LOW"
+        assert bad_cfg.thinking_config.thinking_budget is None
+        assert any("ultra" in r.getMessage().lower() for r in caplog.records)
+
     def test_t5_non_gemini4_passes_minimal_through_and_brain_keeps_lowercase(self):
         from google.genai import types
         from src.agents.llm.gemini_client import GeminiAdapter
@@ -2265,6 +2309,470 @@ class TestStreamTimeoutTransientRetryParityAndDocs:
             _BrokenCodePropertyErr("Permanent client validation failure"), expected=False
         )
 
+    def test_transport_disconnect_classification_and_fail_closed(self):
+        """T-11: Transport-disconnect classification across aiohttp/httpx/httpx2/google.auth/anthropic
+        (evt-a3b9f51f), zero-DeprecationWarning ClientResponseError handling on both _is_transient and
+        _is_rate_limit, and fail-closed rejection of SSL/mTLS/OS/timeout/LocalProtocolError/RefreshError/4xx.
+        """
+        import ssl
+        import warnings
+        import aiohttp
+        import anthropic
+        import google.auth.exceptions as gae
+        import httpcore
+        import httpx
+        import requests
+        import urllib3
+
+        try:
+            import httpx2
+        except ImportError:
+            httpx2 = None
+        try:
+            import httpcore2
+        except ImportError:
+            httpcore2 = None
+
+        key = aiohttp.client_reqrep.ConnectionKey("example.com", 443, True, True, None, None, None)
+        req_info = MagicMock()
+        req = httpx.Request("POST", "https://example.com")
+
+        def _raised_from(exc: BaseException, cause: BaseException) -> BaseException:
+            try:
+                raise exc from cause
+            except BaseException as captured:
+                return captured
+
+        def _raised_with_implicit_context(outer: BaseException, inner: BaseException) -> BaseException:
+            try:
+                try:
+                    raise inner
+                except BaseException:
+                    raise outer
+            except BaseException as captured:
+                return captured
+
+        def _pep409_disconnect_from_none() -> BaseException:
+            try:
+                try:
+                    raise TimeoutError("outer timeout suppressed via PEP 409")
+                except TimeoutError:
+                    raise aiohttp.ServerDisconnectedError("Server disconnected") from None
+            except BaseException as captured:
+                return captured
+
+        # 1. Zero-DeprecationWarning parity on BOTH _is_transient and _is_rate_limit
+        status_matrix = [
+            (400, "Bad Request", False, False),
+            (429, "Too Many Requests", True, True),
+            (503, "Service Unavailable", True, False),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for status_code, message, expected_transient, expected_rate_limit in status_matrix:
+                resp_err = aiohttp.ClientResponseError(req_info, (), status=status_code, message=message)
+                assert Brain._is_transient(resp_err) is expected_transient, (
+                    f"Expected _is_transient={expected_transient} for ClientResponseError(status={status_code})"
+                )
+                assert Brain._is_rate_limit(resp_err) is expected_rate_limit, (
+                    f"Expected _is_rate_limit={expected_rate_limit} for ClientResponseError(status={status_code})"
+                )
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert dep_warnings == [], (
+            f"Expected zero DeprecationWarnings on ClientResponseError status inspection, "
+            f"got: {[str(w.message) for w in dep_warnings]}"
+        )
+
+        # 1b. .response.status_code extraction (httpx.HTTPStatusError & requests.HTTPError via gae.TransportError)
+        for status_code, expected_transient, expected_rate_limit in [
+            (400, False, False),
+            (429, True, True),
+            (503, True, False),
+        ]:
+            httpx_resp = httpx.Response(status_code, request=req)
+            status_err = httpx.HTTPStatusError(f"HTTP {status_code}", request=req, response=httpx_resp)
+            assert Brain._is_transient(status_err) is expected_transient
+            assert Brain._is_rate_limit(status_err) is expected_rate_limit
+
+        req_resp_401 = requests.Response()
+        req_resp_401.status_code = 401
+        gae_http_401 = gae.TransportError(requests.exceptions.HTTPError("Unauthorized", response=req_resp_401))
+        assert Brain._is_transient(gae_http_401) is False
+        assert Brain._is_rate_limit(gae_http_401) is False
+
+        req_resp_429 = requests.Response()
+        req_resp_429.status_code = 429
+        gae_http_429 = gae.TransportError(requests.exceptions.HTTPError("Rate limited", response=req_resp_429))
+        assert Brain._is_transient(gae_http_429) is True
+        assert Brain._is_rate_limit(gae_http_429) is True
+
+        # 2. Positive transport-disconnect cases: _is_transient() is True AND _is_rate_limit() is False
+        positive_cases: list[BaseException] = [
+            aiohttp.ServerDisconnectedError("Server disconnected"),
+            aiohttp.ClientConnectorError(key, OSError(104, "Connection reset")),
+            aiohttp.ClientOSError(104, "Connection reset by peer"),
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            ConnectionResetError("Connection reset by peer"),
+            httpx.RemoteProtocolError("peer closed connection"),
+            httpx.ConnectError("connection failed"),
+            gae.TransportError("connection reset"),
+            gae.TransportError(
+                urllib3.exceptions.MaxRetryError(
+                    None, "/v1", reason=urllib3.exceptions.NewConnectionError(None, "connection failed")
+                )
+            ),
+            _raised_from(
+                anthropic.APIConnectionError(message="conn err", request=req),
+                httpx.RemoteProtocolError("peer closed"),
+            ),
+            _pep409_disconnect_from_none(),
+            RuntimeError("Server disconnected"),
+        ]
+        if httpx2 is not None:
+            positive_cases.extend([
+                httpx2.RemoteProtocolError("peer closed connection"),
+                httpx2.ConnectError("connection failed"),
+                _raised_from(
+                    anthropic.APIConnectionError(message="conn err", request=req),
+                    httpx2.RemoteProtocolError("peer closed"),
+                ),
+            ])
+        for exc in positive_cases:
+            self.assert_transient_classification(exc, expected=True)
+            assert Brain._is_rate_limit(exc) is False, (
+                f"Expected Brain._is_rate_limit to return False for transport error {type(exc).__name__}: {exc!r}"
+            )
+
+        # 3. Negative fail-closed cases: _is_transient() is False
+        cyclic_a = RuntimeError("cycle-a")
+        cyclic_b = RuntimeError("cycle-b")
+        cyclic_a.__cause__ = cyclic_b
+        cyclic_b.__cause__ = cyclic_a
+
+        negative_cases: list[BaseException] = [
+            ssl.SSLError("tls failure"),
+            ssl.SSLCertVerificationError("cert verify failed"),
+            aiohttp.ClientSSLError(key, ssl.SSLError("tls")),
+            aiohttp.ServerFingerprintMismatch(b"a", b"b", "example.com", 443),
+            aiohttp.ClientConnectorError(key, ssl.SSLError("handshake")),
+            aiohttp.ClientConnectorSSLError(key, ssl.SSLError("handshake")),
+            aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad cert")),
+            _raised_from(httpx.ConnectError("tls fail"), ssl.SSLCertVerificationError("bad cert")),
+            httpx.LocalProtocolError("bad header"),
+            anthropic.APITimeoutError(request=req),
+            _raised_from(
+                anthropic.APIConnectionError(message="bad proto", request=req),
+                httpx.LocalProtocolError("bad header"),
+            ),
+            _raised_from(
+                anthropic.APIConnectionError(message="bad cert", request=req),
+                ssl.SSLCertVerificationError("bad cert"),
+            ),
+            gae.TransportError(gae.MutualTLSChannelError("mtls")),
+            gae.TransportError(gae.ClientCertError("cert")),
+            gae.TransportError(FileNotFoundError("missing-ca.pem")),
+            gae.TransportError(PermissionError("unreadable-key.pem")),
+            gae.TransportError(requests.exceptions.SSLError(urllib3.exceptions.SSLError(ssl.SSLError("bad")))),
+            gae.TransportError(
+                urllib3.exceptions.MaxRetryError(
+                    None, "/v1", reason=urllib3.exceptions.ReadTimeoutError(None, "/v1", "read timeout")
+                )
+            ),
+            gae.TransportError(httpcore.ReadTimeout("read timeout")),
+            gae.TransportError(httpcore.LocalProtocolError("bad")),
+            gae.TransportError(aiohttp.ServerTimeoutError("server timeout")),
+            gae.TransportError(requests.exceptions.ReadTimeout("read timeout")),
+            gae.TransportError(aiohttp.ClientResponseError(req_info, (), status=401, message="Unauthorized")),
+            gae.TimeoutError("auth timeout"),
+            gae.RefreshError("invalid_grant: Server disconnected"),
+            aiohttp.ServerTimeoutError("server timeout"),
+            httpx.ReadTimeout("read timeout"),
+            aiohttp.ClientResponseError(req_info, (), status=400, message="Bad Request"),
+            RuntimeError("400 INVALID_ARGUMENT: Server disconnected"),
+            RuntimeError("TTFB timed out"),
+            RuntimeError("inter-chunk timed out"),
+            # Unsuppressed PEP 409 implicit __context__ (without `from None`) must fail closed
+            _raised_with_implicit_context(
+                aiohttp.ServerDisconnectedError("Server disconnected"),
+                TimeoutError("outer timeout"),
+            ),
+            _raised_with_implicit_context(
+                aiohttp.ServerDisconnectedError("Server disconnected"),
+                ssl.SSLCertVerificationError("bad cert"),
+            ),
+            # Cyclic exception graph must terminate cleanly and fail closed
+            cyclic_a,
+        ]
+        if httpx2 is not None:
+            negative_cases.extend([
+                _raised_from(httpx2.ConnectError("tls fail"), ssl.SSLCertVerificationError("bad cert")),
+                _raised_from(
+                    httpx2.ConnectError("multi"),
+                    ExceptionGroup("multi", [ssl.SSLCertVerificationError("bad")]),
+                ),
+                httpx2.LocalProtocolError("bad header"),
+                httpx2.ReadTimeout("read timeout"),
+            ])
+        if httpcore2 is not None:
+            negative_cases.extend([
+                gae.TransportError(httpcore2.ReadTimeout("read timeout")),
+                gae.TransportError(httpcore2.LocalProtocolError("bad")),
+            ])
+        for exc in negative_cases:
+            self.assert_transient_classification(exc, expected=False)
+
+        # 4. Fix 1 regression: chained string-only 4xx / ExceptionGroup client errors fail closed
+        for chained_4xx in [
+            _raised_from(
+                aiohttp.ClientPayloadError("Response payload is not completed"),
+                RuntimeError("413 Payload Too Large"),
+            ),
+            ExceptionGroup(
+                "batch",
+                [RuntimeError("401 UNAUTHENTICATED"), aiohttp.ServerDisconnectedError("Server disconnected")],
+            ),
+        ]:
+            assert Brain._is_transient(chained_4xx) is False
+            assert Brain._is_rate_limit(chained_4xx) is False
+
+        # 5. Fix 3 regression: wrapped 429/503 status parity across is_transient and is_rate_limit
+        def _cre(status_code: int, msg: str) -> aiohttp.ClientResponseError:
+            return aiohttp.ClientResponseError(req_info, (), status=status_code, message=msg)
+
+        for exc, exp_transient, exp_rate_limit in [
+            (gae.TransportError(_cre(429, "Too Many Requests")), True, True),
+            (ExceptionGroup("batch", [_cre(429, "Too Many Requests")]), True, True),
+            (ExceptionGroup("batch", [_cre(503, "Service Unavailable")]), True, False),
+            (_raised_from(_cre(503, "Service Unavailable"), _cre(429, "Too Many Requests")), True, False),
+            (ExceptionGroup("batch", [_cre(400, "Bad Request"), _cre(429, "Too Many Requests")]), False, False),
+        ]:
+            assert Brain._is_transient(exc) is exp_transient, f"_is_transient mismatch for {exc!r}"
+            assert Brain._is_rate_limit(exc) is exp_rate_limit, f"_is_rate_limit mismatch for {exc!r}"
+
+    @pytest.mark.asyncio
+    async def test_transport_disconnect_retry_and_quota_rollback(self, monkeypatch):
+        """T-11: End-to-end _process_with_llm retry backoff and real GeminiAdapter + QuotaTracker
+        ownership handoff (_preacquired[2] is True), single rollback, clean stream.aclose(),
+        and attempt-2 quota recording for both pre-header ServerDisconnectedError and mid-stream
+        ClientPayloadError (discarding attempt-1 partial text).
+        """
+        from types import SimpleNamespace
+        import aiohttp
+        from src.agents.llm.gemini_client import GeminiAdapter
+        from src.agents.llm.quota_tracker import QuotaTracker
+        from src.agents.llm.types import PRIORITY_NORMAL
+
+        monkeypatch.setenv("LLM_STREAM_SDK_RETRY_ATTEMPTS", "1")
+
+        # Part (a): DSL retry loop verifies base-5s transient tier (not 30s rate-limit tier)
+        call_count, error_turns, sleeps = await self.run_process_with_llm_retry(
+            aiohttp.ServerDisconnectedError("Server disconnected")
+        )
+        assert call_count == 2
+        assert error_turns == []
+        assert len(sleeps) == 1
+        assert 5.0 <= sleeps[0] <= 6.5, f"Expected base-5s transient backoff [5.0, 6.5], got {sleeps[0]}"
+
+        def _sdk_text_chunk(text: str, *, usage_total: int | None):
+            usage = None
+            if usage_total is not None:
+                usage = SimpleNamespace(
+                    prompt_token_count=usage_total // 2,
+                    candidates_token_count=usage_total - (usage_total // 2),
+                    thoughts_token_count=0,
+                    cached_content_token_count=0,
+                    tool_use_prompt_token_count=0,
+                    total_token_count=usage_total,
+                )
+            return SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[SimpleNamespace(text=text, thought=False, function_call=None)]
+                        ),
+                        grounding_metadata=None,
+                    )
+                ],
+                text=text,
+                function_calls=[],
+                usage_metadata=usage,
+            )
+
+        class _CleanSDKStream:
+            def __init__(self, text: str, usage_total: int = 120):
+                self._chunks = [_sdk_text_chunk(text, usage_total=usage_total)]
+                self._idx = 0
+                self.aclose_called = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx >= len(self._chunks):
+                    raise StopAsyncIteration
+                chunk = self._chunks[self._idx]
+                self._idx += 1
+                return chunk
+
+            async def aclose(self):
+                self.aclose_called = True
+
+        class _MidStreamPayloadErrorSDKStream:
+            def __init__(self):
+                self._yielded = 0
+                self.aclose_called = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._yielded == 0:
+                    self._yielded += 1
+                    # usage_metadata=None ensures attempt 1 rolls back rather than recording partial usage
+                    return _sdk_text_chunk("partial-attempt-1 ", usage_total=None)
+                raise aiohttp.ClientPayloadError("Response payload is not completed")
+
+            async def aclose(self):
+                self.aclose_called = True
+
+        async def _run_real_adapter_scenario(mode: str):
+            tracker = QuotaTracker(tpm_limit=60000)
+            rollback_calls: list = []
+            record_calls: list = []
+            orig_rollback = tracker.rollback
+            orig_record = tracker.record
+
+            def _spy_rollback(reservation):
+                rollback_calls.append(reservation)
+                return orig_rollback(reservation)
+
+            def _spy_record(*args, **kwargs):
+                record_calls.append((args, kwargs))
+                return orig_record(*args, **kwargs)
+
+            tracker.rollback = _spy_rollback
+            tracker.record = _spy_record
+
+            adapter = GeminiAdapter.__new__(GeminiAdapter)
+            adapter._model_name = "gemini-4-neon"
+            adapter._tracker = tracker
+            adapter._estimate_tokens = lambda contents: 50
+            adapter._convert_contents = lambda contents: contents
+            adapter._build_config = MagicMock(return_value=None)
+            adapter.set_search_enabled = MagicMock()
+
+            captured_preacquired: list[list] = []
+            orig_acquire = adapter.acquire_stream_reservation
+
+            async def _spy_acquire(contents, priority: int = PRIORITY_NORMAL):
+                state = await orig_acquire(contents, priority=priority)
+                captured_preacquired.append(state)
+                return state
+
+            adapter.acquire_stream_reservation = _spy_acquire
+
+            attempt1_stream = _MidStreamPayloadErrorSDKStream() if mode == "mid_stream" else None
+            attempt2_stream = _CleanSDKStream("clean-attempt-2", usage_total=120)
+            gen_calls = 0
+
+            async def _fake_generate_content_stream(**kwargs):
+                nonlocal gen_calls
+                gen_calls += 1
+                if gen_calls == 1:
+                    if mode == "pre_header":
+                        raise aiohttp.ServerDisconnectedError("Server disconnected")
+                    return attempt1_stream
+                return attempt2_stream
+
+            mock_client = MagicMock()
+            mock_client.aio.models.generate_content_stream = AsyncMock(side_effect=_fake_generate_content_stream)
+            adapter._client = mock_client
+
+            brain = _make_brain()
+            brain._adapter = adapter
+            event = _make_event(f"evt-transport-{mode}")
+            recorded_sleeps: list[float] = []
+
+            async def _spy_sleep(delay: float):
+                recorded_sleeps.append(delay)
+
+            with (
+                _gate_patch(),
+                _gate_ctx_patch(),
+                patch("src.agents.brain.asyncio.sleep", new_callable=AsyncMock, side_effect=_spy_sleep),
+            ):
+                await brain._process_with_llm(event.id, event)
+
+            response_turns = []
+            for call in brain._append_and_broadcast.call_args_list:
+                turn = call[0][1] if len(call[0]) > 1 else call.kwargs.get("turn")
+                if turn and getattr(turn, "action", None) == "response":
+                    response_turns.append(turn)
+
+            assert gen_calls == 2, f"[{mode}] Expected 2 SDK stream attempts, got {gen_calls}"
+            assert _get_error_turns(brain) == [], f"[{mode}] Expected 0 error turns on recovery"
+            assert len(recorded_sleeps) == 1 and 5.0 <= recorded_sleeps[0] <= 6.5, (
+                f"[{mode}] Expected 1 transient backoff sleep in [5.0, 6.5], got {recorded_sleeps}"
+            )
+            assert len(captured_preacquired) == 2, f"[{mode}] Expected 2 preacquired reservations"
+            assert all(state[2] is True for state in captured_preacquired), (
+                f"[{mode}] Expected _preacquired[2] is True handoff on all attempts, got {captured_preacquired}"
+            )
+            assert len(rollback_calls) == 1, f"[{mode}] Expected exactly 1 QuotaTracker rollback, got {len(rollback_calls)}"
+            assert len(record_calls) == 1, f"[{mode}] Expected exactly 1 QuotaTracker record on attempt 2, got {len(record_calls)}"
+            assert tracker._active_reservations == {}, (
+                f"[{mode}] Expected zero leaked active reservations, got {tracker._active_reservations}"
+            )
+            if attempt1_stream is not None:
+                assert attempt1_stream.aclose_called is True, f"[{mode}] Expected attempt-1 stream aclose()"
+            assert attempt2_stream.aclose_called is True, f"[{mode}] Expected attempt-2 stream aclose()"
+            assert len(response_turns) == 1, f"[{mode}] Expected 1 response turn, got {len(response_turns)}"
+            final_text = response_turns[0].thoughts or ""
+            assert "clean-attempt-2" in final_text, f"[{mode}] Missing attempt-2 text in {final_text!r}"
+            assert "partial-attempt-1" not in final_text, (
+                f"[{mode}] Attempt-1 partial text leaked into final response: {final_text!r}"
+            )
+
+        # Part (b): Real GeminiAdapter + Real QuotaTracker for BOTH pre-header and mid-stream disconnects
+        await _run_real_adapter_scenario("pre_header")
+        await _run_real_adapter_scenario("mid_stream")
+
+    @pytest.mark.asyncio
+    async def test_exhausted_transport_disconnect_error_turn_parity_with_stabilization(self):
+        """Fix 2 regression: exhausted transient transport disconnects embed canonical '(transient):'
+        marker so Brain._is_transient_llm_error_turn agrees 100% with Brain._is_transient;
+        non-transient 400 errors omit it and classify False.
+        """
+        import aiohttp
+
+        async def _exhaust(exc: Exception):
+            def factory(**kw):
+                raise exc
+
+            brain = _make_brain(stream_factory=factory)
+            event = _make_event("evt-exhaust-parity")
+            with (
+                _gate_patch(),
+                _gate_ctx_patch(),
+                patch("src.agents.brain.asyncio.sleep", new_callable=AsyncMock),
+            ):
+                await brain._process_with_llm(event.id, event)
+            error_turns = _get_error_turns(brain)
+            assert len(error_turns) == 1
+            return error_turns[0]
+
+        for transient_exc in (
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            ConnectionResetError("Connection reset by peer"),
+        ):
+            err_turn = await _exhaust(transient_exc)
+            assert "(transient):" in (err_turn.thoughts or ""), f"Missing (transient): in {err_turn.thoughts!r}"
+            assert Brain._is_transient_llm_error_turn(err_turn) is True
+
+        non_transient_turn = await _exhaust(RuntimeError("400 INVALID_ARGUMENT: bad schema"))
+        assert "(transient):" not in (non_transient_turn.thoughts or "")
+        assert Brain._is_transient_llm_error_turn(non_transient_turn) is False
+
 
 # ---------------------------------------------------------------------------
 # Activity-Based Stream Heartbeat, Carbon TTFB & HTTP Transport ATDD (T-1..T-10)
@@ -2794,13 +3302,14 @@ class TestActivityHeartbeatAndCarbonTtfbATDD:
             "src/agents/llm/types.py",
             "src/agents/llm/quota_tracker.py",
             "src/agents/llm/gemini_client.py",
+            "src/agents/llm_error_classifier.py",
             "src/agents/brain.py",
         ):
             content = (repo_root / rel_path).read_text()
             for tok in forbidden_tokens:
                 assert tok not in content, f"Forbidden internal/workstation token {tok!r} found in {rel_path}"
 
-        # 2. llm/__init__.py <= 100 lines & types.py zero SDK imports
+        # 2. llm/__init__.py <= 100 lines & types.py / llm_error_classifier.py zero SDK imports
         init_lines = (repo_root / "src" / "agents" / "llm" / "__init__.py").read_text().splitlines()
         assert len(init_lines) <= 100, f"src/agents/llm/__init__.py exceeds 100 lines ({len(init_lines)})"
 
@@ -2811,6 +3320,24 @@ class TestActivityHeartbeatAndCarbonTtfbATDD:
                     assert not alias.name.startswith(("google", "anthropic")), f"SDK import {alias.name} in types.py"
             elif isinstance(node, ast.ImportFrom) and node.module:
                 assert not node.module.startswith(("google", "anthropic")), f"SDK import {node.module} in types.py"
+
+        classifier_ast = ast.parse((repo_root / "src" / "agents" / "llm_error_classifier.py").read_text())
+        for node in ast.walk(classifier_ast):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith(("google", "anthropic")), (
+                        f"SDK import {alias.name} in llm_error_classifier.py"
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith(("google", "anthropic")), (
+                    f"SDK import {node.module} in llm_error_classifier.py"
+                )
+                assert node.module not in (
+                    "llm.gemini_client",
+                    "llm.types",
+                    "src.agents.llm.gemini_client",
+                    "src.agents.llm.types",
+                ), f"Direct submodule import {node.module} in src/agents/llm_error_classifier.py"
 
         # 3. brain.py AST boundary: zero direct imports from .llm.types or .llm.gemini_client
         brain_ast = ast.parse((repo_root / "src" / "agents" / "brain.py").read_text())

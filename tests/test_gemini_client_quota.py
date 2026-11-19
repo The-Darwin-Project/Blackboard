@@ -1285,7 +1285,7 @@ class TestBrainDefaultModelMatchesHelm:
         values = yaml.safe_load((_REPO_ROOT / "helm" / "values.yaml").read_text())
         helm_model = values["gcp"]["llm"]["brain"]["model"]
 
-        assert m.group(1) == helm_model == "gemini-4-carbon"
+        assert m.group(1) == helm_model == "gemini-4-neon"
 
     def test_t3_brain_fallback_max_tokens_matches_helm_values(self):
         brain_src = (_REPO_ROOT / "src" / "agents" / "brain.py").read_text()
@@ -1302,7 +1302,7 @@ class TestBrainDefaultModelMatchesHelm:
         llm_vals = values["gcp"]["llm"]
 
         expected_helm = {
-            "brain": "gemini-4-carbon",
+            "brain": "gemini-4-neon",
             "aligner": "gemini-4-argon",
             "archivist": "gemini-4-argon",
             "headhunter": "gemini-4-argon",
@@ -1348,6 +1348,52 @@ class TestBrainDefaultModelMatchesHelm:
             cfg_arg = arg._build_config("sys", None, 0.3, 0.95, 4096, thinking_level="xhigh")
         assert str(cfg_arg.thinking_config.thinking_level).endswith("LOW")
         assert any("unsupported thinking_level=" in r.getMessage() and "xhigh" in r.getMessage().lower() for r in caplog.records)
+
+    def test_gemini4_neon_allows_xhigh_and_carbon_rejects_xhigh(self, caplog):
+        import warnings
+
+        neon = GeminiAdapter.__new__(GeminiAdapter)
+        neon._model_name = "gemini-4-neon"
+        caplog.clear()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+                cfg = neon._build_config("sys", None, 0.3, 0.95, 4096, thinking_level="xhigh")
+        assert cfg.thinking_config.thinking_level == "XHIGH"
+        assert caplog.records == []
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert user_warnings == [], (
+            f"Expected zero UserWarnings for gemini-4-neon XHIGH under google-genai>=3.6.1, "
+            f"got: {[str(w.message) for w in user_warnings]}"
+        )
+
+        carb = GeminiAdapter.__new__(GeminiAdapter)
+        carb._model_name = "gemini-4-carbon"
+        with caplog.at_level(logging.WARNING, logger=_CLAMP_LOGGER):
+            cfg_carb = carb._build_config("sys", None, 0.3, 0.95, 4096, thinking_level="xhigh")
+        assert cfg_carb.thinking_config.thinking_level == "LOW"
+        assert any("unsupported thinking_level=" in r.getMessage() and "xhigh" in r.getMessage().lower() for r in caplog.records)
+
+    def test_requirements_pins_google_genai_v3_6_1_range(self):
+        """T-6: requirements.txt pins google-genai>=3.6.1,<4.0.0 and installed SDK matches with XHIGH."""
+        import importlib.metadata
+        from google.genai import types
+        from packaging.version import Version
+
+        req_lines = [
+            line.strip()
+            for line in (_REPO_ROOT / "requirements.txt").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        genai_specs = [line for line in req_lines if line.startswith("google-genai")]
+        assert genai_specs == ["google-genai>=3.6.1,<4.0.0"], (
+            f"Expected requirements.txt to pin google-genai>=3.6.1,<4.0.0, got {genai_specs!r}"
+        )
+        installed_version = Version(importlib.metadata.version("google-genai"))
+        assert Version("3.6.1") <= installed_version < Version("4.0.0"), (
+            f"Expected installed google-genai in [3.6.1, 4.0.0), got {installed_version}"
+        )
+        assert hasattr(types.ThinkingLevel, "XHIGH"), "Expected google.genai.types.ThinkingLevel.XHIGH"
 
 
 class TestPerStreamRetryOptionsAndSyncStreamDelegator:

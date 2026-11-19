@@ -45,9 +45,9 @@
 #     once (timeout_retries); LLMStreamTotalTimeoutError aborts immediately with zero retries. Stream closed (bounded
 #     aclose, 5s) in finally whenever stream_exhausted is False; normal completion never calls aclose.
 #     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
-#     Transient retry classification (_is_transient / _is_rate_limit): guarded non-transient types (TimeoutError, RequestExceedsBurstError),
-#     structured status code inspection (code/status_code/status), non-transient 4xx guard, transient tokens (RESOURCE_EXHAUSTED,
-#     UNAVAILABLE, INTERNAL, DEADLINE_EXCEEDED), and token-bounded regex fallback for HTTP codes (408, 429, 500, 502, 503, 504, 529).
+#     Transient retry, rate-limit, and error-turn classification (_is_transient / _is_rate_limit /
+#     _is_transient_llm_error_turn) delegates to src/agents/llm_error_classifier.py (PEP 409 fail-closed
+#     exception-graph walk, zero-DeprecationWarning status inspection, canonical "(transient):" turn parity).
 #     Repetition guard: _detect_repetition_collapse runs on BOTH accumulated text and thoughts (len > 2000) and returns a
 #     RepetitionCollapse(kind, token): 'runaway' (len > max(32000, max_output_tokens*4) or LLM_STREAM_RUNAWAY_MAX_CHARS),
 #     'micro' (4-37 char token contiguous >= 8x at the tail) or 'macro' (38-200 char phrase contiguous 4x/3x at the tail);
@@ -313,6 +313,11 @@ from src.agents.context_parts import (
     extract_model_parts as _cp_extract_model_parts,
     normalize_response_parts as _cp_normalize_response_parts,
     turn_to_parts as _cp_turn_to_parts,
+)
+from .llm_error_classifier import (
+    is_rate_limit as _is_rate_limit_error,
+    is_transient as _is_transient_error,
+    is_transient_llm_error_turn as _is_transient_llm_error_turn,
 )
 
 from ..models import (
@@ -757,32 +762,6 @@ import re as _re
 
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
 _HTML_TAG_RE = _re.compile(r'<[^>]+>')
-
-# Regex pattern matching HTTP status codes as distinct tokens (bounded by non-alphanumeric/dot chars)
-# to avoid false positives on token counts, float durations, or event IDs (e.g., 65000, 0.500s, 42900, evt-500a1b).
-_TRANSIENT_HTTP_CODE_RE = _re.compile(r"(?<![0-9a-zA-Z_.-])(?:408|429|500|502|503|504|529)(?![0-9a-zA-Z_.-])")
-_RATE_LIMIT_429_RE = _re.compile(r"(?<![0-9a-zA-Z_.-])429(?![0-9a-zA-Z_.-])")
-
-# Non-transient client-error indicators (4xx and canonical gRPC client error codes)
-_NON_TRANSIENT_CLIENT_ERR_RE = _re.compile(
-    r"(?<![0-9a-zA-Z_.-])(?:400|401|403|404|409|413|422|INVALID_ARGUMENT|PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND)(?![0-9a-zA-Z_.-])"
-)
-_NON_TRANSIENT_400_RE = _NON_TRANSIENT_CLIENT_ERR_RE
-
-# Canonical transient status tokens (gRPC and cloud service errors)
-_TRANSIENT_STATUS_TOKENS = (
-    "RESOURCE_EXHAUSTED",
-    "UNAVAILABLE",
-    "INTERNAL",
-    "DEADLINE_EXCEEDED",
-)
-
-# Structured HTTP status code sets
-_TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
-_NON_TRANSIENT_STATUS_CODES = frozenset({400, 401, 403, 404})
-
-# Stream-timeout error phrases (see LLMStream*TimeoutError messages) that are transient but carry no status token.
-_TRANSIENT_STREAM_MARKERS = ("Server disconnected", "TTFB timed out", "inter-chunk timed out")
 
 # FRIDAY->JARVIS stabilization handoff tuning (see ai-rules 7d).
 _STABILIZATION_MAX_ROUNDS = 2
@@ -1360,7 +1339,7 @@ class Brain:
         self.location = os.getenv("GCP_LOCATION", "global")
         self.provider = os.getenv("LLM_PROVIDER", "gemini")
         self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
-        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-4-carbon")
+        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-4-neon")
         self.max_output_tokens = _parse_positive_int_env(
             "LLM_MAX_TOKENS_BRAIN", os.getenv("LLM_MAX_TOKENS_BRAIN", "65536"), 65536
         )
@@ -2614,11 +2593,14 @@ class Brain:
             last_grounding = None
             self._reasoning_by_event.pop(event_id, None)
             is_timeout = isinstance(last_error, asyncio.TimeoutError)
-            error_text = (
-                f"LLM stream ({timeout_phase}) timed out (budget {last_wait_budget}s) after {attempt + 1} attempts"
-                if is_timeout
-                else f"LLM call failed after {attempt + 1} attempts: {_sanitize_error_text(last_error)}"
-            )
+            if is_timeout:
+                error_text = (
+                    f"LLM stream ({timeout_phase}) timed out (budget {last_wait_budget}s) after {attempt + 1} attempts"
+                )
+            else:
+                sanitized = redact_pii(_sanitize_error_text(last_error))
+                transient_tag = " (transient)" if self._is_transient(last_error) else ""
+                error_text = f"LLM call failed after {attempt + 1} attempts{transient_tag}: {sanitized}"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -3246,69 +3228,12 @@ class Brain:
     @staticmethod
     def _is_rate_limit(e: Exception) -> bool:
         """Check if exception is specifically a 429 / quota rate-limit error (uses 30s base backoff)."""
-        from .llm import QuotaExhaustedError, RequestExceedsBurstError
-        if isinstance(e, (RequestExceedsBurstError, asyncio.TimeoutError, TimeoutError)):
-            return False
-        if isinstance(e, QuotaExhaustedError):
-            return True
-
-        for attr in ("code", "status_code", "status"):
-            try:
-                val = getattr(e, attr, None)
-                if callable(val):
-                    val = val()
-            except Exception:
-                val = None
-            if isinstance(val, int) and not isinstance(val, bool):
-                if val == 429:
-                    return True
-                if 400 <= val < 600:
-                    return False
-
-        err_str = str(e)
-        err_lower = err_str.lower()
-        if (
-            "resource_exhausted" in err_lower
-            or "quota exhausted" in err_lower
-            or "too many requests" in err_lower
-        ):
-            return True
-        return bool(_RATE_LIMIT_429_RE.search(err_str))
+        return _is_rate_limit_error(e)
 
     @staticmethod
     def _is_transient(e: Exception) -> bool:
-        """Check if exception is a transient rate-limit or availability error."""
-        from .llm import QuotaExhaustedError, RequestExceedsBurstError
-        if isinstance(e, (RequestExceedsBurstError, asyncio.TimeoutError, TimeoutError)):
-            return False  # Non-retryable burst overflow or timeout (handled by dedicated timeout policy)
-        if isinstance(e, QuotaExhaustedError):
-            return True
-
-        # Structured status code inspection (.code, .code(), .status_code, .status)
-        for attr in ("code", "status_code", "status"):
-            try:
-                val = getattr(e, attr, None)
-                if callable(val):
-                    val = val()
-            except Exception:
-                val = None
-            if isinstance(val, int) and not isinstance(val, bool):
-                if val in _TRANSIENT_STATUS_CODES:
-                    return True
-                if 400 <= val < 500:
-                    return False
-
-        # Non-transient client error inspection (reject before checking transient tokens/codes)
-        err_str = str(e)
-        if _NON_TRANSIENT_CLIENT_ERR_RE.search(err_str):
-            return False
-
-        # Check canonical transient status tokens
-        if any(token in err_str for token in _TRANSIENT_STATUS_TOKENS):
-            return True
-
-        # Check bounded regex for HTTP status codes
-        return bool(_TRANSIENT_HTTP_CODE_RE.search(err_str))
+        """Check if exception is a transient rate-limit, availability, or transport-disconnect error."""
+        return _is_transient_error(e)
 
     @staticmethod
     def _quota_backoff_delay(attempt: int) -> float:
@@ -6277,33 +6202,8 @@ class Brain:
 
     @staticmethod
     def _is_transient_llm_error_turn(turn: "ConversationTurn | dict | None") -> bool:
-        """True if ``turn`` is a brain.error turn whose text describes a transient LLM/quota failure.
-
-        Reuses the module-level transient classifiers (_TRANSIENT_STATUS_TOKENS, bounded
-        _TRANSIENT_HTTP_CODE_RE, _NON_TRANSIENT_CLIENT_ERR_RE) so bare "429"/"503" substrings inside
-        token counts, durations or event ids do not match. Accepts ConversationTurn objects or dicts.
-        """
-        if not turn:
-            return False
-        if isinstance(turn, dict):
-            actor, action, thoughts = turn.get("actor"), turn.get("action"), turn.get("thoughts")
-        else:
-            actor, action, thoughts = getattr(turn, "actor", None), getattr(turn, "action", None), getattr(turn, "thoughts", None)
-        if actor != "brain" or action != "error":
-            return False
-        text = str(thoughts or "")
-        if not text:
-            return False
-        if "Quota exhausted" in text:
-            # A single request larger than the burst limit is never fixed by waiting for stability.
-            return "exceeds the burst limit" not in text
-        if _NON_TRANSIENT_CLIENT_ERR_RE.search(text):
-            return False
-        if any(token in text for token in _TRANSIENT_STATUS_TOKENS):
-            return True
-        if any(marker in text for marker in _TRANSIENT_STREAM_MARKERS):
-            return True
-        return bool(_TRANSIENT_HTTP_CODE_RE.search(text))
+        """True if ``turn`` is a brain.error turn whose text describes a transient LLM/quota failure."""
+        return _is_transient_llm_error_turn(turn)
 
     def pending_stabilization_event_ids(self) -> list[str]:
         """Events in an active FRIDAY->JARVIS stabilization handoff (excludes normal wait_for_jarvis waits)."""

@@ -107,6 +107,8 @@ logger = logging.getLogger(__name__)
 # Thinking tokens (include_thoughts=True) are counted against max_output_tokens.
 _GEMINI_UNARY_MAX_OUTPUT_TOKENS = 32768
 _GEMINI_4_MAX_OUTPUT_TOKENS = 65536
+# Register new XHIGH-capable Gemini 4 models here (Brain _phase.yaml currently uses <= high; Neon XHIGH is forward-plumbed).
+_GEMINI_4_XHIGH_MODELS = ("hydrogen", "neon")
 _UNSET_MAX_OUTPUT_TOKENS: Any = object()
 
 # Synthetic turn texts used to keep the Gemini wire protocol valid (strict user/model alternation).
@@ -664,7 +666,7 @@ class GeminiAdapter:
                 thinking_kwargs["thinking_level"] = "LOW"
             elif raw_level in ("LOW", "MEDIUM", "HIGH"):
                 thinking_kwargs["thinking_level"] = raw_level
-            elif raw_level == "XHIGH" and "hydrogen" in model_lower:
+            elif raw_level == "XHIGH" and any(m in model_lower for m in _GEMINI_4_XHIGH_MODELS):
                 thinking_kwargs["thinking_level"] = "XHIGH"
             elif raw_level:
                 logger.warning(

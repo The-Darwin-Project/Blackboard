@@ -81,7 +81,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `REDIS_PASSWORD` | Redis password | (empty) |
 | `GCP_PROJECT` | GCP project ID | (required) |
 | `GCP_LOCATION` | Vertex AI location | `global` |
-| `LLM_MODEL_BRAIN` | Brain model | `gemini-4-carbon` (rollback: `gemini-4-argon`) |
+| `LLM_MODEL_BRAIN` | Brain model | `gemini-4-neon` (rollback: `gemini-4-carbon`) |
 | `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-4-argon` |
 | `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | `3000000` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
@@ -93,7 +93,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `LLM_STREAM_TOTAL_TIMEOUT_SEC` | Non-retryable outer runaway sanity ceiling (`20m`) for the complete stream. Finite value in `(0, 3600]` | `1200` |
 | `LLM_STREAM_SDK_RETRY_ATTEMPTS` | Gemini SDK per-call streaming retry attempts before Brain handles stream failure. Integer `1..10` | `1` |
 | `LLM_STREAM_CHUNK_TIMEOUT_SEC` | Legacy per-chunk timeout for Brain LLM streaming (seeds TTFB and inter-chunk defaults when set). Finite value in `(0, 3600]`; invalid values log a warning and fall back to the default | `180` |
-| `LLM_HTTP_TIMEOUT_SEC` | Gemini SDK `HttpOptions.timeout` (the SDK takes milliseconds; this var is seconds). On the async aiohttp stream path it is `ClientTimeout(total=…)`, a wall-clock cap on the **whole** streamed request (also sent as the `X-Server-Timeout` header); on the httpx fallback it is a per-phase timeout. Applies to every `GeminiAdapter` caller (`Archivist` `120s` and `event_namer` `10s` enforce shorter caller timeouts; `Headhunter` and `Aligner` use 5-attempt SDK retry + fallback), and `QuotaTracker` aligns stale-reservation eviction dynamically to `max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s)`. Finite value in `(0, 3600]`; invalid values warn and fall back | `1500` |
+| `LLM_HTTP_TIMEOUT_SEC` | Gemini SDK `HttpOptions.timeout` (the SDK takes milliseconds; this var is seconds). On the async aiohttp stream path it is `ClientTimeout(total=…)`, a wall-clock cap on the **whole** streamed request (also sent as the `X-Server-Timeout` header); on the httpx2 fallback it is a per-phase timeout. Applies to every `GeminiAdapter` caller (`Archivist` `120s` and `event_namer` `10s` enforce shorter caller timeouts; `Headhunter` and `Aligner` use 5-attempt SDK retry + fallback), and `QuotaTracker` aligns stale-reservation eviction dynamically to `max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s)`. Finite value in `(0, 3600]`; invalid values warn and fall back | `1500` |
 | `LLM_STREAM_DRAIN_TIMEOUT_SEC` | Stream drain timeout for trailing metadata after a function call. Finite value in `(0, 300]` | `15.0` |
 | `LLM_STREAM_RUNAWAY_MAX_CHARS` | Ceiling on accumulated stream text **or** thoughts before the stream is aborted as runaway. Integer in `(2000, 10000000]`. When unset the ceiling is `max(32000, max_output_tokens × 4)` | (scaled) |
 | `QDRANT_URL` | Qdrant vector store | `http://localhost:6333` |
