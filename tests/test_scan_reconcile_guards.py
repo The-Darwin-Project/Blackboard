@@ -451,3 +451,122 @@ class TestThinkingBypassNotResetByNudge:
 
         assert (eid in brain._thinking_bypass_count) is expect_kept
         assert (eid in brain._thinking_bypass_time) is expect_kept
+
+
+class TestHeadhunterEvidenceWake:
+    """Headhunter appends trusted GitHub review feedback as actor=headhunter/action=evidence.
+
+    Parked events (deferred, waiting_for_user) must treat it like new user input, and must NOT
+    wake again once Brain has answered it (defer anchor / PROCESSED status).
+    """
+
+    @staticmethod
+    def _defer_turn(n: int) -> ConversationTurn:
+        return ConversationTurn(turn=n, actor="brain", action="defer", status=MessageStatus.EVALUATED,
+                                thoughts="waiting for CI")
+
+    @staticmethod
+    def _hh_turn(n: int, action: str = "evidence", status=MessageStatus.SENT) -> ConversationTurn:
+        return ConversationTurn(turn=n, actor="headhunter", action=action, status=status,
+                                evidence="New GitHub review feedback on org/repo#42")
+
+    @staticmethod
+    def _deferred_brain(event: EventDocument) -> Brain:
+        brain = _make_brain(event)
+        brain.blackboard.EVENT_PREFIX = "darwin:event:"
+        brain.blackboard.redis = AsyncMock()
+        brain.blackboard.redis.get = AsyncMock(return_value=str(time.time() + 600))
+        brain._wake_deferred_event = AsyncMock(return_value=True)
+        return brain
+
+    @pytest.mark.asyncio
+    async def test_deferred_event_woken_by_headhunter_evidence(self):
+        event = _make_event("evt-hh-d1", status="deferred", source="headhunter",
+                            conversation=[self._defer_turn(1), self._hh_turn(2)])
+        brain = self._deferred_brain(event)
+        result = await brain._scan_active_for_reconcile()
+        brain._wake_deferred_event.assert_awaited_once_with("evt-hh-d1")
+        assert "evt-hh-d1" in result
+
+    @pytest.mark.asyncio
+    async def test_deferred_event_not_woken_without_new_input(self):
+        event = _make_event("evt-hh-d2", status="deferred", source="headhunter",
+                            conversation=[self._defer_turn(1)])
+        brain = self._deferred_brain(event)
+        assert await brain._scan_active_for_reconcile() == []
+        brain._wake_deferred_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deferred_event_not_woken_by_other_headhunter_actions(self):
+        event = _make_event("evt-hh-d3", status="deferred", source="headhunter",
+                            conversation=[self._defer_turn(1), self._hh_turn(2, action="triage")])
+        brain = self._deferred_brain(event)
+        assert await brain._scan_active_for_reconcile() == []
+        brain._wake_deferred_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_repeat_wake_after_brain_redefers(self):
+        """Evidence turn precedes the NEW defer turn -> anchored out, no wake loop."""
+        event = _make_event("evt-hh-d4", status="deferred", source="headhunter",
+                            conversation=[self._defer_turn(1), self._hh_turn(2, status=MessageStatus.EVALUATED),
+                                          ConversationTurn(turn=3, actor="brain", action="response",
+                                                           status=MessageStatus.EVALUATED),
+                                          self._defer_turn(4)])
+        brain = self._deferred_brain(event)
+        assert await brain._scan_active_for_reconcile() == []
+        brain._wake_deferred_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_user_event_woken_by_headhunter_evidence(self):
+        turn = self._hh_turn(1)
+        event = _make_event("evt-hh-w1", status="active", source="headhunter", conversation=[turn])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-w1"] = time.time()
+        result = await brain._scan_active_for_reconcile()
+        assert result == ["evt-hh-w1"]
+        assert "evt-hh-w1" not in brain._waiting_for_user
+        assert turn.status == MessageStatus.DELIVERED
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_user_not_woken_by_other_headhunter_actions(self):
+        event = _make_event("evt-hh-w2", status="active", source="headhunter",
+                            conversation=[self._hh_turn(1, action="triage")])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-w2"] = time.time()
+        assert await brain._scan_active_for_reconcile() == []
+        assert "evt-hh-w2" in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_no_repeat_wake_after_brain_processed_evidence_and_reparked(self):
+        """Once Brain answered (turn EVALUATED) and re-parked, the evidence turn can't wake it again."""
+        turns = [
+            self._hh_turn(1, status=MessageStatus.EVALUATED),
+            ConversationTurn(turn=2, actor="brain", action="wait", waitingFor="user",
+                             status=MessageStatus.EVALUATED),
+        ]
+        event = _make_event("evt-hh-w3", status="active", source="headhunter", conversation=turns)
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-w3"] = time.time()
+        for _ in range(3):  # repeated scans stay quiet
+            assert await brain._scan_active_for_reconcile() == []
+        assert "evt-hh-w3" in brain._waiting_for_user
+
+
+    @pytest.mark.asyncio
+    async def test_waiting_approval_gate_not_cleared_by_headhunter_evidence(self):
+        """WAITING_APPROVAL is a human gate: headhunter evidence must not clear waiting_for_user."""
+        turn = self._hh_turn(1)
+        event = _make_event("evt-hh-wa1", status="waiting_approval", source="headhunter", conversation=[turn])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-wa1"] = time.time()
+        assert await brain._scan_active_for_reconcile() == []
+        assert "evt-hh-wa1" in brain._waiting_for_user
+
+    @pytest.mark.asyncio
+    async def test_waiting_approval_still_cleared_by_real_user_turn(self):
+        turn = ConversationTurn(turn=1, actor="user", action="message", status=MessageStatus.SENT)
+        event = _make_event("evt-hh-wa2", status="waiting_approval", source="headhunter", conversation=[turn])
+        brain = _make_brain(event)
+        brain._waiting_for_user["evt-hh-wa2"] = time.time()
+        assert await brain._scan_active_for_reconcile() == ["evt-hh-wa2"]
+        assert "evt-hh-wa2" not in brain._waiting_for_user

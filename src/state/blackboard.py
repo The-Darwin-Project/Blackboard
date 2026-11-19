@@ -2021,6 +2021,86 @@ return 1
         key = f"darwin:github:issue:{owner}:{repo}:{number}"
         return await self.redis.exists(key) > 0
 
+    # --- GitHub PR review-feedback tracking (Headhunter review-response) ---
+
+    _PR_FEEDBACK_CURSOR_KEY = "darwin:github:pr_feedback_cursor"
+    _PR_FEEDBACK_ROUNDS_KEY = "darwin:github:pr_feedback_rounds"
+    _PR_FEEDBACK_WATERMARK_KEY = "darwin:github:review_response_watermark"
+    _PR_FEEDBACK_TTL = 604800  # 7 days
+
+    async def get_or_set_github_review_response_watermark(self, now_iso: str) -> str:
+        """Atomically initialize and return the rollout watermark ISO timestamp (SET NX, persistent).
+
+        Items older than this watermark are treated as pre-rollout history and skipped during
+        first-sight bootstrap; items at or after it on brand-new PRs are delivered normally.
+        """
+        await self.redis.set(self._PR_FEEDBACK_WATERMARK_KEY, now_iso, nx=True)
+        val = await self.redis.get(self._PR_FEEDBACK_WATERMARK_KEY)
+        return val or now_iso
+
+    async def get_github_pr_feedback_cursor(self, owner: str, repo: str, pr_number: int) -> dict | None:
+        """Return the review-feedback cursor for a PR, or None if never bootstrapped.
+
+        Shape: {review_id, review_comment_id, issue_comment_id, ts}.
+        """
+        raw = await self.redis.hget(self._PR_FEEDBACK_CURSOR_KEY, f"{owner}:{repo}:{pr_number}")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def set_github_pr_feedback_cursor(
+        self, owner: str, repo: str, pr_number: int, cursor: dict,
+    ) -> None:
+        """Persist the review-feedback cursor for a PR (O(1) HSET)."""
+        await self.redis.hset(
+            self._PR_FEEDBACK_CURSOR_KEY, f"{owner}:{repo}:{pr_number}", json.dumps(cursor),
+        )
+
+    @staticmethod
+    def _pr_feedback_item_key(owner: str, repo: str, pr_number: int, kind: str, item_id: int | str) -> str:
+        return f"darwin:github:pr_feedback:{owner}:{repo}:{pr_number}:{kind}:{item_id}"
+
+    async def is_github_pr_feedback_seen(
+        self, owner: str, repo: str, pr_number: int, kind: str, item_id: int | str,
+    ) -> bool:
+        """Check whether a review/comment item was already handled (7d TTL)."""
+        key = self._pr_feedback_item_key(owner, repo, pr_number, kind, item_id)
+        return await self.redis.exists(key) > 0
+
+    async def mark_github_pr_feedback_seen(
+        self, owner: str, repo: str, pr_number: int, kind: str, item_id: int | str,
+    ) -> bool:
+        """Atomically mark an item handled (SET NX, 7d TTL). True if newly marked."""
+        key = self._pr_feedback_item_key(owner, repo, pr_number, kind, item_id)
+        return bool(await self.redis.set(key, "1", nx=True, ex=self._PR_FEEDBACK_TTL))
+
+    async def get_github_pr_feedback_rounds(self, owner: str, repo: str, pr_number: int) -> int:
+        """Number of review-response rounds already started on this PR."""
+        raw = await self.redis.hget(self._PR_FEEDBACK_ROUNDS_KEY, f"{owner}:{repo}:{pr_number}")
+        try:
+            return int(raw) if raw else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def incr_github_pr_feedback_rounds(self, owner: str, repo: str, pr_number: int) -> int:
+        """Increment and return the review-response round count for a PR."""
+        return int(await self.redis.hincrby(
+            self._PR_FEEDBACK_ROUNDS_KEY, f"{owner}:{repo}:{pr_number}", 1,
+        ))
+
+    async def mark_github_pr_feedback_cap_notified(self, owner: str, repo: str, pr_number: int) -> bool:
+        """SET NX guard so the round-cap notice is emitted once per PR. True if newly marked."""
+        key = f"darwin:github:pr_feedback_cap:{owner}:{repo}:{pr_number}"
+        return bool(await self.redis.set(key, "1", nx=True, ex=self._PR_FEEDBACK_TTL))
+
+    async def clear_github_pr_feedback_cap_notified(self, owner: str, repo: str, pr_number: int) -> None:
+        """Roll back the round-cap NX guard if comment/event emission failed."""
+        await self.redis.delete(f"darwin:github:pr_feedback_cap:{owner}:{repo}:{pr_number}")
+
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""
         from datetime import datetime, timezone

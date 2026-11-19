@@ -33,6 +33,16 @@
 #     failures must not trip the shared PR/Issue GitHub circuit breaker (see issue #230).
 #     A single failing item (the poison-pill case) never triggers this — that must stay
 #     isolated regardless of phase.
+# 18. [Pattern]: Phase D (_github_poll_review_feedback) runs after Phase C only when the flow gate
+#     is open, behind HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED. Per-item exceptions are isolated;
+#     any Phase D error is caught + logged in _github_poll_and_process (non-fatal, resets the
+#     pending gauge) and never feeds the GitHub circuit breaker / _github_disabled latch.
+#     Feedback is rendered into the triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
+# 19. [Security]: ALL prompt fences (description, job_log, comments, mention_request, issue_body, review_feedback)
+#     go through _sanitize_xml_fence (defined in headhunter_utils, re-exported here): linear regex, max 8 passes,
+#     then every '<' is dropped if a tag still reassembles. Never use a bare .replace("</x>", "") for a fence.
+# 20. [Pattern]: analyze_and_plan(raise_on_error=True) (Phase D) raises on adapter unavailable, LLM error AND an
+#     empty plan so the feedback is retried next cycle; raise_on_error=False keeps the emergency-plan fallback.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -68,14 +78,7 @@ logger = logging.getLogger(__name__)
 
 from .headhunter_utils import _COMMENT_LIMIT, _safe_int  # noqa: E402
 
-import re
-
-_XML_CLOSE_TAG = re.compile(r"</(?:description|job_log|comments|mention_request|issue_body)>")
-
-
-def _sanitize_xml_fence(text: str) -> str:
-    """Strip XML closing tags that could break prompt fencing."""
-    return _XML_CLOSE_TAG.sub("", text) if text else text
+from .headhunter_utils import _XML_FENCE_TAG, _sanitize_xml_fence  # noqa: E402,F401
 
 
 _SYSTEMIC_FAILURE_MIN_BATCH = 2
@@ -123,6 +126,7 @@ class Headhunter:
         self._github_issue_pending: int = 0
         self._github_queued: int = 0
         self._github_issue_queued: int = 0
+        self._github_feedback_pending: int = 0
 
         # Platform adapters
         self._gitlab = GitLabPlatform(blackboard)
@@ -152,14 +156,19 @@ class Headhunter:
     # LLM Analysis (platform-agnostic)
     # =========================================================================
 
-    async def analyze_and_plan(self, context: dict, system_instruction: str = "") -> tuple[str, str]:
+    async def analyze_and_plan(
+        self, context: dict, system_instruction: str = "", *, raise_on_error: bool = False,
+    ) -> str:
         """LLM-based triage with full context.
 
         All work items pass through Flash LLM analysis for consistent evidence quality.
-        Emergency inline fallback when LLM is unavailable.
+        Emergency inline fallback when LLM is unavailable unless ``raise_on_error=True``
+        (used by Phase D so transient LLM outages defer delivery instead of burning a round).
         """
         adapter = await self._get_adapter()
         if not adapter:
+            if raise_on_error:
+                raise RuntimeError("LLM adapter unavailable for triage")
             logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
             return self._emergency_plan(context)
 
@@ -179,9 +188,14 @@ class Headhunter:
             from .llm import record_token_usage
             record_token_usage("headhunter", response.usage)
             plan_text = (response.text or "").strip()
+            if not plan_text and raise_on_error:
+                # Phase D: an empty plan must retry next cycle, not create an empty-plan event and burn a round.
+                raise RuntimeError("LLM triage returned an empty plan")
             logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
             return plan_text
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"LLM analysis failed, using emergency fallback: {e}")
             return self._emergency_plan(context)
 
@@ -207,7 +221,7 @@ class Headhunter:
     def _build_analysis_prompt(self, context: dict) -> str:
         """Build structured prompt with full context for LLM analysis."""
         parts = [
-            f"Action: {context.get('action_name', 'unknown')}",
+            f"Action: {context.get('action_name') or context.get('action') or 'unknown'}",
             f"MR: {context.get('mr_title') or context.get('pr_title') or 'unknown'}",
             f"State: {context.get('mr_state') or context.get('pr_state') or 'unknown'} | "
             f"Merge status: {context.get('merge_status') or context.get('mergeable') or 'unknown'}",
@@ -239,9 +253,45 @@ class Headhunter:
             author = context.get('mention_author', 'unknown').replace('"', '')
             comment = _sanitize_xml_fence(context['mention_comment'])
             parts.append(f"<mention_request author=\"{author}\">\n{comment}\n</mention_request>")
+        if context.get("review_feedback"):
+            parts.append(self._render_review_feedback(context["review_feedback"]))
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
+
+    @staticmethod
+    def _render_review_feedback(items: list[dict]) -> str:
+        """Render GitHub review feedback as a single fenced block (untrusted reviewer text).
+
+        Every free-text field is sanitized so it cannot close the fence; attribute values
+        (author, path) are quote-stripped like mention_author.
+        """
+        def _attr(value: object) -> str:
+            return (
+                str(value if value is not None else "")
+                .replace('"', "").replace("<", "").replace(">", "").replace("\n", " ")[:200]
+            )
+
+        lines: list[str] = []
+        for it in items:
+            head = (
+                f'[{_attr(it.get("kind"))} id={_attr(it.get("id"))} author="{_attr(it.get("author"))}" '
+                f'assoc={_attr(it.get("author_association"))} state={_attr(it.get("state"))}'
+            )
+            if it.get("review_id"):
+                head += f' review_id={_attr(it["review_id"])}'
+            if it.get("in_reply_to_id"):
+                head += f' in_reply_to={_attr(it["in_reply_to_id"])}'
+            if it.get("path"):
+                head += f' path="{_attr(it["path"])}" line={_attr(it.get("line"))}'
+            if it.get("html_url"):
+                head += f' url={_attr(it["html_url"])}'
+            lines.append(head + "]")
+            if it.get("diff_hunk"):
+                lines.append("diff_hunk:\n" + _sanitize_xml_fence(it["diff_hunk"]))
+            lines.append(_sanitize_xml_fence(it.get("body", "")))
+            lines.append("")
+        return "<review_feedback>\n" + "\n".join(lines).rstrip() + "\n</review_feedback>"
 
     @staticmethod
     def _build_issue_analysis_prompt(context: dict) -> str:
@@ -257,7 +307,7 @@ class Headhunter:
             parts.append(f"Labels: {', '.join(context['labels'])}")
         if context.get("assignees"):
             parts.append(f"Assignees: {', '.join(context['assignees'])}")
-        body = context.get("body", "").replace("</issue_body>", "")
+        body = _sanitize_xml_fence(context.get("body", ""))
         if body:
             parts.append(f"<issue_body>\n{body}\n</issue_body>")
         if context.get("skill_label"):
@@ -278,6 +328,7 @@ class Headhunter:
             + self._github_issue_pending
             + self._github_queued
             + self._github_issue_queued
+            + self._github_feedback_pending
         )
 
     def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
@@ -471,6 +522,7 @@ class Headhunter:
             self._github._last_queued_prs = queued_items + newly_queued
             self._github_queued = len(self._github._last_queued_prs)
             self._github_pending = 0  # All new items moved to queued state — avoid double-count
+            self._github_feedback_pending = 0  # Phase D is skipped while the gate is closed
             try:
                 await self._github_poll_issues()
             except Exception as e:
@@ -563,6 +615,46 @@ class Headhunter:
             await self._github_poll_issues()
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
+
+        # Phase D: PR review feedback / @mentions (flag-gated, flow-gate gated). Non-fatal like
+        # Phase C: an optional feature must never abort _poll_github or feed the circuit breaker
+        # that latches _github_disabled.
+        try:
+            await self._github_poll_review_feedback()
+        except Exception as e:
+            self._github_feedback_pending = 0  # never leave the gauge stale after a failed poll
+            logger.warning(f"GitHub review-feedback poll failed (non-fatal): {e}")
+
+    async def _github_poll_review_feedback(self) -> None:
+        """Phase D: turn trusted review feedback on Darwin PRs (and @mentions) into events.
+
+        Items that are not turned into an event this cycle (flow gate closed, LLM/side-effect
+        failure) are NOT marked handled, so they are retried next cycle. The caller treats any
+        error from this phase as non-fatal (logged only); per-item failures are isolated.
+        """
+        if not self._github.review_response_enabled():
+            self._github_feedback_pending = 0
+            return
+        items = await self._github.poll_review_feedback_all_installations()
+        self._github_feedback_pending = len(items)
+        if not items:
+            return
+        logger.info(f"Headhunter GitHub review feedback: {len(items)} PR(s) with new feedback")
+        si = self._github.load_review_response_instruction()
+        for item in items:
+            if not await self.check_flow_gate():
+                logger.info("Headhunter flow gate closed -- deferring review-feedback events to next cycle")
+                break
+            try:
+                context = await self._github.fetch_context(item)
+                plan_text = await self.analyze_and_plan(context, si, raise_on_error=True)
+                await self._github.create_review_feedback_event(item, plan_text, context)
+                self._github_feedback_pending = max(0, self._github_feedback_pending - 1)
+            except Exception as e:
+                logger.warning(
+                    f"GitHub review-feedback processing failed for "
+                    f"{item.get('owner')}/{item.get('repo')}#{item.get('number')}: {e}"
+                )
 
     async def _github_poll_issues(self) -> None:
         """Poll GitHub Issues (darwin-work label), queue/promote to mirror PR Phase A/B.
