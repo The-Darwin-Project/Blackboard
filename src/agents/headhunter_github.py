@@ -41,6 +41,12 @@
 # 23. [Constraint]: Review-response events NEVER touch darwin-* labels or the pr_sha re-trigger
 #     store (would start an unintended darwin-review on Darwin's own PR). See _NO_LABEL_ACTIONS.
 # 24. [Pattern]: Feedback poll: one PR's 429/5xx is isolated (healthy PRs' items returned); raised only when 2+ PRs polled and ALL failed 429/5xx. Headhunter Phase D treats any error as non-fatal (never feeds the circuit breaker). 404/422 per PR skip it.
+# 25. [Constraint]: _has_write_permission returns a bool ONLY for definitive answers (200 dict payload or 404).
+#     401/403/429/5xx/timeouts/connect errors/bad JSON are RE-RAISED so the per-PR isolation leaves the
+#     feedback unseen (retry next cycle); returning False there would mark maintainer feedback seen for 7 days.
+# 26. [Pattern]: _handle_round_cap creates the maintainer event FIRST (NX key rolled back in a guarded try/except
+#     if that fails, no comment posted yet => no duplicates), then posts the PR comment best-effort.
+#     _post_comment returns bool (True only if posted) and never raises.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -64,7 +70,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int, _sanitize_xml_fence
 
 logger = logging.getLogger(__name__)
 
@@ -984,9 +990,9 @@ class GitHubPlatform:
         )
         # Warning string injected by _github_poll_issues when skill URL exceeded 10KB cap
         skill_size_warning: str | None = issue.get("_skill_size_warning")
-        body_sanitized = (issue.get("body") or "")[:_DESC_SAFETY_CAP]
-        # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
-        body_sanitized = body_sanitized.replace("</issue_body>", "")
+        # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content.
+        # Same linear, multi-pass sanitizer as every other prompt fence (single-pass replace is bypassable).
+        body_sanitized = _sanitize_xml_fence((issue.get("body") or "")[:_DESC_SAFETY_CAP])
 
         evidence = EventEvidence(
             display_text=f"GitHub Issue #{number}: {issue.get('issue_title', '')} in {owner}/{repo}",
@@ -1293,11 +1299,13 @@ class GitHubPlatform:
         return None
 
     async def _has_write_permission(self, client, owner: str, repo: str, login: str) -> bool:
-        """Fail-closed repo write-permission check with in-memory TTL cache.
+        """Repo write-permission check with in-memory TTL cache. ONLY definitive answers return a bool.
 
-        Verifies the commenter actually holds write/maintain/admin permission on ``owner/repo``
-        (not just a read-only collaborator or generic org member). 429/5xx errors propagate so
-        transient API failures retry next cycle instead of permanently marking feedback seen.
+        Returns True/False only for a 200 with a dict payload (permission / role_name decides) or a 404
+        (not a collaborator). EVERY other outcome -- 401/403 (token/App permission/primary or secondary
+        rate limit), 429, 5xx, timeouts, connection errors, token-refresh failures, malformed JSON --
+        is logged and re-raised so the per-PR isolation leaves the feedback unseen and it is retried next
+        cycle. Returning False on those would mark trusted maintainer feedback seen for 7 days.
         """
         key = (owner.lower(), repo.lower(), login.lower())
         now = time.monotonic()
@@ -1306,24 +1314,29 @@ class GitHubPlatform:
             return cached[0]
         try:
             resp = await client.get(f"/repos/{owner}/{repo}/collaborators/{login}/permission")
-            data = resp.json() if hasattr(resp, "json") else {}
-            perm = (data.get("permission") or "").lower() if isinstance(data, dict) else ""
-            role = (data.get("role_name") or "").lower() if isinstance(data, dict) else ""
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError(f"unexpected permission payload type {type(data).__name__}")
+            perm = (data.get("permission") or "").lower()
+            role = (data.get("role_name") or "").lower()
             allowed = perm in _WRITE_PERMISSIONS or role in _WRITE_PERMISSIONS
             self._perm_cache[key] = (allowed, now + _PERM_CACHE_TTL)
             return allowed
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
-            if code == 429 or code >= 500:
-                raise
             if code == 404:
                 self._perm_cache[key] = (False, now + _PERM_CACHE_TTL)
-            else:
-                logger.warning(f"Permission lookup {code} for {login} on {owner}/{repo}; failing closed")
-            return False
+                return False
+            logger.warning(
+                f"Permission lookup {code} for {login} on {owner}/{repo}; feedback left unseen, retrying next cycle"
+            )
+            raise
         except Exception as e:
-            logger.warning(f"Permission lookup failed for {login} on {owner}/{repo}: {e}; failing closed")
-            return False
+            logger.warning(
+                f"Permission lookup failed for {login} on {owner}/{repo}: {type(e).__name__}: {e}; "
+                "feedback left unseen, retrying next cycle"
+            )
+            raise
 
     @staticmethod
     def _attach_review_feedback(context: dict, work_item: dict) -> None:
@@ -1716,12 +1729,6 @@ class GitHubPlatform:
         installation_id = pr.get("installation_id", "")
         logger.warning(f"Review-response round cap ({rounds}/{max_rounds}) reached on {owner}/{repo}#{number}")
         try:
-            await self._post_comment(
-                installation_id, owner, repo, number,
-                f"**Darwin** has already responded to review feedback on this PR {rounds} times "
-                f"(limit {max_rounds}). Automatic responses are paused -- a maintainer needs to give "
-                "direction before I make further changes.",
-            )
             from ..models import EventEvidence
 
             evidence = EventEvidence(
@@ -1749,13 +1756,39 @@ class GitHubPlatform:
                 f"    summary: \"Read-only: summarise the outstanding review feedback on {owner}/{repo}#{number} "
                 "for the maintainer and notify them. Make no code changes.\"\n---"
             )
+            # Event FIRST: if it fails nothing has been posted, so the rollback + retry next cycle cannot
+            # duplicate the PR comment. The event is the authoritative maintainer notification.
             await self.blackboard.create_event(
                 source="headhunter", service=repo or "general", reason=plan, evidence=evidence,
             )
         except Exception:
-            # Roll back NX key so a failed comment or event emission is retried next cycle.
-            await self.blackboard.clear_github_pr_feedback_cap_notified(owner, repo, number)
+            # Roll back the NX key so the failed event emission is retried next cycle. Guarded so a
+            # secondary Redis error cannot mask the original exception.
+            try:
+                await self.blackboard.clear_github_pr_feedback_cap_notified(owner, repo, number)
+            except Exception as rollback_err:
+                logger.error(
+                    f"Round-cap NX rollback failed for {owner}/{repo}#{number}: {rollback_err}"
+                )
             raise
+        # Comment is best-effort AFTER the event exists (the NX key stays set, so it is never re-posted).
+        # Guarded: _resolve_client can raise outside _post_comment's own handler, and a failure here must
+        # not undo/roll back an event that already exists (that would duplicate the maintainer event).
+        posted = False
+        try:
+            posted = await self._post_comment(
+                installation_id, owner, repo, number,
+                f"**Darwin** has already responded to review feedback on this PR {rounds} times "
+                f"(limit {max_rounds}). Automatic responses are paused -- a maintainer needs to give "
+                "direction before I make further changes.",
+            )
+        except Exception as e:
+            logger.warning(f"Round-cap PR comment error on {owner}/{repo}#{number}: {e}")
+        if not posted:
+            logger.warning(
+                f"Round-cap PR comment not posted on {owner}/{repo}#{number}; "
+                "maintainer notification event was created"
+            )
 
     async def _acknowledge(
         self, installation_id: str, owner: str, repo: str, items: list[dict],
@@ -1941,17 +1974,19 @@ class GitHubPlatform:
         except Exception as e:
             logger.warning(f"Label remove error for {owner}/{repo}#{pr_number}: {e}")
 
-    async def _post_comment(self, installation_id: str, owner: str, repo: str, pr_number: int, body: str) -> None:
-        """Best-effort: post comment on PR."""
+    async def _post_comment(self, installation_id: str, owner: str, repo: str, pr_number: int, body: str) -> bool:
+        """Best-effort: post comment on PR. Never raises; returns True only if the comment was posted."""
         client = await self._resolve_client(installation_id, owner, repo)
         if not client:
-            return
+            return False
         try:
             await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/comments", json={"body": body})
+            return True
         except httpx.HTTPStatusError as e:
             logger.warning(f"Comment post failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}")
         except Exception as e:
             logger.warning(f"Comment error for {owner}/{repo}#{pr_number}: {e}")
+        return False
 
     # =========================================================================
     # Internal Helpers

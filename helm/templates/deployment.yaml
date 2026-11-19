@@ -304,14 +304,16 @@ spec:
             {{- $rr := .Values.headhunter.github.reviewResponse | default dict }}
             - name: HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED
               value: "{{ $rr.enabled | default false }}"
-            - name: HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS
-              value: {{ default "" $rr.trustedAssociations | quote }}
-            - name: HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS
-              value: {{ default "" $rr.ignoreLogins | quote }}
-            - name: HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC
-              value: {{ default "" $rr.debounceSec | quote }}
-            - name: HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS
-              value: {{ default "" $rr.maxRounds | quote }}
+            {{- /* Optional overrides: emit an env var ONLY when its key is present and non-null, so an
+                   absent/null reviewResponse (or key) falls through to the Python defaults (e.g. the CI-robot
+                   ignore list) instead of rendering "". `default` is NOT used: it treats integer 0 as unset,
+                   which would turn debounceSec=0 / maxRounds=0 into "". An explicit "" is respected. */}}
+            {{- range $env, $key := dict "HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS" "trustedAssociations" "HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS" "ignoreLogins" "HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC" "debounceSec" "HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS" "maxRounds" }}
+            {{- if and (hasKey $rr $key) (not (kindIs "invalid" (get $rr $key))) }}
+            - name: {{ $env }}
+              value: {{ get $rr $key | toString | quote }}
+            {{- end }}
+            {{- end }}
             {{- range $label, $url := .Values.headhunter.github.skills }}
             - name: "HEADHUNTER_GITHUB_SKILL_{{ $label | upper }}"
               value: {{ $url | quote }}

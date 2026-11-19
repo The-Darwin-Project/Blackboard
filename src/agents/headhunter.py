@@ -38,6 +38,11 @@
 #     any Phase D error is caught + logged in _github_poll_and_process (non-fatal, resets the
 #     pending gauge) and never feeds the GitHub circuit breaker / _github_disabled latch.
 #     Feedback is rendered into the triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
+# 19. [Security]: ALL prompt fences (description, job_log, comments, mention_request, issue_body, review_feedback)
+#     go through _sanitize_xml_fence (defined in headhunter_utils, re-exported here): linear regex, max 8 passes,
+#     then every '<' is dropped if a tag still reassembles. Never use a bare .replace("</x>", "") for a fence.
+# 20. [Pattern]: analyze_and_plan(raise_on_error=True) (Phase D) raises on adapter unavailable, LLM error AND an
+#     empty plan so the feedback is retried next cycle; raise_on_error=False keeps the emergency-plan fallback.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -73,29 +78,7 @@ logger = logging.getLogger(__name__)
 
 from .headhunter_utils import _COMMENT_LIMIT, _safe_int  # noqa: E402
 
-import re
-
-_XML_FENCE_TAG = re.compile(
-    r"<\s*/?\s*(?:description|job_log|comments|mention_request|issue_body|review_feedback)\b[^>]*>",
-    re.IGNORECASE,
-)
-
-
-def _sanitize_xml_fence(text: str) -> str:
-    """Strip XML fence tags that could break prompt fencing.
-
-    Removes any case/whitespace variant of opening or closing tags for all prompt fences
-    (``</MENTION_REQUEST>``, ``</review_feedback >``, ``< /description>``). Repeats until
-    stable so nested payloads like ``</review_</review_feedback>feedback>`` cannot reassemble
-    a tag after one pass.
-    """
-    if not text:
-        return text
-    prev = None
-    while prev != text:
-        prev = text
-        text = _XML_FENCE_TAG.sub("", text)
-    return text
+from .headhunter_utils import _XML_FENCE_TAG, _sanitize_xml_fence  # noqa: E402,F401
 
 
 _SYSTEMIC_FAILURE_MIN_BATCH = 2
@@ -205,6 +188,9 @@ class Headhunter:
             from .llm import record_token_usage
             record_token_usage("headhunter", response.usage)
             plan_text = (response.text or "").strip()
+            if not plan_text and raise_on_error:
+                # Phase D: an empty plan must retry next cycle, not create an empty-plan event and burn a round.
+                raise RuntimeError("LLM triage returned an empty plan")
             logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
             return plan_text
         except Exception as e:
@@ -321,7 +307,7 @@ class Headhunter:
             parts.append(f"Labels: {', '.join(context['labels'])}")
         if context.get("assignees"):
             parts.append(f"Assignees: {', '.join(context['assignees'])}")
-        body = context.get("body", "").replace("</issue_body>", "")
+        body = _sanitize_xml_fence(context.get("body", ""))
         if body:
             parts.append(f"<issue_body>\n{body}\n</issue_body>")
         if context.get("skill_label"):
