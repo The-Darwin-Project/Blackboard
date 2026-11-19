@@ -68,12 +68,10 @@ human reviewers can compare it against future occurrences to spot trends.
 
 Cross-event root cause analysis during individual event processing is the wrong abstraction level -- you're seeing one event's perspective, not the full picture. The Nightwatcher daemon has access to all escalations in the current shift window and can cluster them accurately. Your job is to provide accurate, well-evidenced per-event input to that clustering process.
 
-When you see 3+ events with the same failure signature (same error, same
-service account, same infrastructure component), you do not need to analyze
-the systemic root cause yourself. Stage each incident individually via the
-normal escalation path -- the Nightwatcher daemon clusters related
-escalations during its sweep cycle and produces a consolidated incident.
-Your job is accurate evidence per event, not cross-event root cause analysis.
+When you see multiple events with the same failure signature, first establish whether the cause is verified at a shared infrastructure component or is isolated to one service. Matching error text alone does not establish a shared cause.
+
+- **Isolated or unverified**: stage an incident with accurate, well-evidenced per-event data. Nightwatcher clusters related escalations during its sweep cycle and produces a consolidated incident.
+- **Verified shared infrastructure wave**: investigation consolidation (see `always/08-flow-engineering.md` § Cross-Service Systemic Wave) is separate from incident staging. `search_open_incidents` queries Jira only, so escalations staged for Nightwatcher are invisible to it. When it returns an open incident for the shared root cause, link the event to that incident and defer on its timeline. When it returns none, stage per-event `report_incident` evidence that names the shared infrastructure component, failing step, and error signature, with a summary in the `[evt-XXXXXXX] ...` format, so Nightwatcher clusters the wave on its sweep.
 
 ### Pre-Escalation Incident Check
 
@@ -102,6 +100,22 @@ confirmation, not the close reason.
 If the work was stuck in a queue (Kueue, Tekton queue, CI backlog), defer with a
 calibrated interval based on historical queue drain time. The queue clearing is the
 resolution, not the escalation filing.
+
+**Post-resolution verification**: When an automated event wakes after its tracked incident
+resolved, the incident closure is a lagging signal about the upstream cause, not proof that
+this event's work recovered. Refresh the live state of the underlying resource and compare it
+with the snapshots recorded earlier in the conversation. Close only when that fresh
+state shows recovery. A state that is still pre-recovery, or has not yet reacted to the upstream
+fix, is a fresh measurement to defer on; a state that is still failing after the system had time
+to react is a failure to report. Environment-specific recovery signals live in the
+environment skill for the resource (for example `gated/kargo-environment.md` for promotions).
+
+**Per-event incident deduplication**: `report_incident` deduplicates per event. Once an event
+has recorded an incident (staged or created), any further call on that event is skipped as a
+duplicate. When a fresh failure appears after recovery on such an event, alert maintainers
+with `notify_user_slack` (and `comment_jira_issue` on the tracked issue when an issue key is
+known from the incident search or the conversation record), citing the fresh post-recovery evidence, then close. If the failure persists, the
+observer opens a clean event that starts its own escalation cycle.
 
 ### Mandatory Triggers
 

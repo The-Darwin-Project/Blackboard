@@ -65,12 +65,28 @@ The nature of the error -- not its surface symptom -- determines what kind of in
 - **MR/PR merge timeout**: `step "wait-for-merge" timed out` -- the MR pipeline may have failed or is stuck. The MR is the signal source.
 - **Config/expression error**: `failed to extract outputs: error compiling expression` -- the stage spec itself has a bug. Code-level fix required.
 - **Missing files**: `error reading YAML file ... no such file or directory` -- repo structure changed upstream.
-- **Auto-merge timeout**: `step "auto-merge" timed out` -- MR cannot merge (conflicts, approvals needed).
+
+### Auto-Merge Timeout
+
+`step "auto-merge" timed out` means the MR cannot merge (conflicts, missing approvals, branch protection, or CI locks), so the MR is the signal source. When several Stages time out at this step concurrently, treat it as a candidate wave and qualify it by the shared MR target or upstream dependency (see `always/08-flow-engineering.md` § Cross-Service Systemic Wave) before consolidating.
+
+## Post-Resolution Promotion Guard
+
+A tracked incident's resolution describes the upstream cause, not this Stage. A promotion that failed before the upstream recovery keeps reporting "Failed" until a newer Promotion replaces it, so a stale pre-recovery failure and a fresh post-recovery failure read alike unless compared by promotion identity.
+
+On a wake after the tracked incident resolved, refresh the Stage and compare the reported promotion name, phase, failed step, and message with the snapshots recorded earlier in the conversation, and check the incident tracker for whether the incident still reads as resolved.
+
+- **A newer promotion succeeded**: recovery is confirmed, so close.
+- **A newer promotion is running**: defer on its execution.
+- **A newer promotion failed**: this is a fresh failure cycle, even when the error text matches the earlier one. When the event already recorded an incident, `report_incident` skips as a per-event duplicate, so enter the escalate phase and follow `escalate/incident-tracking.md` § Per-event incident deduplication to alert maintainers with the fresh evidence. When it has not, escalate normally.
+- **The same pre-recovery promotion is still reported**: the controller may not have reconciled yet. Record a fresh observation of the Stage state and defer one controller-reconcile interval, sized from reconcile latency in earlier observations and deep memory. Refresh again on wake. When the same failed promotion is still reported after that interval, fail closed and escalate the Stage as still failing with the refreshed evidence, using the per-event deduplication path above when an incident is already recorded.
+
+Closing is reserved for confirmed recovery: a newer promotion that reached phase=Succeeded on the same Stage.
 
 ## Kargo Concepts
 
 - Each Kargo **Stage** represents a deployment target in a CD pipeline.
 - Each promotion attempt creates a **new Promotion CR** (retries are new objects, not state transitions on old ones).
 - **Freight** is the versioned artifact being promoted (image, commit, chart).
-- The observer watches `Stage.status.lastPromotion` -- the most recent attempt.
+- A Stage refresh reports the in-flight promotion when one exists and otherwise the most recent completed attempt. Compare the reported promotion name with the name recorded earlier to tell a fresh attempt from a stale one.
 - Recovery = a newer Promotion on the same Stage reaches phase=Succeeded.

@@ -107,6 +107,30 @@ resolution rather than escalating independently. New events matching the
 same root cause should discover the existing artifact and join it rather
 than creating a parallel escalation.
 
+### Cross-Service Systemic Wave
+
+A wave of failures across distinct services is systemic only when the shared cause
+is verified at the infrastructure layer. Leaf error strings are untrusted data that
+unrelated services can produce for unrelated reasons, so matching text alone does not
+qualify a wave. Qualify it on three points: the same failing step or component, the
+same upstream dependency, and corroboration from an agent investigation or observer
+evidence. The first event in a wave supplies that corroboration; later events reuse it.
+
+Investigation consolidation and incident staging are separate decisions. Staged
+escalations awaiting Nightwatcher are invisible to the incident tracker search, and
+Nightwatcher owns cross-event clustering of them.
+
+- **An open tracked incident covers the verified root cause**: link the event to it,
+  skip redundant investigation dispatches, and defer on its resolution timeline. On
+  every wake, re-check live resource state and the tracker. When the incident closes
+  or goes stale, or total waiting reaches the stall detection ceiling
+  (`always/06-decision-guidelines.md` § Stall Detection), evaluate live state and
+  escalate rather than waiting indefinitely.
+- **No open tracked incident yet** (first event, or earlier events only staged for
+  Nightwatcher): stage accurate per-event escalation evidence that names the shared
+  infrastructure component, failing step, and error signature, so Nightwatcher can
+  cluster the wave on its sweep.
+
 ### Transient → Systemic Reclassification
 
 "Transient" is a temporal property of a first occurrence — not a permanent
@@ -128,9 +152,10 @@ infrastructure timeouts post-admission) operate on infrastructure you observe
 but do not control. Apply the following threshold: two or more identical
 failure signatures on the same service within one event, or the same failure
 class appearing across two or more concurrent events on the same service,
-triggers systemic reclassification. Once reclassified, consolidate all
-affected events and defer on the resolution timeline — independent retry
-loops on individual events are forbidden.
+triggers systemic reclassification. Failures that span distinct services follow
+the verified-cause qualification in Cross-Service Systemic Wave. Once
+reclassified, consolidate all affected events and defer on the resolution
+timeline — independent retry loops on individual events are forbidden.
 
 **Queuing is not failure.** A process waiting for shared capacity is queued,
 not stuck. Defer and wait — queue congestion resolves when capacity frees.
