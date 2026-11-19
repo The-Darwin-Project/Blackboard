@@ -15,8 +15,8 @@ pydantic>=2.10.0
 # Redis (with hiredis for async performance)
 redis[hiredis]>=5.2.0
 
-# Google Gen AI SDK (Vertex AI) -- replaces deprecated google-cloud-aiplatform
-google-genai>=2.20.0,<3.0.0
+# Google Gen AI SDK (Vertex AI) -- >=3.6.1 for native ThinkingLevel.XHIGH (Gemini 4 Neon), aiohttp SSE fixes, google.auth retry; <4.0.0 major-version guard
+google-genai>=3.6.1,<4.0.0
 
 # Anthropic SDK (Claude via Vertex AI) -- lazy-loaded when LLM_PROVIDER=claude
 anthropic>=0.116.0
