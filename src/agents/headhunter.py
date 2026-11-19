@@ -75,30 +75,26 @@ from .headhunter_utils import _COMMENT_LIMIT, _safe_int  # noqa: E402
 
 import re
 
-_XML_CLOSE_TAG = re.compile(
-    r"</(?:description|job_log|comments|mention_request|issue_body|review_feedback)>"
+_XML_FENCE_TAG = re.compile(
+    r"<\s*/?\s*(?:description|job_log|comments|mention_request|issue_body|review_feedback)\b[^>]*>",
+    re.IGNORECASE,
 )
-
-
-_REVIEW_FEEDBACK_TAG = re.compile(r"<\s*/?\s*review_feedback\b[^>]*>", re.IGNORECASE)
 
 
 def _sanitize_xml_fence(text: str) -> str:
     """Strip XML fence tags that could break prompt fencing.
 
-    Exact closing tags for the other fences are removed by ``_XML_CLOSE_TAG``. For
-    ``review_feedback`` any case/whitespace variant of the opening or closing tag
-    (``</REVIEW_FEEDBACK>``, ``</review_feedback >``, ``< /review_feedback>``) is removed.
-    Repeats until stable so nested payloads like ``</review_</review_feedback>feedback>``
-    cannot reassemble a tag after one pass.
+    Removes any case/whitespace variant of opening or closing tags for all prompt fences
+    (``</MENTION_REQUEST>``, ``</review_feedback >``, ``< /description>``). Repeats until
+    stable so nested payloads like ``</review_</review_feedback>feedback>`` cannot reassemble
+    a tag after one pass.
     """
     if not text:
         return text
     prev = None
     while prev != text:
         prev = text
-        text = _XML_CLOSE_TAG.sub("", text)
-        text = _REVIEW_FEEDBACK_TAG.sub("", text)
+        text = _XML_FENCE_TAG.sub("", text)
     return text
 
 
@@ -177,14 +173,19 @@ class Headhunter:
     # LLM Analysis (platform-agnostic)
     # =========================================================================
 
-    async def analyze_and_plan(self, context: dict, system_instruction: str = "") -> tuple[str, str]:
+    async def analyze_and_plan(
+        self, context: dict, system_instruction: str = "", *, raise_on_error: bool = False,
+    ) -> str:
         """LLM-based triage with full context.
 
         All work items pass through Flash LLM analysis for consistent evidence quality.
-        Emergency inline fallback when LLM is unavailable.
+        Emergency inline fallback when LLM is unavailable unless ``raise_on_error=True``
+        (used by Phase D so transient LLM outages defer delivery instead of burning a round).
         """
         adapter = await self._get_adapter()
         if not adapter:
+            if raise_on_error:
+                raise RuntimeError("LLM adapter unavailable for triage")
             logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
             return self._emergency_plan(context)
 
@@ -207,6 +208,8 @@ class Headhunter:
             logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
             return plan_text
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.warning(f"LLM analysis failed, using emergency fallback: {e}")
             return self._emergency_plan(context)
 
@@ -658,7 +661,7 @@ class Headhunter:
                 break
             try:
                 context = await self._github.fetch_context(item)
-                plan_text = await self.analyze_and_plan(context, si)
+                plan_text = await self.analyze_and_plan(context, si, raise_on_error=True)
                 await self._github.create_review_feedback_event(item, plan_text, context)
                 self._github_feedback_pending = max(0, self._github_feedback_pending - 1)
             except Exception as e:

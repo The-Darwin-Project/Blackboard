@@ -134,6 +134,8 @@ _FEEDBACK_MAX_AGE = timedelta(days=6)
 _FEEDBACK_PAGE_SIZE = 100
 _FEEDBACK_MAX_PAGES = 5
 _FEEDBACK_POLL_CONCURRENCY = 5
+_PERM_CACHE_TTL = 600.0  # 10-min in-memory cache for repo collaborator write-permission checks
+_WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 _DEFAULT_TRIGGER_REASONS = "review_requested,review_feedback,mention"
 _PR_REF_URL = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 _PR_REF_SHORT = re.compile(r"(?<![\w/.-])([\w.-]+)/([\w.-]+)#(\d+)")
@@ -227,6 +229,8 @@ class GitHubPlatform:
         # Open PRs discovered by the most recent poll_work_items(); reused by the
         # review-feedback poll so it does not re-list /pulls (saves 1 GET per repo/cycle).
         self._last_open_prs: list[dict] = []
+        # (owner, repo, login) -> (has_write, expiry_monotonic)
+        self._perm_cache: dict[tuple[str, str, str], tuple[bool, float]] = {}
 
     def _is_tombstoned(self, repo_full: str, endpoint: str) -> bool:
         """Check if an endpoint for a repo is tombstoned (404/422 cooldown). Lazy eviction."""
@@ -326,19 +330,22 @@ class GitHubPlatform:
 
     async def _collect_active_refs(
         self, include_non_headhunter: bool = False,
-    ) -> list[tuple[tuple[str, str, int], str, str]]:
-        """Scan active events -> [((owner, repo, number), event_id, kind)], kind in {pr, issue}.
+    ) -> list[tuple[tuple[str, str, int], str, str, bool]]:
+        """Scan active events -> [((owner, repo, number), event_id, kind, is_headhunter)].
 
         Headhunter events are matched via github_context / github_issue_context.
-        With include_non_headhunter, Slack/chat/etc. events are matched by PR references
-        (github.com/<o>/<r>/pull/<n> or <o>/<r>#<n>) in their reason, display text and
-        first/last turns, so a human-relayed request on a PR also blocks a duplicate event.
+        With include_non_headhunter, non-casual Slack/chat/etc. events are matched by PR
+        references (github.com/<o>/<r>/pull/<n> or <o>/<r>#<n>) in their reason, display text
+        and first/last turns, so a human-relayed PR task blocks a duplicate event without
+        casual Q&A threads hijacking PR review feedback.
         """
+        from ..models import resolve_event_domain
+
         # park_for_approval() moves ids from the active set to the waiting_approval set, so a PR
         # event parked on a human is only visible via the union (same pattern as Brain dedup).
         active_ids = await self.blackboard.get_active_events()
         waiting_ids = await self.blackboard.get_waiting_approval_events()
-        refs: list[tuple[tuple[str, str, int], str, str]] = []
+        refs: list[tuple[tuple[str, str, int], str, str, bool]] = []
         for eid in dict.fromkeys(list(active_ids) + list(waiting_ids)):
             event = await self.blackboard.get_event(eid)
             if not event:
@@ -347,9 +354,9 @@ class GitHubPlatform:
             if event.status.value not in ("new", "active", "deferred", "waiting_approval"):
                 continue
             if event.source != "headhunter":
-                if include_non_headhunter:
+                if include_non_headhunter and resolve_event_domain(event) != "casual":
                     for key in self._extract_pr_refs(event):
-                        refs.append((key, eid, "pr"))
+                        refs.append((key, eid, "pr", False))
                 continue
             evidence = event.event.evidence if event.event else None
             if evidence is None:
@@ -361,7 +368,7 @@ class GitHubPlatform:
                 repo = ctx.get("repo", "") if isinstance(ctx, dict) else getattr(ctx, "repo", "")
                 pr_num = ctx.get("pr_number", 0) if isinstance(ctx, dict) else getattr(ctx, "pr_number", 0)
                 if owner and repo and pr_num:
-                    refs.append(((owner, repo, pr_num), eid, "pr"))
+                    refs.append(((owner, repo, pr_num), eid, "pr", True))
             # Issue context
             issue_ctx = getattr(evidence, "github_issue_context", None)
             if issue_ctx:
@@ -369,7 +376,7 @@ class GitHubPlatform:
                 repo = issue_ctx.get("repo", "") if isinstance(issue_ctx, dict) else getattr(issue_ctx, "repo", "")
                 issue_num = issue_ctx.get("issue_number", 0) if isinstance(issue_ctx, dict) else getattr(issue_ctx, "issue_number", 0)
                 if owner and repo and issue_num:
-                    refs.append(((owner, repo, issue_num), eid, "issue"))
+                    refs.append(((owner, repo, issue_num), eid, "issue", True))
         return refs
 
     @staticmethod
@@ -402,19 +409,23 @@ class GitHubPlatform:
 
         Reads both github_context (PR) and github_issue_context (Issue).
         3-tuple format is safe: GitHub issues and PRs share a monotonic counter per repo.
-        include_non_headhunter additionally covers Slack/chat events that reference a PR.
+        include_non_headhunter additionally covers non-casual Slack/chat events referencing a PR.
         """
         refs = await self._collect_active_refs(include_non_headhunter)
-        return {key for key, _eid, _kind in refs}
+        return {key for key, _eid, _kind, _is_hh in refs}
 
     async def get_active_pr_events(self) -> dict[tuple[str, str, int], str]:
-        """Map lower-cased (owner, repo, pr) -> active event id, across ALL event sources."""
+        """Map lower-cased (owner, repo, pr) -> active event id (headhunter prioritized over non-casual fallback)."""
         refs = await self._collect_active_refs(include_non_headhunter=True)
-        return {
-            (o.lower(), r.lower(), n): eid
-            for (o, r, n), eid, kind in refs
-            if kind == "pr"
-        }
+        mapping: dict[tuple[str, str, int], str] = {}
+        # Populate non-headhunter fallbacks first so dedicated headhunter events always win ties.
+        for (o, r, n), eid, kind, is_hh in refs:
+            if kind == "pr" and not is_hh:
+                mapping[(o.lower(), r.lower(), n)] = eid
+        for (o, r, n), eid, kind, is_hh in refs:
+            if kind == "pr" and is_hh:
+                mapping[(o.lower(), r.lower(), n)] = eid
+        return mapping
 
     async def poll_work_items(self) -> list[dict]:
         """Discover PRs from all repos across all discovered installations.
@@ -1281,6 +1292,39 @@ class GitHubPlatform:
             return "untrusted_association"
         return None
 
+    async def _has_write_permission(self, client, owner: str, repo: str, login: str) -> bool:
+        """Fail-closed repo write-permission check with in-memory TTL cache.
+
+        Verifies the commenter actually holds write/maintain/admin permission on ``owner/repo``
+        (not just a read-only collaborator or generic org member). 429/5xx errors propagate so
+        transient API failures retry next cycle instead of permanently marking feedback seen.
+        """
+        key = (owner.lower(), repo.lower(), login.lower())
+        now = time.monotonic()
+        cached = self._perm_cache.get(key)
+        if cached is not None and now < cached[1]:
+            return cached[0]
+        try:
+            resp = await client.get(f"/repos/{owner}/{repo}/collaborators/{login}/permission")
+            data = resp.json() if hasattr(resp, "json") else {}
+            perm = (data.get("permission") or "").lower() if isinstance(data, dict) else ""
+            role = (data.get("role_name") or "").lower() if isinstance(data, dict) else ""
+            allowed = perm in _WRITE_PERMISSIONS or role in _WRITE_PERMISSIONS
+            self._perm_cache[key] = (allowed, now + _PERM_CACHE_TTL)
+            return allowed
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            if code == 429 or code >= 500:
+                raise
+            if code == 404:
+                self._perm_cache[key] = (False, now + _PERM_CACHE_TTL)
+            else:
+                logger.warning(f"Permission lookup {code} for {login} on {owner}/{repo}; failing closed")
+            return False
+        except Exception as e:
+            logger.warning(f"Permission lookup failed for {login} on {owner}/{repo}: {e}; failing closed")
+            return False
+
     @staticmethod
     def _attach_review_feedback(context: dict, work_item: dict) -> None:
         """Copy review-feedback fields from a feedback work item into a PR context dict."""
@@ -1464,18 +1508,37 @@ class GitHubPlatform:
         }
 
         if cursor is None:
-            # Bootstrap without backfill: mark everything that exists NOW as seen so deploying the
-            # feature (or discovering a PR) never replays old reviews.
+            # Rollout watermark (SET NX on first enabled poll): pre-mark items older than the
+            # watermark so enabling the feature never backfills old reviews, while fast reviews on
+            # brand-new PRs posted after rollout are still delivered normally.
+            watermark_iso = await bb.get_or_set_github_review_response_watermark(_iso(poll_started))
+            watermark_dt = _parse_ts(watermark_iso) or poll_started
+            has_post_watermark = False
             for kind, rows in (("review", reviews), ("review_comment", inline), ("issue_comment", issue_comments)):
                 for row in rows:
-                    if row.get("id") is not None:
+                    if row.get("id") is None:
+                        continue
+                    row_ts = _parse_ts(row.get("submitted_at") or row.get("created_at"))
+                    if row_ts is None or row_ts < watermark_dt:
                         await bb.mark_github_pr_feedback_seen(owner, repo, number, kind, row["id"])
-            await bb.set_github_pr_feedback_cursor(owner, repo, number, new_cursor)
-            logger.info(f"GitHub review-feedback cursor bootstrapped for {owner}/{repo}#{number}")
-            return None
+                    else:
+                        has_post_watermark = True
+            if not has_post_watermark:
+                await bb.set_github_pr_feedback_cursor(owner, repo, number, new_cursor)
+                logger.info(f"GitHub review-feedback cursor bootstrapped for {owner}/{repo}#{number}")
+                return None
+            # Brand-new PR with post-watermark feedback: persist a watermark-anchored cursor so
+            # subsequent polls never re-bootstrap even if items are still inside debounce.
+            cursor = {"review_id": 0, "review_comment_id": 0, "issue_comment_id": 0, "ts": watermark_iso}
+            cur = cursor
+            await bb.set_github_pr_feedback_cursor(owner, repo, number, cursor)
+            logger.info(
+                f"GitHub review-feedback cursor bootstrapped at watermark for {owner}/{repo}#{number} "
+                "(preserving post-watermark feedback)"
+            )
 
         items = await self._collect_feedback_items(
-            owner, repo, number, reviews, inline, issue_comments, is_darwin,
+            client, owner, repo, number, reviews, inline, issue_comments, is_darwin,
         )
 
         if not items:
@@ -1539,12 +1602,12 @@ class GitHubPlatform:
         }
 
     async def _collect_feedback_items(
-        self, owner: str, repo: str, number: int,
+        self, client, owner: str, repo: str, number: int,
         reviews: list[dict], inline: list[dict], issue_comments: list[dict], is_darwin: bool,
     ) -> list[dict]:
-        """State, age, mention, seen and trust gating; return new actionable items (oldest first).
+        """State, age, mention, seen, association and write-permission gating (oldest first).
 
-        No id floor: exactly-once comes from the per-item seen keys (bootstrap pre-marks existing
+        No id floor: exactly-once comes from the per-item seen keys (bootstrap pre-marks pre-watermark
         items; delivered items are marked after the event exists). Untrusted authors are marked
         seen here so they are logged and evaluated once, never forever.
         """
@@ -1567,6 +1630,13 @@ class GitHubPlatform:
                 logger.info(
                     f"Ignoring {kind} {raw.get('id')} on {owner}/{repo}#{number} "
                     f"from {(raw.get('user') or {}).get('login', '?')}: {reason}"
+                )
+                await bb.mark_github_pr_feedback_seen(owner, repo, number, kind, raw["id"])
+                return
+            if not await self._has_write_permission(client, owner, repo, item["author"]):
+                logger.info(
+                    f"Ignoring {kind} {raw.get('id')} on {owner}/{repo}#{number} "
+                    f"from {item['author']}: no_write_permission"
                 )
                 await bb.mark_github_pr_feedback_seen(owner, repo, number, kind, raw["id"])
                 return
@@ -1645,42 +1715,47 @@ class GitHubPlatform:
             return
         installation_id = pr.get("installation_id", "")
         logger.warning(f"Review-response round cap ({rounds}/{max_rounds}) reached on {owner}/{repo}#{number}")
-        await self._post_comment(
-            installation_id, owner, repo, number,
-            f"**Darwin** has already responded to review feedback on this PR {rounds} times "
-            f"(limit {max_rounds}). Automatic responses are paused -- a maintainer needs to give "
-            "direction before I make further changes.",
-        )
-        from ..models import EventEvidence
+        try:
+            await self._post_comment(
+                installation_id, owner, repo, number,
+                f"**Darwin** has already responded to review feedback on this PR {rounds} times "
+                f"(limit {max_rounds}). Automatic responses are paused -- a maintainer needs to give "
+                "direction before I make further changes.",
+            )
+            from ..models import EventEvidence
 
-        evidence = EventEvidence(
-            display_text=f"GitHub: review-response round cap reached on #{number} in {owner}/{repo}",
-            source_type="headhunter",
-            triggered_by="github-app",
-            domain="disorder",
-            domain_confidence="default",
-            severity="warning",
-            github_context={
-                "owner": owner, "repo": repo, "installation_id": installation_id,
-                "pr_number": number, "pr_title": pr.get("title", ""), "pr_state": "open",
-                "pr_url": pr.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
-                "action": "review_round_cap", "review_round": rounds, "review_max_rounds": max_rounds,
-                "head_sha": pr.get("head_sha", ""), "author": pr.get("user", ""),
-                "labels": pr.get("labels", []), "maintainer": self._resolve_maintainer(),
-            },
-        )
-        plan = (
-            f"---\nplan: Notify maintainer: review-response round cap reached on {owner}/{repo}#{number}\n"
-            f"service: {repo}\nrepository: {owner}/{repo}\nrisk: low\n"
-            f"reasoning: Darwin answered {rounds} review rounds on this PR (cap {max_rounds}); "
-            "auto-response paused until a human gives direction. Do not modify code.\n"
-            f"steps:\n  - id: \"1\"\n    agent: architect\n"
-            f"    summary: \"Read-only: summarise the outstanding review feedback on {owner}/{repo}#{number} "
-            "for the maintainer and notify them. Make no code changes.\"\n---"
-        )
-        await self.blackboard.create_event(
-            source="headhunter", service=repo or "general", reason=plan, evidence=evidence,
-        )
+            evidence = EventEvidence(
+                display_text=f"GitHub: review-response round cap reached on #{number} in {owner}/{repo}",
+                source_type="headhunter",
+                triggered_by="github-app",
+                domain="disorder",
+                domain_confidence="default",
+                severity="warning",
+                github_context={
+                    "owner": owner, "repo": repo, "installation_id": installation_id,
+                    "pr_number": number, "pr_title": pr.get("title", ""), "pr_state": "open",
+                    "pr_url": pr.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
+                    "action": "review_round_cap", "review_round": rounds, "review_max_rounds": max_rounds,
+                    "head_sha": pr.get("head_sha", ""), "author": pr.get("user", ""),
+                    "labels": pr.get("labels", []), "maintainer": self._resolve_maintainer(),
+                },
+            )
+            plan = (
+                f"---\nplan: Notify maintainer: review-response round cap reached on {owner}/{repo}#{number}\n"
+                f"service: {repo}\nrepository: {owner}/{repo}\nrisk: low\n"
+                f"reasoning: Darwin answered {rounds} review rounds on this PR (cap {max_rounds}); "
+                "auto-response paused until a human gives direction. Do not modify code.\n"
+                f"steps:\n  - id: \"1\"\n    agent: architect\n"
+                f"    summary: \"Read-only: summarise the outstanding review feedback on {owner}/{repo}#{number} "
+                "for the maintainer and notify them. Make no code changes.\"\n---"
+            )
+            await self.blackboard.create_event(
+                source="headhunter", service=repo or "general", reason=plan, evidence=evidence,
+            )
+        except Exception:
+            # Roll back NX key so a failed comment or event emission is retried next cycle.
+            await self.blackboard.clear_github_pr_feedback_cap_notified(owner, repo, number)
+            raise
 
     async def _acknowledge(
         self, installation_id: str, owner: str, repo: str, items: list[dict],

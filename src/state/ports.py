@@ -490,6 +490,8 @@ class EventRepository(Protocol):
 
     # --- GitHub PR review-feedback tracking (cursor, per-item NX dedup, round cap) ---
 
+    async def get_or_set_github_review_response_watermark(self, now_iso: str) -> str: ...
+
     async def get_github_pr_feedback_cursor(
         self, owner: str, repo: str, pr_number: int,
     ) -> dict | None: ...
@@ -517,6 +519,10 @@ class EventRepository(Protocol):
     async def mark_github_pr_feedback_cap_notified(
         self, owner: str, repo: str, pr_number: int,
     ) -> bool: ...
+
+    async def clear_github_pr_feedback_cap_notified(
+        self, owner: str, repo: str, pr_number: int,
+    ) -> None: ...
 
     # --- Defer timestamps ---
 

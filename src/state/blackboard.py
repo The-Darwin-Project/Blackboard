@@ -2025,7 +2025,18 @@ return 1
 
     _PR_FEEDBACK_CURSOR_KEY = "darwin:github:pr_feedback_cursor"
     _PR_FEEDBACK_ROUNDS_KEY = "darwin:github:pr_feedback_rounds"
+    _PR_FEEDBACK_WATERMARK_KEY = "darwin:github:review_response_watermark"
     _PR_FEEDBACK_TTL = 604800  # 7 days
+
+    async def get_or_set_github_review_response_watermark(self, now_iso: str) -> str:
+        """Atomically initialize and return the rollout watermark ISO timestamp (SET NX, persistent).
+
+        Items older than this watermark are treated as pre-rollout history and skipped during
+        first-sight bootstrap; items at or after it on brand-new PRs are delivered normally.
+        """
+        await self.redis.set(self._PR_FEEDBACK_WATERMARK_KEY, now_iso, nx=True)
+        val = await self.redis.get(self._PR_FEEDBACK_WATERMARK_KEY)
+        return val or now_iso
 
     async def get_github_pr_feedback_cursor(self, owner: str, repo: str, pr_number: int) -> dict | None:
         """Return the review-feedback cursor for a PR, or None if never bootstrapped.
@@ -2085,6 +2096,10 @@ return 1
         """SET NX guard so the round-cap notice is emitted once per PR. True if newly marked."""
         key = f"darwin:github:pr_feedback_cap:{owner}:{repo}:{pr_number}"
         return bool(await self.redis.set(key, "1", nx=True, ex=self._PR_FEEDBACK_TTL))
+
+    async def clear_github_pr_feedback_cap_notified(self, owner: str, repo: str, pr_number: int) -> None:
+        """Roll back the round-cap NX guard if comment/event emission failed."""
+        await self.redis.delete(f"darwin:github:pr_feedback_cap:{owner}:{repo}:{pr_number}")
 
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""

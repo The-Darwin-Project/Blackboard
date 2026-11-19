@@ -66,10 +66,11 @@ def _pr(user: str = BOT, number: int = 42, draft: bool = False, updated_at: str 
 
 
 class FakeGitHubClient:
-    def __init__(self, reviews=None, inline=None, issue_comments=None):
+    def __init__(self, reviews=None, inline=None, issue_comments=None, permissions=None):
         self.reviews = reviews or []
         self.inline = inline or []
         self.issue_comments = issue_comments or []
+        self.permissions: dict[str, str | Exception] = dict(permissions or {})
         self.get_calls: list[tuple[str, dict]] = []
         self.posts: list[tuple[str, dict]] = []
         self.deletes: list[str] = []
@@ -80,7 +81,14 @@ class FakeGitHubClient:
         if self.get_error:
             raise self.get_error
         resp = MagicMock()
-        if path.endswith("/reviews"):
+        perm_match = re.search(r"/collaborators/([^/]+)/permission$", path)
+        if perm_match:
+            login = perm_match.group(1)
+            val = self.permissions.get(login, "write")
+            if isinstance(val, Exception):
+                raise val
+            resp.json.return_value = {"permission": val}
+        elif path.endswith("/reviews"):
             resp.json.return_value = self.reviews
         elif re.search(r"/pulls/\d+/comments$", path):
             resp.json.return_value = self.inline
