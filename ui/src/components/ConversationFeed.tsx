@@ -5,6 +5,7 @@
 // 3. [Pattern]: Report button fetches server-side report via getEventReport(); falls back to client-side eventToMarkdown on failure.
 // 4. [Constraint]: closeEvent via REST, not WS -- ensures request completes even if WS is flaky.
 // 5. [Pattern]: TurnBubble and MarkdownViewer extracted to own files (transparency compliance refactor).
+// 6. [Constraint]: Feed edge fade uses the .fade-edges-y class (index.css), never an inline full-width maskImage: that would fade the scrollbar thumb.
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useWSMessage } from '../contexts/WebSocketContext';
@@ -247,7 +248,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
       {turnViewer && <MarkdownViewer filename={turnViewer.filename} content={turnViewer.content} onClose={() => setTurnViewer(null)} />}
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <div ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'absolute', inset: 0, overflow: 'auto', padding: 12, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
+        <div ref={feedRef} onScroll={handleFeedScroll} className={selectedEvent.conversation.length > 3 ? 'fade-edges-y' : undefined} style={{ position: 'absolute', inset: 0, overflow: 'auto', padding: 12 }}>
           {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
             const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
               ? attachments.find((a) => a.eventId === eventId)

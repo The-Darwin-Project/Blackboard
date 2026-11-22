@@ -4,6 +4,8 @@
 // 2. [Pattern]: Event detail area extracted to EventChatPanel. Sidebar is tree-only + new-event ChatInput.
 // 3. [Pattern]: Right-click context menus per node type. Icons + color from ACTOR_COLORS and lucide-react.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
+//    [Constraint]: Panel root keeps `pr-1.5` to reserve the gutter under the absolute `right-0 w-1.5` resize handle; otherwise the handle overlaps the
+//    inner scrollbar and steals mouse-drag on its thumb. Keep pr-1.5 in sync with the handle width.
 // 5. [Pattern]: ctxMenu cleared on all collapse paths (collapseSidebar, toggleSidebar, chevron button).
 // 6. [Pattern]: ChatInput only visible when !selectedEventId (event chat lives in EventChatPanel).
 // 7. [Pattern]: Agents tree is driven ONLY by registeredAgents (no static/offline ghost rows). partitionAgents() precedence:
@@ -254,7 +256,7 @@ export default function EventSidebar() {
   };
 
   return (
-    <div ref={sidebarRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative"
+    <div ref={sidebarRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative pr-1.5"
       style={{ width }}>
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Header */}

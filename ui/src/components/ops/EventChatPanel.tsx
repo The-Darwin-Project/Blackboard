@@ -4,6 +4,8 @@
 // 2. [Pattern]: Two-header design: identity card + ConversationFeed (owns its own actions header).
 // 3. [Pattern]: key={eventId} on ConversationFeed forces state reset on event switch.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage (darwin:chatPanelWidth).
+//    [Constraint]: Panel root keeps `pr-1.5` to reserve the gutter under the absolute `right-0 w-1.5` resize handle; otherwise the handle overlaps the
+//    inner scrollbar and steals mouse-drag on its thumb. Keep pr-1.5 in sync with the handle width.
 // 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
 import { X } from 'lucide-react';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
@@ -136,7 +138,7 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
   const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
 
   return (
-    <div ref={panelRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative" style={{ width }}>
+    <div ref={panelRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative pr-1.5" style={{ width }}>
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Identity card header */}
         <div className="flex-shrink-0 px-1.5 pt-2 pb-1 border-b border-border">

@@ -495,4 +495,19 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
       expect(setHotspotMock).not.toHaveBeenCalled();
     });
   });
+
+  describe('resize handle gutter', () => {
+    it('reserves a pr-1.5 gutter on the panel root so the w-1.5 resize handle never overlaps the inner scrollbar', () => {
+      setupOpsControl([]);
+      const { container } = renderSidebar();
+
+      const root = container.firstElementChild as HTMLElement;
+      const handle = root.querySelector('.cursor-col-resize') as HTMLElement | null;
+
+      expect(root.classList.contains('pr-1.5')).toBe(true);
+      expect(handle).not.toBeNull();
+      expect(handle!.classList.contains('w-1.5')).toBe(true);
+      expect(handle!.classList.contains('right-0')).toBe(true);
+    });
+  });
 });
