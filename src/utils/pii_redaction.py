@@ -18,8 +18,9 @@
 #    a fix to live_api_adapter.py in parallel with a manually-driven session fix that additionally
 #    extracted the utility to this shared module (so Archivist's Ranking API calls get the same
 #    coverage). Merged: shared-module placement (manual fix) + fuller pattern set (Darwin's fix).
-# 4. [Security]: _EMAIL_RE and _URL_CREDENTIALS_RE use bounded quantifiers so redact_pii is linear-ish on
-#    adversarial input (it runs synchronously on the asyncio loop). Do NOT relax them back to `+`.
+# 4. [Security]: _EMAIL_RE, _URL_CREDENTIALS_RE, and _redact_pem_private_keys are bounded / strictly O(n)
+#    so redact_pii is linear on adversarial input (it runs synchronously on the asyncio loop). Do NOT
+#    relax them back to unbounded `+` or `[\s\S]*?` regexes.
 """Shared PII/secret redaction for text eligible for durable external storage.
 
 Used by:
@@ -67,13 +68,31 @@ _URL_CREDENTIALS_RE = re.compile(
     r"://(?:[^/\s?#]{1,1024}|[^/:\s?#]{1,1024}:(?![0-9]+(?:/|$))[^\s?#]{1,1024})"
     r"@(?=[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:[^a-zA-Z0-9_.:-]|$))"
 )
-# PEM private key blocks. Closed blocks first; then an unclosed BEGIN header (text sliced
-# before the END marker, e.g. a tail-truncated thought) redacts through end of string, since
-# the base64 body that follows is the secret.
-_PEM_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-)
-_PEM_UNCLOSED_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*")
+# PEM private key blocks. Strictly O(n) linear scanner: a regex like `BEGIN...[\s\S]*?END...` is O(n^2)
+# when repeated BEGIN markers appear without an END marker (5.7s at 100k, ~90s at 400k on the asyncio loop).
+# Unclosed BEGIN headers (e.g. tail-truncated text) redact through EOF since the following body is the secret.
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]{0,64}PRIVATE KEY-----")
+
+
+def _redact_pem_private_keys(text: str) -> str:
+    """Redact closed and unclosed PEM private key blocks in strictly O(n) linear time."""
+    if "PRIVATE KEY-----" not in text:
+        return text
+    out: list[str] = []
+    pos = 0
+    while True:
+        m_begin = _PEM_BEGIN_RE.search(text, pos)
+        if m_begin is None:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:m_begin.start()])
+        out.append("[REDACTED_PRIVATE_KEY]")
+        m_end = _PEM_END_RE.search(text, m_begin.end())
+        if m_end is None:
+            break
+        pos = m_end.end()
+    return "".join(out)
 
 
 def redact_pii(text: str) -> str:
@@ -85,8 +104,7 @@ def redact_pii(text: str) -> str:
         return text
     # PEM and URL credentials run before the email pattern, which would otherwise consume
     # the "password@host" part of a credentialed URL and obscure the match.
-    text = _PEM_PRIVATE_KEY_RE.sub("[REDACTED_PRIVATE_KEY]", text)
-    text = _PEM_UNCLOSED_RE.sub("[REDACTED_PRIVATE_KEY]", text)
+    text = _redact_pem_private_keys(text)
     text = _URL_CREDENTIALS_RE.sub("://[REDACTED]@", text)
     text = _EMAIL_RE.sub("[redacted-email]", text)
     text = _JWT_RE.sub("[redacted-jwt]", text)

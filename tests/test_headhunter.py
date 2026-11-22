@@ -1049,7 +1049,9 @@ class TestATDDT2MentionAuthAndSiblingTodos:
 
         assert ctx is None
         assert any("/todos/55/mark_as_done" in u for u in dismissed_urls)
-        assert any("/todos/56/mark_as_done" in u for u in dismissed_urls)
+        assert not any("/todos/56/mark_as_done" in u for u in dismissed_urls), (
+            "rejecting an unauthorized mention must dismiss ONLY its own todo ID, preserving siblings"
+        )
 
         # End-to-end through real fetch_context() + _poll_and_process() + Headhunter.run() over 4 cycles:
         # unauthorized mention returns None without raising or latching GitLab circuit breaker off.
@@ -1864,6 +1866,155 @@ class TestRemediationGitLabSecurityAndResilience:
         assert ctx_ok is not None
         assert ctx_ok["mention_author"] == "trusted-maint"
         assert "re-run tests" in ctx_ok["mention_comment"]
+
+    @pytest.mark.asyncio
+    async def test_note_anchor_discriminating_guards_prevent_replay_and_handle_malformed_fragments(
+        self, monkeypatch
+    ):
+        """H2: Discriminating #note_<id> anchor verification:
+        (a) Unauthorized anchor #note_200 with older authorized #note_100 in window -> None + dismiss own todo only.
+        (b) Missing anchor #note_999 with older authorized #note_100 in window -> None + dismiss ZERO todos.
+        (c) Bot-authored or system:True anchor #note_200 with older authorized #note_100 -> None (no fallback replay).
+        (d) Malformed #note_abc falls back cleanly; #note_12&x parses anchor_note_id=12."""
+        monkeypatch.setenv("HEADHUNTER_ALLOWED_AUTHORS", "trusted-maint")
+        monkeypatch.setenv("GITLAB_BOT_USERNAME", "darwin-bot")
+        hh = _make_headhunter()
+
+        dismissed: list[str] = []
+
+        async def _post_rec(url, **kwargs):
+            dismissed.append(str(url))
+            return _ok_response({})
+
+        def _make_getter(notes):
+            async def _get(url, **kwargs):
+                u = str(url)
+                if "/notes" in u:
+                    return _ok_response(notes)
+                if "/changes" in u:
+                    return _ok_response({"changes": []})
+                return _ok_response([])
+            return _get
+
+        # (a) Unauthorized anchor #note_200 alongside older authorized #note_100 -> fail closed, dismiss own todo only
+        todo_a = _make_todo(action_name="directly_addressed", todo_id=701, project_id=100, mr_iid=42)
+        todo_a["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_200"
+        todo_a["_sibling_todo_ids"] = [701, 702]
+        notes_a = [
+            {"id": 200, "system": False, "body": "@darwin-bot merge now", "author": {"username": "stranger"}},
+            {"id": 100, "system": False, "body": "@darwin-bot check CI", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_a), post=_post_rec)
+            ctx_a = await hh._gitlab.fetch_context(todo_a)
+        assert ctx_a is None
+        assert dismissed == ["https://gitlab.example.com/api/v4/todos/701/mark_as_done"]
+
+        # (b) Missing anchor #note_999 while older authorized #note_100 is present -> fail closed, NO dismissal
+        dismissed.clear()
+        todo_b = _make_todo(action_name="directly_addressed", todo_id=703, project_id=100, mr_iid=42)
+        todo_b["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_999"
+        notes_b = [
+            {"id": 100, "system": False, "body": "@darwin-bot check CI", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_b), post=_post_rec)
+            ctx_b = await hh._gitlab.fetch_context(todo_b)
+        assert ctx_b is None
+        assert dismissed == [], "missing anchor note must NOT dismiss todos"
+
+        # (c1) Bot-authored anchor #note_200 alongside older authorized #note_100 -> None, no fallback replay
+        dismissed.clear()
+        todo_c1 = _make_todo(action_name="directly_addressed", todo_id=704, project_id=100, mr_iid=42)
+        todo_c1["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_200"
+        notes_c1 = [
+            {"id": 200, "system": False, "body": "@darwin-bot self-echo", "author": {"username": "darwin-bot"}},
+            {"id": 100, "system": False, "body": "@darwin-bot check CI", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_c1), post=_post_rec)
+            ctx_c1 = await hh._gitlab.fetch_context(todo_c1)
+        assert ctx_c1 is None
+        assert dismissed == []
+
+        # (c2) system:True anchor #note_200 alongside older authorized #note_100 -> None, no fallback replay
+        dismissed.clear()
+        notes_c2 = [
+            {"id": 200, "system": True, "body": "assigned to @darwin-bot", "author": {"username": "trusted-maint"}},
+            {"id": 100, "system": False, "body": "@darwin-bot check CI", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_c2), post=_post_rec)
+            ctx_c2 = await hh._gitlab.fetch_context(todo_c1)
+        assert ctx_c2 is None
+        assert dismissed == []
+
+        # (d1) Malformed #note_abc falls back cleanly to normal newest-first scan
+        todo_d1 = _make_todo(action_name="directly_addressed", todo_id=705, project_id=100, mr_iid=42)
+        todo_d1["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_abc"
+        notes_d1 = [
+            {"id": 100, "system": False, "body": "@darwin-bot fallback ok", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_d1), post=_post_rec)
+            ctx_d1 = await hh._gitlab.fetch_context(todo_d1)
+        assert ctx_d1 is not None
+        assert "fallback ok" in ctx_d1["mention_comment"]
+
+        # (d2) Fragment #note_12&x parses anchor_note_id=12 and selects note 12 (not newer note 20)
+        todo_d2 = _make_todo(action_name="directly_addressed", todo_id=706, project_id=100, mr_iid=42)
+        todo_d2["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_12&x=1"
+        notes_d2 = [
+            {"id": 20, "system": False, "body": "@darwin-bot wrong newer note", "author": {"username": "trusted-maint"}},
+            {"id": 12, "system": False, "body": "@darwin-bot exact anchor 12", "author": {"username": "trusted-maint"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_d2), post=_post_rec)
+            ctx_d2 = await hh._gitlab.fetch_context(todo_d2)
+        assert ctx_d2 is not None
+        assert "exact anchor 12" in ctx_d2["mention_comment"]
+
+    @pytest.mark.asyncio
+    async def test_m1_authorized_mention_beats_unauthorized_sibling_and_rejection_dismisses_own_todo_only(
+        self, monkeypatch
+    ):
+        """M1: (1) In poll_work_items(), an authorized maintainer mention beats an earlier unauthorized
+        mention on the same MR. (2) When fetch_context() rejects an unauthorized mention (via todo
+        author fast-path), ONLY its own todo ID is dismissed, preserving sibling todos."""
+        monkeypatch.setenv("HEADHUNTER_ALLOWED_AUTHORS", "trusted-maint")
+        monkeypatch.setenv("GITLAB_BOT_USERNAME", "darwin-bot")
+        hh = _make_headhunter()
+
+        unauth_todo = _make_todo(action_name="directly_addressed", todo_id=801, project_id=100, mr_iid=42)
+        unauth_todo["author"] = {"username": "stranger"}
+        unauth_todo["created_at"] = "2026-09-01T00:00:01Z"
+
+        auth_todo = _make_todo(action_name="directly_addressed", todo_id=802, project_id=100, mr_iid=42)
+        auth_todo["author"] = {"username": "trusted-maint"}
+        auth_todo["created_at"] = "2026-09-01T00:00:02Z"
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=lambda *a, **k: _ok_response([unauth_todo, auth_todo]))
+            items = await hh._gitlab.poll_work_items()
+
+        assert len(items) == 1
+        assert items[0]["id"] == 802, f"authorized maintainer todo must win tie-break, got {items[0]['id']}"
+        assert set(items[0]["_sibling_todo_ids"]) == {801, 802}
+
+        # Rejecting unauthorized todo via todo.author fast-path dismisses ONLY todo 801 (never sibling 802)
+        unauth_todo["_sibling_todo_ids"] = [801, 802]
+        dismissed: list[str] = []
+
+        async def _post_rec(url, **kwargs):
+            dismissed.append(str(url))
+            return _ok_response({})
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(post=_post_rec)
+            ctx = await hh._gitlab.fetch_context(unauth_todo)
+
+        assert ctx is None
+        assert dismissed == ["https://gitlab.example.com/api/v4/todos/801/mark_as_done"]
 
     @pytest.mark.asyncio
     async def test_trace_timeout_isolation_empty_source_branch_and_terminal_429_break(self):

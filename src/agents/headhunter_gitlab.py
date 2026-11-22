@@ -14,6 +14,11 @@
 # 9. [Gotcha]: project_id may be a numeric id OR a path ("group/proj", seeded by Kargo gitlab_context). Any
 #    URL that interpolates a gitlab_context/StateWatcher project_id MUST go through _enc_project_id()
 #    (quote(unquote(...), safe="")); a raw "/" would split the API path.
+# 10. [Pattern]: Todo dismissal lifecycle — open MRs dismiss all sibling todo_ids ONLY on event close via
+#     two-phase post_feedback() (feedback_note_sent -> sibling mark_as_done -> feedback_sent). Terminal
+#     (merged/closed) MRs and proven-unauthorized @mention todos are best-effort dismissed during poll/fetch
+#     via bounded _dismiss_todos_best_effort(); unauthorized mention rejection dismisses ONLY its own todo ID
+#     (never sibling todos), and poll_work_items() prefers authorized mention authors over unauthorized/bot ones.
 """
 GitLab Platform Adapter for Headhunter.
 
@@ -197,13 +202,30 @@ class GitLabPlatform:
 
         active_mr_keys = await self.get_active_keys()
         grouped = self._group_by_mr(actionable)
+        allowed_mention_authors = _get_allowed_mention_authors()
+        darwin_bot_lower = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot").lower()
+
+        def _todo_selection_key(t: dict) -> tuple[int, int]:
+            action_name = t.get("action_name", "")
+            prio = ACTION_PRIORITY.get(action_name, 99)
+            if action_name in ("directly_addressed", "mentioned"):
+                author = ((t.get("author") or {}).get("username") or "").strip().lower()
+                if not author:
+                    return (prio, 1)
+                if author == darwin_bot_lower or (
+                    allowed_mention_authors and author not in allowed_mention_authors
+                ):
+                    return (prio + 10, 2)
+                return (prio, 0)
+            return (prio, 0)
+
         result = []
         skipped_terminal = 0
         terminal_todo_ids: list[int] = []
         for key, group in grouped.items():
             if key in active_mr_keys:
                 continue
-            best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
+            best = min(group, key=_todo_selection_key)
             mr_state = best.get("target", {}).get("state", "")
             if mr_state in ("merged", "closed"):
                 skipped_terminal += 1
@@ -399,7 +421,7 @@ class GitLabPlatform:
             darwin_bot_lower = darwin_bot.lower()
             is_mention_action = action in ("directly_addressed", "mentioned")
             allowed_authors = _get_allowed_mention_authors() if is_mention_action else set()
-            sibling_ids = work_item.get("_sibling_todo_ids") or ([work_item["id"]] if work_item.get("id") else [])
+            own_todo_ids = [work_item["id"]] if work_item.get("id") else []
 
             if is_mention_action:
                 todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
@@ -409,11 +431,11 @@ class GitLabPlatform:
                         allowed_authors and todo_author_lower not in allowed_authors
                     ):
                         await self._dismiss_todos_best_effort(
-                            client, headers, sibling_ids, "unauthorized mention",
+                            client, headers, own_todo_ids, "unauthorized mention",
                         )
                         logger.info(
                             f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
-                            f"{todo_author} on !{mr_iid}; dismissed todos {sibling_ids}"
+                            f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
                         )
                         return None
 
@@ -534,10 +556,10 @@ class GitLabPlatform:
                 if is_mention_action and not authorized_mention_found:
                     if unauthorized_mention_seen:
                         await self._dismiss_todos_best_effort(
-                            client, headers, sibling_ids, "unauthorized mention",
+                            client, headers, own_todo_ids, "unauthorized mention",
                         )
                         logger.info(
-                            f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todos {sibling_ids} and skipping"
+                            f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todo {own_todo_ids} and skipping"
                         )
                     else:
                         logger.warning(

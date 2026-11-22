@@ -77,6 +77,27 @@ from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int, _sani
 
 logger = logging.getLogger(__name__)
 
+
+class _LabelResult:
+    """Boolean-compatible result for label mutations distinguishing permanent 403/404 from transient errors."""
+
+    __slots__ = ("ok", "permanent")
+
+    def __init__(self, ok: bool, *, permanent: bool = False):
+        self.ok = ok
+        self.permanent = permanent
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, bool):
+            return self.ok == other
+        if isinstance(other, _LabelResult):
+            return self.ok == other.ok and self.permanent == other.permanent
+        return NotImplemented
+
+
 _SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
 
 _EMERGENCY_SI = """\
@@ -1139,21 +1160,40 @@ class GitHubPlatform:
             await self.blackboard.mark_feedback_sent(event.id)
             return
 
-        # Label swap: ADD done BEFORE removing active (prevents orphan on partial failure)
+        # Label swap: ADD done BEFORE removing active (prevents orphan on partial failure).
+        # Permanent 403/404 (missing issues:write scope or deleted PR) proceeds to avoid a 24h retry loop;
+        # transient failures (429/5xx/network) return early so the next cycle retries.
         added = await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
         if not added:
-            logger.warning(
-                f"GitHub feedback label swap aborted for {event.id} ({owner}/{repo}#{pr_number}): "
-                f"failed to add {self._done_label}; will retry"
-            )
-            return
-        removed = await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
-        if not removed:
-            logger.warning(
-                f"GitHub feedback label swap incomplete for {event.id} ({owner}/{repo}#{pr_number}): "
-                f"failed to remove {self._active_label}; will retry"
-            )
-            return
+            if getattr(added, "permanent", False):
+                logger.warning(
+                    f"GitHub feedback label add permanently failed (403/404) for {event.id} "
+                    f"({owner}/{repo}#{pr_number}); proceeding without retrying"
+                )
+            else:
+                logger.warning(
+                    f"GitHub feedback label swap aborted for {event.id} ({owner}/{repo}#{pr_number}): "
+                    f"failed to add {self._done_label}; will retry"
+                )
+                return
+        if added:
+            removed = await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
+            if not removed:
+                if getattr(removed, "permanent", False):
+                    logger.warning(
+                        f"GitHub feedback label remove permanently failed (403) for {event.id} "
+                        f"({owner}/{repo}#{pr_number}); proceeding without retrying"
+                    )
+                else:
+                    logger.warning(
+                        f"GitHub feedback label swap incomplete for {event.id} ({owner}/{repo}#{pr_number}): "
+                        f"failed to remove {self._active_label}; will retry"
+                    )
+                    return
+            # Best-effort cleanup of stale trigger/queued labels (prevents poll re-enqueue loop
+            # if trigger DELETE failed during create_platform_event()).
+            await self._remove_label(installation_id, owner, repo, pr_number, self._trigger_label)
+            await self._remove_label(installation_id, owner, repo, pr_number, self._queued_label)
 
         # Fetch live HEAD SHA — evidence value is stale if FRIDAY pushed commits during review
         head_sha = ""
@@ -1977,38 +2017,42 @@ class GitHubPlatform:
         except Exception:
             pass
 
-    async def _add_labels(self, installation_id: str, owner: str, repo: str, pr_number: int, labels: list[str]) -> bool:
-        """Best-effort: ensure labels exist on repo, then add to PR. Returns True on success."""
+    async def _add_labels(self, installation_id: str, owner: str, repo: str, pr_number: int, labels: list[str]) -> _LabelResult:
+        """Best-effort: ensure labels exist on repo, then add to PR. Returns truthy on 2xx; marks 403/404 permanent."""
         client = await self._resolve_client(installation_id, owner, repo)
         if not client:
-            return False
+            return _LabelResult(False)
         for label in labels:
             await self._ensure_label_exists(installation_id, owner, repo, label)
         try:
             await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/labels", json={"labels": labels})
-            return True
+            return _LabelResult(True)
         except httpx.HTTPStatusError as e:
             logger.warning(f"Label add failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {labels}")
+            if e.response.status_code in (403, 404):
+                return _LabelResult(False, permanent=True)
         except Exception as e:
             logger.warning(f"Label add error for {owner}/{repo}#{pr_number}: {e}")
-        return False
+        return _LabelResult(False)
 
-    async def _remove_label(self, installation_id: str, owner: str, repo: str, pr_number: int, label: str) -> bool:
-        """Best-effort: remove label from PR. Returns True on 2xx or 404 (already absent)."""
+    async def _remove_label(self, installation_id: str, owner: str, repo: str, pr_number: int, label: str) -> _LabelResult:
+        """Best-effort: remove label from PR. Returns truthy on 2xx/404; marks 403 permanent."""
         client = await self._resolve_client(installation_id, owner, repo)
         if not client:
-            return False
+            return _LabelResult(False)
         encoded = urllib.parse.quote(label, safe="")
         try:
             await client.delete(f"/repos/{owner}/{repo}/issues/{pr_number}/labels/{encoded}")
-            return True
+            return _LabelResult(True)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return True
+                return _LabelResult(True)
             logger.warning(f"Label remove failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {label}")
+            if e.response.status_code == 403:
+                return _LabelResult(False, permanent=True)
         except Exception as e:
             logger.warning(f"Label remove error for {owner}/{repo}#{pr_number}: {e}")
-        return False
+        return _LabelResult(False)
 
     async def _post_comment(self, installation_id: str, owner: str, repo: str, pr_number: int, body: str) -> bool:
         """Best-effort: post comment on PR. Never raises; returns True only if the comment was posted."""

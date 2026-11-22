@@ -48,8 +48,9 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 ## Feedback Loop (Signal + Poll Hybrid)
 
 * Brain signals `_headhunter_close_signal.set()` in `_close_and_broadcast()`.
-* Headhunter feedback loop wakes on signal or every `poll_interval` (safety net).
-* Posts MR comment + marks todo as done on event close.
+* Headhunter feedback loop wakes on signal or every `poll_interval` (safety net) and relays wake signals to the poll loop via `_poll_wake_signal`.
+* For open MRs, `mark_as_done` runs on event close via two-phase `post_feedback()` (Phase 1 MR comment tracked by `feedback_note_sent` -> Phase 2 sibling `todo_ids` dismissal -> `feedback_sent`), so a Phase 2 transient failure retries dismissal without double-posting the MR note.
+* Terminal (`merged`/`closed`) MRs and proven-unauthorized `@mention` todos have no event lifecycle, so they are best-effort dismissed during poll/fetch via bounded `_dismiss_todos_best_effort()`; rejecting an unauthorized `@mention` dismisses ONLY its own todo ID (preserving any authorized sibling todo on the same MR), and `poll_work_items()` prefers authorized mention authors over unauthorized/bot authors on tie-break.
 * `directly_addressed` and `mentioned` bypass recently-processed dedup (explicit re-request).
 
 ## Dedup Layers
@@ -58,7 +59,7 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 |---|---|---|---|
 | `get_active_keys()` (Blackboard active events) | GitLab `(project, mr)`, GitHub `(owner, repo, number)` | Second event for an MR/PR/Issue that already has an active/deferred headhunter event | Yes |
 | Flow gate (`MAX_ACTIVE_EVENTS`) | both | Concurrent events beyond the global WIP cap | Yes |
-| GitLab todo `mark_as_done` | GitLab | Re-processing the same todo after the event closes | Yes |
+| GitLab todo `mark_as_done` (two-phase close + best-effort terminal/unauthorized cleanup) | GitLab | Re-processing the same todo after event close, or stale terminal/unauthorized todos | Yes |
 | GitHub label truth table (`darwin-active` > `darwin-review` > `darwin-queued` > `darwin-done`) + `darwin:github:pr_sha` | GitHub PR | Re-trigger only on a new head SHA after `darwin-done` | Yes |
 | `darwin:github:issue:{o}:{r}:{n}` (7d) | GitHub Issue | Re-processing an Issue after a label API failure | Yes |
 | `darwin:github:pr_feedback_cursor` + per-item `darwin:github:pr_feedback:{o}:{r}:{pr}:{kind}:{id}` (SET NX, 7d) | GitHub review feedback | At-least-once handling of each review / inline / issue comment, deduped by seen ID | Yes |
@@ -112,9 +113,10 @@ Brain can override via `classify_event(severity=...)` -> stored in `brain_severi
 
 ## Prompt Injection Defense
 
-* XML fence sanitization via `_sanitize_xml_fence()` in `headhunter.py`. Strips closing tags for all prompt XML fences (`</description>`, `</job_log>`, `</comments>`, `</mention_request>`, `</issue_body>`, `</review_feedback>`) from user-controlled content before embedding.
-* `mention_author` sanitized (quote stripping) before XML attribute insertion.
-* `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default 100K) prevents degenerate descriptions from consuming excessive tokens.
+* Shared untrusted-text sanitization via `sanitize_untrusted_block()` and `sanitize_untrusted_line()` in `src/utils/prompt_sanitize.py` (used by `headhunter.py`, `llm/prompt.py`, and `brain.py`): strips invisible/control characters, removes bounded linear XML prompt fences across Brain + all 6 Headhunter tags (`description`, `job_log`, `comments`, `mention_request`, `issue_body`, `review_feedback`), runs $O(n)$ PII/secret redaction (`src/utils/pii_redaction.py`), defangs case/whitespace-variant `[!call:` directives, and caps length LAST.
+* Zero-import `_sanitize_xml_fence()` in `src/agents/headhunter_utils.py` (re-exported by `headhunter.py`) remains for `issue_body` and `review_feedback` blocks.
+* `mention_author` and untrusted scalars (`title`, branches, `failed_checks`, `failed_job_names`, `labels`, `changed_files`) are sanitized via `sanitize_untrusted_line()` (plus quote stripping for XML attributes and JSON-quoting in `_emergency_plan()`).
+* `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default 100K) prevents degenerate descriptions from consuming excessive tokens while keeping full descriptions + trailing `### Bot Instructions` intact.
 
 ## Helm Configuration
 

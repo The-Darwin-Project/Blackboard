@@ -941,7 +941,12 @@ class TestATDDT7GitHubLabelOrderAndGuards:
         platform._remove_label = AsyncMock(side_effect=lambda *a: (call_order.append(("remove", a[4])), True)[1])
 
         await platform.post_feedback(_make_closed_pr_event("evt-gh-main", "review_requested"))
-        assert call_order == [("add", [platform._done_label]), ("remove", platform._active_label)]
+        assert call_order == [
+            ("add", [platform._done_label]),
+            ("remove", platform._active_label),
+            ("remove", platform._trigger_label),
+            ("remove", platform._queued_label),
+        ]
 
         # _NO_LABEL_ACTIONS path untouched (no label calls)
         call_order.clear()
@@ -1102,6 +1107,93 @@ class TestRemediationGitHubHardeningAndPromptChain:
         await platform.post_feedback(ev)
         platform._remove_label.assert_awaited_once()
         platform.blackboard.mark_feedback_sent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_m2_post_feedback_cleans_stale_trigger_and_handles_permanent_403_404_vs_transient_502(self):
+        """M2: (1) post_feedback() cleans stale darwin-review/darwin-queued after removing darwin-active.
+        (2) Permanent 403/404 in _add_labels() or 403 in _remove_label() completes feedback without 24h retry loop.
+        (3) Transient 502 in _add_labels() still aborts without calling mark_feedback_sent()."""
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+
+        def _make_ev(eid: str) -> EventDocument:
+            return EventDocument(
+                id=eid, source="headhunter", service="repo",
+                event=EventInput(
+                    reason="PR",
+                    evidence=EventEvidence(
+                        display_text="PR", source_type="headhunter", severity="info",
+                        github_context={
+                            "owner": "org", "repo": "repo", "pr_number": 33,
+                            "installation_id": "456", "action": "review_requested", "head_sha": "sha33",
+                        },
+                    ),
+                ),
+                conversation=[ConversationTurn(turn=1, actor="brain", action="close", evidence="resolved")],
+            )
+
+        def _http_err(status: int) -> httpx.HTTPStatusError:
+            req = httpx.Request("POST", "https://api.github.com/repos/org/repo/issues/33/labels")
+            resp = httpx.Response(status, request=req)
+            return httpx.HTTPStatusError(f"HTTP {status}", request=req, response=resp)
+
+        # (1) Happy path removes darwin-active, darwin-review, and darwin-queued
+        platform = _make_platform("org/repo")
+        client = AsyncMock()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"head": {"sha": "live33"}}
+        client.get = AsyncMock(return_value=pr_resp)
+        client.post = AsyncMock(return_value=MagicMock())
+        client.delete = AsyncMock(return_value=MagicMock())
+        platform._manager = _mock_manager(client)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+        platform.blackboard.set_github_pr_sha = AsyncMock()
+
+        await platform.post_feedback(_make_ev("evt-m2-clean"))
+        deleted_paths = [c.args[0] for c in client.delete.call_args_list]
+        assert any(p.endswith("/labels/darwin-active") for p in deleted_paths)
+        assert any(p.endswith("/labels/darwin-review") for p in deleted_paths)
+        assert any(p.endswith("/labels/darwin-queued") for p in deleted_paths)
+        platform.blackboard.mark_feedback_sent.assert_awaited_once_with("evt-m2-clean")
+
+        # (2a) Permanent 403/404 on _add_labels proceeds to mark_feedback_sent (no 24h retry storm)
+        for perm_status in (403, 404):
+            p_perm = _make_platform("org/repo")
+            c_perm = AsyncMock()
+            c_perm.get = AsyncMock(return_value=pr_resp)
+            c_perm.post = AsyncMock(side_effect=lambda path, **kw: (_ for _ in ()).throw(_http_err(perm_status)) if path.endswith("/labels") else MagicMock())
+            c_perm.delete = AsyncMock()
+            p_perm._manager = _mock_manager(c_perm)
+            p_perm.blackboard.mark_feedback_sent = AsyncMock()
+            p_perm.blackboard.set_github_pr_sha = AsyncMock()
+
+            await p_perm.post_feedback(_make_ev(f"evt-m2-perm-{perm_status}"))
+            c_perm.delete.assert_not_awaited()
+            p_perm.blackboard.mark_feedback_sent.assert_awaited_once_with(f"evt-m2-perm-{perm_status}")
+
+        # (2b) Permanent 403 on _remove_label(darwin-active) proceeds to mark_feedback_sent
+        p_rm403 = _make_platform("org/repo")
+        c_rm403 = AsyncMock()
+        c_rm403.get = AsyncMock(return_value=pr_resp)
+        c_rm403.post = AsyncMock(return_value=MagicMock())
+        c_rm403.delete = AsyncMock(side_effect=_http_err(403))
+        p_rm403._manager = _mock_manager(c_rm403)
+        p_rm403.blackboard.mark_feedback_sent = AsyncMock()
+        p_rm403.blackboard.set_github_pr_sha = AsyncMock()
+
+        await p_rm403.post_feedback(_make_ev("evt-m2-rm403"))
+        p_rm403.blackboard.mark_feedback_sent.assert_awaited_once_with("evt-m2-rm403")
+
+        # (3) Transient 502 on _add_labels aborts without marking feedback sent
+        p_502 = _make_platform("org/repo")
+        c_502 = AsyncMock()
+        c_502.post = AsyncMock(side_effect=_http_err(502))
+        c_502.delete = AsyncMock()
+        p_502._manager = _mock_manager(c_502)
+        p_502.blackboard.mark_feedback_sent = AsyncMock()
+
+        await p_502.post_feedback(_make_ev("evt-m2-502"))
+        c_502.delete.assert_not_awaited()
+        p_502.blackboard.mark_feedback_sent.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_skill_url_redacts_userinfo_query_and_fragment_in_warning_and_logs(self, caplog):
