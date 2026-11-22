@@ -35,7 +35,7 @@ _TOOL_NAMES = frozenset({
     "defer_event", "subscribe_to", "wait_for_user", "message_agent",
     "reply_to_agent", "create_plan", "get_plan_progress",
     "fetch_jira_issue", "comment_jira_issue", "transition_jira_issue",
-    "notify_gitlab_result", "inspect_event", "request_user_approval",
+    "inspect_event", "request_user_approval",
     "wait_for_agent", "hold_watch", "wait_for_jarvis",
     "post_sticky_note", "read_sticky_notes", "wait_for_verification",
     "respond_to_jarvis", "lookup_journal",

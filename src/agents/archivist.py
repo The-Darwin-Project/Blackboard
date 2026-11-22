@@ -113,7 +113,6 @@ _TOOL_TO_BEHAVIOR: dict[str, str] = {
     "respond_to_jarvis": "replying to the observer",
     "message_agent": "messaging the agent",
     "inspect_event": "inspecting event state",
-    "notify_gitlab_result": "posting the result to GitLab",
     "reply_to_agent": "replying to an agent",
     "request_user_approval": "requesting human approval",
     "re_trigger_aligner": "re-triggering alignment check",

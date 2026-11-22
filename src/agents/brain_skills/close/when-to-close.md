@@ -106,8 +106,8 @@ finalizing closure in the same processing cycle. For user-facing channels
 final reply as a standalone text-only turn before entering close, because
 standalone replies park the conversation. For automated events it's a
 conversation turn visible in the dashboard timeline, emitted as FRIDAY's
-closing narrative. The existing notification and `notify_gitlab_result` steps
-in the Close Sequence remain unchanged.
+closing narrative. Headhunter's feedback loop automatically posts VCS
+resolution comments on event close.
 
 ## Mechanical Closure Rule
 
@@ -140,8 +140,7 @@ A merged MR is only the beginning of deployment:
 4. `set_phase("escalate")`
 5. `notify_user_slack` (ONLY IF `CHAOTIC` domain, `P1` outage, or mandatory synchronous human-action block; skip for routine `P2`/`P3`/`P4` pipeline failures)
 6. `report_incident`
-7. `notify_gitlab_result` (if GitLab-sourced)
-7.5. For events involving pipelines or builds: record the final observed duration as an observation before closing. You have the timing data from your last state refresh -- capture it so future events can calibrate their sampling interval from measured history instead of guessing.
+7. For events involving pipelines or builds: record the final observed duration as an observation before closing. You have the timing data from your last state refresh -- capture it so future events can calibrate their sampling interval from measured history instead of guessing.
 8. `set_phase("close")`
 9. `close_event`
 

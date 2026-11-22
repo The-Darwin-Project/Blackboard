@@ -663,13 +663,13 @@ class TestVmer2391CasualTriageWaitAndCloseReplyProbe:
         assert "for casual events" in sec_lower and "reclassify to clear" in sec_lower
         assert "for user-facing events (chat/slack), never emit a final reply as a standalone text-only turn before entering close" in sec_lower
 
-    def test_when_to_close_closure_reason_turn_avoids_set_phase_and_keeps_gitlab_note(self, loader):
+    def test_when_to_close_closure_reason_turn_avoids_set_phase_and_omits_notify_gitlab_result(self, loader):
         sec = _section(_skill(loader, "close/when-to-close.md"), "## Closure Reason Turn")
         sec_lower = sec.lower()
         assert "set_phase" not in sec
         assert "emitted as text alongside entering the close phase or finalizing closure in the same processing cycle" in sec_lower
         assert "never send this final reply as a standalone text-only turn before entering close" in sec_lower
-        assert "notify_gitlab_result" in sec
+        assert "notify_gitlab_result" not in sec
 
     def test_tool_schemas_align_close_and_wait_for_user_reply_timing(self):
         from src.agents.llm.types import BRAIN_TOOL_SCHEMAS

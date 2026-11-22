@@ -550,7 +550,7 @@ def _tools_notify(_ctx: GateContext) -> set[str]:
 
 
 def _tools_close(_ctx: GateContext) -> set[str]:
-    return {"close_event", "notify_gitlab_result"}
+    return {"close_event"}
 
 
 def _tools_observation(_ctx: GateContext) -> set[str]:

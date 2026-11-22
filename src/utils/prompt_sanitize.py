@@ -142,38 +142,45 @@ def strip_xml_fences(text: str) -> str:
     return _DASH_RUN_RE.sub("--", text.replace("<", ""))
 
 
-def _finalize_untrusted(text: str, *, max_len: int, pre_cap: int) -> str:
-    """Apply entry pre-cap, fence stripping, PII redaction, call-tag defang, and final cap."""
+def _finalize_untrusted(
+    text: str, *, max_len: int, pre_cap: int, redact: bool = True,
+) -> str:
+    """Apply entry pre-cap, fence stripping, optional PII redaction, call-tag defang, and final cap."""
     text = text[:pre_cap]
     text = strip_xml_fences(text)
-    text = redact_pii(text)
+    if redact:
+        text = redact_pii(text)
     text = _CALL_TAG_RE.sub("[call:", text)
     return text[:max_len]
 
 
-def sanitize_untrusted_block(value: object, *, max_len: int = 8000) -> str:
+def sanitize_untrusted_block(
+    value: object, *, max_len: int = 8000, redact: bool = True,
+) -> str:
     """Sanitize multiline untrusted text (e.g. MR/PR descriptions, Bot Instructions, job logs).
 
     Preserves Markdown \\n and \\t while enforcing @ai-rules #6 pipeline order:
     normalize line endings -> strip invisibles/controls -> pre-cap -> strip XML fences ->
-    redact PII -> defang "[!call:" -> cap LAST.
+    optional redact PII -> defang "[!call:" -> cap LAST.
     """
     text = "" if value is None else str(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
     text = _MULTILINE_STRIP_CHARS.sub("", text)
-    return _finalize_untrusted(text, max_len=max_len, pre_cap=max(max_len * 4, 32768))
+    return _finalize_untrusted(text, max_len=max_len, pre_cap=max(max_len * 4, 32768), redact=redact)
 
 
-def sanitize_untrusted_line(value: object, *, max_len: int) -> str:
+def sanitize_untrusted_line(
+    value: object, *, max_len: int, redact: bool = True,
+) -> str:
     """Sanitize single-line untrusted text (e.g. MR/PR titles) with full fence/PII/call defense.
 
     Pipeline order (@ai-rules #6): collapse line breaks -> strip invisibles/controls ->
-    pre-cap (4x) -> strip XML fences -> redact PII -> defang "[!call:" -> cap LAST.
+    pre-cap (4x) -> strip XML fences -> optional redact PII -> defang "[!call:" -> cap LAST.
     """
     text = "" if value is None else str(value)
     text = _LINE_BREAKERS.sub(" ", text)
     text = _STRIP_CHARS.sub("", text)
-    return _finalize_untrusted(text, max_len=max_len, pre_cap=max_len * 4)
+    return _finalize_untrusted(text, max_len=max_len, pre_cap=max_len * 4, redact=redact)
 
 
 UNTITLED_EVENT = "Untitled Event"

@@ -288,7 +288,7 @@ class TestResolveGithubHead:
         gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale-sha"}
         mock_client_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-sha-xyz"}}))
         with (
-            patch("src.utils.vcs_approval._usable_ca_file", return_value=False),
+            patch("src.utils.tls._usable_ca_file", return_value=False),
             patch("src.utils.vcs_approval.httpx.AsyncClient", mock_client_cls),
         ):
             await _resolve_github_head(gh_ctx)
@@ -354,7 +354,7 @@ class TestResolveLiveHeadShaDispatcher:
             # Host-independent: _usable_ca_file is the only filesystem probe, so patch it rather than
             # relying on /etc/pki existing (RHEL) -- ubuntu-latest only ships /etc/ssl/certs.
             patch(
-                "src.utils.vcs_approval._usable_ca_file",
+                "src.utils.tls._usable_ca_file",
                 side_effect=lambda p: p == "/etc/pki/tls/certs/ca-bundle.crt",
             ),
             patch("httpx.AsyncClient") as mock_client_cls,

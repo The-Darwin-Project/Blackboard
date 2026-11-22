@@ -1003,15 +1003,14 @@ class TestATDDT7GitHubLabelOrderAndGuards:
         secret_url = "https://raw.example.com/skills/audit.md?token=ghp_super_secret_token_999"
         platform._issue_skill_urls = {"darwin_audit": secret_url}
 
-        big_resp = MagicMock()
-        big_resp.text = "x" * 12000
-        big_resp.raise_for_status = MagicMock()
-        mock_http = AsyncMock()
-        mock_http.get = AsyncMock(return_value=big_resp)
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("httpx.AsyncClient", return_value=mock_http):
+        real_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, text="x" * 12000))
+        with patch(
+            "httpx.AsyncClient",
+            side_effect=lambda *a, **kw: real_async_client(
+                transport=transport, follow_redirects=kw.get("follow_redirects", False),
+            ),
+        ):
             _, warning = await platform._load_issue_triage_instruction(["darwin-audit"])
 
         assert warning is not None
@@ -1202,15 +1201,14 @@ class TestRemediationGitHubHardeningAndPromptChain:
         secret_url = "https://alice:topsecret@raw.example.com:8443/skills/s.md?token=ghp_123#frag-secret"
         platform._issue_skill_urls = {"darwin_audit": secret_url}
 
-        big_resp = MagicMock()
-        big_resp.text = "y" * 12000
-        big_resp.raise_for_status = MagicMock()
-        mock_http = AsyncMock()
-        mock_http.get = AsyncMock(return_value=big_resp)
-        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-        mock_http.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("httpx.AsyncClient", return_value=mock_http), caplog.at_level("WARNING"):
+        real_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, text="y" * 12000))
+        with patch(
+            "httpx.AsyncClient",
+            side_effect=lambda *a, **kw: real_async_client(
+                transport=transport, follow_redirects=kw.get("follow_redirects", False),
+            ),
+        ), caplog.at_level("WARNING"):
             _, warning = await platform._load_issue_triage_instruction(["darwin-audit"])
 
         assert warning is not None

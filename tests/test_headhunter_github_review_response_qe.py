@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.agents.headhunter import _XML_FENCE_TAG, Headhunter, _sanitize_xml_fence
+from src.agents.headhunter import Headhunter
+from src.utils.prompt_sanitize import _FENCE_RE, strip_xml_fences
 from src.models import EventEvidence
 from tests.test_headhunter_github_review_response import (  # noqa: F401  (fixtures are re-exported)
     FakeGitHubClient,
@@ -224,7 +225,7 @@ class TestUnifiedXmlFenceSanitization:
         ],
     )
     def test_strips_all_fence_tag_variants(self, payload):
-        cleaned = _sanitize_xml_fence(f"before {payload} after")
+        cleaned = strip_xml_fences(f"before {payload} after")
         assert cleaned == "before  after"
 
 
@@ -331,7 +332,7 @@ class TestSanitizerLinearAndBounded:
     @staticmethod
     def _elapsed(payload: str) -> tuple[float, str]:
         t0 = time.perf_counter()
-        out = _sanitize_xml_fence(payload)
+        out = strip_xml_fences(payload)
         return time.perf_counter() - t0, out
 
     def test_lt_followed_by_long_whitespace_is_linear(self):
@@ -348,24 +349,24 @@ class TestSanitizerLinearAndBounded:
         """`[^>]*>` is quadratic here (each '<name' scans to end of text); `[^<>]*` is not."""
         elapsed, out = self._elapsed(f"<{name}" * 20_000)
         assert elapsed < 0.2
-        assert _XML_FENCE_TAG.search(out) is None
+        assert _FENCE_RE.search(out) is None
 
     def test_nested_reassembly_hits_cap_and_stays_linear_and_safe(self):
         payload = "</review_" * 5000 + "</review_feedback>" + "feedback>" * 5000
         elapsed, out = self._elapsed(payload)
         assert elapsed < 0.2
-        assert _XML_FENCE_TAG.search(out) is None
+        assert _FENCE_RE.search(out) is None
         assert "</review_feedback" not in out.lower()
         assert "<" not in out  # fallback neutralized every '<'
 
     def test_moderate_nesting_resolved_by_passes_without_dropping_unrelated_text(self):
-        out = _sanitize_xml_fence("keep <b>bold</b> </review_</review_feedback>feedback> end")
+        out = strip_xml_fences("keep <b>bold</b> </review_</review_feedback>feedback> end")
         assert out == "keep <b>bold</b>  end"
 
     def test_plain_text_and_html_untouched(self):
         txt = "a < b and <div>x</div> and <descriptions> hm"
-        assert _sanitize_xml_fence(txt) == txt.replace("<descriptions>", "<descriptions>")  # \b blocks 'descriptions'
-        assert _sanitize_xml_fence("") == ""
+        assert strip_xml_fences(txt) == txt.replace("<descriptions>", "<descriptions>")  # \b blocks 'descriptions'
+        assert strip_xml_fences("") == ""
 
 
 class TestPromptBuilderStripsAllFences:
@@ -551,7 +552,8 @@ class TestEmptyPlanUnderRaiseOnError:
         hh = _hh()
         hh._get_adapter = AsyncMock(return_value=_adapter_returning(""))
         with patch("src.agents.llm.record_token_usage"):
-            assert await hh.analyze_and_plan(dict(self.CTX), "si") == ""
+            plan = await hh.analyze_and_plan(dict(self.CTX), "si")
+        assert "LLM analysis unavailable" in plan
 
     @pytest.mark.asyncio
     async def test_non_empty_text_returned_stripped(self):

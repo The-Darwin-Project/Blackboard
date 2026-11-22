@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket
 from fastapi.staticfiles import StaticFiles
 
 from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_argocd_observer, set_kargo_observer, set_kg_store, set_pulse_tracker, set_registry_and_bridge
@@ -308,19 +308,16 @@ async def lifespan(app: FastAPI):
             logger.info("Slack channel disabled (SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set)")
         
         # === HEADHUNTER (VCS Todo/PR Poller) ===
+        headhunter = None
         headhunter_task = None
         if should_start_headhunter:
-            from .agents.headhunter import Headhunter
-            if headhunter_close_signal is None:
-                raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
-            headhunter = Headhunter(
+            from .agents.headhunter import start_headhunter_task
+            headhunter, headhunter_task = start_headhunter_task(
                 blackboard,
-                close_signal=headhunter_close_signal,
+                brain,
+                headhunter_close_signal,
                 gitlab_enabled=headhunter_enabled,
             )
-            headhunter.set_wip_counter(brain.count_global_wip)
-            brain.agents["_headhunter"] = headhunter
-            headhunter_task = asyncio.create_task(headhunter.run())
             platforms = []
             if headhunter_enabled and gitlab_host:
                 platforms.append("GitLab")
@@ -540,6 +537,11 @@ async def lifespan(app: FastAPI):
             headhunter_task.cancel()
         await asyncio.gather(headhunter_task, return_exceptions=True)
         logger.info("Headhunter task stopped")
+    if headhunter is not None and hasattr(headhunter, "_gitlab") and hasattr(headhunter._gitlab, "close"):
+        try:
+            await headhunter._gitlab.close()
+        except Exception as e:
+            logger.warning(f"Failed to close Headhunter GitLab client: {e}")
 
     # Close shared GitHub App installation manager (sole teardown owner)
     try:

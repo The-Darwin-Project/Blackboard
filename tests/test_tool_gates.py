@@ -171,7 +171,6 @@ class TestPhaseClose:
         ctx = _ctx(brain_phase="triage")
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "close_event" not in _names(result)
-        assert "notify_gitlab_result" not in _names(result)
 
     def test_keeps_close_event_in_escalate(self):
         ctx = _ctx(brain_phase="escalate")

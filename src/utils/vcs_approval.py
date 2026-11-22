@@ -7,12 +7,11 @@
 #    cached gh_ctx["head_sha"] is NEVER substituted for a live SHA (it may be stale vs. the pushed HEAD).
 # 3. [Security]: TLS verification is NEVER disabled on these calls -- GITLAB_HOST and
 #    api.github.com are both CA-signed; verify=False would let a MITM forge the live SHA
-#    this module exists to protect against. resolve_ca_bundle() is the SINGLE trust resolver for
-#    every VCS client (this module, headhunter_gitlab.py, AND routes/queue.py): it raises ValueError on
-#    GITLAB_SSL_VERIFY=0/false/no and only accepts non-empty regular files as CA bundles (an empty
-#    or directory path is skipped, never handed to httpx). `_resolve_ca_bundle` is a back-compat alias.
-#    normalize_gitlab_host() is the single GITLAB_HOST normalizer shared across this module,
-#    headhunter_gitlab.py, and routes/queue.py.
+#    this module exists to protect against. resolve_ca_bundle() and normalize_gitlab_host() live
+#    in utils/tls.py (re-exported here for backward compatibility) as the SINGLE trust/host
+#    resolvers shared across every VCS client (this module, github_app.py, headhunter_gitlab.py,
+#    headhunter_github.py, and routes/queue.py): resolve_ca_bundle() raises ValueError on
+#    GITLAB_SSL_VERIFY=0/false/no and only accepts readable non-empty regular files as CA bundles.
 # 4. [Pattern]: verify_merge_guard() is the Python REFERENCE implementation of the approval verdict (out-of-band
 #    approval + SHA binding for category 'git_merge'; approval only for 'operational'). The sidecar enforces the same
 #    contract in JS (gemini-sidecar/hooks/merge-guard.js approvalVerdict) -- keep the two in lock-step; the parity is
@@ -31,19 +30,17 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from .github_app import get_installation_manager
+from .tls import (
+    _resolve_ca_bundle,
+    _usable_ca_file,
+    normalize_gitlab_host,
+    resolve_ca_bundle,
+)
 
 if TYPE_CHECKING:
     from ..models import EventDocument
 
 logger = logging.getLogger(__name__)
-
-
-def normalize_gitlab_host(raw: str) -> str:
-    """Normalize GITLAB_HOST by stripping scheme and trailing slashes; reject invalid host chars."""
-    host = (raw or "").strip().removeprefix("https://").removeprefix("http://").rstrip("/")
-    if not host or any(ch.isspace() or ch in "@?#" for ch in host):
-        return ""
-    return host
 
 
 def parse_mr_url(url: str) -> tuple[int | str, int] | None:
@@ -63,60 +60,6 @@ def parse_mr_url(url: str) -> tuple[int | str, int] | None:
             if project_path:
                 return unquote(project_path), int(mr_iid_str)
     return None
-
-
-def _usable_ca_file(path: str) -> bool:
-    """True only for a non-empty regular file (an empty/dir path would break or silently weaken TLS)."""
-    return os.path.isfile(path) and os.path.getsize(path) > 0
-
-
-def resolve_ca_bundle(host: str = "") -> str | bool:
-    """Resolve the CA bundle for VCS TLS verification (path, or True for httpx's default store).
-
-    Raises ValueError when GITLAB_SSL_VERIFY disables verification: verify=False is forbidden for
-    every VCS call (approval SHA resolution and Headhunter GitLab polling alike).
-    """
-    verify_env = os.getenv("GITLAB_SSL_VERIFY")
-    if verify_env is not None:
-        cleaned = verify_env.strip().lower()
-        if cleaned in ("0", "false", "no"):
-            raise ValueError(
-                f"Insecure TLS verification (GITLAB_SSL_VERIFY={verify_env}) is forbidden for VCS API calls"
-            )
-        if cleaned in ("1", "true", "yes"):
-            pass
-        elif _usable_ca_file(verify_env.strip()):
-            return verify_env.strip()
-        else:
-            logger.warning(
-                "GITLAB_SSL_VERIFY path %s does not exist or is not a non-empty file; "
-                "falling back to standard CA search", verify_env,
-            )
-
-    for env_var in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
-        val = os.getenv(env_var)
-        if val:
-            val_clean = val.strip()
-            if _usable_ca_file(val_clean):
-                return val_clean
-            logger.warning(
-                "%s path %s does not exist or is not a non-empty file; falling back to standard CA search",
-                env_var, val,
-            )
-
-    for std_path in (
-        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/certs/ca-certificates.crt",
-    ):
-        if _usable_ca_file(std_path):
-            return std_path
-
-    return True
-
-
-# Back-compat alias (tests / older call sites import the underscore name).
-_resolve_ca_bundle = resolve_ca_bundle
 
 
 async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
@@ -163,8 +106,15 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
     if not project_id or not mr_iid:
         return (mr_iid or None, None)
 
-    encoded_project_id = urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
+    decoded_pid = urllib.parse.unquote(str(project_id)).strip()
+    if not decoded_pid or decoded_pid in (".", "..") or any(
+        seg in (".", "..") for seg in decoded_pid.split("/")
+    ):
+        logger.warning("Rejected invalid GitLab project_id for MR !%s", mr_iid)
+        return mr_iid, None
+    encoded_project_id = urllib.parse.quote(decoded_pid, safe="")
     host = normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
+    auth = None
     token = ""
     try:
         from .gitlab_token import get_gitlab_auth
@@ -179,11 +129,17 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
     if host and token:
         try:
             ca_bundle = resolve_ca_bundle(host)
-            async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
-                resp = await client.get(
-                    f"https://{host}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}",
-                    headers={"PRIVATE-TOKEN": token},
-                )
+            mr_url = f"https://{host}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}"
+            async with httpx.AsyncClient(timeout=10, verify=ca_bundle, follow_redirects=False) as client:
+                resp = await client.get(mr_url, headers={"PRIVATE-TOKEN": token})
+                if resp.status_code == 401 and auth is not None and hasattr(auth, "invalidate"):
+                    auth.invalidate()
+                    try:
+                        refreshed = auth.get_token()
+                    except Exception:
+                        refreshed = ""
+                    if refreshed and refreshed != token:
+                        resp = await client.get(mr_url, headers={"PRIVATE-TOKEN": refreshed})
                 if resp.is_success:
                     mr_data = resp.json()
                     live_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha")
@@ -248,7 +204,7 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
 
     try:
         ca_bundle = resolve_ca_bundle()
-        async with httpx.AsyncClient(timeout=10, verify=ca_bundle) as client:
+        async with httpx.AsyncClient(timeout=10, verify=ca_bundle, follow_redirects=False) as client:
             resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
                 headers=headers,

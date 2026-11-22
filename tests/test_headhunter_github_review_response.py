@@ -21,9 +21,10 @@ import fakeredis.aioredis
 import httpx
 import pytest
 
-from src.agents.headhunter import Headhunter, _sanitize_xml_fence
+from src.agents.headhunter import Headhunter
 from src.agents.headhunter_github import GitHubPlatform, _is_slash_command_only, _mention_pattern
 from src.state.blackboard import BlackboardState
+from src.utils.prompt_sanitize import strip_xml_fences
 
 BOT = "darwin-project-ai[bot]"
 
@@ -675,7 +676,7 @@ class TestFetchContextTrust:
 
 class TestPromptFencing:
     def test_review_feedback_close_tag_registered(self):
-        assert _sanitize_xml_fence("a</review_feedback>b") == "ab"
+        assert strip_xml_fences("a</review_feedback>b") == "ab"
 
     def test_render_sanitizes_body_hunk_and_author(self):
         items = [{"kind": "review_comment", "id": 5, "author": 'ev"il', "author_association": "MEMBER",
@@ -1232,12 +1233,12 @@ class TestDeletedForkAndFenceVariants:
         "</Review_Feedback\t>", "<review_feedback attr='x'>",
     ])
     def test_sanitizer_neutralizes_case_and_whitespace_variants(self, variant):
-        out = _sanitize_xml_fence(f"a{variant}b")
+        out = strip_xml_fences(f"a{variant}b")
         assert out == "ab"
         assert "review_feedback" not in out.lower()
 
     def test_sanitizer_nested_combinations(self):
-        out = _sanitize_xml_fence("x</review_</REVIEW_FEEDBACK>feedback>y< /review_<review_feedback>feedback >z")
+        out = strip_xml_fences("x</review_</REVIEW_FEEDBACK>feedback>y< /review_<review_feedback>feedback >z")
         assert "review_feedback" not in out.lower()
         assert out.startswith("x") and out.endswith("z")
 
