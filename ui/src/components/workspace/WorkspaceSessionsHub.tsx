@@ -14,6 +14,7 @@
 // 5. [Pattern]: Accordion folders: Waiting for Approval (shown in Global, or in My Tasks only when non-empty), Active, Deferred, and
 //    Closed & Failed (defaults collapsed). An event renders in exactly one folder: waiting rows are dropped when the id is in closed or is
 //    in active with a non-waiting status (stale waiting cache); waiting rows are sorted deterministically (created desc, then id).
+// 6. [Constraint]: Panel root keeps `pr-1.5` to reserve the gutter under the absolute `right-0 w-1.5` resize handle so it never overlaps the inner scrollbar.
 /**
  * Collapsible left panel for task session switching in Agent Workspace.
  * Supports dual-scope filtering ('My Tasks' vs 'Global'), a Global-only project filter,
@@ -247,7 +248,7 @@ export default function WorkspaceSessionsHub({
   if (!isOpen) return null;
 
   return (
-    <aside ref={panelRef} className="flex-shrink-0 bg-bg-secondary border-r border-border h-full flex flex-col relative" style={{ width }}>
+    <aside ref={panelRef} className="flex-shrink-0 bg-bg-secondary border-r border-border h-full flex flex-col relative pr-1.5" style={{ width }}>
       {/* Top Header: New Task + Title */}
       <div className="p-3 border-b border-border flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-text-primary tracking-wider uppercase">Workspace</span>

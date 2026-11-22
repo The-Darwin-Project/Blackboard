@@ -1,4 +1,15 @@
 /* BlackBoard/ui/src/index.css */
+/* @ai-rules:
+ * 1. [Constraint]: Global scrollbar rules live here. Thumb is 12px wide with a 3px transparent border + background-clip: padding-box (visible 6px pill,
+ *    12px grab target). Do not shrink below 12px or drop min-height/min-width: 32px; mouse-dragging the thumb depends on it.
+ * 2. [Gotcha]: Firefox styling is gated by `@supports not selector(::-webkit-scrollbar)`. Setting scrollbar-color/scrollbar-width unconditionally
+ *    makes Chromium 121+ ignore the ::-webkit-scrollbar rules.
+ * 3. [Pattern]: Use .fade-edges-y for vertical edge-fade masks on scroll containers. It keeps the right-most 16px (scrollbar strip) opaque.
+ *    Never put a full-width mask-image on an element that owns a scrollbar: it fades the thumb and makes it undraggable at the edges.
+ * 4. [Constraint]: Resizable panels (EventSidebar, EventChatPanel, WorkspaceSessionsHub) reserve `pr-1.5` for their absolute right-0 w-1.5 resize handle.
+ *    Keep that gutter in sync with the handle width so the handle never overlaps an inner scrollbar.
+ * 5. [Pattern]: Theme tokens are defined in @theme below (Tailwind v4); reference them via var(--color-*) in plain CSS.
+ */
 @import "tailwindcss";
 
 /* Darwin Brain - Cyberpunk/Ops dark theme */
@@ -46,22 +57,57 @@ html, body {
   height: 100%;
 }
 
-/* Scrollbar styling */
+/* Scrollbar styling -- 12px hit target; visible 6px pill thumb (3px transparent border + padding-box clip) */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
 }
 
-::-webkit-scrollbar-track {
-  @apply bg-bg-secondary;
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-bg-tertiary rounded;
+  background-color: var(--color-text-muted);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  min-height: 32px;
+  min-width: 32px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  @apply bg-text-muted;
+  background-color: var(--color-text-secondary);
+  border-width: 2px;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--color-accent);
+  border-width: 2px;
+}
+
+/* Firefox: only where ::-webkit-scrollbar is unsupported, so Chromium 121+ keeps the custom WebKit styling above */
+@supports not selector(::-webkit-scrollbar) {
+  html {
+    scrollbar-color: var(--color-text-muted) transparent;
+  }
+}
+
+/* Vertical edge fade that leaves the right-most 16px (scrollbar strip) fully opaque so the thumb is not masked out */
+.fade-edges-y {
+  -webkit-mask-image:
+    linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%),
+    linear-gradient(#000, #000);
+  -webkit-mask-size: calc(100% - 16px) 100%, 16px 100%;
+  -webkit-mask-position: 0 0, 100% 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-image:
+    linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%),
+    linear-gradient(#000, #000);
+  mask-size: calc(100% - 16px) 100%, 16px 100%;
+  mask-position: 0 0, 100% 0;
+  mask-repeat: no-repeat;
 }
 
 /* FRIDAY thinking indicator */
@@ -85,10 +131,6 @@ html, body {
 @keyframes friday-spin {
   to { transform: rotate(360deg); }
 }
-
-/* Terminal view: hide scrollbar but keep scroll functionality */
-.terminal-scroll::-webkit-scrollbar { display: none; }
-.terminal-scroll { scrollbar-width: none; }
 
 @keyframes blink { 50% { opacity: 0; } }
 .terminal-cursor {

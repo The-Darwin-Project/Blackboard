@@ -1,7 +1,8 @@
 // BlackBoard/ui/src/components/workspace/__tests__/workspace-sessions-hub.test.tsx
 // @ai-rules:
 // 1. [Pattern]: Tests WorkspaceSessionsHub filtering, search, selection, and context menu parity.
-// 2. [Constraint]: Clears localStorage in both beforeEach and afterEach to prevent test pollution.
+// 2. [Pattern]: Resize-handle gutter guard asserts token-exact classList (pr-1.5 on root, w-1.5 on handle), not substring matches.
+// 3. [Constraint]: Clears localStorage in both beforeEach and afterEach to prevent test pollution.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import WorkspaceSessionsHub from '../WorkspaceSessionsHub';
@@ -885,6 +886,20 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(approveItem).toBeInTheDocument();
       fireEvent.click(approveItem);
       expect(mockSend).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-2' });
+    });
+  });
+
+  describe('resize handle gutter', () => {
+    it('reserves a pr-1.5 gutter on the panel root so the w-1.5 resize handle never overlaps the inner scrollbar', () => {
+      const { container } = render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+
+      const root = container.firstElementChild as HTMLElement;
+      const handle = root.querySelector('.cursor-col-resize') as HTMLElement | null;
+
+      expect(root.classList.contains('pr-1.5')).toBe(true);
+      expect(handle).not.toBeNull();
+      expect(handle!.classList.contains('w-1.5')).toBe(true);
+      expect(handle!.classList.contains('right-0')).toBe(true);
     });
   });
 });
