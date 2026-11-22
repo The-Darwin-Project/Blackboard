@@ -11,7 +11,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   classification: ['classify_event', 'set_phase'],
   routing: ['select_agent', 'create_plan', 'message_agent', 'reply_to_agent'],
   lifecycle: ['defer_event', 'wait_for_user', 'close_event'],
-  communication: ['notify_user_slack', 'notify_gitlab_result', 'report_incident', 'get_plan_progress'],
+  communication: ['notify_user_slack', 'report_incident', 'get_plan_progress'],
 };
 
 export const PHASES = ['triage', 'dispatch', 'verify', 'escalate', 'close'];
@@ -22,8 +22,8 @@ const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
   triage: ['refresh_gitlab_context', 'refresh_kargo_context'],
   dispatch: ['select_agent', 'create_plan', 'message_agent', 'reply_to_agent', 'defer_event', 'comment_jira_issue', 'transition_jira_issue'],
   verify: ['refresh_gitlab_context', 'refresh_kargo_context', 'get_plan_progress', 'defer_event'],
-  escalate: ['report_incident', 'notify_user_slack', 'notify_gitlab_result', 'close_event', 'defer_event'],
-  close: ['close_event', 'notify_gitlab_result', 'notify_user_slack', 'post_sticky_note', 'hold_watch'],
+  escalate: ['report_incident', 'notify_user_slack', 'close_event', 'defer_event'],
+  close: ['close_event', 'notify_user_slack', 'post_sticky_note', 'hold_watch'],
 };
 
 export function getExecutiveNeurons(): Neuron[] {
@@ -102,7 +102,6 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'tool:close_event': 'Resolve and close the event lifecycle',
   // Communication tools
   'tool:notify_user_slack': 'Send a message to the user via Slack',
-  'tool:notify_gitlab_result': 'Post results as a GitLab MR comment',
   'tool:report_incident': 'Escalate to Jira incident report',
   'tool:get_plan_progress': 'Check execution status of the current plan',
   'tool:comment_jira_issue': 'Post a comment on a Jira issue',

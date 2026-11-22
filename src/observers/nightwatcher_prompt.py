@@ -6,7 +6,7 @@
 # 4. [Constraint]: Manifest table is 8 columns including Links (compact labels via extract_event_links).
 # 5. [Pattern]: build_report_iteration_prompt carries ALL context including cluster_links. Tool descriptions carry contract only.
 # 6. [Pattern]: extract_event_links (compact, table-safe) vs extract_full_links (full URLs, empty string when none).
-# 7. [Gotcha]: `import os` required for GITLAB_HOST env var. _normalize_gitlab_host strips prefix THEN trailing slash.
+# 7. [Gotcha]: `import os` required for GITLAB_HOST env var; delegates host normalization to utils/tls.normalize_gitlab_host.
 """Nightwatcher system prompt builder -- phase-aware instructions + manifest table."""
 from __future__ import annotations
 
@@ -14,13 +14,10 @@ import os
 import time
 from typing import TYPE_CHECKING
 
+from ..utils.tls import normalize_gitlab_host
+
 if TYPE_CHECKING:
     from ..models import StagedEscalation
-
-
-def _normalize_gitlab_host(host: str) -> str:
-    """Strip scheme and trailing slash from GITLAB_HOST for URL construction."""
-    return host.removeprefix("https://").removeprefix("http://").rstrip("/")
 
 
 def extract_event_links(e: "StagedEscalation") -> str:
@@ -71,7 +68,7 @@ def extract_full_links(e: "StagedEscalation") -> str:
         lines.append(f"- GitHub Issue: {gi['html_url']}")
     if gl.get("pipeline_id"):
         raw_host = os.getenv("GITLAB_HOST", "")
-        gitlab_host = _normalize_gitlab_host(raw_host)
+        gitlab_host = normalize_gitlab_host(raw_host)
         if gl.get("project_path") and gitlab_host:
             lines.append(f"- Pipeline: https://{gitlab_host}/{gl['project_path']}/-/pipelines/{gl['pipeline_id']}")
         else:

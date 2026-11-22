@@ -7,7 +7,10 @@
 # 4. [Pattern]: HeadhunterJira secondary head mounted in main loop (own error boundary).
 # 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Queries injected
 #    Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
-# 6. [Pattern]: Circuit breaker per-head: 3 consecutive failures -> latch disable that head.
+# 6. [Pattern]: Per-head self-recovering half-open circuit breaker (HeadhunterCircuitBreaker):
+#    3 consecutive non-401/403 failures -> open with exponential cooldown (300s/900s/1800s) ->
+#    half_open probe -> closed on success. HTTP 401/403 auth/permission errors are exempt on both
+#    GitLab and GitHub.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: For open MRs, mark_as_done is called in feedback (on close), NOT during poll;
 #    terminal (merged/closed) MRs and unauthorized-only @mention todos have no event lifecycle so
@@ -15,41 +18,43 @@
 # 9. [Pattern]: process_event_feedback / _dispatch_feedback route by evidence context
 #    (github_issue_context vs github_context vs gitlab_context; jira_context is quietly marked sent).
 #    _process_closed_events isolates per-event exceptions so one failure cannot starve remaining events.
-# 10. [Pattern]: issue_title sanitized (replace </ → < /) in _build_issue_analysis_prompt.
+# 10. [Pattern]: issue_title and issue metadata sanitized via prompt_sanitize.sanitize_untrusted_line in
+#     _build_issue_analysis_prompt; issue body via sanitize_untrusted_block.
 # 11. [Pattern]: Phase B uses gate_closed flag — no per-item Redis gate re-check after first closure.
-# 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
+# 12. [Pattern]: _github_pending decremented by newly queued count (avoids double-count in pending_count).
 # 13. [Pattern]: Descriptions flow up to _DESC_SAFETY_CAP (default 100,000 chars) via
 #     sanitize_untrusted_block(..., max_len=_DESC_SAFETY_CAP) so full text + trailing Bot Instructions reach
 #     gemini-4-argon (1M+ context) without 8KB clipping. Output controlled by max_output_tokens.
 #     _COMMENT_LIMIT (default 2000) for aggregated notes only.
-# 14. [Pattern]: analyze_and_plan returns plan_text only (str). Domain classification removed —
+# 14. [Pattern]: analyze_and_plan returns validated YAML plan_text only (str). Domain classification removed —
 #     events land in disorder, FRIDAY classifies during triage.
-# 15. [Pattern]: Per-item try/except in all GitHub drain loops (Phase A/B PRs, Phase A/B
-#     Issues) isolates one bad item (e.g. None title) from starving the rest of the batch
-#     or bubbling out of _github_poll_and_process and tripping the GitHub circuit breaker.
+# 15. [Pattern]: Per-item try/except in unified _drain_platform_phase_ab (GitLab + GitHub PRs) and Phase C
+#     Issues isolates one bad item (e.g. None title) from starving the rest of the batch
+#     or bubbling out and tripping the platform circuit breaker.
 # 16. [Pattern]: Issue queue mirrors PR queue (Phase A promote FIFO, Phase B queue-on-close)
 #     but is purely additive — _queue_issue adds darwin-queued without removing darwin-work,
 #     since _poll_issues filters server-side on labels=darwin-work.
 # 17. [Pattern]: _raise_if_systemic_failure() escalates a fully-failed 2+ item drain-loop
-#     batch (Phase A/B, PR and Issue) instead of the cycle "succeeding" silently and
-#     resetting github_failures. PR-side Phase A/B escalation propagates all the way to
-#     Headhunter.run()'s circuit breaker (github_failures). Issue-side Phase A/B escalation
-#     is caught and logged as a WARNING by its caller (_github_poll_and_process's wrapper
-#     around _github_poll_issues) — it does NOT reach the circuit breaker, since issue
-#     failures must not trip the shared PR/Issue GitHub circuit breaker (see issue #230).
-#     A single failing item (the poison-pill case) never triggers this — that must stay
-#     isolated regardless of phase.
+#     batch (Phase A/B, GitLab/GitHub PR and Issue) instead of the cycle "succeeding" silently and
+#     resetting the platform breaker. When every failure in the batch is HTTP 401/403 auth-exempt,
+#     the original HTTPStatusError is chained via __cause__ so HeadhunterCircuitBreaker stays closed.
+#     PR-side Phase A/B escalation propagates to Headhunter.run()'s circuit breaker. Issue-side
+#     escalation is caught and logged as WARNING in _github_poll_and_process (see issue #230).
+#     A single failing item (poison-pill) never triggers systemic escalation.
 # 18. [Pattern]: Phase D (_github_poll_review_feedback) runs after Phase C only when the flow gate
 #     is open, behind HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED. Per-item exceptions are isolated;
 #     any Phase D error is caught + logged in _github_poll_and_process (non-fatal, resets the
-#     pending gauge) and never feeds the GitHub circuit breaker / _github_disabled latch.
-#     Feedback is rendered into the triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
-# 19. [Security]: Untrusted blocks/scalars in _build_analysis_prompt and _emergency_plan go through
-#     prompt_sanitize.{sanitize_untrusted_block,sanitize_untrusted_line} (bounded linear XML fence strip for
-#     all Brain + Headhunter tags, PII redaction, control stripping, "[!call:" defang). _sanitize_xml_fence
-#     (from headhunter_utils, re-exported here) remains for _render_review_feedback/_build_issue_analysis_prompt.
-# 20. [Pattern]: analyze_and_plan(raise_on_error=True) (Phase D) raises on adapter unavailable, LLM error AND an
-#     empty plan so the feedback is retried next cycle; raise_on_error=False keeps the emergency-plan fallback.
+#     pending gauge) and never feeds the GitHub circuit breaker.
+#     Feedback is rendered into the triage prompt as a fenced <review_feedback> block via prompt_sanitize.
+# 19. [Security]: Untrusted blocks/scalars across _build_analysis_prompt, _build_issue_analysis_prompt,
+#     _render_review_feedback, and _emergency_plan go through prompt_sanitize.{sanitize_untrusted_block,
+#     sanitize_untrusted_line} (bounded linear XML fence strip for all Brain + Headhunter tags, PII
+#     redaction, control stripping, "[!call:" defang). Attribute metacharacters (", <, >, ]) are
+#     stripped BEFORE sanitize_untrusted_line so post-strip cannot reassemble "[!call:".
+# 20. [Pattern]: analyze_and_plan validates LLM YAML via _NoAliasSafeLoader (yaml.SafeLoader subclass
+#     rejecting anchors/aliases, 64KB pre-cap, recognized plan keys). raise_on_error=True (Phase D)
+#     raises on adapter unavailable, LLM error, empty/invalid YAML so feedback retries next cycle;
+#     raise_on_error=False keeps the _emergency_plan fallback (developer for PR/MR, architect for issues).
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -64,12 +69,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import dataclasses
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any
 
-import httpx
+import yaml
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -82,19 +89,50 @@ from .headhunter_gitlab import (
     V1_ACTIONABLE,
 )
 from .headhunter_jira import HeadhunterJira
+from .headhunter_models import (
+    HeadhunterCircuitBreaker,
+    VcsContext,
+    VcsWorkItem,
+    _redact_error_text,
+)
+from .headhunter_port import VcsPlatformPort
+from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 
 logger = logging.getLogger(__name__)
 
 from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int  # noqa: E402
 
-from .headhunter_utils import _XML_FENCE_TAG, _sanitize_xml_fence  # noqa: E402,F401
-
 
 _SYSTEMIC_FAILURE_MIN_BATCH = 2
+_PLAN_MAX_CHARS = 65_536
+_OPEN_FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*$")
+_RECOGNIZED_PLAN_KEYS = frozenset({"plan", "steps", "action", "summary", "verdict", "reply"})
 
 
-def _raise_if_systemic_failure(phase: str, attempted: int, failed: int) -> None:
+class _NoAliasSafeLoader(yaml.SafeLoader):
+    """yaml.SafeLoader subclass that rejects YAML anchors and aliases (anti-Billion-Laughs)."""
+
+    def compose_alias(self, anchor: Any) -> Any:  # type: ignore[override]
+        raise yaml.YAMLError("YAML anchors/aliases are forbidden in LLM plans")
+
+    def compose_node(self, parent: Any, index: Any) -> Any:  # type: ignore[override]
+        if self.check_event(yaml.AliasEvent):
+            raise yaml.YAMLError("YAML anchors/aliases are forbidden in LLM plans")
+        event = self.peek_event()
+        if getattr(event, "anchor", None) is not None:
+            raise yaml.YAMLError("YAML anchors/aliases are forbidden in LLM plans")
+        return super().compose_node(parent, index)
+
+
+def _raise_if_systemic_failure(
+    phase: str,
+    attempted: int,
+    failed: int,
+    *,
+    platform: str = "GitHub",
+    errors: list[BaseException] | None = None,
+) -> None:
     """Escalate a fully-failed multi-item batch instead of silently swallowing it.
 
     Per-item try/except exists so one poison-pill item (attempted=1, failed=1)
@@ -103,13 +141,140 @@ def _raise_if_systemic_failure(phase: str, attempted: int, failed: int) -> None:
     failed, N independent bad items is a far less likely explanation than a
     systemic cause (installation token expiry, downstream Blackboard outage) that
     will keep failing every item on every future cycle too. Raising here lets the
-    caller's existing circuit breaker (github_failures in Headhunter.run) see it
-    instead of the cycle silently "succeeding" and resetting the failure count.
+    caller's circuit breaker in Headhunter.run see it instead of the cycle silently
+    "succeeding" and resetting the failure count.
+
+    When every failure in the batch is HTTP 401/403 auth-exempt, chains the first
+    auth exception via __cause__ so HeadhunterCircuitBreaker.is_auth_exempt() keeps
+    the breaker closed.
     """
     if attempted >= _SYSTEMIC_FAILURE_MIN_BATCH and failed == attempted:
+        if errors and all(HeadhunterCircuitBreaker.is_auth_exempt(err) for err in errors):
+            raise RuntimeError(
+                f"{platform} {phase}: all {attempted} item(s) failed with auth/permission errors"
+            ) from errors[0]
         raise RuntimeError(
-            f"GitHub {phase}: all {attempted} item(s) failed -- treating as systemic failure"
+            f"{platform} {phase}: all {attempted} item(s) failed -- treating as systemic failure"
         )
+
+
+def _validate_plan_yaml(plan_text: str) -> str:
+    """Validate LLM triage plan text using _NoAliasSafeLoader (yaml.SafeLoader) ONLY.
+
+    Enforces a 64KB pre-parse cap, forbids YAML anchors/aliases, extracts a single
+    optional markdown code fence (rejecting nested/multiple fences; discarding any
+    benign trailing notes after a closed fence), requires column-0 YAML frontmatter
+    '---' delimiters (rejecting trailing non-whitespace content after closing '---'),
+    and validates a recognized non-empty plan mapping.
+
+    Returns the validated canonical YAML text (never unvalidated trailing prose).
+    """
+    candidate = (plan_text or "").strip()
+    if not candidate:
+        raise RuntimeError("LLM triage returned an empty plan")
+    if len(candidate) > _PLAN_MAX_CHARS:
+        raise ValueError(f"LLM triage plan exceeds {_PLAN_MAX_CHARS} char limit")
+
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if not _OPEN_FENCE_RE.match(lines[0]):
+            raise ValueError("Invalid opening markdown code fence in LLM plan")
+        close_idx: int | None = None
+        for idx in range(1, len(lines)):
+            stripped = lines[idx].strip()
+            if stripped.startswith("```"):
+                if stripped != "```":
+                    raise ValueError("Nested/malformed markdown code fence in LLM plan")
+                close_idx = idx
+                break
+        if close_idx is None:
+            raise ValueError("Unclosed markdown code fence in LLM plan")
+        for trailing_line in lines[close_idx + 1 :]:
+            if trailing_line.strip().startswith("```"):
+                raise ValueError("Multiple markdown code fences in LLM plan")
+        candidate = "\n".join(lines[1:close_idx]).strip()
+
+    has_frontmatter = False
+    lines = candidate.splitlines()
+    if lines and lines[0].rstrip() == "---":
+        has_frontmatter = True
+        body_lines = lines[1:]
+        close_fm_idx: int | None = None
+        for idx, line in enumerate(body_lines):
+            if line.rstrip() == "---":
+                close_fm_idx = idx
+                break
+        if close_fm_idx is not None:
+            trailing_fm = body_lines[close_fm_idx + 1 :]
+            if any(ln.strip() for ln in trailing_fm):
+                raise ValueError("Unexpected trailing content after closing YAML frontmatter '---'")
+            body_lines = body_lines[:close_fm_idx]
+        yaml_body = "\n".join(body_lines).strip()
+    else:
+        yaml_body = candidate
+
+    if not yaml_body:
+        raise ValueError("LLM triage plan YAML body is empty")
+
+    parsed = yaml.load(yaml_body, Loader=_NoAliasSafeLoader)
+    if not isinstance(parsed, dict) or not parsed or not all(isinstance(k, str) for k in parsed):
+        raise ValueError(
+            f"LLM triage plan must parse to a non-empty string-keyed YAML mapping, got {type(parsed).__name__}"
+        )
+
+    if "plan" in parsed:
+        if not isinstance(parsed["plan"], str) or not parsed["plan"].strip():
+            raise ValueError("LLM triage plan 'plan' field must be a non-empty string")
+    else:
+        has_recognized = any(
+            k in parsed and parsed[k] not in (None, "", [], {})
+            for k in _RECOGNIZED_PLAN_KEYS
+        )
+        if not has_recognized:
+            raise ValueError(
+                "LLM triage YAML mapping lacks recognized plan keys "
+                f"({', '.join(sorted(_RECOGNIZED_PLAN_KEYS))})"
+            )
+
+    return f"---\n{yaml_body}\n---" if has_frontmatter else yaml_body
+
+
+def on_headhunter_done(task: asyncio.Task) -> None:
+    """Done-callback watchdog for the Headhunter background asyncio task."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        safe_msg = _redact_error_text(redact_pii(str(exc)), max_len=400)
+        logger.error(
+            "Headhunter background task exited unexpectedly (%s): %s",
+            type(exc).__name__,
+            safe_msg,
+        )
+    else:
+        logger.warning("Headhunter background task exited cleanly without cancellation")
+
+
+def start_headhunter_task(
+    blackboard: "BlackboardState",
+    brain: Any,
+    close_signal: asyncio.Event | None,
+    *,
+    gitlab_enabled: bool,
+) -> tuple["Headhunter", asyncio.Task]:
+    """Create, wire, and launch the Headhunter background task with done watchdog."""
+    if close_signal is None:
+        raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
+    headhunter = Headhunter(
+        blackboard,
+        close_signal=close_signal,
+        gitlab_enabled=gitlab_enabled,
+    )
+    headhunter.set_wip_counter(brain.count_global_wip)
+    brain.agents["_headhunter"] = headhunter
+    task = asyncio.create_task(headhunter.run())
+    task.add_done_callback(on_headhunter_done)
+    return headhunter, task
 
 
 class Headhunter:
@@ -148,6 +313,12 @@ class Headhunter:
         self._github = GitHubPlatform(blackboard)
         self._jira = HeadhunterJira(blackboard)
 
+        # Self-recovering per-platform half-open circuit breakers
+        self._breakers: dict[str, HeadhunterCircuitBreaker] = {
+            "gitlab": HeadhunterCircuitBreaker("gitlab"),
+            "github": HeadhunterCircuitBreaker("github"),
+        }
+
     # =========================================================================
     # LLM Adapter (lazy-loaded, same pattern as Aligner._get_adapter)
     # =========================================================================
@@ -171,25 +342,48 @@ class Headhunter:
     # LLM Analysis (platform-agnostic)
     # =========================================================================
 
+    @staticmethod
+    def _is_issue_context(context: VcsContext | dict[str, Any]) -> bool:
+        if isinstance(context, VcsContext):
+            return context.item_kind == "issue"
+        return "issue_number" in context
+
+    @staticmethod
+    def _context_title(context: VcsContext | dict[str, Any]) -> str:
+        if isinstance(context, VcsContext):
+            return context.title or "?"
+        return (
+            context.get("mr_title")
+            or context.get("pr_title")
+            or context.get("issue_title")
+            or context.get("title")
+            or "?"
+        )
+
     async def analyze_and_plan(
-        self, context: dict, system_instruction: str = "", *, raise_on_error: bool = False,
+        self,
+        context: VcsContext | dict[str, Any],
+        system_instruction: str = "",
+        *,
+        raise_on_error: bool = False,
     ) -> str:
-        """LLM-based triage with full context.
+        """LLM-based triage with full context (accepts VcsContext or legacy dict).
 
         All work items pass through Flash LLM analysis for consistent evidence quality.
         Emergency inline fallback when LLM is unavailable unless ``raise_on_error=True``
         (used by Phase D so transient LLM outages defer delivery instead of burning a round).
         """
+        title_for_log = self._context_title(context)
         adapter = await self._get_adapter()
         if not adapter:
             if raise_on_error:
                 raise RuntimeError("LLM adapter unavailable for triage")
-            logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
+            logger.warning(f"Emergency fallback plan for {title_for_log}")
             return self._emergency_plan(context)
 
         prompt = (
             self._build_issue_analysis_prompt(context)
-            if "issue_number" in context
+            if self._is_issue_context(context)
             else self._build_analysis_prompt(context)
         )
         try:
@@ -203,11 +397,9 @@ class Headhunter:
             from .llm import record_token_usage
             record_token_usage("headhunter", response.usage)
             plan_text = (response.text or "").strip()
-            if not plan_text and raise_on_error:
-                # Phase D: an empty plan must retry next cycle, not create an empty-plan event and burn a round.
-                raise RuntimeError("LLM triage returned an empty plan")
-            logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
-            return plan_text
+            validated_plan = _validate_plan_yaml(plan_text)
+            logger.info(f"LLM analysis for {title_for_log}")
+            return validated_plan
         except Exception as e:
             if raise_on_error:
                 raise
@@ -215,12 +407,14 @@ class Headhunter:
             return self._emergency_plan(context)
 
     @staticmethod
-    def _format_project(context: dict) -> str:
-        """Resolve canonical project/repo string from GitLab or GitHub context."""
+    def _format_project(context: VcsContext | dict[str, Any]) -> str:
+        """Resolve canonical project/repo string from VcsContext or GitLab/GitHub dict."""
+        if isinstance(context, VcsContext):
+            return context.project_ref or "unknown"
         return (
             context.get("project_path")
             or (
-                f"{context['owner']}/{context['repo']}"
+                f"{context.get('owner')}/{context.get('repo')}"
                 if context.get("owner") and context.get("repo")
                 else context.get("repo")
             )
@@ -228,19 +422,38 @@ class Headhunter:
         )
 
     @staticmethod
-    def _emergency_plan(context: dict) -> str:
+    def _emergency_plan(context: VcsContext | dict[str, Any]) -> str:
         """Minimal YAML plan when LLM is unavailable."""
-        action = sanitize_untrusted_line(
-            context.get("action_name") or context.get("action") or "unknown",
-            max_len=200,
-        )
-        title = sanitize_untrusted_line(
-            context.get("mr_title") or context.get("pr_title") or "unknown",
-            max_len=200,
-        )
+        is_issue = Headhunter._is_issue_context(context)
+        if isinstance(context, VcsContext):
+            raw_action = (
+                context.raw.get("action_name")
+                or context.raw.get("action")
+                or ("issue_triage" if is_issue else "unknown")
+            )
+            raw_title = context.title or "unknown"
+            raw_iid: Any = context.item_id
+            iid = f"!{raw_iid}" if context.item_kind == "mr" else f"#{raw_iid}"
+        else:
+            raw_action = (
+                context.get("action_name")
+                or context.get("action")
+                or ("issue_triage" if is_issue else "unknown")
+            )
+            raw_title = (
+                context.get("mr_title")
+                or context.get("pr_title")
+                or context.get("issue_title")
+                or context.get("title")
+                or "unknown"
+            )
+            raw_iid = context.get("mr_iid", context.get("pr_number", context.get("issue_number", "?")))
+            iid = f"!{raw_iid}" if context.get("mr_iid") else f"#{raw_iid}"
+
+        action = sanitize_untrusted_line(raw_action, max_len=200)
+        title = sanitize_untrusted_line(raw_title, max_len=200)
         project = sanitize_untrusted_line(Headhunter._format_project(context), max_len=200)
-        raw_iid = context.get("mr_iid", context.get("pr_number", "?"))
-        iid = f"!{raw_iid}" if context.get("mr_iid") else f"#{raw_iid}"
+        agent = "architect" if is_issue else "developer"
         plan_scalar = json.dumps(f"Investigate {action} on {title}")
         summary_scalar = json.dumps(
             f"Investigate {action} on {iid} in {project}. LLM triage failed -- review manually."
@@ -251,78 +464,102 @@ class Headhunter:
             f"repository: {project}\n"
             f"risk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
-            f"steps:\n  - id: \"1\"\n    agent: developer\n"
+            f"steps:\n  - id: \"1\"\n    agent: {agent}\n"
             f"    summary: {summary_scalar}\n---"
         )
 
-    def _build_analysis_prompt(self, context: dict) -> str:
-        """Build structured prompt with full context for LLM analysis."""
-        merge_val = context.get("merge_status")
+    def _build_analysis_prompt(self, context: VcsContext | dict[str, Any]) -> str:
+        """Build structured prompt with full context for LLM analysis (VcsContext or dict)."""
+        extras: dict[str, Any] = context.raw if isinstance(context, VcsContext) else context
+
+        merge_val = extras.get("merge_status")
         if not merge_val:
-            mergeable = context.get("mergeable")
+            mergeable = extras.get("mergeable")
             if mergeable is None or mergeable == "":
                 merge_val = "unknown"
             elif isinstance(mergeable, bool):
                 merge_val = "true" if mergeable else "false"
             else:
                 merge_val = str(mergeable)
+
         project = sanitize_untrusted_line(self._format_project(context), max_len=200)
-        title = sanitize_untrusted_line(
-            context.get("mr_title") or context.get("pr_title") or "unknown",
-            max_len=200,
-        )
-        src_branch = sanitize_untrusted_line(
-            context.get("source_branch") or context.get("head_branch") or "?",
-            max_len=200,
-        )
-        tgt_branch = sanitize_untrusted_line(
-            context.get("target_branch") or context.get("base_branch") or "?",
-            max_len=200,
-        )
-        author = sanitize_untrusted_line(context.get("author", "unknown"), max_len=120)
+        if isinstance(context, VcsContext):
+            raw_action = extras.get("action_name") or extras.get("action") or "unknown"
+            raw_title = context.title or "unknown"
+            raw_state = context.state or "unknown"
+            raw_src = context.source_branch or "?"
+            raw_tgt = context.target_branch or "?"
+            raw_author = context.author or "unknown"
+            raw_ci = context.ci_status or "unknown"
+            raw_desc = context.description or ""
+        else:
+            raw_action = context.get("action_name") or context.get("action") or "unknown"
+            raw_title = context.get("mr_title") or context.get("pr_title") or context.get("title") or "unknown"
+            raw_state = context.get("mr_state") or context.get("pr_state") or context.get("state") or "unknown"
+            raw_src = context.get("source_branch") or context.get("head_branch") or "?"
+            raw_tgt = context.get("target_branch") or context.get("base_branch") or "?"
+            raw_author = context.get("author") or "unknown"
+            raw_ci = context.get("pipeline_status") or context.get("check_status") or context.get("ci_status") or "unknown"
+            raw_desc = context.get("mr_description") or context.get("pr_body") or context.get("description") or ""
+
+        title = sanitize_untrusted_line(raw_title, max_len=200)
+        src_branch = sanitize_untrusted_line(raw_src, max_len=200)
+        tgt_branch = sanitize_untrusted_line(raw_tgt, max_len=200)
+        author = sanitize_untrusted_line(raw_author, max_len=120)
         parts = [
-            f"Action: {sanitize_untrusted_line(context.get('action_name') or context.get('action') or 'unknown', max_len=80)}",
+            f"Action: {sanitize_untrusted_line(raw_action, max_len=80)}",
             f"MR: {title}",
-            f"State: {context.get('mr_state') or context.get('pr_state') or 'unknown'} | "
-            f"Merge status: {merge_val}",
+            f"State: {sanitize_untrusted_line(raw_state, max_len=60)} | "
+            f"Merge status: {sanitize_untrusted_line(merge_val, max_len=60)}",
             f"Branch: {src_branch} -> {tgt_branch}",
             f"Author: {author}",
-            f"Pipeline: {context.get('pipeline_status') or context.get('check_status') or 'unknown'}",
+            f"Pipeline: {sanitize_untrusted_line(raw_ci, max_len=60)}",
         ]
-        if context.get("pipeline_id"):
-            parts.append(f"Pipeline ID: {context['pipeline_id']}")
+        pipeline_id = extras.get("pipeline_id")
+        if pipeline_id:
+            parts.append(f"Pipeline ID: {pipeline_id}")
         parts.append(f"Project: {project}")
-        raw_desc = context.get("mr_description") or context.get("pr_body") or ""
         if raw_desc:
             desc = sanitize_untrusted_block(raw_desc, max_len=_DESC_SAFETY_CAP)
             parts.append(f"<description>\n{desc}\n</description>")
-        if context.get("changed_files"):
-            safe_files = [sanitize_untrusted_line(f, max_len=120) for f in context["changed_files"][:10]]
-            parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(safe_files)}")
-        if context.get("labels"):
-            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in context["labels"]]
+        changed_files = extras.get("changed_files")
+        if changed_files:
+            safe_files = [sanitize_untrusted_line(f, max_len=120) for f in changed_files[:10]]
+            parts.append(f"Changed files ({len(changed_files)}): {', '.join(safe_files)}")
+        labels = extras.get("labels")
+        if labels:
+            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in labels]
             parts.append(f"Labels: {', '.join(safe_labels)}")
-        if context.get("failed_job_names"):
-            safe_jobs = [sanitize_untrusted_line(j, max_len=120) for j in context["failed_job_names"]]
-            parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(safe_jobs)}")
-        if context.get("failed_checks"):
-            safe_checks = [sanitize_untrusted_line(c, max_len=120) for c in context["failed_checks"]]
+        failed_job_names = extras.get("failed_job_names")
+        if failed_job_names:
+            safe_jobs = [sanitize_untrusted_line(j, max_len=120) for j in failed_job_names]
+            parts.append(
+                f"Failed jobs ({extras.get('failed_job_count', '?')}/{extras.get('total_job_count', '?')} total): "
+                f"{', '.join(safe_jobs)}"
+            )
+        failed_checks = extras.get("failed_checks")
+        if failed_checks:
+            safe_checks = [sanitize_untrusted_line(c, max_len=120) for c in failed_checks]
             parts.append(f"Failed checks: {', '.join(safe_checks)}")
-        if context.get("failed_job_log"):
-            log = sanitize_untrusted_block(context["failed_job_log"], max_len=MAX_FAILED_LOG_CHARS)
+        failed_job_log = extras.get("failed_job_log")
+        if failed_job_log:
+            log = sanitize_untrusted_block(failed_job_log, max_len=MAX_FAILED_LOG_CHARS)
             parts.append(f"<job_log>\n{log}\n</job_log>")
-        notes = context.get("recent_notes") or context.get("recent_comments") or []
+        notes = extras.get("recent_notes") or extras.get("recent_comments") or []
         if notes:
             joined = sanitize_untrusted_block("\n".join(notes), max_len=_COMMENT_LIMIT)
             parts.append(f"<comments>\n{joined}\n</comments>")
-        if context.get("mention_comment"):
-            mention_author = sanitize_untrusted_line(
-                context.get("mention_author", "unknown"), max_len=120,
-            ).replace('"', "")
-            comment = sanitize_untrusted_block(context["mention_comment"])
+        mention_comment = extras.get("mention_comment")
+        if mention_comment:
+            raw_mention_author = str(extras.get("mention_author") or "unknown")
+            for ch in ('"', "<", ">", "]"):
+                raw_mention_author = raw_mention_author.replace(ch, "")
+            mention_author = sanitize_untrusted_line(raw_mention_author, max_len=120)
+            comment = sanitize_untrusted_block(mention_comment)
             parts.append(f"<mention_request author=\"{mention_author}\">\n{comment}\n</mention_request>")
-        if context.get("review_feedback"):
-            parts.append(self._render_review_feedback(context["review_feedback"]))
+        review_feedback = extras.get("review_feedback")
+        if review_feedback:
+            parts.append(self._render_review_feedback(review_feedback))
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
@@ -331,14 +568,15 @@ class Headhunter:
     def _render_review_feedback(items: list[dict]) -> str:
         """Render GitHub review feedback as a single fenced block (untrusted reviewer text).
 
-        Every free-text field is sanitized so it cannot close the fence; attribute values
-        (author, path) are quote-stripped like mention_author.
+        Every free-text field is sanitized through prompt_sanitize so it cannot close the fence,
+        smuggle control chars/PII, or inject '[!call:'; attribute metacharacters (", <, >, ])
+        are stripped BEFORE sanitize_untrusted_line so post-strip cannot reassemble '[!call:'.
         """
         def _attr(value: object) -> str:
-            return (
-                str(value if value is not None else "")
-                .replace('"', "").replace("<", "").replace(">", "").replace("\n", " ")[:200]
-            )
+            raw = "" if value is None else str(value)
+            for ch in ('"', "<", ">", "]"):
+                raw = raw.replace(ch, "")
+            return sanitize_untrusted_line(raw, max_len=200)
 
         lines: list[str] = []
         for it in items:
@@ -356,30 +594,54 @@ class Headhunter:
                 head += f' url={_attr(it["html_url"])}'
             lines.append(head + "]")
             if it.get("diff_hunk"):
-                lines.append("diff_hunk:\n" + _sanitize_xml_fence(it["diff_hunk"]))
-            lines.append(_sanitize_xml_fence(it.get("body", "")))
+                lines.append(
+                    "diff_hunk:\n" + sanitize_untrusted_block(it["diff_hunk"], max_len=_DESC_SAFETY_CAP)
+                )
+            lines.append(sanitize_untrusted_block(it.get("body", ""), max_len=_DESC_SAFETY_CAP))
             lines.append("")
         return "<review_feedback>\n" + "\n".join(lines).rstrip() + "\n</review_feedback>"
 
     @staticmethod
-    def _build_issue_analysis_prompt(context: dict) -> str:
+    def _build_issue_analysis_prompt(context: VcsContext | dict[str, Any]) -> str:
         """Build issue-specific prompt. Excludes PR-only fields (branch, pipeline, merge, head_sha)."""
-        # Sanitize title to prevent XML-like breakout in the prompt
-        title = (context.get("issue_title") or "unknown").replace("</", "< /")
+        extras: dict[str, Any] = context.raw if isinstance(context, VcsContext) else context
+        if isinstance(context, VcsContext):
+            issue_num: Any = context.item_id
+            title = sanitize_untrusted_line(context.title or "unknown", max_len=200) or "unknown"
+            repo_line = sanitize_untrusted_line(context.project_ref or "?/?", max_len=200) or "?/?"
+            state = sanitize_untrusted_line(context.state or "open", max_len=40) or "open"
+            author = sanitize_untrusted_line(context.author or "unknown", max_len=120) or "unknown"
+            raw_body = context.description or ""
+        else:
+            issue_num = context.get("issue_number", "?")
+            title = sanitize_untrusted_line(context.get("issue_title") or "unknown", max_len=200) or "unknown"
+            owner = sanitize_untrusted_line(context.get("owner") or "?", max_len=120) or "?"
+            repo = sanitize_untrusted_line(context.get("repo") or "?", max_len=120) or "?"
+            repo_line = f"{owner}/{repo}"
+            state = sanitize_untrusted_line(context.get("state") or "open", max_len=40) or "open"
+            author = sanitize_untrusted_line(context.get("author") or "unknown", max_len=120) or "unknown"
+            raw_body = context.get("body", "")
+
         parts = [
-            f"GitHub Issue #{context.get('issue_number', '?')}: {title}",
-            f"Repo: {context.get('owner', '?')}/{context.get('repo', '?')}",
-            f"State: {context.get('state', 'open')} | Author: {context.get('author', 'unknown')}",
+            f"GitHub Issue #{issue_num}: {title}",
+            f"Repo: {repo_line}",
+            f"State: {state} | Author: {author}",
         ]
-        if context.get("labels"):
-            parts.append(f"Labels: {', '.join(context['labels'])}")
-        if context.get("assignees"):
-            parts.append(f"Assignees: {', '.join(context['assignees'])}")
-        body = _sanitize_xml_fence(context.get("body", ""))
+        labels = extras.get("labels")
+        if labels:
+            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in labels]
+            parts.append(f"Labels: {', '.join(safe_labels)}")
+        assignees = extras.get("assignees")
+        if assignees:
+            safe_assignees = [sanitize_untrusted_line(a, max_len=120) for a in assignees]
+            parts.append(f"Assignees: {', '.join(safe_assignees)}")
+        body = sanitize_untrusted_block(raw_body, max_len=_DESC_SAFETY_CAP)
         if body:
             parts.append(f"<issue_body>\n{body}\n</issue_body>")
-        if context.get("skill_label"):
-            parts.append(f"Skill context: {context['skill_label']} routing")
+        skill_label = extras.get("skill_label")
+        if skill_label:
+            safe_skill = sanitize_untrusted_line(skill_label, max_len=120)
+            parts.append(f"Skill context: {safe_skill} routing")
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
 
@@ -442,6 +704,52 @@ class Headhunter:
     # Main Loop (Circuit Breaker)
     # =========================================================================
 
+    @staticmethod
+    def _extract_auth_status(exc: BaseException) -> Any:
+        cur: BaseException | None = exc
+        seen: set[int] = set()
+        while cur is not None and id(cur) not in seen and len(seen) < 8:
+            seen.add(id(cur))
+            status = getattr(getattr(cur, "response", None), "status_code", None)
+            if status in (401, 403):
+                return status
+            cur = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+        return "?"
+
+    async def _run_platform_head(
+        self,
+        key: str,
+        label: str,
+        enabled: bool,
+        poll_fn: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Execute one platform poll cycle under its half-open circuit breaker."""
+        cb = self._breakers[key]
+        if not enabled or not cb.should_attempt():
+            return
+        try:
+            await poll_fn()
+            cb.record_success()
+        except Exception as e:
+            if cb.is_auth_exempt(e):
+                status_code = self._extract_auth_status(e)
+                logger.error(
+                    f"Headhunter {label} auth error ({status_code}) — "
+                    "not counting toward circuit breaker"
+                )
+            else:
+                safe_err = _redact_error_text(redact_pii(str(e)), max_len=400)
+                opened = cb.record_failure(safe_err)
+                logger.error(
+                    f"Headhunter {label} poll failed "
+                    f"({cb.consecutive_failures}/{cb.max_failures}): {safe_err}"
+                )
+                if opened:
+                    logger.critical(
+                        f"Headhunter {label} circuit breaker OPEN "
+                        f"(next_retry_at={cb.next_retry_at})"
+                    )
+
     async def run(self) -> None:
         """Main loop: poll -> analyze -> create events. Per-head circuit breaker."""
         if not self._gitlab.enabled() and not self._github.enabled():
@@ -459,61 +767,25 @@ class Headhunter:
             f"(poll={self._poll_interval}s, cap={self._wip_cap}, model={self._model_name}, "
             f"heads={heads})"
         )
-        await asyncio.sleep(startup_delay)
-        logger.info("Headhunter started")
-
-        if self._close_signal:
-            self._feedback_task = asyncio.create_task(self._feedback_loop())
-            logger.info("Headhunter feedback loop started (Signal + Poll hybrid)")
-
-        gitlab_failures = 0
-        github_failures = 0
-        max_failures = 3
-        _gitlab_disabled = False
-        _github_disabled = False
 
         try:
+            await asyncio.sleep(startup_delay)
+            logger.info("Headhunter started")
+
+            if self._close_signal:
+                self._feedback_task = asyncio.create_task(self._feedback_loop())
+                logger.info("Headhunter feedback loop started (Signal + Poll hybrid)")
+
             while True:
-                # GitLab head
-                if self._gitlab.enabled() and not _gitlab_disabled:
-                    try:
-                        await self._poll_and_process()
-                        gitlab_failures = 0
-                    except Exception as e:
-                        gitlab_failures += 1
-                        logger.error(f"Headhunter GitLab poll failed ({gitlab_failures}/{max_failures}): {e}")
-                        if gitlab_failures >= max_failures:
-                            logger.critical("Headhunter GitLab head disabled after 3 consecutive failures")
-                            _gitlab_disabled = True
+                # GitLab head (half-open circuit breaker; 401/403 exempt)
+                await self._run_platform_head(
+                    "gitlab", "GitLab", self._gitlab.enabled(), self._poll_and_process,
+                )
 
-                # GitHub head
-                if self._github.enabled() and not _github_disabled:
-                    try:
-                        await self._github_poll_and_process()
-                        github_failures = 0
-                    except httpx.HTTPStatusError as e:
-                        if e.response.status_code in (401, 403):
-                            logger.error(f"Headhunter GitHub auth error ({e.response.status_code}) — not counting toward circuit breaker")
-                        else:
-                            github_failures += 1
-                            logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
-                            if github_failures >= max_failures:
-                                logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
-                                _github_disabled = True
-                    except Exception as e:
-                        github_failures += 1
-                        logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
-                        if github_failures >= max_failures:
-                            logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
-                            _github_disabled = True
-
-                # Both heads latched off → exit
-                gitlab_dead = not self._gitlab.enabled() or _gitlab_disabled
-                github_dead = not self._github.enabled() or _github_disabled
-                if gitlab_dead and github_dead:
-                    logger.critical("Headhunter: all VCS heads disabled, shutting down")
-                    await self._github.close()
-                    return
+                # GitHub head (half-open circuit breaker; 401/403 exempt)
+                await self._run_platform_head(
+                    "github", "GitHub", self._github.enabled(), self._github_poll_and_process,
+                )
 
                 # Jira head (independent error boundary)
                 if self._jira.enabled():
@@ -522,25 +794,178 @@ class Headhunter:
                     except Exception as e:
                         logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
 
-                # Sleep or wait for relayed poll-wake signal
-                if self._close_signal:
-                    try:
-                        await asyncio.wait_for(self._poll_wake_signal.wait(), timeout=self._poll_interval)
+                # Unconditionally await _poll_wake_signal alongside poll_interval (even when _close_signal is None)
+                wake_task = asyncio.create_task(self._poll_wake_signal.wait())
+                sleep_task = asyncio.create_task(asyncio.sleep(self._poll_interval))
+                try:
+                    done, pending = await asyncio.wait(
+                        {wake_task, sleep_task}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    if sleep_task in done:
+                        if sleep_task.cancelled() and wake_task not in done:
+                            raise asyncio.CancelledError()
+                        if not sleep_task.cancelled():
+                            sleep_exc = sleep_task.exception()
+                            if sleep_exc is not None:
+                                raise sleep_exc
+                    if wake_task in done and not wake_task.cancelled():
                         self._poll_wake_signal.clear()
-                        logger.debug("Headhunter poll woke early: event closed, slot may be open")
-                    except asyncio.TimeoutError:
-                        pass
-                else:
-                    await asyncio.sleep(self._poll_interval)
+                        logger.debug("Headhunter poll woke early: poll wake signal set")
+                except asyncio.CancelledError:
+                    wake_task.cancel()
+                    sleep_task.cancel()
+                    await asyncio.gather(wake_task, sleep_task, return_exceptions=True)
+                    raise
         finally:
             if self._feedback_task is not None:
                 if not self._feedback_task.done():
                     self._feedback_task.cancel()
                 await asyncio.gather(self._feedback_task, return_exceptions=True)
                 self._feedback_task = None
+            # Close only GitLabPlatform's owned HTTP client (main.py owns GitHub's shared singleton)
+            if hasattr(self._gitlab, "close"):
+                try:
+                    await self._gitlab.close()
+                except Exception as close_err:
+                    logger.warning(f"Failed to close GitLabPlatform HTTP client: {close_err}")
+
+    @staticmethod
+    def _item_label(item: Any) -> str:
+        """Short human-readable identifier for logging per-item Phase A/B failures."""
+        if isinstance(item, dict):
+            if "owner" in item and "repo" in item:
+                return f"{item.get('owner')}/{item.get('repo')}#{item.get('number', '?')}"
+            target = item.get("target") if isinstance(item.get("target"), dict) else {}
+            project = item.get("project") if isinstance(item.get("project"), dict) else {}
+            return f"project={project.get('id', '?')}!{target.get('iid', item.get('id', '?'))}"
+        return f"{getattr(item, 'project_ref', '?')}#{getattr(item, 'item_id', '?')}"
+
+    @staticmethod
+    def _mark_item_queued(item: Any) -> Any:
+        if isinstance(item, VcsWorkItem):
+            return dataclasses.replace(item, queued=True)
+        if isinstance(item, dict):
+            return {**item, "queued": True}
+        return item
+
+    async def _drain_platform_phase_ab(
+        self,
+        platform: VcsPlatformPort,
+        queued_items: list[Any],
+        new_items: list[Any],
+        *,
+        platform_label: str,
+        phase_prefix: str = "",
+        queue_fn: Callable[[Any, int], Awaitable[Any]] | None = None,
+        on_queue_update: Callable[[list[Any]], None] | None = None,
+        gate_closed_initial: bool = False,
+    ) -> tuple[list[Any], int]:
+        """Unified Phase A (promote queued FIFO) + Phase B (process new / queue on gate close).
+
+        Isolates per-item exceptions (poison pills) and escalates fully-failed 2+ item batches
+        via _raise_if_systemic_failure(). Invokes on_queue_update BEFORE raising so pending/queue
+        observability reflects reality even across systemic outages.
+        """
+        si = "" if gate_closed_initial else platform.load_triage_instruction()
+        remaining_queued = list(queued_items)
+
+        # Phase A: Promote oldest queued items first (FIFO)
+        attempted_a = 0
+        failed_a = 0
+        errors_a: list[BaseException] = []
+        if not gate_closed_initial:
+            for item in queued_items:
+                if not await self.check_flow_gate():
+                    break
+                attempted_a += 1
+                try:
+                    context = await platform.fetch_context(item)
+                    if context is None:
+                        remaining_queued = [q for q in remaining_queued if q is not item]
+                        continue
+                    plan_text = await self.analyze_and_plan(context, si)
+                    await platform.create_platform_event(item, plan_text, context)
+                    # Remove by identity, not position -- a prior item may have failed and been skipped.
+                    remaining_queued = [q for q in remaining_queued if q is not item]
+                except Exception as e:
+                    failed_a += 1
+                    errors_a.append(e)
+                    logger.warning(
+                        f"{platform_label} queued item processing failed for {self._item_label(item)}: {e}"
+                    )
+                    continue
+        if on_queue_update is not None:
+            on_queue_update(remaining_queued)
+        _raise_if_systemic_failure(
+            f"{phase_prefix}Phase A (queued promote)",
+            attempted_a,
+            failed_a,
+            platform=platform_label,
+            errors=errors_a,
+        )
+
+        # Phase B: Process new items (or queue when gate closes if queue_fn provided)
+        gate_closed = gate_closed_initial
+        newly_queued_in_phase_b = 0
+        attempted_b = 0
+        failed_b = 0
+        errors_b: list[BaseException] = []
+        for item in new_items:
+            if gate_closed or not await self.check_flow_gate():
+                gate_closed = True
+                if queue_fn is None:
+                    logger.info(f"Headhunter flow gate closed mid-cycle ({platform_label}) -- stopping")
+                    break
+                attempted_b += 1
+                position = len(remaining_queued) + 1
+                try:
+                    queued_ok = await queue_fn(item, position)
+                    if queued_ok is False:
+                        failed_b += 1
+                        logger.warning(
+                            f"{platform_label} queue item failed (label rejected) for {self._item_label(item)}"
+                        )
+                    else:
+                        remaining_queued.append(self._mark_item_queued(item))
+                        newly_queued_in_phase_b += 1
+                except Exception as e:
+                    failed_b += 1
+                    errors_b.append(e)
+                    logger.warning(
+                        f"{platform_label} queue item failed for {self._item_label(item)}: {e}"
+                    )
+                continue
+            attempted_b += 1
+            try:
+                context = await platform.fetch_context(item)
+                if context is None:
+                    continue
+                plan_text = await self.analyze_and_plan(context, si)
+                await platform.create_platform_event(item, plan_text, context)
+            except Exception as e:
+                failed_b += 1
+                errors_b.append(e)
+                logger.warning(
+                    f"{platform_label} item processing failed for {self._item_label(item)}: {e}"
+                )
+                continue
+        if on_queue_update is not None:
+            on_queue_update(remaining_queued)
+        _raise_if_systemic_failure(
+            f"{phase_prefix}Phase B (new items)",
+            attempted_b,
+            failed_b,
+            platform=platform_label,
+            errors=errors_b,
+        )
+        return remaining_queued, newly_queued_in_phase_b
 
     async def _poll_and_process(self) -> None:
-        """Single GitLab poll cycle: check gate, fetch items, analyze, create events."""
+        """Single GitLab poll cycle (thin delegate over unified _drain_platform_phase_ab)."""
         if not await self.check_flow_gate():
             logger.debug("Headhunter flow gate closed -- skipping GitLab cycle")
             return
@@ -552,24 +977,21 @@ class Headhunter:
             return
 
         logger.info(f"Headhunter GitLab: {len(todos)} actionable item(s)")
-        si = self._gitlab.load_triage_instruction()
-        for todo in todos:
-            if not await self.check_flow_gate():
-                logger.info("Headhunter flow gate closed mid-cycle -- stopping")
-                break
-            context = await self._gitlab.fetch_context(todo)
-            if context is None:
-                continue
-            plan_text = await self.analyze_and_plan(context, si)
-            await self._gitlab.create_platform_event(todo, plan_text, context)
+        await self._drain_platform_phase_ab(
+            self._gitlab,
+            [],
+            todos,
+            platform_label="GitLab",
+        )
 
     async def _github_poll_and_process(self) -> None:
-        """Single GitHub poll cycle: promote queued PRs, create events for new, poll issues.
+        """Single GitHub poll cycle (thin delegate over unified _drain_platform_phase_ab + Phase C/D).
 
         Order: (1) reset queued cache, (2) poll ALL items (always — gate must not skip poll,
         UI needs queued state), (3) separate queued/new, (4) check gate: if open promote queued
-        + process new; if closed queue new items and expose queued state for observability.
-        (5) poll issues.
+        + process new via _drain_platform_phase_ab; if closed queue new items via the same
+        drain helper so failures are tracked and exposed cleanly. (5) poll issues (Phase C) &
+        review feedback (Phase D).
         """
         # Reset queued cache at top of cycle
         self._github._last_queued_prs = []
@@ -583,103 +1005,40 @@ class Headhunter:
         new_items = [p for p in prs if not p.get("queued")]
         self._github_pending = len(new_items)
 
-        if not await self.check_flow_gate():
+        def _sync_github_queued(remaining: list[Any]) -> None:
+            self._github._last_queued_prs = remaining
+            self._github_queued = len(remaining)
+
+        gate_open = await self.check_flow_gate()
+        if not gate_open:
             logger.debug("Headhunter flow gate closed -- queuing new PRs, observing queued state")
-            # Queue all new items so they get the darwin-queued label
-            for i, pr in enumerate(new_items, start=len(queued_items) + 1):
-                try:
-                    await self._github._queue_pr(pr, i)
-                except Exception as e:
-                    logger.warning(
-                        f"GitHub queue PR failed for "
-                        f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
-                    )
-            # Expose all queued items for /headhunter/pending observability
-            newly_queued = [{**pr, "queued": True} for pr in new_items]
-            self._github._last_queued_prs = queued_items + newly_queued
-            self._github_queued = len(self._github._last_queued_prs)
-            self._github_pending = 0  # All new items moved to queued state — avoid double-count
             self._github_feedback_pending = 0  # Phase D is skipped while the gate is closed
+            _, newly_queued_in_phase_b = await self._drain_platform_phase_ab(
+                self._github,
+                queued_items,
+                new_items,
+                platform_label="GitHub",
+                phase_prefix="PR ",
+                queue_fn=self._github._queue_pr,
+                on_queue_update=_sync_github_queued,
+                gate_closed_initial=True,
+            )
+            self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
             try:
                 await self._github_poll_issues()
             except Exception as e:
                 logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
             return
 
-        si = self._github.load_triage_instruction()
-
-        # Phase A: Promote oldest queued PRs first (FIFO)
-        remaining_queued = list(queued_items)
-        attempted_a = 0
-        failed_a = 0
-        for pr in queued_items:
-            if not await self.check_flow_gate():
-                break
-            attempted_a += 1
-            try:
-                context = await self._github.fetch_context(pr)
-                plan_text = await self.analyze_and_plan(context, si)
-                await self._github.create_platform_event(pr, plan_text, context)
-                # Remove by identity, not position -- a prior item may have failed
-                # and been skipped, so the promoted item is not necessarily index 0.
-                remaining_queued = [q for q in remaining_queued if q is not pr]
-            except Exception as e:
-                failed_a += 1
-                logger.warning(
-                    f"GitHub queued PR processing failed for "
-                    f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
-                )
-                continue
-        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
-        # reflect current queue state even when Phase A hits a systemic failure and
-        # raises past this point. Otherwise the cache stays stale-empty (reset at
-        # cycle top) for the outage window this feature exists to surface.
-        self._github._last_queued_prs = remaining_queued
-        self._github_queued = len(remaining_queued)
-        # A fully-failed multi-item batch is more likely systemic (auth/outage)
-        # than N coincidental poison pills -- escalate past the circuit breaker.
-        _raise_if_systemic_failure("PR Phase A (queued promote)", attempted_a, failed_a)
-
-        # Phase B: Process new darwin-review PRs.
-        # gate_closed flag avoids per-item Redis gate re-check once closure is confirmed.
-        gate_closed = False
-        newly_queued_in_phase_b = 0
-        attempted_b = 0
-        failed_b = 0
-        for pr in new_items:
-            attempted_b += 1
-            if gate_closed or not await self.check_flow_gate():
-                gate_closed = True
-                position = len(remaining_queued) + 1
-                try:
-                    await self._github._queue_pr(pr, position)
-                    remaining_queued.append({**pr, "queued": True})
-                    newly_queued_in_phase_b += 1
-                except Exception as e:
-                    failed_b += 1
-                    logger.warning(
-                        f"GitHub queue PR failed for "
-                        f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
-                    )
-                continue
-            try:
-                context = await self._github.fetch_context(pr)
-                plan_text = await self.analyze_and_plan(context, si)
-                await self._github.create_platform_event(pr, plan_text, context)
-            except Exception as e:
-                failed_b += 1
-                logger.warning(
-                    f"GitHub PR processing failed for "
-                    f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
-                )
-                continue
-        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
-        # reflect current queue state even when Phase B hits a systemic failure and
-        # raises past this point. Otherwise the cache stays stale-empty (reset at
-        # cycle top) for the outage window this feature exists to surface.
-        self._github._last_queued_prs = remaining_queued
-        self._github_queued = len(remaining_queued)
-        _raise_if_systemic_failure("PR Phase B (new items)", attempted_b, failed_b)
+        _, newly_queued_in_phase_b = await self._drain_platform_phase_ab(
+            self._github,
+            queued_items,
+            new_items,
+            platform_label="GitHub",
+            phase_prefix="PR ",
+            queue_fn=self._github._queue_pr,
+            on_queue_update=_sync_github_queued,
+        )
 
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
         self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
@@ -687,15 +1046,14 @@ class Headhunter:
         if not queued_items and not new_items:
             logger.debug("Headhunter GitHub: no actionable PRs")
 
-        # Phase C: Poll Issues (darwin-work label) — no queuing for issues
+        # Phase C: Poll Issues (darwin-work label)
         try:
             await self._github_poll_issues()
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
 
         # Phase D: PR review feedback / @mentions (flag-gated, flow-gate gated). Non-fatal like
-        # Phase C: an optional feature must never abort _poll_github or feed the circuit breaker
-        # that latches _github_disabled.
+        # Phase C: an optional feature must never abort _github_poll_and_process or feed the circuit breaker.
         try:
             await self._github_poll_review_feedback()
         except Exception as e:
@@ -762,18 +1120,21 @@ class Headhunter:
 
         if not await self.check_flow_gate():
             logger.debug("Headhunter flow gate closed -- queuing new issues, observing queued state")
-            for i, issue in enumerate(new_items, start=len(queued_items) + 1):
+            newly_queued: list[dict] = []
+            for issue in new_items:
+                position = len(queued_items) + len(newly_queued) + 1
                 try:
-                    await self._github._queue_issue(issue, i)
+                    queued_ok = await self._github._queue_issue(issue, position)
+                    if queued_ok is not False:
+                        newly_queued.append({**issue, "queued": True})
                 except Exception as e:
                     logger.warning(
                         f"GitHub queue issue failed for "
                         f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                     )
-            newly_queued = [{**issue, "queued": True} for issue in new_items]
             self._github._last_queued_issues = queued_items + newly_queued
             self._github_issue_queued = len(self._github._last_queued_issues)
-            self._github_issue_pending = 0  # All new items moved to queued state — avoid double-count
+            self._github_issue_pending = max(0, self._github_issue_pending - len(newly_queued))
             return
 
         if issues:
@@ -827,9 +1188,12 @@ class Headhunter:
                 gate_closed = True
                 position = len(remaining_queued) + 1
                 try:
-                    await self._github._queue_issue(issue, position)
-                    remaining_queued.append({**issue, "queued": True})
-                    newly_queued_in_phase_b += 1
+                    queued_ok = await self._github._queue_issue(issue, position)
+                    if queued_ok is False:
+                        failed_b += 1
+                    else:
+                        remaining_queued.append({**issue, "queued": True})
+                        newly_queued_in_phase_b += 1
                 except Exception as e:
                     failed_b += 1
                     logger.warning(

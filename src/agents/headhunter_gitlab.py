@@ -8,9 +8,10 @@
 # 5. [Pattern]: _load_gitlab_si() loads from headhunter_skills/gitlab-mr-triage.md with emergency fallback.
 # 6. [Gotcha]: merge_status excluded from state_key (flaps during active pipelines).
 # 7. [Pattern]: GITLAB_HOST normalization: strip scheme BEFORE trailing slash.
-# 8. [Security]: Every httpx client uses verify=self._verify (vcs_approval.resolve_ca_bundle, re-read per
-#    call). TLS verification is NEVER disabled; __init__ calls resolve_ca_bundle() once so an insecure
-#    GITLAB_SSL_VERIFY=false raises ValueError at startup instead of at the first poll.
+# 8. [Security]: Persistent httpx.AsyncClient (lazy init, closed via close(), auto-reinitialized on
+#    subsequent Brain/StateWatcher calls) uses verify=self._verify (utils/tls.resolve_ca_bundle) and
+#    follow_redirects=False. TLS verification is NEVER disabled; __init__ calls resolve_ca_bundle()
+#    once so an insecure GITLAB_SSL_VERIFY=false raises ValueError at startup instead of at first poll.
 # 9. [Gotcha]: project_id may be a numeric id OR a path ("group/proj", seeded by Kargo gitlab_context). Any
 #    URL that interpolates a gitlab_context/StateWatcher project_id MUST go through _enc_project_id()
 #    (quote(unquote(...), safe="")); a raw "/" would split the API path.
@@ -125,9 +126,7 @@ class GitLabPlatform:
         self.blackboard = blackboard
         self._enabled_flag = enabled
         self._gitlab_host = _vcs_approval.normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
-        self._gitlab_token: str | None = None
-        self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
-        self._smartsheet_cache = None
+        self._client: httpx.AsyncClient | None = None
         # Fail fast: GITLAB_SSL_VERIFY=false/0/no raises ValueError here, at startup.
         _vcs_approval.resolve_ca_bundle(self._gitlab_host)
 
@@ -135,10 +134,153 @@ class GitLabPlatform:
     def _verify(self) -> str | bool:
         return _vcs_approval.resolve_ca_bundle(self._gitlab_host)
 
+    def _get_client(self) -> httpx.AsyncClient:
+        """Lazily initialize persistent httpx.AsyncClient; safely re-initializes post-close()."""
+        existing = getattr(self, "_client", None)
+        if existing is not None and not getattr(existing, "is_closed", False):
+            return existing
+        client = httpx.AsyncClient(
+            verify=self._verify, timeout=30.0, follow_redirects=False,
+        )
+        if type(client).__module__.startswith("httpx"):
+            self._client = client
+        return client
+
+    async def close(self) -> None:
+        """Close the persistent HTTP client (subsequent Brain calls lazily re-initialize)."""
+        client = getattr(self, "_client", None)
+        self._client = None
+        if client is not None:
+            await client.aclose()
+
+    def _invalidate_token(self) -> bool:
+        """Invalidate GitLabTokenAuth cache if active (returns True if invalidated)."""
+        if self.__dict__.get("_gitlab_token"):
+            return False
+        try:
+            from ..utils.gitlab_token import get_gitlab_auth
+
+            auth = get_gitlab_auth()
+            if auth is not None and hasattr(auth, "invalidate"):
+                auth.invalidate()
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _send_get(
+        self,
+        http: httpx.AsyncClient,
+        url: str,
+        kwargs: dict,
+        *,
+        allow_reinit: bool,
+    ) -> httpx.Response:
+        try:
+            return await http.get(url, **kwargs)
+        except RuntimeError as exc:
+            if allow_reinit and "closed" in str(exc).lower():
+                if self._client is http:
+                    self._client = None
+                fresh = self._get_client()
+                return await fresh.get(url, **kwargs)
+            raise
+
+    async def _get(
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        timeout: float | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> httpx.Response:
+        """Execute an idempotent GitLab GET with single 401 token-invalidate retry."""
+        http = client or self._get_client()
+        allow_reinit = client is None
+        old_token = self._get_token()
+        kwargs: dict = {"headers": {"PRIVATE-TOKEN": old_token}}
+        if params is not None:
+            kwargs["params"] = params
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = await self._send_get(http, url, kwargs, allow_reinit=allow_reinit)
+        if getattr(resp, "status_code", None) == 401 and self._invalidate_token():
+            try:
+                new_token = self._get_token()
+            except Exception as exc:
+                logger.warning(f"GitLabPlatform: post-401 token reload failed: {exc}")
+                return resp
+            if new_token and new_token != old_token:
+                kwargs["headers"] = {"PRIVATE-TOKEN": new_token}
+                retry_http = client or self._get_client()
+                resp = await self._send_get(retry_http, url, kwargs, allow_reinit=allow_reinit)
+        return resp
+
+    @staticmethod
+    def _parse_next_page(headers: object, current_page: int) -> int | None:
+        """Parse numeric ASCII X-Next-Page header strictly > current_page (never follows Link URLs)."""
+        if headers is None or not hasattr(headers, "get"):
+            return None
+        raw = headers.get("X-Next-Page") or headers.get("x-next-page")
+        if not isinstance(raw, str):
+            return None
+        cleaned = raw.strip()
+        if not (cleaned.isascii() and cleaned.isdigit()):
+            return None
+        nxt = int(cleaned)
+        return nxt if nxt > current_page else None
+
+    async def _get_paginated_list(
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        max_pages: int = 10,
+        client: httpx.AsyncClient | None = None,
+    ) -> tuple[list[dict], httpx.Response]:
+        """Fetch a paginated GitLab list endpoint using bounded numeric X-Next-Page only."""
+        items: list[dict] = []
+        page = 1
+        last_resp: httpx.Response | None = None
+        for _ in range(max(1, max_pages)):
+            req_params = dict(params) if params else {}
+            if page > 1:
+                req_params["page"] = str(page)
+            resp = await self._get(
+                url,
+                params=req_params if req_params else None,
+                client=client,
+            )
+            last_resp = resp
+            if not resp.is_success:
+                if page > 1:
+                    logger.warning(
+                        "GitLabPlatform: paginated fetch %s failed on page %d with HTTP %s",
+                        url,
+                        page,
+                        getattr(resp, "status_code", "?"),
+                    )
+                return items, resp
+            data = resp.json()
+            if isinstance(data, list):
+                items.extend(data)
+            next_page = self._parse_next_page(getattr(resp, "headers", None), page)
+            if next_page is None:
+                break
+            page = next_page
+        assert last_resp is not None
+        return items, last_resp
+
     @staticmethod
     def _enc_project_id(project_id: int | str) -> str:
-        """URL-encode a numeric id or path-style project id exactly once (idempotent on %2F)."""
-        return urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
+        """URL-encode a numeric id or path-style project id exactly once (idempotent on %2F).
+
+        Rejects empty values and dot-segments ('.' / '..') after unquoting.
+        """
+        decoded = urllib.parse.unquote(str(project_id)).strip()
+        if not decoded or decoded in (".", "..") or any(seg in (".", "..") for seg in decoded.split("/")):
+            raise ValueError(f"Invalid GitLab project_id: {project_id!r}")
+        return urllib.parse.quote(decoded, safe="")
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -176,24 +318,22 @@ class GitLabPlatform:
         page = 1
         per_page = 100
         max_pages = 20
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-            while page <= max_pages:
-                resp = await client.get(
-                    self._api_url("/todos"),
-                    headers=self._headers(),
-                    params={
-                        "state": "pending", "type": "MergeRequest",
-                        "sort": "asc", "page": str(page), "per_page": str(per_page),
-                    },
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-                all_todos.extend(batch)
-                if len(batch) < per_page:
-                    break
-                page += 1
-            else:
-                logger.warning(f"GitLabPlatform: hit max_pages ({max_pages}), {len(all_todos)} todos fetched")
+        while page <= max_pages:
+            resp = await self._get(
+                self._api_url("/todos"),
+                params={
+                    "state": "pending", "type": "MergeRequest",
+                    "sort": "asc", "page": str(page), "per_page": str(per_page),
+                },
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            all_todos.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+        else:
+            logger.warning(f"GitLabPlatform: hit max_pages ({max_pages}), {len(all_todos)} todos fetched")
 
         actionable = [t for t in all_todos if t.get("action_name") in V1_ACTIONABLE]
         if not actionable:
@@ -237,10 +377,9 @@ class GitLabPlatform:
 
         if terminal_todo_ids:
             try:
-                async with httpx.AsyncClient(verify=self._verify, timeout=10) as client:
-                    await self._dismiss_todos_best_effort(
-                        client, self._headers(), terminal_todo_ids, "terminal MR",
-                    )
+                await self._dismiss_todos_best_effort(
+                    self._get_client(), self._headers(), terminal_todo_ids, "terminal MR",
+                )
             except Exception as exc:
                 logger.debug(f"GitLabPlatform: best-effort terminal todo cleanup failed: {exc}")
 
@@ -261,7 +400,7 @@ class GitLabPlatform:
         max_items: int = 20,
         timeout: float = 10.0,
     ) -> None:
-        """Best-effort bounded todo dismissal; stops early on 403, 429, or timeout."""
+        """Best-effort bounded todo dismissal; stops early on 401, 403, 429, or timeout."""
         for tid in todo_ids[:max_items]:
             try:
                 dismiss_resp = await client.post(
@@ -269,6 +408,12 @@ class GitLabPlatform:
                     headers=headers,
                     timeout=timeout,
                 )
+                if dismiss_resp.status_code == 401:
+                    self._invalidate_token()
+                    logger.debug(
+                        f"GitLabPlatform: stopping {reason} todo dismissal after HTTP 401 on todo {tid}"
+                    )
+                    break
                 if dismiss_resp.status_code in (403, 429):
                     logger.debug(
                         f"GitLabPlatform: stopping {reason} todo dismissal after HTTP {dismiss_resp.status_code} on todo {tid}"
@@ -286,18 +431,15 @@ class GitLabPlatform:
 
     async def _fetch_latest_pipeline(
         self,
-        client: httpx.AsyncClient,
-        headers: dict[str, str],
         enc_pid: str,
         mr_iid: int,
         source_branch: str,
     ) -> list[dict]:
-        """Fetch latest MR pipeline with guarded branch-ref fallback (never sends empty ref)."""
+        """Fetch latest MR pipeline (single GET, per_page=1) with guarded branch-ref fallback."""
         pipelines: list[dict] = []
         try:
-            mr_pipe_resp = await client.get(
+            mr_pipe_resp = await self._get(
                 self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/pipelines"),
-                headers=headers,
                 params={"per_page": "1"},
             )
             if mr_pipe_resp.is_success:
@@ -309,9 +451,8 @@ class GitLabPlatform:
 
         if not pipelines and source_branch:
             try:
-                pipe_resp = await client.get(
+                pipe_resp = await self._get(
                     self._api_url(f"/projects/{enc_pid}/pipelines"),
-                    headers=headers,
                     params={"ref": source_branch, "order_by": "updated_at", "per_page": "1"},
                 )
                 if pipe_resp.is_success:
@@ -326,22 +467,18 @@ class GitLabPlatform:
 
     async def _fetch_failed_job_log(
         self,
-        client: httpx.AsyncClient,
-        headers: dict[str, str],
         enc_pid: str,
         pipe_id: int,
         context: dict,
     ) -> str:
-        """Fetch failed pipeline jobs and tail traces; isolates per-job errors."""
+        """Fetch failed pipeline jobs (paginated via X-Next-Page) and tail traces; isolates per-job errors."""
         try:
-            jobs_resp = await client.get(
+            all_jobs, jobs_resp = await self._get_paginated_list(
                 self._api_url(f"/projects/{enc_pid}/pipelines/{pipe_id}/jobs"),
-                headers=headers,
+                params={"per_page": "100"},
+                max_pages=10,
             )
             if not jobs_resp.is_success:
-                return ""
-            all_jobs = jobs_resp.json()
-            if not isinstance(all_jobs, list):
                 return ""
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(f"GitLabPlatform: failed jobs fetch failed for pipeline {pipe_id}: {exc}")
@@ -360,9 +497,8 @@ class GitLabPlatform:
             if not job_id:
                 continue
             try:
-                trace_resp = await client.get(
+                trace_resp = await self._get(
                     self._api_url(f"/projects/{enc_pid}/jobs/{job_id}/trace"),
-                    headers=headers,
                 )
                 if trace_resp.is_success:
                     lines = trace_resp.text.splitlines()
@@ -415,159 +551,164 @@ class GitLabPlatform:
             "target_url": todo.get("target_url", "").split("#")[0],
         }
 
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-            headers = self._headers()
-            darwin_bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
-            darwin_bot_lower = darwin_bot.lower()
-            is_mention_action = action in ("directly_addressed", "mentioned")
-            allowed_authors = _get_allowed_mention_authors() if is_mention_action else set()
-            own_todo_ids = [work_item["id"]] if work_item.get("id") else []
+        darwin_bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
+        darwin_bot_lower = darwin_bot.lower()
+        is_mention_action = action in ("directly_addressed", "mentioned")
+        allowed_authors = _get_allowed_mention_authors() if is_mention_action else set()
+        own_todo_ids = [work_item["id"]] if work_item.get("id") else []
 
-            if is_mention_action:
-                todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
-                if todo_author:
-                    todo_author_lower = todo_author.lower()
-                    if todo_author_lower == darwin_bot_lower or (
-                        allowed_authors and todo_author_lower not in allowed_authors
-                    ):
-                        await self._dismiss_todos_best_effort(
-                            client, headers, own_todo_ids, "unauthorized mention",
-                        )
-                        logger.info(
-                            f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
-                            f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
-                        )
-                        return None
-
-            changes_resp = await client.get(
-                self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/changes"),
-                headers=headers,
-            )
-            if changes_resp.is_success:
-                changes = changes_resp.json().get("changes", [])
-                context["changed_files"] = [c.get("new_path", "") for c in changes[:MAX_CHANGED_FILES]]
-            else:
-                context["changed_files"] = []
-
-            pipelines = await self._fetch_latest_pipeline(
-                client, headers, enc_pid, mr_iid, target.get("source_branch", ""),
-            )
-
-            pipeline_status = "unknown"
-            failed_job_log = ""
-            if pipelines:
-                pipeline_status = pipelines[0].get("status", "unknown")
-                context["pipeline_id"] = pipelines[0].get("id")
-                if pipeline_status == "failed":
-                    pipe_id = context.get("pipeline_id")
-                    if pipe_id:
-                        failed_job_log = await self._fetch_failed_job_log(
-                            client, headers, enc_pid, pipe_id, context,
-                        )
-
-            context["pipeline_status"] = pipeline_status
-            context["failed_job_log"] = failed_job_log
-
-            notes_resp = await client.get(
-                self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/notes"),
-                headers=headers,
-                params={"sort": "desc", "per_page": "25"},
-            )
-            if not notes_resp.is_success:
-                if is_mention_action:
-                    logger.warning(
-                        f"GitLabPlatform: notes fetch failed ({notes_resp.status_code}) on mention for !{mr_iid}; failing closed without dismissing todo"
+        if is_mention_action:
+            todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
+            if todo_author:
+                todo_author_lower = todo_author.lower()
+                if todo_author_lower == darwin_bot_lower or (
+                    allowed_authors and todo_author_lower not in allowed_authors
+                ):
+                    await self._dismiss_todos_best_effort(
+                        self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
+                    )
+                    logger.info(
+                        f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
+                        f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
                     )
                     return None
+
+        diffs_resp = await self._get(
+            self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/diffs"),
+        )
+        if diffs_resp.is_success:
+            diffs_data = diffs_resp.json()
+            if isinstance(diffs_data, list):
+                diffs = diffs_data
+            elif isinstance(diffs_data, dict):
+                raw_changes = diffs_data.get("changes")
+                diffs = raw_changes if isinstance(raw_changes, list) else []
             else:
-                all_notes = notes_resp.json()
-                ci_notes: list[str] = []
-                authorized_mention_found = False
-                unauthorized_mention_seen = False
-                mention_needle = f"@{darwin_bot_lower}"
+                diffs = []
+            context["changed_files"] = [
+                c.get("new_path", "") for c in diffs[:MAX_CHANGED_FILES] if isinstance(c, dict)
+            ]
+        else:
+            context["changed_files"] = []
 
-                anchor_note_id: int | None = None
-                raw_target_url = work_item.get("target_url") or ""
-                if "#note_" in raw_target_url:
-                    anchor_frag = raw_target_url.split("#note_", 1)[1].split("&")[0].split("/")[0]
-                    if anchor_frag.isdigit():
-                        anchor_note_id = int(anchor_frag)
+        pipelines = await self._fetch_latest_pipeline(
+            enc_pid, mr_iid, target.get("source_branch", ""),
+        )
 
-                if is_mention_action and anchor_note_id is not None:
-                    matched_anchor = next(
-                        (n for n in all_notes if n.get("id") == anchor_note_id),
-                        None,
+        pipeline_status = "unknown"
+        failed_job_log = ""
+        if pipelines:
+            pipeline_status = pipelines[0].get("status", "unknown")
+            context["pipeline_id"] = pipelines[0].get("id")
+            if pipeline_status == "failed":
+                pipe_id = context.get("pipeline_id")
+                if pipe_id:
+                    failed_job_log = await self._fetch_failed_job_log(
+                        enc_pid, pipe_id, context,
                     )
-                    if matched_anchor is not None and not matched_anchor.get("system"):
-                        body = matched_anchor.get("body", "")
-                        note_author = ((matched_anchor.get("author") or {}).get("username") or "")
-                        if note_author.lower() != darwin_bot_lower and mention_needle in body.lower():
-                            is_authorized = (not allowed_authors) or (note_author.lower() in allowed_authors)
-                            if is_authorized:
-                                context["mention_comment"] = body[:5000]
-                                context["mention_author"] = note_author
-                                authorized_mention_found = True
-                            else:
-                                logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
-                                unauthorized_mention_seen = True
-                    if authorized_mention_found:
-                        for note in all_notes:
-                            if note.get("system") or note.get("id") == anchor_note_id:
-                                continue
-                            note_author = ((note.get("author") or {}).get("username") or "")
-                            if note_author.lower() == darwin_bot_lower:
-                                continue
-                            if len(ci_notes) < MAX_CI_NOTES:
-                                ci_notes.append(f"[{note_author}]: {note.get('body', '')[:500]}")
-                else:
-                    for note in all_notes:
-                        if note.get("system"):
-                            continue
-                        body = note.get("body", "")
-                        note_author = ((note.get("author") or {}).get("username") or "")
-                        if note_author.lower() == darwin_bot_lower:
-                            continue
-                        if is_mention_action and mention_needle in body.lower():
-                            is_authorized = (not allowed_authors) or (note_author.lower() in allowed_authors)
-                            if not is_authorized:
-                                logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
-                                unauthorized_mention_seen = True
-                                break
+
+        context["pipeline_status"] = pipeline_status
+        context["failed_job_log"] = failed_job_log
+
+        all_notes, notes_resp = await self._get_paginated_list(
+            self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/notes"),
+            params={"sort": "desc", "per_page": "100"},
+            max_pages=2,
+        )
+        if not notes_resp.is_success:
+            if is_mention_action:
+                logger.warning(
+                    f"GitLabPlatform: notes fetch failed ({notes_resp.status_code}) on mention for !{mr_iid}; failing closed without dismissing todo"
+                )
+                return None
+        else:
+            ci_notes: list[str] = []
+            authorized_mention_found = False
+            unauthorized_mention_seen = False
+            mention_needle = f"@{darwin_bot_lower}"
+
+            anchor_note_id: int | None = None
+            raw_target_url = work_item.get("target_url") or ""
+            if "#note_" in raw_target_url:
+                anchor_frag = raw_target_url.split("#note_", 1)[1].split("&")[0].split("/")[0]
+                if anchor_frag.isdigit():
+                    anchor_note_id = int(anchor_frag)
+
+            if is_mention_action and anchor_note_id is not None:
+                matched_anchor = next(
+                    (n for n in all_notes if n.get("id") == anchor_note_id),
+                    None,
+                )
+                if matched_anchor is not None and not matched_anchor.get("system"):
+                    body = matched_anchor.get("body", "")
+                    note_author = ((matched_anchor.get("author") or {}).get("username") or "")
+                    if note_author.lower() != darwin_bot_lower and mention_needle in body.lower():
+                        is_authorized = (not allowed_authors) or (note_author.lower() in allowed_authors)
+                        if is_authorized:
                             context["mention_comment"] = body[:5000]
                             context["mention_author"] = note_author
                             authorized_mention_found = True
-                            break
-                        if len(ci_notes) < MAX_CI_NOTES:
-                            ci_notes.append(f"[{note_author}]: {body[:500]}")
-
-                if is_mention_action and not authorized_mention_found and not unauthorized_mention_seen and anchor_note_id is None:
-                    mr_desc = target.get("description") or ""
-                    mr_author = ((target.get("author") or {}).get("username") or "")
-                    if mention_needle in mr_desc.lower() and mr_author.lower() != darwin_bot_lower:
-                        is_authorized = (not allowed_authors) or (mr_author.lower() in allowed_authors)
-                        if is_authorized:
-                            context["mention_comment"] = mr_desc[:5000]
-                            context["mention_author"] = mr_author
-                            authorized_mention_found = True
                         else:
-                            logger.info(f"Ignoring @mention in MR description from {mr_author} (not in maintainer list)")
+                            logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
                             unauthorized_mention_seen = True
+                if authorized_mention_found:
+                    for note in all_notes:
+                        if note.get("system") or note.get("id") == anchor_note_id:
+                            continue
+                        note_author = ((note.get("author") or {}).get("username") or "")
+                        if note_author.lower() == darwin_bot_lower:
+                            continue
+                        if len(ci_notes) < MAX_CI_NOTES:
+                            ci_notes.append(f"[{note_author}]: {note.get('body', '')[:500]}")
+            else:
+                for note in all_notes:
+                    if note.get("system"):
+                        continue
+                    body = note.get("body", "")
+                    note_author = ((note.get("author") or {}).get("username") or "")
+                    if note_author.lower() == darwin_bot_lower:
+                        continue
+                    if is_mention_action and mention_needle in body.lower():
+                        is_authorized = (not allowed_authors) or (note_author.lower() in allowed_authors)
+                        if not is_authorized:
+                            logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
+                            unauthorized_mention_seen = True
+                            break
+                        context["mention_comment"] = body[:5000]
+                        context["mention_author"] = note_author
+                        authorized_mention_found = True
+                        break
+                    if len(ci_notes) < MAX_CI_NOTES:
+                        ci_notes.append(f"[{note_author}]: {body[:500]}")
 
-                if is_mention_action and not authorized_mention_found:
-                    if unauthorized_mention_seen:
-                        await self._dismiss_todos_best_effort(
-                            client, headers, own_todo_ids, "unauthorized mention",
-                        )
-                        logger.info(
-                            f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todo {own_todo_ids} and skipping"
-                        )
+            if is_mention_action and not authorized_mention_found and not unauthorized_mention_seen and anchor_note_id is None:
+                mr_desc = target.get("description") or ""
+                mr_author = ((target.get("author") or {}).get("username") or "")
+                if mention_needle in mr_desc.lower() and mr_author.lower() != darwin_bot_lower:
+                    is_authorized = (not allowed_authors) or (mr_author.lower() in allowed_authors)
+                    if is_authorized:
+                        context["mention_comment"] = mr_desc[:5000]
+                        context["mention_author"] = mr_author
+                        authorized_mention_found = True
                     else:
-                        logger.warning(
-                            f"GitLabPlatform: no @{darwin_bot} mention found in recent notes window on !{mr_iid}; skipping without dismissing todos"
-                        )
-                    return None
-                if ci_notes:
-                    context["recent_notes"] = ci_notes
+                        logger.info(f"Ignoring @mention in MR description from {mr_author} (not in maintainer list)")
+                        unauthorized_mention_seen = True
+
+            if is_mention_action and not authorized_mention_found:
+                if unauthorized_mention_seen:
+                    await self._dismiss_todos_best_effort(
+                        self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
+                    )
+                    logger.info(
+                        f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todo {own_todo_ids} and skipping"
+                    )
+                else:
+                    logger.warning(
+                        f"GitLabPlatform: no @{darwin_bot} mention found in recent notes window on !{mr_iid}; skipping without dismissing todos"
+                    )
+                return None
+            if ci_notes:
+                context["recent_notes"] = ci_notes
 
         return context
 
@@ -687,68 +828,72 @@ class GitLabPlatform:
             logger.info(f"GitLab duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid}")
             return
 
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-            headers = self._headers()
+        client = self._get_client()
+        headers = self._headers()
 
-            # Phase 1: MR Note (suppressed for stale/duplicate; retryable on 401/408/429/5xx/network error)
-            if close_reason in ("stale", "duplicate"):
-                if not await self.blackboard.is_feedback_note_sent(event.id):
-                    await self.blackboard.mark_feedback_note_sent(event.id)
-            elif not await self.blackboard.is_feedback_note_sent(event.id):
-                outcome = self._build_feedback_comment(event, close_reason)
-                try:
-                    resp = await client.post(
-                        self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/notes"),
-                        headers=headers,
-                        json={"body": outcome},
-                    )
-                except Exception as exc:
-                    logger.warning(f"GitLab MR comment request failed for {event.id}: {exc}")
-                    return
-                if resp.status_code in _RETRYABLE_STATUSES or resp.status_code >= 500:
-                    logger.warning(f"GitLab MR comment transient failure ({resp.status_code}) for {event.id}")
-                    return
-                if resp.status_code == 404:
-                    logger.info(f"Feedback skip: MR !{mr_iid} not found (deleted?)")
-                elif resp.status_code == 403:
-                    logger.warning(f"MR comment forbidden (403) for {event.id}: {resp.text[:200]}")
-                elif 400 <= resp.status_code < 500:
-                    logger.warning(
-                        f"MR comment permanent client error ({resp.status_code}) for {event.id}: {resp.text[:200]}"
-                    )
-                elif not resp.is_success:
-                    logger.warning(f"MR comment failed ({resp.status_code}): {resp.text[:200]}")
-                    return
+        # Phase 1: MR Note (suppressed for stale/duplicate; retryable on 401/408/429/5xx/network error; NEVER replayed inline)
+        if close_reason in ("stale", "duplicate"):
+            if not await self.blackboard.is_feedback_note_sent(event.id):
                 await self.blackboard.mark_feedback_note_sent(event.id)
+        elif not await self.blackboard.is_feedback_note_sent(event.id):
+            outcome = self._build_feedback_comment(event, close_reason)
+            try:
+                resp = await client.post(
+                    self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/notes"),
+                    headers=headers,
+                    json={"body": outcome},
+                )
+            except Exception as exc:
+                logger.warning(f"GitLab MR comment request failed for {event.id}: {exc}")
+                return
+            if resp.status_code in _RETRYABLE_STATUSES or resp.status_code >= 500:
+                if resp.status_code == 401:
+                    self._invalidate_token()
+                logger.warning(f"GitLab MR comment transient failure ({resp.status_code}) for {event.id}")
+                return
+            if resp.status_code == 404:
+                logger.info(f"Feedback skip: MR !{mr_iid} not found (deleted?)")
+            elif resp.status_code == 403:
+                logger.warning(f"MR comment forbidden (403) for {event.id}: {resp.text[:200]}")
+            elif 400 <= resp.status_code < 500:
+                logger.warning(
+                    f"MR comment permanent client error ({resp.status_code}) for {event.id}: {resp.text[:200]}"
+                )
+            elif not resp.is_success:
+                logger.warning(f"MR comment failed ({resp.status_code}): {resp.text[:200]}")
+                return
+            await self.blackboard.mark_feedback_note_sent(event.id)
 
-            # Phase 2: Todo Dismissal (all sibling todo_ids; retryable on 401/408/429/5xx/network error)
-            for tid in todo_ids:
-                try:
-                    done_resp = await client.post(
-                        self._api_url(f"/todos/{tid}/mark_as_done"), headers=headers,
-                    )
-                except Exception as exc:
-                    logger.warning(f"GitLab mark_as_done request failed for todo {tid} ({event.id}): {exc}")
-                    return
-                if done_resp.status_code in _RETRYABLE_STATUSES or done_resp.status_code >= 500:
-                    logger.warning(f"GitLab mark_as_done transient failure ({done_resp.status_code}) for todo {tid} ({event.id})")
-                    return
-                if done_resp.status_code == 304:
-                    logger.debug(f"GitLab feedback: todo {tid} already done (304) for {event.id}")
-                elif done_resp.status_code == 404:
-                    logger.info(f"GitLab feedback: todo {tid} not found for {event.id}")
-                elif done_resp.status_code == 403:
-                    logger.warning(f"GitLab mark_as_done forbidden (403) for todo {tid} ({event.id})")
-                elif 400 <= done_resp.status_code < 500:
-                    logger.warning(
-                        f"GitLab mark_as_done permanent client error ({done_resp.status_code}) for todo {tid} ({event.id})"
-                    )
-                elif not done_resp.is_success:
-                    logger.warning(f"GitLab mark_as_done failed ({done_resp.status_code}) for todo {tid} ({event.id})")
-                    return
+        # Phase 2: Todo Dismissal (all sibling todo_ids; retryable on 401/408/429/5xx/network error)
+        for tid in todo_ids:
+            try:
+                done_resp = await client.post(
+                    self._api_url(f"/todos/{tid}/mark_as_done"), headers=headers,
+                )
+            except Exception as exc:
+                logger.warning(f"GitLab mark_as_done request failed for todo {tid} ({event.id}): {exc}")
+                return
+            if done_resp.status_code in _RETRYABLE_STATUSES or done_resp.status_code >= 500:
+                if done_resp.status_code == 401:
+                    self._invalidate_token()
+                logger.warning(f"GitLab mark_as_done transient failure ({done_resp.status_code}) for todo {tid} ({event.id})")
+                return
+            if done_resp.status_code == 304:
+                logger.debug(f"GitLab feedback: todo {tid} already done (304) for {event.id}")
+            elif done_resp.status_code == 404:
+                logger.info(f"GitLab feedback: todo {tid} not found for {event.id}")
+            elif done_resp.status_code == 403:
+                logger.warning(f"GitLab mark_as_done forbidden (403) for todo {tid} ({event.id})")
+            elif 400 <= done_resp.status_code < 500:
+                logger.warning(
+                    f"GitLab mark_as_done permanent client error ({done_resp.status_code}) for todo {tid} ({event.id})"
+                )
+            elif not done_resp.is_success:
+                logger.warning(f"GitLab mark_as_done failed ({done_resp.status_code}) for todo {tid} ({event.id})")
+                return
 
-            await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"GitLab feedback posted for {event.id}: {close_reason} on !{mr_iid}")
+        await self.blackboard.mark_feedback_sent(event.id)
+        logger.info(f"GitLab feedback posted for {event.id}: {close_reason} on !{mr_iid}")
 
     # =========================================================================
     # Brain-Facing Methods (NOT part of VcsPlatformPort)
@@ -776,50 +921,47 @@ class GitLabPlatform:
         state_changed_at = ""
         head_sha = (gl_ctx or {}).get("head_sha") or (gl_ctx or {}).get("sha")
         try:
-            async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-                headers = self._headers()
-                mr_resp = await client.get(
-                    self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
-                    headers=headers,
-                )
-                if mr_resp.status_code == 404:
-                    return {"error": "MR not found (deleted?)", "pipeline_status": "unknown",
-                            "mr_state": "closed", "merge_status": "unknown", "severity": "info"}
-                if mr_resp.status_code == 429:
-                    _fallback = gl_ctx or {}
-                    return {"error": "GitLab rate limited", "pipeline_status": _fallback.get("pipeline_status", "unknown"),
-                            "mr_state": _fallback.get("mr_state", "unknown"), "merge_status": _fallback.get("merge_status", "unknown"),
-                            "severity": event.event.evidence.severity if event.event.evidence else "warning"}
+            mr_resp = await self._get(
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
+            )
+            if mr_resp.status_code == 404:
+                return {"error": "MR not found (deleted?)", "pipeline_status": "unknown",
+                        "mr_state": "closed", "merge_status": "unknown", "severity": "info"}
+            if mr_resp.status_code == 429:
+                _fallback = gl_ctx or {}
+                return {"error": "GitLab rate limited", "pipeline_status": _fallback.get("pipeline_status", "unknown"),
+                        "mr_state": _fallback.get("mr_state", "unknown"), "merge_status": _fallback.get("merge_status", "unknown"),
+                        "severity": event.event.evidence.severity if event.event.evidence else "warning"}
 
-                mr_state = "unknown"
-                merge_status = "unknown"
-                if mr_resp.is_success:
-                    mr_data = mr_resp.json()
-                    mr_state = mr_data.get("state", "unknown")
-                    merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
-                    head_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha") or head_sha
-                    if not source_branch:
-                        source_branch = mr_data.get("source_branch", "")
-                    if mr_state in ("merged", "closed"):
-                        state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
-                else:
-                    _fallback = gl_ctx or {}
-                    return {
-                        "error": f"MR fetch failed: HTTP {mr_resp.status_code}",
-                        "pipeline_status": _fallback.get("pipeline_status", "unknown"),
-                        "mr_state": _fallback.get("mr_state", "unknown"),
-                        "merge_status": _fallback.get("merge_status", "unknown"),
-                        "severity": event.event.evidence.severity if event.event.evidence else "warning",
-                    }
+            mr_state = "unknown"
+            merge_status = "unknown"
+            if mr_resp.is_success:
+                mr_data = mr_resp.json()
+                mr_state = mr_data.get("state", "unknown")
+                merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
+                head_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha") or head_sha
+                if not source_branch:
+                    source_branch = mr_data.get("source_branch", "")
+                if mr_state in ("merged", "closed"):
+                    state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
+            else:
+                _fallback = gl_ctx or {}
+                return {
+                    "error": f"MR fetch failed: HTTP {mr_resp.status_code}",
+                    "pipeline_status": _fallback.get("pipeline_status", "unknown"),
+                    "mr_state": _fallback.get("mr_state", "unknown"),
+                    "merge_status": _fallback.get("merge_status", "unknown"),
+                    "severity": event.event.evidence.severity if event.event.evidence else "warning",
+                }
 
-                pipeline_id = (gl_ctx or {}).get("pipeline_id")
-                pipelines = await self._fetch_latest_pipeline(
-                    client, headers, encoded_project_id, mr_iid, source_branch,
-                )
-                pipeline_status = "unknown"
-                if pipelines:
-                    pipeline_status = pipelines[0].get("status", "unknown")
-                    pipeline_id = pipelines[0].get("id")
+            pipeline_id = (gl_ctx or {}).get("pipeline_id")
+            pipelines = await self._fetch_latest_pipeline(
+                encoded_project_id, mr_iid, source_branch,
+            )
+            pipeline_status = "unknown"
+            if pipelines:
+                pipeline_status = pipelines[0].get("status", "unknown")
+                pipeline_id = pipelines[0].get("id")
 
         except Exception as e:
             logger.warning(f"refresh_mr_state: GitLab API error for {event_id}: {e}")
@@ -850,17 +992,15 @@ class GitLabPlatform:
     async def poll_gitlab_mr_status(self, project_id: int | str, mr_iid: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Raises on HTTP errors."""
         encoded_project_id = self._enc_project_id(project_id)
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-            mr_resp = await client.get(
-                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
-                headers=self._headers(),
-            )
-            mr_resp.raise_for_status()
-            pipe_resp = await client.get(
-                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/pipelines"),
-                headers=self._headers(),
-            )
-            pipe_resp.raise_for_status()
+        mr_resp = await self._get(
+            self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
+        )
+        mr_resp.raise_for_status()
+        pipe_resp = await self._get(
+            self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}/pipelines"),
+            params={"per_page": "1"},
+        )
+        pipe_resp.raise_for_status()
         mr = mr_resp.json()
         pipelines = pipe_resp.json()
         latest_pipeline = pipelines[0] if isinstance(pipelines, list) and pipelines else {}
@@ -880,12 +1020,10 @@ class GitLabPlatform:
     async def poll_gitlab_pipeline_status(self, project_id: int | str, pipeline_id: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Returns pipeline status."""
         encoded_project_id = self._enc_project_id(project_id)
-        async with httpx.AsyncClient(verify=self._verify, timeout=30) as client:
-            resp = await client.get(
-                self._api_url(f"/projects/{encoded_project_id}/pipelines/{pipeline_id}"),
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
+        resp = await self._get(
+            self._api_url(f"/projects/{encoded_project_id}/pipelines/{pipeline_id}"),
+        )
+        resp.raise_for_status()
         pipeline = resp.json()
         return {
             "pipeline_status": pipeline.get("status", "unknown"),
@@ -911,16 +1049,18 @@ class GitLabPlatform:
             return pid
         except (ValueError, TypeError):
             pass
-        from urllib.parse import quote
-        encoded = quote(str(path_or_id), safe="")
         try:
-            async with httpx.AsyncClient(verify=self._verify, timeout=15) as client:
-                resp = await client.get(
-                    self._api_url(f"/projects/{encoded}"),
-                    headers=self._headers(),
-                )
-                if resp.is_success:
-                    return resp.json().get("id")
+            encoded = self._enc_project_id(path_or_id)
+        except ValueError as e:
+            logger.warning(f"resolve_project_id rejected invalid path {path_or_id!r}: {e}")
+            return None
+        try:
+            resp = await self._get(
+                self._api_url(f"/projects/{encoded}"),
+                timeout=15.0,
+            )
+            if resp.is_success:
+                return resp.json().get("id")
         except Exception as e:
             logger.warning(f"resolve_project_id failed for {path_or_id}: {e}")
         return None
@@ -930,15 +1070,15 @@ class GitLabPlatform:
     # =========================================================================
 
     def _get_token(self) -> str:
-        """Read GitLab token (cached after first read)."""
-        if self._gitlab_token:
-            return self._gitlab_token
+        """Read GitLab token fresh from GitLabTokenAuth (no secondary cache)."""
+        override = self.__dict__.get("_gitlab_token")
+        if override:
+            return override
         from ..utils.gitlab_token import get_gitlab_auth
         auth = get_gitlab_auth()
         if not auth:
             raise RuntimeError("GitLab auth not configured (GITLAB_HOST or token missing)")
-        self._gitlab_token = auth.get_token()
-        return self._gitlab_token
+        return auth.get_token()
 
     def _headers(self) -> dict[str, str]:
         return {"PRIVATE-TOKEN": self._get_token()}
@@ -958,11 +1098,6 @@ class GitLabPlatform:
 
     async def resolve_maintainer(self, project_path: str, todo: dict) -> dict:
         """Resolve maintainer for escalation."""
-        if self._maintainer_source == "smartsheet":
-            maintainer = await self._resolve_from_smartsheet(project_path)
-            if maintainer:
-                return {**maintainer, "source": "smartsheet"}
-
         static_emails = _get_static_maintainer_emails()
         if static_emails:
             return {"source": "static", "emails": static_emails}
@@ -979,36 +1114,20 @@ class GitLabPlatform:
     async def _resolve_email_from_gitlab(self, username: str) -> str | None:
         """Lookup a GitLab user's email by username."""
         try:
-            async with httpx.AsyncClient(verify=self._verify, timeout=10) as client:
-                resp = await client.get(
-                    self._api_url("/users"),
-                    headers=self._headers(),
-                    params={"username": username},
-                )
-                if resp.is_success:
-                    users = resp.json()
-                    if users and users[0].get("public_email"):
-                        return users[0]["public_email"]
-                    if users and users[0].get("email"):
-                        return users[0]["email"]
+            resp = await self._get(
+                self._api_url("/users"),
+                params={"username": username},
+                timeout=10.0,
+            )
+            if resp.is_success:
+                users = resp.json()
+                if users and users[0].get("public_email"):
+                    return users[0]["public_email"]
+                if users and users[0].get("email"):
+                    return users[0]["email"]
         except Exception as e:
             logger.debug(f"GitLab email lookup failed for {username}: {e}")
         return None
-
-    async def _resolve_from_smartsheet(self, project_path: str) -> dict | None:
-        """Resolve from Smartsheet API (lazy-loaded)."""
-        if not self._smartsheet_cache:
-            try:
-                from .headhunter_smartsheet import SmartsheetMaintainerCache
-                token = os.getenv("SMARTSHEET_API_TOKEN", "")
-                sheet_id = os.getenv("SMARTSHEET_SHEET_ID", "")
-                if not token or not sheet_id:
-                    return None
-                self._smartsheet_cache = SmartsheetMaintainerCache(token, sheet_id)
-            except ImportError:
-                return None
-        component = project_path.rsplit("/", 1)[-1] if "/" in project_path else project_path
-        return await self._smartsheet_cache.get_maintainer(component)
 
     async def _resolve_service(self, project_path: str) -> str:
         """Map GitLab project path to Darwin service name."""

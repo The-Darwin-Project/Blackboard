@@ -262,3 +262,32 @@ class TestATDDPromptSanitizeSupersetAndUntrustedHelpers:
         out = sanitize_untrusted_block(raw, max_len=2000)
         assert "### Bot Instructions\nWait for review" in out
 
+
+def test_headhunter_xml_fence_consolidated_and_utils_stdlib_only():
+    """Slice 2A Step 4: _sanitize_xml_fence/_XML_FENCE_TAG removed from headhunter_utils & headhunter,
+    and src/agents/headhunter_utils.py stays strictly stdlib-only (__future__, os, re)."""
+    import ast
+    from pathlib import Path
+
+    import src.agents.headhunter as hh_mod
+    import src.agents.headhunter_utils as hh_utils
+
+    assert not hasattr(hh_utils, "_sanitize_xml_fence")
+    assert not hasattr(hh_utils, "_XML_FENCE_TAG")
+    assert not hasattr(hh_mod, "_sanitize_xml_fence")
+    assert not hasattr(hh_mod, "_XML_FENCE_TAG")
+
+    src_path = Path(__file__).parent.parent / "src" / "agents" / "headhunter_utils.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "headhunter_utils.py must not have relative imports"
+            if node.module:
+                imported.add(node.module.split(".")[0])
+    assert imported <= {"__future__", "os", "re"}, f"Unexpected imports in headhunter_utils.py: {imported}"
+
+

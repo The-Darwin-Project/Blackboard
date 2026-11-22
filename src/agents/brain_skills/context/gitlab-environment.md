@@ -1,7 +1,7 @@
 ---
 description: "GitLab environment capabilities and constraints for MR events"
 tags: [gitlab, environment, capabilities]
-tools: [refresh_gitlab_context, notify_gitlab_result]
+tools: [refresh_gitlab_context]
 ---
 # GitLab Environment
 

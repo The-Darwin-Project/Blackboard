@@ -985,9 +985,8 @@ def _sanitize_error_text(error: "BaseException | str") -> str:
 
 def _sanitize_override_reason(reason: str) -> str:
     """Strip tag-like sequences from a user-supplied override reason before it enters
-    ConversationTurn.thoughts and Brain's own LLM context (equivalent to Headhunter's
-    _sanitize_xml_fence -- length-bounding alone does not stop tag/fence-based prompt
-    injection, codereview finding)."""
+    ConversationTurn.thoughts and Brain's own LLM context (complementing prompt_sanitize.strip_xml_fences
+    -- length-bounding alone does not stop tag/fence-based prompt injection, codereview finding)."""
     return _HTML_TAG_RE.sub('', reason) if reason else reason
 
 
@@ -2229,8 +2228,8 @@ class Brain:
             "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
             "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
             "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context", "get_plan_progress", "defer_event"},
-            "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
-            "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
+            "escalate":  {"report_incident", "notify_user_slack", "close_event", "defer_event"},
+            "close":     {"close_event", "notify_user_slack", "post_sticky_note", "hold_watch"},
         }
         priority_names = _phase_tool_priority.get(brain_phase, set())
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
@@ -6398,27 +6397,8 @@ class Brain:
         """
         idle_min = int(idle_seconds // 60)
 
-        email = None
-        evidence = event.event.evidence
-        if hasattr(evidence, "gitlab_context") and evidence.gitlab_context:
-            gl = evidence.gitlab_context
-            maintainer = gl.get("maintainer", {})
-            emails = maintainer.get("emails", [])
-            if emails:
-                email = emails[0]
-        if not email and hasattr(evidence, "github_context") and evidence.github_context:
-            gh = evidence.github_context
-            maintainer = gh.get("maintainer", {}) if isinstance(gh, dict) else getattr(gh, "maintainer", {})
-            emails = (maintainer or {}).get("emails", [])
-            if emails:
-                email = emails[0]
-        if not email and event.slack_user_id:
-            email = event.slack_user_id
-        if not email:
-            import os as _os
-            static = _os.getenv("HEADHUNTER_MAINTAINERS", "")
-            if static:
-                email = static.split(",")[0].strip()
+        resolved_emails = resolve_maintainer_emails(event, prefer_slack_user=True)
+        email = resolved_emails[0] if resolved_emails else None
 
         escalation_msg = (
             f"Event `{event_id}` has been idle for {idle_min} minutes after "

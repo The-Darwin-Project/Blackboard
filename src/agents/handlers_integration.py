@@ -814,45 +814,6 @@ async def handle_refresh_kargo_context(
 
 
 # ---------------------------------------------------------------------------
-# notify_gitlab_result
-# ---------------------------------------------------------------------------
-async def handle_notify_gitlab_result(
-    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
-) -> bool:
-    bb = ctx.get_blackboard()
-    event_doc = await bb.get_event(event_id)
-    gl_ctx = None
-    if event_doc and event_doc.event.evidence:
-        ev = event_doc.event.evidence
-        gl_ctx = getattr(ev, "gitlab_context", None) if hasattr(ev, "gitlab_context") else None
-    if not gl_ctx:
-        result_text = "Cannot notify GitLab: no gitlab_context in event evidence. This tool is for headhunter-sourced events only."
-        await ctx.emit_pulse(event_id, [("tool:notify_gitlab_result", "tool", 0.3)])
-    else:
-        project_id = args.get("project_id", gl_ctx.get("project_id"))
-        mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
-        result_type = args.get("result", "success")
-        summary = str(args.get("summary") or "")
-        reassign = args.get("reassign_reviewer", False)
-        result_text = (
-            f"GitLab notification queued: {result_type} on !{mr_iid} (project {project_id}). "
-            f"Summary: {summary[:200]}. Reassign reviewer: {reassign}. "
-            f"Feedback will be posted by Headhunter feedback loop on event close."
-        )
-        logger.info(f"notify_gitlab_result: event={event_id} project={project_id} mr=!{mr_iid} result={result_type}")
-    turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
-        actor="brain",
-        action="notify",
-        thoughts=result_text,
-        waitingFor="notify_gitlab_result",
-        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
-    )
-    await ctx.append_and_broadcast(event_id, turn)
-    return True
-
-
-# ---------------------------------------------------------------------------
 # search_open_incidents
 # ---------------------------------------------------------------------------
 async def handle_search_open_incidents(
@@ -1565,7 +1526,6 @@ HANDLER_REGISTRY["transition_jira_issue"] = handle_transition_jira_issue
 HANDLER_REGISTRY["refresh_gitlab_context"] = handle_refresh_gitlab_context
 HANDLER_REGISTRY["refresh_kargo_context"] = handle_refresh_kargo_context
 HANDLER_REGISTRY["refresh_github_context"] = handle_refresh_github_context
-HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result
 HANDLER_REGISTRY["search_open_incidents"] = handle_search_open_incidents
 HANDLER_REGISTRY["greenwave"] = handle_greenwave
 HANDLER_REGISTRY["ask_release_ai"] = handle_ask_release_ai

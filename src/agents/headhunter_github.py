@@ -14,7 +14,8 @@
 #    via close_installation_manager(); close() only closes an injected _manager).
 #    _resolve_client(installation_id, owner, repo) is the unified client resolution helper used by
 #    ALL label/comment/context call sites -- direct ID lookup, falling back to repo->installation cache.
-# 8. [Pattern]: Label/comment helpers never raise; _add_labels() and _remove_label() return bool so callers
+# 8. [Pattern]: Label/comment helpers never raise; _add_labels() and _remove_label() return _LabelResult
+#    (truthy on success, .permanent distinguishes permanent 403/404 from transient errors) so callers
 #    can enforce add-before-remove ordering and retry on failure. URL-encode labels in DELETE path.
 # 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
 # 10. [Pattern]: Re-trigger via darwin-done + SHA comparison (Redis HASH darwin:github:pr_sha).
@@ -59,6 +60,7 @@ Also exposes Brain-facing methods for refresh_github_context and StateWatcher in
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -73,7 +75,8 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int, _sanitize_xml_fence
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
+from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 
 logger = logging.getLogger(__name__)
 
@@ -347,9 +350,16 @@ class GitHubPlatform:
         return await self._get_client_for_repo(owner, repo)
 
     async def close(self) -> None:
-        """Shut down all persistent HTTP clients."""
-        if self._manager:
-            await self._manager.close_all()
+        """Close an injected test manager only; never close the borrowed shared singleton.
+
+        main.py lifespan is the sole teardown owner of get_installation_manager()
+        via close_installation_manager() (github_app.py @ai-rules #7).
+        """
+        if self._manager is not None:
+            from ..utils.github_app import is_shared_installation_manager
+
+            if not is_shared_installation_manager(self._manager):
+                await self._manager.close_all()
             self._manager = None
 
     async def _collect_active_refs(
@@ -465,21 +475,39 @@ class GitHubPlatform:
 
         installations = await manager.get_clients_with_repos()
 
+        attempted = 0
+        errors: list[BaseException] = []
+
         async def _poll_one(inst_id: str, client, inst_repos: list[str]) -> list[dict]:
+            nonlocal attempted
             effective_repos = (
                 [r for r in inst_repos if r in set(self._repos)] if self._repos else inst_repos
             )
             if not effective_repos:
                 return []
+            attempted += 1
             try:
                 return await self._list_from_repos(client, effective_repos, inst_id)
             except Exception as e:
+                errors.append(e)
                 logger.warning(f"GitHub PR poll failed for installation {inst_id}: {e}")
                 return []
 
         results = await asyncio.gather(
             *[_poll_one(inst_id, client, repos) for inst_id, client, repos in installations],
         )
+        if attempted > 0 and len(errors) == attempted:
+            from .headhunter_models import HeadhunterCircuitBreaker
+
+            if all(HeadhunterCircuitBreaker.is_auth_exempt(err) for err in errors):
+                raise errors[0]
+            non_auth = next(
+                (err for err in errors if not HeadhunterCircuitBreaker.is_auth_exempt(err)),
+                errors[0],
+            )
+            raise RuntimeError(
+                f"GitHub PR poll failed across all {attempted} installation(s)"
+            ) from non_auth
         prs = [pr for batch in results for pr in batch]
         self._last_open_prs = prs
 
@@ -682,22 +710,40 @@ class GitHubPlatform:
             log_url = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + (
                 "?..." if parsed.query else ""
             )
+            # Enforce https:// scheme before any outbound HTTP call
+            if (parsed.scheme or "").lower() != "https":
+                logger.warning(f"Rejected non-HTTPS issue skill URL for {label_key}: {log_url}")
+                continue
+            from ..utils.tls import resolve_ca_bundle
+
+            # Resolve CA bundle outside try/except so GITLAB_SSL_VERIFY=false fails closed with ValueError
+            ca_bundle = resolve_ca_bundle()
             try:
-                async with httpx.AsyncClient(timeout=10.0) as http:
-                    resp = await http.get(url)
-                    resp.raise_for_status()
-                    content = resp.text.strip()
+                async with httpx.AsyncClient(
+                    timeout=10.0, verify=ca_bundle, follow_redirects=False,
+                ) as http:
+                    oversized = False
+                    async with http.stream("GET", url) as resp:
+                        resp.raise_for_status()
+                        buf = bytearray()
+                        async for chunk in resp.aiter_bytes(chunk_size=1024):
+                            buf.extend(chunk)
+                            if len(buf) > 10240:
+                                oversized = True
+                                break
+                    content = bytes(buf).decode("utf-8", errors="replace").strip() if not oversized else ""
+
+                    if oversized:
+                        logger.warning(
+                            f"Skill URL {log_url} exceeds 10KB (>10240 bytes), using fallback"
+                        )
+                        self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
+                        warning = (
+                            f"Darwin skill file at `{log_url}` exceeds the 10KB size limit. "
+                            "Using default triage. Please reduce the skill file size."
+                        )
+                        return _EMERGENCY_ISSUE_SI, warning
                     if content:
-                        if len(content) > 10240:
-                            logger.warning(
-                                f"Skill URL {log_url} exceeds 10KB ({len(content)} bytes), using fallback"
-                            )
-                            self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
-                            warning = (
-                                f"Darwin skill file at `{log_url}` exceeds the 10KB size limit. "
-                                "Using default triage. Please reduce the skill file size."
-                            )
-                            return _EMERGENCY_ISSUE_SI, warning
                         self._issue_skill_cache[label_key] = (content, now + 300)
                         return content, None
                     logger.warning(f"Issue skill URL returned empty content for {label_key}")
@@ -1011,7 +1057,7 @@ class GitHubPlatform:
         plan_text comes from the orchestrator's analyze_and_plan call.
         When omitted (legacy/emergency path), a stub plan is generated inline.
         Label ordering: ADD darwin-active BEFORE removing darwin-work (prevents orphan).
-        Issue body truncated to 2000 chars with XML fence (prompt injection defense).
+        Issue body sanitized via prompt_sanitize.sanitize_untrusted_block (prompt injection defense).
         Returns event ID.
         """
         from ..models import EventEvidence
@@ -1027,12 +1073,12 @@ class GitHubPlatform:
         )
         # Warning string injected by _github_poll_issues when skill URL exceeded 10KB cap
         skill_size_warning: str | None = issue.get("_skill_size_warning")
-        # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content.
-        # Same linear, multi-pass sanitizer as every other prompt fence (single-pass replace is bypassable).
-        body_sanitized = _sanitize_xml_fence((issue.get("body") or "")[:_DESC_SAFETY_CAP])
+        # Sanitize before XML fence to prevent prompt injection via </issue_body>, PII, or [!call:
+        body_sanitized = sanitize_untrusted_block(issue.get("body") or "", max_len=_DESC_SAFETY_CAP)
+        safe_title = sanitize_untrusted_line(issue.get("issue_title") or "", max_len=200)
 
         evidence = EventEvidence(
-            display_text=f"GitHub Issue #{number}: {issue.get('issue_title', '')} in {owner}/{repo}",
+            display_text=f"GitHub Issue #{number}: {safe_title} in {owner}/{repo}",
             source_type="headhunter",
             triggered_by="github-issue",
             domain="disorder",
@@ -1052,18 +1098,21 @@ class GitHubPlatform:
                 "author": issue.get("author", ""),
                 "created_at": issue.get("created_at", ""),
                 "skill_label": skill_label,
+                "maintainer": self._resolve_maintainer(),
             },
         )
 
         service = repo or "general"
         if not plan_text:
+            plan_scalar = json.dumps(f"Triage GitHub Issue #{number}: {safe_title}")
+            summary_scalar = json.dumps(f"Analyse issue #{number} in {owner}/{repo}")
             plan_text = (
-                f"---\nplan: Triage GitHub Issue #{number}: {issue.get('issue_title', '')}\n"
+                f"---\nplan: {plan_scalar}\n"
                 f"service: {service}\nrepository: {owner}/{repo}\n"
                 f"risk: medium\n"
                 f"reasoning: GitHub issue requires triage\n"
                 f"steps:\n  - id: \"1\"\n    agent: architect\n"
-                f"    summary: \"Analyse issue #{number} in {owner}/{repo}\"\n---"
+                f"    summary: {summary_scalar}\n---"
             )
 
         event_id = await self.blackboard.create_event(
@@ -1078,10 +1127,11 @@ class GitHubPlatform:
         # Mark processed BEFORE label swap — dedup survives a label API failure on next cycle
         await self.blackboard.set_github_issue_processed(owner, repo, number)
 
-        # Label swap: ADD active BEFORE removing work/queued
-        await self._add_labels(installation_id, owner, repo, number, [self._active_label])
-        await self._remove_label(installation_id, owner, repo, number, self._work_label)
-        await self._remove_label(installation_id, owner, repo, number, self._queued_label)
+        # Label swap: ADD active BEFORE removing work/queued (gated on add success)
+        added = await self._add_labels(installation_id, owner, repo, number, [self._active_label])
+        if added:
+            await self._remove_label(installation_id, owner, repo, number, self._work_label)
+            await self._remove_label(installation_id, owner, repo, number, self._queued_label)
 
         cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
         if cortex_url and cortex_url.startswith(("https://", "http://")):
@@ -1112,9 +1162,23 @@ class GitHubPlatform:
         if not owner or not repo or not number:
             return
 
-        # Label swap: ADD done BEFORE removing active
-        await self._add_labels(installation_id, owner, repo, number, [self._done_label])
-        await self._remove_label(installation_id, owner, repo, number, self._active_label)
+        # Label swap: ADD done BEFORE removing active (gated on add success).
+        # Permanent 403/404 proceeds to avoid a 24h retry loop; transient errors return early to retry.
+        added = await self._add_labels(installation_id, owner, repo, number, [self._done_label])
+        if not added:
+            if getattr(added, "permanent", False):
+                logger.warning(
+                    f"GitHub issue feedback label add permanently failed (403/404) for {event.id} "
+                    f"({owner}/{repo}#{number}); proceeding without retrying"
+                )
+            else:
+                logger.warning(
+                    f"GitHub issue feedback label swap aborted for {event.id} ({owner}/{repo}#{number}): "
+                    f"failed to add {self._done_label}; will retry"
+                )
+                return
+        if added:
+            await self._remove_label(installation_id, owner, repo, number, self._active_label)
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
@@ -1942,12 +2006,13 @@ class GitHubPlatform:
     # Queue Helpers
     # =========================================================================
 
-    async def _queue_pr(self, pr: dict, position: int) -> None:
+    async def _queue_pr(self, pr: dict, position: int) -> bool:
         """Acknowledge a PR into the darwin-queued state.
 
         Label ordering: ADD darwin-queued BEFORE removing darwin-review (prevents orphan).
-        Comment is informational — failure is silent (best-effort).
+        Comment is informational — failure is silent (best-effort) and gated on label add success.
         Idempotency: if darwin-queued already present (pod restart), skip comment.
+        Returns True if the label was added successfully, False otherwise.
         """
         owner = pr["owner"]
         repo = pr["repo"]
@@ -1956,24 +2021,27 @@ class GitHubPlatform:
         labels = set(pr.get("labels", []))
         already_queued = self._queued_label in labels
 
-        await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
-        await self._remove_label(installation_id, owner, repo, number, self._trigger_label)
+        added = await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
+        if added:
+            await self._remove_label(installation_id, owner, repo, number, self._trigger_label)
 
-        if not already_queued:
+        if added and not already_queued:
             await self._post_comment(
                 installation_id, owner, repo, number,
                 f"**Darwin** acknowledged your PR — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
+        return bool(added)
 
-    async def _queue_issue(self, issue: dict, position: int) -> None:
+    async def _queue_issue(self, issue: dict, position: int) -> bool:
         """Acknowledge a GitHub Issue into the darwin-queued state.
 
         Unlike _queue_pr, this does NOT remove darwin-work: `_poll_issues` filters
         server-side on `labels=darwin-work`, so removing it here would make queued
         issues invisible to future polls. darwin-queued is purely additive.
-        Comment is informational — failure is silent (best-effort).
+        Comment is informational — failure is silent (best-effort) and gated on label add success.
         Idempotency: if darwin-queued already present (pod restart), skip comment.
+        Returns True if the label was added successfully, False otherwise.
         """
         owner = issue["owner"]
         repo = issue["repo"]
@@ -1982,14 +2050,15 @@ class GitHubPlatform:
         labels = set(issue.get("labels", []))
         already_queued = self._queued_label in labels
 
-        await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
+        added = await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
 
-        if not already_queued:
+        if added and not already_queued:
             await self._post_comment(
                 installation_id, owner, repo, number,
                 f"**Darwin** acknowledged this issue — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
+        return bool(added)
 
     # =========================================================================
     # Label / Comment Helpers (best-effort, never raise)

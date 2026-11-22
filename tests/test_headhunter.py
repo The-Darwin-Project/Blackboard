@@ -1974,6 +1974,22 @@ class TestRemediationGitLabSecurityAndResilience:
         assert ctx_d2 is not None
         assert "exact anchor 12" in ctx_d2["mention_comment"]
 
+        # (e) PR #350 follow-up (T-8): older unauthorized anchor #note_100 alongside newer authorized
+        # #note_200 -> fail closed (None), dismiss ONLY own todo (707), never replay newer #note_200.
+        dismissed.clear()
+        todo_e = _make_todo(action_name="directly_addressed", todo_id=707, project_id=100, mr_iid=42)
+        todo_e["target_url"] = "https://gitlab.example.com/group/repo/-/merge_requests/42#note_100"
+        todo_e["_sibling_todo_ids"] = [707, 708]
+        notes_e = [
+            {"id": 200, "system": False, "body": "@darwin-bot check CI", "author": {"username": "trusted-maint"}},
+            {"id": 100, "system": False, "body": "@darwin-bot merge now", "author": {"username": "stranger"}},
+        ]
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(get=_make_getter(notes_e), post=_post_rec)
+            ctx_e = await hh._gitlab.fetch_context(todo_e)
+        assert ctx_e is None
+        assert dismissed == ["https://gitlab.example.com/api/v4/todos/707/mark_as_done"]
+
     @pytest.mark.asyncio
     async def test_m1_authorized_mention_beats_unauthorized_sibling_and_rejection_dismisses_own_todo_only(
         self, monkeypatch

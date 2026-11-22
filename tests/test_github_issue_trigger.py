@@ -166,7 +166,7 @@ async def test_queue_pr_label_ordering():
     """darwin-queued must be ADDED before darwin-review is REMOVED."""
     platform, _ = _make_platform()
     call_order = []
-    platform._add_labels = AsyncMock(side_effect=lambda *a, **kw: call_order.append("add"))
+    platform._add_labels = AsyncMock(side_effect=lambda *a, **kw: call_order.append("add") or True)
     platform._remove_label = AsyncMock(side_effect=lambda *a, **kw: call_order.append("remove"))
     platform._post_comment = AsyncMock()
 
@@ -271,13 +271,17 @@ async def test_issue_skill_url_failure_uses_fallback():
     platform, _ = _make_platform()
     platform._issue_skill_urls = {"darwin_general": "https://bad.example.com/skill.md"}
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
-        mock_client_cls.return_value = mock_client
+    def _fail_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
 
+    real_async_client = httpx.AsyncClient
+    with patch(
+        "httpx.AsyncClient",
+        side_effect=lambda *a, **kw: real_async_client(
+            transport=httpx.MockTransport(_fail_handler),
+            follow_redirects=kw.get("follow_redirects", False),
+        ),
+    ):
         si, warning = await platform._load_issue_triage_instruction(["darwin_general"])
 
     assert si == _EMERGENCY_ISSUE_SI
