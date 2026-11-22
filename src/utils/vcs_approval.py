@@ -8,9 +8,11 @@
 # 3. [Security]: TLS verification is NEVER disabled on these calls -- GITLAB_HOST and
 #    api.github.com are both CA-signed; verify=False would let a MITM forge the live SHA
 #    this module exists to protect against. resolve_ca_bundle() is the SINGLE trust resolver for
-#    every VCS client (this module AND headhunter_gitlab.py): it raises ValueError on
+#    every VCS client (this module, headhunter_gitlab.py, AND routes/queue.py): it raises ValueError on
 #    GITLAB_SSL_VERIFY=0/false/no and only accepts non-empty regular files as CA bundles (an empty
 #    or directory path is skipped, never handed to httpx). `_resolve_ca_bundle` is a back-compat alias.
+#    normalize_gitlab_host() is the single GITLAB_HOST normalizer shared across this module,
+#    headhunter_gitlab.py, and routes/queue.py.
 # 4. [Pattern]: verify_merge_guard() is the Python REFERENCE implementation of the approval verdict (out-of-band
 #    approval + SHA binding for category 'git_merge'; approval only for 'operational'). The sidecar enforces the same
 #    contract in JS (gemini-sidecar/hooks/merge-guard.js approvalVerdict) -- keep the two in lock-step; the parity is
@@ -20,6 +22,7 @@
 #    'operational' is treated as 'git_merge'.
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import urllib.parse
@@ -27,10 +30,20 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from .github_app import get_installation_manager
+
 if TYPE_CHECKING:
     from ..models import EventDocument
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_gitlab_host(raw: str) -> str:
+    """Normalize GITLAB_HOST by stripping scheme and trailing slashes; reject invalid host chars."""
+    host = (raw or "").strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    if not host or any(ch.isspace() or ch in "@?#" for ch in host):
+        return ""
+    return host
 
 
 def parse_mr_url(url: str) -> tuple[int | str, int] | None:
@@ -151,7 +164,7 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
         return (mr_iid or None, None)
 
     encoded_project_id = urllib.parse.quote(urllib.parse.unquote(str(project_id)), safe="")
-    host = os.getenv("GITLAB_HOST", "").removeprefix("https://").removeprefix("http://").rstrip("/")
+    host = normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
     token = ""
     try:
         from .gitlab_token import get_gitlab_auth
@@ -182,7 +195,10 @@ async def _resolve_gitlab_head(gl_ctx: dict) -> tuple[str | None, str | None]:
                         mr_iid, resp.status_code,
                     )
         except Exception as e:
-            logger.warning("Failed live GitLab HEAD SHA query for MR !%s: %s -- merge guard will refuse unverified SHA", mr_iid, e)
+            logger.warning(
+                "Failed live GitLab HEAD SHA query for MR !%s (%s) -- merge guard will refuse unverified SHA",
+                mr_iid, type(e).__name__,
+            )
 
     return mr_iid, None
 
@@ -200,7 +216,32 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
     if not owner or not repo or not pr_number:
         return (pr_number or None, None)
 
-    token = os.getenv("GITHUB_TOKEN", "")
+    token = ""
+    try:
+        mgr = get_installation_manager()
+        if mgr is not None:
+            async def _fetch_app_token() -> tuple[object | None, str]:
+                found = await mgr.get_client_for_repo(owner, repo)
+                if found is None:
+                    return None, ""
+                _, gh_client = found
+                return found, await gh_client.get_token()
+
+            res, token = await asyncio.wait_for(_fetch_app_token(), timeout=10)
+            if res is None:
+                logger.warning(
+                    "GitHub App installation lookup missed repo %s/%s for PR #%s -- falling back to GITHUB_TOKEN",
+                    owner, repo, pr_number,
+                )
+    except Exception as e:
+        logger.warning(
+            "GitHub App token resolution failed for %s/%s PR #%s (%s) -- falling back to GITHUB_TOKEN",
+            owner, repo, pr_number, type(e).__name__,
+        )
+        token = ""
+
+    if not token:
+        token = os.getenv("GITHUB_TOKEN", "")
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -227,7 +268,10 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
                     pr_number, resp.status_code,
                 )
     except Exception as e:
-        logger.warning("Failed live GitHub HEAD SHA query for PR #%s: %s -- merge guard will refuse unverified SHA", pr_number, e)
+        logger.warning(
+            "Failed live GitHub HEAD SHA query for PR #%s (%s) -- merge guard will refuse unverified SHA",
+            pr_number, type(e).__name__,
+        )
 
     return pr_number, None
 

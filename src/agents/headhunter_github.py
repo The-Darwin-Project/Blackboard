@@ -9,10 +9,13 @@
 # 5. [Pattern]: _load_github_si() loads from headhunter_skills/github-pr-triage.md with emergency fallback.
 #    _load_issue_triage_instruction() loads from URL (HEADHUNTER_GITHUB_SKILL_<LABEL>), 5-min cache.
 # 6. [Gotcha]: mergeable excluded from state_key (flaps during CI runs).
-# 7. [Pattern]: Lazy-init MultiInstallationManager via _get_manager() — never raises in constructor.
+# 7. [Pattern]: _get_manager() returns injected _manager or borrows the shared MultiInstallationManager
+#    singleton via utils/github_app.get_installation_manager() (sole teardown owner is main.py lifespan
+#    via close_installation_manager(); close() only closes an injected _manager).
 #    _resolve_client(installation_id, owner, repo) is the unified client resolution helper used by
 #    ALL label/comment/context call sites -- direct ID lookup, falling back to repo->installation cache.
-# 8. [Pattern]: Label/comment helpers are best-effort (never raise). URL-encode labels in DELETE path.
+# 8. [Pattern]: Label/comment helpers never raise; _add_labels() and _remove_label() return bool so callers
+#    can enforce add-before-remove ordering and retry on failure. URL-encode labels in DELETE path.
 # 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
 # 10. [Pattern]: Re-trigger via darwin-done + SHA comparison (Redis HASH darwin:github:pr_sha).
 # 11. [Pattern]: _queue_pr() ADD new label BEFORE removing old (prevents orphan on partial failure).
@@ -287,17 +290,11 @@ class GitHubPlatform:
         )
 
     def _get_manager(self):
-        """Lazy-init MultiInstallationManager. Returns None if auth is unavailable."""
-        if self._manager is None:
-            try:
-                from ..utils.github_app import MultiInstallationManager
-                self._manager = MultiInstallationManager(
-                    filter_installation_id=os.getenv("GITHUB_INSTALLATION_ID") or None,
-                )
-            except Exception as e:
-                logger.warning(f"GitHub manager init failed: {e}")
-                return None
-        return self._manager
+        """Return injected _manager or borrow the shared MultiInstallationManager singleton."""
+        if self._manager is not None:
+            return self._manager
+        from ..utils.github_app import get_installation_manager
+        return get_installation_manager()
 
     async def _get_client_for(self, installation_id: str):
         """Direct lookup by installation_id. None if manager/installation unavailable."""
@@ -481,6 +478,11 @@ class GitHubPlatform:
 
             labels = set(pr.get("labels", []))
             if self._active_label in labels:
+                if self._trigger_label in labels:
+                    logger.debug(
+                        f"GitHub poll: skipping {pr['owner']}/{pr['repo']}#{pr['number']} "
+                        f"carrying both {self._active_label} and {self._trigger_label}"
+                    )
                 continue
 
             if self._trigger_label in labels:
@@ -646,8 +648,19 @@ class GitHubPlatform:
             cached = self._issue_skill_cache.get(label_key)
             if cached and now < cached[1]:
                 return cached[0], None
-            # Redact query params before logging — credentials may appear in query string
-            log_url = url.split("?")[0] + ("?..." if "?" in url else "")
+            # Redact userinfo, query params, and fragment before logging or posting to GitHub
+            parsed = urllib.parse.urlsplit(url)
+            host = parsed.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            try:
+                port_part = f":{parsed.port}" if parsed.port is not None else ""
+            except ValueError:
+                port_part = ""
+            netloc = f"{host}{port_part}"
+            log_url = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", "")) + (
+                "?..." if parsed.query else ""
+            )
             try:
                 async with httpx.AsyncClient(timeout=10.0) as http:
                     resp = await http.get(url)
@@ -660,7 +673,7 @@ class GitHubPlatform:
                             )
                             self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
                             warning = (
-                                f"Darwin skill file at `{url}` exceeds the 10KB size limit. "
+                                f"Darwin skill file at `{log_url}` exceeds the 10KB size limit. "
                                 "Using default triage. Please reduce the skill file size."
                             )
                             return _EMERGENCY_ISSUE_SI, warning
@@ -677,7 +690,7 @@ class GitHubPlatform:
                     logger.warning(f"Issue skill fetch failed ({e.response.status_code}) for {label_key}")
                     self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 60)
             except Exception as e:
-                logger.warning(f"Issue skill fetch error for {label_key}: {e}")
+                logger.warning(f"Issue skill fetch error ({type(e).__name__}) for {label_key} at {log_url}")
         return _EMERGENCY_ISSUE_SI, None
 
     @staticmethod
@@ -890,6 +903,7 @@ class GitHubPlatform:
             "installation_id": work_item.get("installation_id", ""),
             "pr_number": pr_number,
             "pr_title": context.get("pr_title", ""),
+            "pr_body": context.get("pr_body", ""),
             "pr_state": context.get("pr_state", "open"),
             "pr_url": context.get("pr_url", f"https://github.com/{owner}/{repo}/pull/{pr_number}"),
             "check_status": check_status,
@@ -950,10 +964,12 @@ class GitHubPlatform:
         )
         logger.info(f"GitHub event created: {event_id} for {action} on #{pr_number} in {owner}/{repo}")
 
-        await self._remove_label(installation_id, owner, repo, pr_number, self._trigger_label)
-        await self._remove_label(installation_id, owner, repo, pr_number, self._done_label)
-        await self._remove_label(installation_id, owner, repo, pr_number, self._queued_label)
-        await self._add_labels(installation_id, owner, repo, pr_number, [self._active_label])
+        # Label swap: ADD active BEFORE removing trigger/done/queued (prevents orphan on partial failure)
+        added = await self._add_labels(installation_id, owner, repo, pr_number, [self._active_label])
+        if added:
+            await self._remove_label(installation_id, owner, repo, pr_number, self._trigger_label)
+            await self._remove_label(installation_id, owner, repo, pr_number, self._done_label)
+            await self._remove_label(installation_id, owner, repo, pr_number, self._queued_label)
         cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
         if cortex_url and cortex_url.startswith(("https://", "http://")):
             link = f" [{event_id}]({cortex_url}/events/{event_id})"
@@ -1091,6 +1107,8 @@ class GitHubPlatform:
 
     async def post_feedback(self, event: object) -> None:
         """Post resolution feedback as PR comment + label lifecycle (active→done)."""
+        if await self.blackboard.is_feedback_sent(event.id):
+            return
         gh_ctx = None
         if hasattr(event, "event") and event.event.evidence and hasattr(event.event.evidence, "github_context"):
             gh_ctx = event.event.evidence.github_context
@@ -1121,8 +1139,21 @@ class GitHubPlatform:
             await self.blackboard.mark_feedback_sent(event.id)
             return
 
-        await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
-        await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
+        # Label swap: ADD done BEFORE removing active (prevents orphan on partial failure)
+        added = await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
+        if not added:
+            logger.warning(
+                f"GitHub feedback label swap aborted for {event.id} ({owner}/{repo}#{pr_number}): "
+                f"failed to add {self._done_label}; will retry"
+            )
+            return
+        removed = await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
+        if not removed:
+            logger.warning(
+                f"GitHub feedback label swap incomplete for {event.id} ({owner}/{repo}#{pr_number}): "
+                f"failed to remove {self._active_label}; will retry"
+            )
+            return
 
         # Fetch live HEAD SHA — evidence value is stale if FRIDAY pushed commits during review
         head_sha = ""
@@ -1946,33 +1977,38 @@ class GitHubPlatform:
         except Exception:
             pass
 
-    async def _add_labels(self, installation_id: str, owner: str, repo: str, pr_number: int, labels: list[str]) -> None:
-        """Best-effort: ensure labels exist on repo, then add to PR."""
+    async def _add_labels(self, installation_id: str, owner: str, repo: str, pr_number: int, labels: list[str]) -> bool:
+        """Best-effort: ensure labels exist on repo, then add to PR. Returns True on success."""
         client = await self._resolve_client(installation_id, owner, repo)
         if not client:
-            return
+            return False
         for label in labels:
             await self._ensure_label_exists(installation_id, owner, repo, label)
         try:
             await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/labels", json={"labels": labels})
+            return True
         except httpx.HTTPStatusError as e:
             logger.warning(f"Label add failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {labels}")
         except Exception as e:
             logger.warning(f"Label add error for {owner}/{repo}#{pr_number}: {e}")
+        return False
 
-    async def _remove_label(self, installation_id: str, owner: str, repo: str, pr_number: int, label: str) -> None:
-        """Best-effort: remove label from PR. 404 is expected and silenced."""
+    async def _remove_label(self, installation_id: str, owner: str, repo: str, pr_number: int, label: str) -> bool:
+        """Best-effort: remove label from PR. Returns True on 2xx or 404 (already absent)."""
         client = await self._resolve_client(installation_id, owner, repo)
         if not client:
-            return
+            return False
         encoded = urllib.parse.quote(label, safe="")
         try:
             await client.delete(f"/repos/{owner}/{repo}/issues/{pr_number}/labels/{encoded}")
+            return True
         except httpx.HTTPStatusError as e:
-            if e.response.status_code != 404:
-                logger.warning(f"Label remove failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {label}")
+            if e.response.status_code == 404:
+                return True
+            logger.warning(f"Label remove failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {label}")
         except Exception as e:
             logger.warning(f"Label remove error for {owner}/{repo}#{pr_number}: {e}")
+        return False
 
     async def _post_comment(self, installation_id: str, owner: str, repo: str, pr_number: int, body: str) -> bool:
         """Best-effort: post comment on PR. Never raises; returns True only if the comment was posted."""

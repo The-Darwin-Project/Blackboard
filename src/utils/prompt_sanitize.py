@@ -1,7 +1,8 @@
 # src/utils/prompt_sanitize.py
 # @ai-rules:
-# 1. [Constraint]: Pure, sync, dependency-free -- imported by auth.py, agents/llm/prompt.py and
-#    agents/context_parts.py. Do NOT import from src.agents or src.auth here (import cycles).
+# 1. [Constraint]: Pure, sync, stdlib + intra-utils (.pii_redaction, re-only) -- imported by auth.py,
+#    agents/llm/prompt.py, agents/context_parts.py, agents/brain.py, and agents/headhunter.py.
+#    Do NOT import from src.agents or src.auth here (import cycles).
 # 2. [Pattern]: Line-breaking chars (\t \n \r \v \f, C1 NEL, U+2028/U+2029) become a single space so
 #    text stays on one line; every other control/format char is dropped. Length cap is applied LAST.
 #    Dropped set: C0/DEL/C1 controls, soft hyphen, ALM, CGJ (034F), Mongolian FVS/vowel separator
@@ -14,10 +15,10 @@
 # 5. [Pattern]: sanitize_title/fallback_title are the single title pipeline (PATCH validator, LLM namer,
 #    chat/slack fallbacks): line breaks -> space FIRST, then strip invisibles, then collapse \s+, cap LAST.
 # 6. [Security]: strip_xml_fences is the SINGLE prompt-fence sanitizer (context_parts, prompt, brain,
-#    handlers_cross_event). It removes the full tag union and LOOPS until unchanged so nested split tags
-#    ("</func</functionResponse>tionResponse>") cannot reassemble a fence. Callers that also redact PII MUST
-#    strip first, redact second, defang "[!call:" third, truncate LAST (a fence spliced inside a secret
-#    would otherwise defeat redaction and rejoin after the strip).
+#    headhunter, handlers_cross_event). It removes the full tag union and LOOPS until unchanged so nested
+#    split tags ("</func</functionResponse>tionResponse>") cannot reassemble a fence. Callers that also
+#    redact PII MUST strip first, redact second, defang "[!call:" (case/whitespace-insensitive) third,
+#    truncate LAST (a fence spliced inside a secret would otherwise defeat redaction and rejoin after strip).
 # 7. [Security]: CONTROL_TOKEN_NAMES/CONTROL_TOKEN_PATTERN are the SINGLE definition of model control tokens
 #    (<end_of_image>, <start_of_turn>, <thought>, ...; optional "/" and whitespace before ">", case-insensitive).
 #    strip_control_tokens is the shared bounded fixed-point stripper (_CONTROL_TOKEN_MAX_PASSES, early exit when
@@ -27,6 +28,8 @@
 from __future__ import annotations
 
 import re
+
+from .pii_redaction import redact_pii
 
 # Cap for human display names rendered into prompts / [USER <name>] turn prefixes.
 PROMPT_NAME_MAX_LEN = 80
@@ -40,10 +43,17 @@ _LINE_BREAKERS = re.compile("[\\t\\n\\r\\x0b\\x0c\\x85\\u2028\\u2029]")
 # (2060-206F, includes bidi isolates 2066-2069), variation selectors (FE00-FE0F), the BOM/ZWNBSP,
 # Unicode Tag chars (E0000-E007F, used to smuggle invisible ASCII payloads) and the variation
 # selectors supplement (E0100-E01EF).
-_STRIP_CHARS = re.compile(
-    "[\\x00-\\x1f\\x7f-\\x9f\\u00ad\\u034f\\u061c\\u180b-\\u180e\\u200b-\\u200f\\u202a-\\u202e"
-    "\\u2060-\\u206f\\ufe00-\\ufe0f\\ufeff\\U000e0000-\\U000e007f\\U000e0100-\\U000e01ef]"
+_INVISIBLE_CLASS = (
+    "\\x7f-\\x9f\\u00ad\\u034f\\u061c\\u180b-\\u180e\\u200b-\\u200f\\u202a-\\u202e"
+    "\\u2060-\\u206f\\ufe00-\\ufe0f\\ufeff\\U000e0000-\\U000e007f\\U000e0100-\\U000e01ef"
 )
+_STRIP_CHARS = re.compile("[\\x00-\\x1f" + _INVISIBLE_CLASS + "]")
+
+# Multiline-safe variant of _STRIP_CHARS: preserves \t (\x09) and \n (\x0a) for Markdown blocks.
+_MULTILINE_STRIP_CHARS = re.compile("[\\x00-\\x08\\x0b-\\x1f" + _INVISIBLE_CLASS + "]")
+
+# Case- and whitespace-insensitive defang for synthetic tool-call syntax (`[!call:`, `[!\tCALL:`, etc.).
+_CALL_TAG_RE = re.compile(r"\[\s*!\s*call\s*:", re.IGNORECASE)
 
 
 def sanitize_prompt_text(value: object, *, max_len: int) -> str:
@@ -54,21 +64,25 @@ def sanitize_prompt_text(value: object, *, max_len: int) -> str:
     return text[:max_len]
 
 
-# Every delimiter an untrusted string must not be able to forge inside a Brain prompt. Union of the
-# per-module lists that previously diverged (context_parts, prompt, brain). Literal alternation only
-# (no quantifiers), so matching is linear in the input length.
+# Every delimiter an untrusted string must not be able to forge inside a Brain or Headhunter prompt.
+# All XML tag patterns use bounded linear attribute runs ([^<>]{0,512}>)? so matching is O(n) and an
+# unclosed opening tag cannot swallow trailing text.
 _FENCE_TAGS = (
-    "</blackboard_evidence_reference>",
-    "<functionResponse>", "</functionResponse>",
-    "<functionCall>", "</functionCall>",
-    "<context>", "</context>",
-    "<description>", "</description>",
-    "</job_log>", "</comments>", "</mention_request>", "</issue_body>",
     "--- CONVERSATION ---",
 )
-# The decay-reference OPEN tag is removed WITH its attributes (bounded, no nested quantifier): leaving
-# `turn="9" tool="x">` behind would splice garbage into whatever the tag was embedded in.
+# Linear bounded pattern covering Brain XML prompt fences (open/close/whitespace/attributes).
+# Requires closing '>' so nested split tags like '<context<context>>' peel inner-outward per pass.
+_BRAIN_FENCE_PATTERN = (
+    r"<\s*(?:/\s*)?(?:functionResponse|functionCall|context|blackboard_evidence_reference)\b"
+    r"[^<>]{0,512}>"
+)
+# Decay-reference OPEN tag is also removed if unclosed (bounded, linear).
 _EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"
+# Linear bounded pattern covering all 6 Headhunter prompt fences (open/close/whitespace/attributes).
+_HEADHUNTER_FENCE_PATTERN = (
+    r"<\s*(?:/\s*)?(?:description|job_log|comments|mention_request|issue_body|review_feedback)\b"
+    r"(?:[^<>]{0,512}>)?"
+)
 # Model control tokens that must never reach users or prompts. Each matches as <name> or </name>.
 CONTROL_TOKEN_NAMES = (
     "end_of_image", "start_of_image", "end_of_turn", "start_of_turn",
@@ -78,7 +92,7 @@ CONTROL_TOKEN_PATTERN = r"<\/?(?:" + "|".join(CONTROL_TOKEN_NAMES) + r")\s*>"
 CONTROL_TOKEN_RE = re.compile(CONTROL_TOKEN_PATTERN, re.IGNORECASE)
 _FENCE_RE = re.compile(
     "|".join(
-        [_EVIDENCE_OPEN, CONTROL_TOKEN_PATTERN]
+        [_EVIDENCE_OPEN, _BRAIN_FENCE_PATTERN, _HEADHUNTER_FENCE_PATTERN, CONTROL_TOKEN_PATTERN]
         + [re.escape(t) for t in sorted(_FENCE_TAGS, key=len, reverse=True)]
     ),
     re.IGNORECASE,
@@ -126,6 +140,40 @@ def strip_xml_fences(text: str) -> str:
             return cleaned
         text = cleaned
     return _DASH_RUN_RE.sub("--", text.replace("<", ""))
+
+
+def _finalize_untrusted(text: str, *, max_len: int, pre_cap: int) -> str:
+    """Apply entry pre-cap, fence stripping, PII redaction, call-tag defang, and final cap."""
+    text = text[:pre_cap]
+    text = strip_xml_fences(text)
+    text = redact_pii(text)
+    text = _CALL_TAG_RE.sub("[call:", text)
+    return text[:max_len]
+
+
+def sanitize_untrusted_block(value: object, *, max_len: int = 8000) -> str:
+    """Sanitize multiline untrusted text (e.g. MR/PR descriptions, Bot Instructions, job logs).
+
+    Preserves Markdown \\n and \\t while enforcing @ai-rules #6 pipeline order:
+    normalize line endings -> strip invisibles/controls -> pre-cap -> strip XML fences ->
+    redact PII -> defang "[!call:" -> cap LAST.
+    """
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
+    text = _MULTILINE_STRIP_CHARS.sub("", text)
+    return _finalize_untrusted(text, max_len=max_len, pre_cap=max(max_len * 4, 32768))
+
+
+def sanitize_untrusted_line(value: object, *, max_len: int) -> str:
+    """Sanitize single-line untrusted text (e.g. MR/PR titles) with full fence/PII/call defense.
+
+    Pipeline order (@ai-rules #6): collapse line breaks -> strip invisibles/controls ->
+    pre-cap (4x) -> strip XML fences -> redact PII -> defang "[!call:" -> cap LAST.
+    """
+    text = "" if value is None else str(value)
+    text = _LINE_BREAKERS.sub(" ", text)
+    text = _STRIP_CHARS.sub("", text)
+    return _finalize_untrusted(text, max_len=max_len, pre_cap=max_len * 4)
 
 
 UNTITLED_EVENT = "Untitled Event"

@@ -1,8 +1,6 @@
 ---
 description: "Headhunter-sourced event environment, data structure, and lifecycle"
-tags: [headhunter, gitlab, github, autonomous]
-requires:
-  - context/gitlab-environment.md
+tags: [headhunter, autonomous]
 ---
 # Headhunter Source Environment
 

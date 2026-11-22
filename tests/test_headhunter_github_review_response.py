@@ -627,6 +627,7 @@ class TestEventCreation:
                                              "action": "review_feedback", "head_sha": "abc"}
         evt.conversation = [turn]
         platform.blackboard = AsyncMock()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
         await platform.post_feedback(evt)
         assert not [p for p, _ in client.posts if "/labels" in p]
         assert client.deletes == []

@@ -382,7 +382,9 @@ async def test_headhunter_pending_includes_active_github_issue_event():
     assert len(active_items) == 1
     item = active_items[0]
     assert item["platform"] == "github"
-    assert item["pr_number"] == 233  # issue_number reuses the pr_number field slot
+    assert item["issue_number"] == 233
+    assert "pr_number" not in item
+    assert item["issue_title"] == "Headhunter pending widget drops active GitHub work"
     assert item["project_path"] == "The-Darwin-Project/Blackboard"
     assert item["target_url"] == "https://github.com/The-Darwin-Project/Blackboard/issues/233"
 
@@ -1028,3 +1030,330 @@ class TestPlanStepFarleyATDDScenarioT4:
             dsl.then_request_succeeded()
             dsl.then_broadcast_turn_contains_test_evidence("green_verified", passing_evidence)
             dsl.then_event_stamped_with_atdd_cycle_sec("evt-atdd-02")
+
+
+# =========================================================================
+# Batch 1 ATDD (Step 6 / T-10): /queue/headhunter/pending decoupling,
+# independent env gates, 4 GitLab skip paths, CA bundle & host normalization
+# =========================================================================
+
+
+async def _get_headhunter_pending_http(
+    *,
+    env: dict[str, str],
+    mock_bb: AsyncMock,
+    mock_brain: MagicMock | None = None,
+    gitlab_auth: object = "DEFAULT",
+    gitlab_auth_exc: Exception | None = None,
+    gitlab_resp: MagicMock | None = None,
+    gitlab_get_exc: Exception | None = None,
+    capture_httpx_kwargs: list[dict] | None = None,
+    capture_get_urls: list[str] | None = None,
+):
+    """Layer 3 Protocol Driver for GET /queue/headhunter/pending."""
+    if gitlab_resp is None:
+        gitlab_resp = MagicMock()
+        gitlab_resp.is_success = True
+        gitlab_resp.json.return_value = []
+
+    mock_client = AsyncMock()
+    if gitlab_get_exc is not None:
+        mock_client.get = AsyncMock(side_effect=gitlab_get_exc)
+    else:
+        async def _capture_get(url, **kwargs):
+            if capture_get_urls is not None:
+                capture_get_urls.append(str(url))
+            return gitlab_resp
+        mock_client.get = AsyncMock(side_effect=_capture_get)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    def _client_factory(*args, **kwargs):
+        if capture_httpx_kwargs is not None:
+            capture_httpx_kwargs.append(kwargs)
+        return mock_client
+
+    if gitlab_auth == "DEFAULT":
+        mock_auth = MagicMock()
+        if gitlab_auth_exc is not None:
+            mock_auth.get_token.side_effect = gitlab_auth_exc
+        else:
+            mock_auth.get_token.return_value = "fake-token"
+    else:
+        mock_auth = gitlab_auth
+
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        with patch.dict(os.environ, env, clear=False):
+            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
+                with patch("httpx.AsyncClient", side_effect=_client_factory):
+                    from src import dependencies
+                    from src.main import app
+
+                    original_bb = dependencies._blackboard
+                    original_brain = dependencies._brain
+                    dependencies._blackboard = mock_bb
+                    if mock_brain is not None:
+                        dependencies._brain = mock_brain
+                    try:
+                        transport = ASGITransport(app=app)
+                        async with AsyncClient(transport=transport, base_url="http://test") as client:
+                            return await client.get("/queue/headhunter/pending")
+                    finally:
+                        dependencies._blackboard = original_bb
+                        dependencies._brain = original_brain
+
+
+def _github_pending_fixtures():
+    queued_pr = {
+        "number": 77,
+        "title": "Queued PR",
+        "owner": "The-Darwin-Project",
+        "repo": "BlackBoard",
+        "user": "octocat",
+        "created_at": "2026-09-01T00:00:00Z",
+        "html_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/77",
+    }
+    fake_hh = SimpleNamespace(_github=SimpleNamespace(queued_prs=[queued_pr], queued_issues=[]))
+    mock_brain = MagicMock()
+    mock_brain.agents = {"_headhunter": fake_hh}
+
+    issue_event = _make_headhunter_event(
+        "evt-issue-t10",
+        github_issue_context={
+            "owner": "The-Darwin-Project",
+            "repo": "BlackBoard",
+            "issue_number": 233,
+            "title": "Active issue title",
+            "author": "octocat",
+            "html_url": "https://github.com/The-Darwin-Project/BlackBoard/issues/233",
+            "created_at": "2026-09-01T00:01:00Z",
+        },
+    )
+    mock_bb = AsyncMock()
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-issue-t10": "active"})
+    mock_bb.get_event = AsyncMock(return_value=issue_event)
+    return mock_bb, mock_brain
+
+
+class TestATDDT10QueuePendingDecoupling:
+    """Layer 1-4 ATDD scenarios for T-10 (/queue/headhunter/pending)."""
+
+    @pytest.mark.asyncio
+    async def test_t10a_gitlab_host_unset_still_returns_github_queued_and_active_items(self):
+        """Given GITLAB_HOST="" and HEADHUNTER_GITHUB_ENABLED=true
+        When GET /queue/headhunter/pending is called
+        Then HTTP 200 returns GitHub queued PRs and active Issues with issue_number/issue_title."""
+        mock_bb, mock_brain = _github_pending_fixtures()
+        resp = await _get_headhunter_pending_http(
+            env={"GITLAB_HOST": "", "HEADHUNTER_ENABLED": "true", "HEADHUNTER_GITHUB_ENABLED": "true"},
+            mock_bb=mock_bb,
+            mock_brain=mock_brain,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(i.get("pr_number") == 77 and i.get("action") == "queued" for i in data)
+        issues = [i for i in data if i.get("issue_number") == 233]
+        assert len(issues) == 1
+        assert issues[0]["issue_title"] == "Active issue title"
+        assert "pr_number" not in issues[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_mode",
+        ["no_auth", "token_exc", "http_500", "connect_exc"],
+    )
+    async def test_t10b_all_four_gitlab_failures_skip_gitlab_and_return_github_items(self, failure_mode):
+        """Given GitLab hits any of the 4 failure modes (no auth, token exception, HTTP 500,
+        httpx/TLS error)
+        When GET /queue/headhunter/pending is called
+        Then GitLab is skipped without early-returning and GitHub queued & active items still appear."""
+        import httpx as httpx_mod
+
+        mock_bb, mock_brain = _github_pending_fixtures()
+        kwargs: dict = {
+            "env": {
+                "GITLAB_HOST": "gitlab.example.com",
+                "HEADHUNTER_ENABLED": "true",
+                "HEADHUNTER_GITHUB_ENABLED": "true",
+            },
+            "mock_bb": mock_bb,
+            "mock_brain": mock_brain,
+        }
+        if failure_mode == "no_auth":
+            kwargs["gitlab_auth"] = None
+        elif failure_mode == "token_exc":
+            kwargs["gitlab_auth_exc"] = RuntimeError("vault unavailable")
+        elif failure_mode == "http_500":
+            err_resp = MagicMock()
+            err_resp.is_success = False
+            err_resp.status_code = 500
+            kwargs["gitlab_resp"] = err_resp
+        elif failure_mode == "connect_exc":
+            kwargs["gitlab_get_exc"] = httpx_mod.ConnectError("TLS handshake failed")
+
+        resp = await _get_headhunter_pending_http(**kwargs)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(i.get("pr_number") == 77 for i in data), f"GitHub queued PR hidden on {failure_mode}"
+        assert any(i.get("issue_number") == 233 for i in data), f"GitHub active Issue hidden on {failure_mode}"
+
+    @pytest.mark.asyncio
+    async def test_t10c_headhunter_enabled_false_with_github_enabled_true_returns_github_items(self):
+        """Given HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=true
+        When GET /queue/headhunter/pending is called
+        Then GitLab is skipped (0 GitLab HTTP calls) and GitHub items are still returned."""
+        mock_bb, mock_brain = _github_pending_fixtures()
+        captured_urls: list[str] = []
+        resp = await _get_headhunter_pending_http(
+            env={
+                "GITLAB_HOST": "gitlab.example.com",
+                "HEADHUNTER_ENABLED": "false",
+                "HEADHUNTER_GITHUB_ENABLED": "true",
+            },
+            mock_bb=mock_bb,
+            mock_brain=mock_brain,
+            capture_get_urls=captured_urls,
+        )
+        assert resp.status_code == 200
+        assert captured_urls == []
+        data = resp.json()
+        assert any(i.get("pr_number") == 77 for i in data)
+        assert any(i.get("issue_number") == 233 for i in data)
+
+    @pytest.mark.asyncio
+    async def test_t10d_gitlab_call_normalizes_host_and_uses_resolve_ca_bundle_never_verify_false(self, tmp_path):
+        """Given GITLAB_HOST='https://gitlab.example.com/' and a CA bundle
+        When GET /queue/headhunter/pending queries GitLab
+        Then host is normalized (no double scheme/slash) and httpx.AsyncClient uses resolve_ca_bundle,
+        never verify=False."""
+        ca = str(tmp_path / "ca.pem")
+        (tmp_path / "ca.pem").write_text("cert")
+        mock_bb = AsyncMock()
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        captured_kwargs: list[dict] = []
+        captured_urls: list[str] = []
+
+        with patch("src.routes.queue.resolve_ca_bundle", return_value=ca) as mock_ca:
+            resp = await _get_headhunter_pending_http(
+                env={
+                    "GITLAB_HOST": "https://gitlab.example.com/",
+                    "HEADHUNTER_ENABLED": "true",
+                    "HEADHUNTER_GITHUB_ENABLED": "false",
+                },
+                mock_bb=mock_bb,
+                capture_httpx_kwargs=captured_kwargs,
+                capture_get_urls=captured_urls,
+            )
+
+        assert resp.status_code == 200
+        mock_ca.assert_called_once_with("gitlab.example.com")
+        assert captured_kwargs and captured_kwargs[0].get("verify") == ca
+        assert captured_kwargs[0].get("verify") is not False
+        assert captured_urls == ["https://gitlab.example.com/api/v4/todos"]
+
+    @pytest.mark.asyncio
+    async def test_t10e_both_flags_false_returns_empty_list(self):
+        """F-19: Given HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=false
+        When GET /queue/headhunter/pending is called
+        Then HTTP 200 returns [] with zero GitLab calls."""
+        mock_bb, mock_brain = _github_pending_fixtures()
+        captured_urls: list[str] = []
+        resp = await _get_headhunter_pending_http(
+            env={
+                "GITLAB_HOST": "gitlab.example.com",
+                "HEADHUNTER_ENABLED": "false",
+                "HEADHUNTER_GITHUB_ENABLED": "false",
+            },
+            mock_bb=mock_bb,
+            mock_brain=mock_brain,
+            capture_get_urls=captured_urls,
+        )
+        assert resp.status_code == 200
+        assert resp.json() == []
+        assert captured_urls == []
+
+    @pytest.mark.asyncio
+    async def test_t10f_gitlab_ssl_verify_false_logs_error_and_still_returns_github_items(self, caplog):
+        """F-16: Given GITLAB_SSL_VERIFY=false raises ValueError in resolve_ca_bundle()
+        When GET /queue/headhunter/pending runs
+        Then an ERROR is logged for TLS policy block and GitHub items are still returned."""
+        mock_bb, mock_brain = _github_pending_fixtures()
+        with caplog.at_level("ERROR"):
+            resp = await _get_headhunter_pending_http(
+                env={
+                    "GITLAB_HOST": "gitlab.example.com",
+                    "GITLAB_SSL_VERIFY": "false",
+                    "HEADHUNTER_ENABLED": "true",
+                    "HEADHUNTER_GITHUB_ENABLED": "true",
+                },
+                mock_bb=mock_bb,
+                mock_brain=mock_brain,
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(i.get("pr_number") == 77 for i in data)
+        assert any(i.get("issue_number") == 233 for i in data)
+        assert any(
+            r.levelname == "ERROR" and "TLS policy" in r.message
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_t10g_malformed_gitlab_payload_and_none_fields_do_not_crash_endpoint(self):
+        """F-16: Non-list JSON payload, target=None, and created_at=None must not raise 500."""
+        mock_bb = AsyncMock()
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+
+        non_list_resp = MagicMock()
+        non_list_resp.is_success = True
+        non_list_resp.json.return_value = {"message": "unexpected dict"}
+        resp1 = await _get_headhunter_pending_http(
+            env={
+                "GITLAB_HOST": "gitlab.example.com",
+                "HEADHUNTER_ENABLED": "true",
+                "HEADHUNTER_GITHUB_ENABLED": "false",
+            },
+            mock_bb=mock_bb,
+            gitlab_resp=non_list_resp,
+        )
+        assert resp1.status_code == 200
+        assert resp1.json() == []
+
+        weird_todos_resp = MagicMock()
+        weird_todos_resp.is_success = True
+        weird_todos_resp.json.return_value = [
+            "not-a-dict",
+            {
+                "id": 1,
+                "action_name": "assigned",
+                "target": None,
+                "project": None,
+                "created_at": None,
+                "target_url": None,
+            },
+            {
+                "id": 2,
+                "action_name": "assigned",
+                "target": {"iid": 9, "title": "Valid", "state": "opened", "author": None, "pipeline": None},
+                "project": {"path_with_namespace": "org/repo"},
+                "created_at": "2026-09-01T00:00:00Z",
+                "target_url": "https://gitlab.example.com/org/repo/-/merge_requests/9",
+            },
+        ]
+        resp2 = await _get_headhunter_pending_http(
+            env={
+                "GITLAB_HOST": "gitlab.example.com",
+                "HEADHUNTER_ENABLED": "true",
+                "HEADHUNTER_GITHUB_ENABLED": "false",
+            },
+            mock_bb=mock_bb,
+            gitlab_resp=weird_todos_resp,
+        )
+        assert resp2.status_code == 200
+        rows = resp2.json()
+        assert len(rows) == 2
+        assert rows[0]["todo_id"] == 1 and rows[0]["created_at"] == ""
+        assert rows[1]["todo_id"] == 2 and rows[1]["mr_iid"] == 9
+

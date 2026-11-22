@@ -891,3 +891,49 @@ class TestVmer2409KargoSystemicConsolidationAndTsGuardProbe:
                 assert n == 0 or lines[n - 1].strip() in ("", "---"), (
                     f"{rel}:{n + 1} heading lacks leading blank line: {heading!r}"
                 )
+
+
+class TestATDDT12VcsSkillTagRouting:
+    """Layer 1-4 ATDD probes (T-12) against real on-disk src/agents/brain_skills/."""
+
+    def test_github_tag_routes_only_to_github_environment_not_headhunter_or_issue(self, loader):
+        """Given real brain_skills/ frontmatter
+        When loader.find_paths_by_tag('github') runs
+        Then gated/github-environment.md is included and source/headhunter.md +
+        source/headhunter_github_issue.md are NOT leaked into PR events."""
+        gh_paths = loader.find_paths_by_tag("github")
+        assert "gated/github-environment.md" in gh_paths
+        assert "source/headhunter.md" not in gh_paths
+        assert "source/headhunter_github_issue.md" not in gh_paths
+
+    def test_gitlab_tag_routes_to_gitlab_environment_not_headhunter(self, loader):
+        """When loader.find_paths_by_tag('gitlab') runs
+        Then context/gitlab-environment.md is included and source/headhunter.md is excluded."""
+        gl_paths = loader.find_paths_by_tag("gitlab")
+        assert "context/gitlab-environment.md" in gl_paths
+        assert "source/headhunter.md" not in gl_paths
+
+    def test_headhunter_source_skill_does_not_require_gitlab_environment(self, loader):
+        """source/headhunter.md must not unconditionally require context/gitlab-environment.md
+        so GitHub PR events are not polluted with GitLab rules."""
+        result = loader.get_with_meta("source/headhunter.md")
+        assert result is not None
+        _, meta = result
+        assert "context/gitlab-environment.md" not in (meta.get("requires") or [])
+
+    def test_headhunter_github_issue_skill_uses_github_issue_tag(self, loader):
+        result = loader.get_with_meta("source/headhunter_github_issue.md")
+        assert result is not None
+        _, meta = result
+        tags = meta.get("tags") or []
+        assert "github_issue" in tags
+        assert "github" not in tags
+
+    def test_flow_engineering_includes_refresh_github_context_tool(self, loader):
+        """always/08-flow-engineering.md declares refresh_github_context in tools:."""
+        result = loader.get_with_meta("always/08-flow-engineering.md")
+        assert result is not None
+        _, meta = result
+        assert "refresh_github_context" in (meta.get("tools") or [])
+        assert "always/08-flow-engineering.md" in loader.get_tool_skills("refresh_github_context")
+

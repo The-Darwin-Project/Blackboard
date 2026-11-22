@@ -1,7 +1,7 @@
 ---
 description: "GitHub Issue event environment, data structure, and lifecycle"
 tag_type: rule
-tags: [headhunter, github, issue]
+tags: [headhunter, github_issue, issue]
 ---
 # GitHub Issue Source Environment
 

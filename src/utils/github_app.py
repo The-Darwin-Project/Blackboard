@@ -7,7 +7,9 @@
 # 5. [Pattern]: get_github_auth() is the singleton accessor — all consumers use it, not GitHubAppAuth() directly.
 # 6. [Pattern]: get/post/delete share the same auth header pattern. delete() calls raise_for_status().
 # 7. [Pattern]: MultiInstallationManager owns all per-installation GitHubAppAuth/AsyncGitHubClient
-#    instances + the repo->installation_id cache (single source of truth for GitHubPlatform).
+#    instances + the repo->installation_id cache (shared singleton via get_installation_manager(),
+#    borrowed by headhunter_github.py and utils/vcs_approval.py; sole teardown owner is main.py
+#    lifespan via close_installation_manager(), guarded by _shutting_down).
 # 8. [Constraint]: MultiInstallationManager discovery uses the App JWT (installation_id=None on
 #    GitHubAppAuth is invalid for GET /app/installations -- needs get_app_jwt() from any instance
 #    or a dedicated JWT-only helper). Discovery failure serves stale cache; raises only cold-start.
@@ -430,7 +432,7 @@ class MultiInstallationManager:
                     full_names = [r["full_name"] for r in repos if not r.get("archived")]
                 except Exception as e:
                     logger.warning(f"Repo discovery failed for installation {inst_id}: {e}")
-                    full_names = []
+                    full_names = list(self._installation_repos.get(inst_id, []))
                 installation_repos[inst_id] = full_names
                 for full_name in full_names:
                     repo_to_installation[full_name] = inst_id
@@ -487,3 +489,55 @@ class MultiInstallationManager:
             *[c.close() for c in self._clients.values()], return_exceptions=True,
         )
         self._clients.clear()
+
+
+_installation_manager: Optional[MultiInstallationManager] = None
+_shutting_down: bool = False
+
+
+def get_installation_manager() -> Optional[MultiInstallationManager]:
+    """Return shared lazy-initialized MultiInstallationManager, reading env vars at call time.
+
+    Assumes single-asyncio-event-loop access (FastAPI/uvicorn main loop).
+    The .pem private key is loaded lazily on first JWT/token request (not in __init__).
+    Returns None when shutting down, when GITHUB_APP_ID is unset, or when construction fails.
+    Never caches None so recovery when env/secrets appear works without restart.
+    """
+    global _installation_manager
+    if _shutting_down:
+        return None
+    if _installation_manager is not None:
+        return _installation_manager
+    app_id = os.getenv("GITHUB_APP_ID", "").strip()
+    if not app_id:
+        return None
+    private_key_path = os.getenv("GITHUB_PRIVATE_KEY_PATH", "").strip() or "/secrets/github"
+    filter_installation_id = os.getenv("GITHUB_INSTALLATION_ID", "").strip() or None
+    try:
+        mgr = MultiInstallationManager(
+            app_id=app_id,
+            private_key_path=private_key_path,
+            filter_installation_id=filter_installation_id,
+        )
+    except Exception as e:
+        logger.warning(f"Shared GitHub installation manager init failed: {e}")
+        return None
+    _installation_manager = mgr
+    return _installation_manager
+
+
+async def close_installation_manager() -> None:
+    """Close and clear the shared MultiInstallationManager (owned by main.py lifespan)."""
+    global _installation_manager, _shutting_down
+    _shutting_down = True
+    mgr = _installation_manager
+    _installation_manager = None
+    if mgr is not None:
+        await mgr.close_all()
+
+
+def reset_installation_manager() -> None:
+    """Synchronous reset helper for pytest teardown fixtures."""
+    global _installation_manager, _shutting_down
+    _installation_manager = None
+    _shutting_down = False

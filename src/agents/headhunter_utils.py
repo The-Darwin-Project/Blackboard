@@ -4,11 +4,13 @@
 # 2. [Pattern]: Shared constants for all Headhunter adapters.
 # 3. [Gotcha]: Imported by headhunter.py, headhunter_gitlab.py, and headhunter_github.py
 #    — circular imports are fatal if this file imports any of those.
-# 4. [Security]: _sanitize_xml_fence is the SINGLE Headhunter prompt-fence sanitizer (all 6 named fences:
-#    description, job_log, comments, mention_request, issue_body, review_feedback). Re-exported from
-#    headhunter.py. Regex MUST stay linear: no adjacent optional \s* around `/`, and the attribute run is
-#    [^<>]* (NOT [^>]*, which is quadratic on '<description' * N). Stripping loops are capped at
-#    _FENCE_MAX_PASSES; if a nested payload still reassembles a tag, every '<' is dropped in one linear pass.
+# 4. [Security]: _sanitize_xml_fence is the zero-import Headhunter prompt-fence sanitizer (all 6 named fences:
+#    description, job_log, comments, mention_request, issue_body, review_feedback) used for issue_body/review_feedback
+#    and re-exported from headhunter.py. For full untrusted-text sanitization (fences + PII + "[!call:" + controls),
+#    callers use src/utils/prompt_sanitize.{sanitize_untrusted_block,sanitize_untrusted_line} (keep fence tag lists in sync).
+#    Regex MUST stay linear: no adjacent optional \s* around `/`, and the attribute run is [^<>]* (NOT [^>]*, which is
+#    quadratic on '<description' * N). Stripping loops are capped at _FENCE_MAX_PASSES; if a nested payload still
+#    reassembles a tag, every '<' is dropped in one linear pass.
 """Shared constants for Headhunter adapters. Import-cycle-safe (no sibling imports)."""
 from __future__ import annotations
 

@@ -406,6 +406,25 @@ async def handle_transition_jira_issue(
     return True
 
 
+async def _reject_context_conflict(
+    ctx: ToolContext,
+    event_id: str,
+    tool_name: str,
+    evidence: str,
+    response_parts: list[dict] | None,
+) -> bool:
+    """Append a tool_result turn rejecting a cross-VCS context refresh."""
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain", action="tool_result",
+        waitingFor=tool_name,
+        evidence=evidence,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # refresh_gitlab_context
 # ---------------------------------------------------------------------------
@@ -415,16 +434,18 @@ async def handle_refresh_gitlab_context(
     bb = ctx.get_blackboard()
     event_check = await bb.get_event(event_id)
     if event_check and event_check.event and event_check.event.evidence:
-        if getattr(event_check.event.evidence, "github_context", None):
-            turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="refresh_gitlab_context",
-                evidence="This event has GitHub context, not GitLab. Use refresh_github_context instead.",
-                response_parts=response_parts,
+        if getattr(event_check.event.evidence, "github_issue_context", None):
+            return await _reject_context_conflict(
+                ctx, event_id, "refresh_gitlab_context",
+                "This event has GitHub Issue context, not GitLab. Cannot attach gitlab_context.",
+                response_parts,
             )
-            await ctx.append_and_broadcast(event_id, turn)
-            return True
+        if getattr(event_check.event.evidence, "github_context", None):
+            return await _reject_context_conflict(
+                ctx, event_id, "refresh_gitlab_context",
+                "This event has GitHub context, not GitLab. Use refresh_github_context instead.",
+                response_parts,
+            )
 
     condition = args.get("check_condition", "")
     headhunter = ctx.get_agent_instance("_headhunter")
@@ -736,12 +757,13 @@ async def handle_refresh_kargo_context(
                 parsed = parse_mr_url(new_mr_url)
                 if parsed:
                     project_id, mr_iid = parsed
-                    await bb.update_event_gitlab_context(event_id, {
+                    updated = await bb.update_event_gitlab_context(event_id, {
                         "target_url": new_mr_url,
                         "project_id": str(project_id),
                         "mr_iid": int(mr_iid),
                     })
-                    logger.info(f"Updated gitlab_context for {event_id}: project_id={project_id}, mr_iid={mr_iid}")
+                    if updated:
+                        logger.info(f"Updated gitlab_context for {event_id}: project_id={project_id}, mr_iid={mr_iid}")
             except Exception as e:
                 logger.warning(f"Failed to update gitlab_context for {event_id} (non-fatal): {e}")
         result_text = (
@@ -881,16 +903,18 @@ async def handle_refresh_github_context(
     bb = ctx.get_blackboard()
     event_check = await bb.get_event(event_id)
     if event_check and event_check.event and event_check.event.evidence:
-        if getattr(event_check.event.evidence, "gitlab_context", None):
-            turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="refresh_github_context",
-                evidence="This event has GitLab context, not GitHub. Use refresh_gitlab_context instead.",
-                response_parts=response_parts,
+        if getattr(event_check.event.evidence, "github_issue_context", None):
+            return await _reject_context_conflict(
+                ctx, event_id, "refresh_github_context",
+                "This event has GitHub Issue context, not a GitHub PR. Cannot attach github_context.",
+                response_parts,
             )
-            await ctx.append_and_broadcast(event_id, turn)
-            return True
+        if getattr(event_check.event.evidence, "gitlab_context", None):
+            return await _reject_context_conflict(
+                ctx, event_id, "refresh_github_context",
+                "This event has GitLab context, not GitHub. Use refresh_gitlab_context instead.",
+                response_parts,
+            )
 
     condition = args.get("check_condition", "")
     headhunter = ctx.get_agent_instance("_headhunter")
