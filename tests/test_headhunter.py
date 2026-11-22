@@ -118,6 +118,68 @@ class StubBlackboard:
     async def get_services(self):
         return {}
 
+    async def enqueue_gitlab_mr(
+        self,
+        project_id: int,
+        mr_iid: int,
+        metadata: dict,
+        *,
+        score: float | None = None,
+        action_priority: dict[str, int] | None = None,
+    ):
+        self._gitlab_queue = getattr(self, "_gitlab_queue", {})
+        key = f"{int(project_id)}:{int(mr_iid)}"
+        is_new = key not in self._gitlab_queue
+        self._gitlab_queue[key] = dict(metadata)
+        return is_new
+
+    async def get_gitlab_queue_entry(self, project_id: int, mr_iid: int):
+        return getattr(self, "_gitlab_queue", {}).get(f"{int(project_id)}:{int(mr_iid)}")
+
+    async def list_gitlab_queue(self):
+        return list(getattr(self, "_gitlab_queue", {}).values())
+
+    async def remove_gitlab_queue(self, project_id: int, mr_iid: int):
+        getattr(self, "_gitlab_queue", {}).pop(f"{int(project_id)}:{int(mr_iid)}", None)
+
+    async def get_wakeup_sha(self, platform: str, event_id: str):
+        return getattr(self, "_wakeup_shas", {}).get(f"{platform}:{event_id}")
+
+    async def set_wakeup_sha(self, platform: str, event_id: str, sha: str, ttl_s: int = 604800):
+        self._wakeup_shas = getattr(self, "_wakeup_shas", {})
+        self._wakeup_shas[f"{platform}:{event_id}"] = sha
+
+    async def has_wakeup_notes_cursor(self, platform: str, event_id: str) -> bool:
+        return f"{platform}:{event_id}" in getattr(self, "_wakeup_notes", {})
+
+    async def is_wakeup_note_seen(self, platform: str, event_id: str, note_id: str) -> bool:
+        return str(note_id) in getattr(self, "_wakeup_notes", {}).get(f"{platform}:{event_id}", set())
+
+    async def mark_wakeup_notes_seen(self, platform: str, event_id: str, note_ids: list[str], ttl_s: int = 604800):
+        self._wakeup_notes = getattr(self, "_wakeup_notes", {})
+        self._wakeup_notes.setdefault(f"{platform}:{event_id}", set()).update(str(n) for n in note_ids)
+
+    async def get_gitlab_mr_sha(self, project_id: int, mr_iid: int):
+        entry = getattr(self, "_gitlab_mr_shas", {}).get(f"{int(project_id)}:{int(mr_iid)}")
+        return entry["sha"] if isinstance(entry, dict) else entry
+
+    async def set_gitlab_mr_sha(self, project_id: int, mr_iid: int, sha: str, *, recorded_at: float | None = None):
+        self._gitlab_mr_shas = getattr(self, "_gitlab_mr_shas", {})
+        self._gitlab_mr_shas[f"{int(project_id)}:{int(mr_iid)}"] = {"sha": sha, "recorded_at": recorded_at or 0.0}
+
+    async def delete_gitlab_mr_sha(self, project_id: int, mr_iid: int):
+        getattr(self, "_gitlab_mr_shas", {}).pop(f"{int(project_id)}:{int(mr_iid)}", None)
+
+    async def get_all_gitlab_mr_shas(self):
+        return dict(getattr(self, "_gitlab_mr_shas", {}))
+
+    async def clear_event_approval(self, event_id: str):
+        ev = await self.get_event(event_id)
+        if ev is not None:
+            for attr in ("approved_by", "approved_mr_id", "approved_mr_sha", "approval_requested_sha"):
+                if hasattr(ev, attr):
+                    setattr(ev, attr, None)
+
 
 def _make_headhunter(blackboard=None, **env_overrides) -> Headhunter:
     defaults = {"GITLAB_HOST": "gitlab.example.com", "MAX_ACTIVE_EVENTS": "20"}

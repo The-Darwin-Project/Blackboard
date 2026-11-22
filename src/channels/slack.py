@@ -399,6 +399,155 @@ class SlackChannel:
         await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
         return new_event_id
 
+    _EVENT_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]{1,64}\Z")
+
+    @staticmethod
+    def _extract_action_fields(body: Any) -> tuple[str, str, str, str]:
+        """Safely extract (raw_value, user_id, channel_id, thread_ts) from a Slack action body."""
+        if not isinstance(body, dict):
+            return "", "", "", ""
+        actions = body.get("actions")
+        raw_val = actions[0].get("value") if isinstance(actions, list) and actions and isinstance(actions[0], dict) else ""
+        val = raw_val if isinstance(raw_val, str) else ""
+        user_obj = body.get("user")
+        raw_user = user_obj.get("id") if isinstance(user_obj, dict) else ""
+        user = raw_user if isinstance(raw_user, str) else ""
+        chan_obj = body.get("channel")
+        raw_chan = chan_obj.get("id") if isinstance(chan_obj, dict) else ""
+        channel = raw_chan if isinstance(raw_chan, str) else ""
+        msg = body.get("message")
+        raw_ts = (msg.get("thread_ts") or msg.get("ts")) if isinstance(msg, dict) else ""
+        thread_ts = raw_ts if isinstance(raw_ts, str) else ""
+        return val, user, channel, thread_ts
+
+    async def _complete_slack_approve(
+        self,
+        client: Any,
+        *,
+        event_id: str,
+        user: str,
+        channel: str,
+        thread_ts: str,
+        expected_sha: str | None = None,
+    ) -> None:
+        from ..utils.vcs_approval import check_approval_sha_drift, resolve_live_head_sha
+
+        decision = await self._authorize_plan_decision(
+            client, event_id=event_id, user=user, channel=channel,
+            thread_ts=thread_ts, verb="approve",
+        )
+        if decision is None:
+            return
+        event_doc = decision.event_doc
+        email_str = decision.email
+        clean_name_str = decision.clean_name
+        clean_ident_str = decision.clean_ident
+
+        try:
+            mr_id, mr_sha = await resolve_live_head_sha(event_doc)
+        except Exception as exc:
+            logger.warning("Slack approve: resolve_live_head_sha failed for %s (%s)", event_id, type(exc).__name__)
+            mr_id, mr_sha = None, None
+        fresh_doc = await self._blackboard.get_event(event_id)
+        if not fresh_doc:
+            return
+        drift = check_approval_sha_drift(fresh_doc, mr_sha, expected_sha=expected_sha)
+        if not drift.allowed:
+            if drift.code == "sha_drift" and drift.live_sha:
+                req_short = (drift.approval_requested_sha or "unknown")[:8]
+                live_short = drift.live_sha[:8]
+                warn_text = (
+                    f":warning: HEAD SHA changed since approval was requested "
+                    f"(`{req_short}` -> `{live_short}`). Confirm approval for `{live_short}`?"
+                )
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": warn_text},
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": f"Approve New SHA ({live_short})",
+                                },
+                                "style": "primary",
+                                "action_id": "darwin_approve_sha",
+                                "value": f"{event_id}:{drift.live_sha}",
+                            },
+                        ],
+                    },
+                ]
+                try:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=warn_text,
+                        blocks=blocks,
+                    )
+                except Exception as e:
+                    logger.warning(f"Slack SHA drift prompt failed for {event_id}: {e}")
+            else:
+                try:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f":warning: Approval blocked: {drift.detail}",
+                    )
+                except Exception as e:
+                    logger.warning(f"Slack approval block message failed for {event_id}: {e}")
+            return
+
+        raw_fresh_req = getattr(fresh_doc, "approval_requested_sha", None)
+        fresh_req_sha = raw_fresh_req if isinstance(raw_fresh_req, str) else None
+        stamp_res = self._blackboard.stamp_event(
+            event_id,
+            _expected_requested_sha=fresh_req_sha,
+            approved_by=clean_ident_str,
+            approved_mr_id=mr_id,
+            approved_mr_sha=mr_sha,
+            approval_requested_sha=None,
+        )
+        stamped = await stamp_res if inspect.isawaitable(stamp_res) else stamp_res
+        if stamped is False:
+            try:
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=":warning: Approval blocked: Event state changed concurrently; please refresh and retry.",
+                )
+            except Exception as e:
+                logger.warning(f"Slack CAS conflict message failed for {event_id}: {e}")
+            return
+
+        thought_msg = "User approved the plan."
+        if mr_id and mr_sha:
+            thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
+
+        conv_len = len(fresh_doc.conversation) if fresh_doc and fresh_doc.conversation else 0
+        turn = ConversationTurn(
+            turn=conv_len + 1,
+            actor="user",
+            action="approve",
+            thoughts=thought_msg,
+            source="slack",
+            user=clean_name_str,
+            user_name=clean_name_str,
+            user_email=email_str,
+            approved_by=clean_ident_str,
+            approved_mr_id=mr_id,
+            approved_mr_sha=mr_sha,
+        )
+        await self._blackboard.append_turn(event_id, turn)
+        self._brain.clear_waiting(event_id)
+        await self._brain.resume_if_parked(event_id)
+        self._brain.enqueue_for_processing(event_id)
+        await self._safe_react(client, channel, thread_ts, "white_check_mark")
+        logger.info(f"Slack approve on {event_id} by {user} (mr_id={mr_id}, sha={mr_sha})")
+
     def _register_handlers(self) -> None:
         """Register Slack event listeners on the Bolt app."""
 
@@ -729,71 +878,47 @@ class SlackChannel:
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            actions = body.get("actions", [])
-            event_id = actions[0].get("value", "") if actions and isinstance(actions[0], dict) else ""
-            user = body.get("user", {}).get("id", "")
-            channel = body.get("channel", {}).get("id", "")
-            msg = body.get("message", {})
-            thread_ts = msg.get("thread_ts") or msg.get("ts", "")
-
-            from ..utils.vcs_approval import resolve_live_head_sha
-
-            decision = await self._authorize_plan_decision(
-                client, event_id=event_id, user=user, channel=channel,
-                thread_ts=thread_ts, verb="approve",
-            )
-            if decision is None:
+            event_id, user, channel, thread_ts = self._extract_action_fields(body)
+            if not self._EVENT_ID_RE.match(event_id):
+                logger.warning("Slack darwin_approve rejected invalid event_id from user=%s", user)
                 return
-            event_doc = decision.event_doc
-            email_str = decision.email
-            clean_name_str = decision.clean_name
-            clean_ident_str = decision.clean_ident
-
-            mr_id, mr_sha = await resolve_live_head_sha(event_doc)
-
-            stamp_res = self._blackboard.stamp_event(
-                event_id,
-                approved_by=clean_ident_str,
-                approved_mr_id=mr_id,
-                approved_mr_sha=mr_sha,
+            await self._complete_slack_approve(
+                client,
+                event_id=event_id,
+                user=user,
+                channel=channel,
+                thread_ts=thread_ts,
+                expected_sha=None,
             )
-            if inspect.isawaitable(stamp_res):
-                await stamp_res
 
-            thought_msg = "User approved the plan."
-            if mr_id and mr_sha:
-                thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
+        @self._app.action("darwin_approve_sha")
+        async def handle_approve_sha(ack: Any, body: dict, client: Any) -> None:
+            from ..utils.vcs_approval import HEX_SHA_RE
 
-            conv_len = len(event_doc.conversation) if event_doc and event_doc.conversation else 0
-            turn = ConversationTurn(
-                turn=conv_len + 1,
-                actor="user",
-                action="approve",
-                thoughts=thought_msg,
-                source="slack",
-                user=clean_name_str,
-                user_name=clean_name_str,
-                user_email=email_str,
-                approved_by=clean_ident_str,
-                approved_mr_id=mr_id,
-                approved_mr_sha=mr_sha,
+            await ack()
+            raw_val, user, channel, thread_ts = self._extract_action_fields(body)
+            event_id, sep, expected_sha = raw_val.rpartition(":")
+            if sep != ":" or not self._EVENT_ID_RE.match(event_id) or not HEX_SHA_RE.match(expected_sha):
+                logger.warning(
+                    "Slack darwin_approve_sha rejected malformed payload from user=%s", user,
+                )
+                return
+            await self._complete_slack_approve(
+                client,
+                event_id=event_id,
+                user=user,
+                channel=channel,
+                thread_ts=thread_ts,
+                expected_sha=expected_sha,
             )
-            await self._blackboard.append_turn(event_id, turn)
-            self._brain.clear_waiting(event_id)
-            await self._brain.resume_if_parked(event_id)
-            self._brain.enqueue_for_processing(event_id)
-            await self._safe_react(client, channel, thread_ts, "white_check_mark")
-            logger.info(f"Slack approve on {event_id} by {user} (mr_id={mr_id}, sha={mr_sha})")
 
         @self._app.action("darwin_reject")
         async def handle_reject(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            actions = body.get("actions", [])
-            event_id = actions[0].get("value", "") if actions and isinstance(actions[0], dict) else ""
-            user = body.get("user", {}).get("id", "")
-            channel = body.get("channel", {}).get("id", "")
-            msg = body.get("message", {})
-            thread_ts = msg.get("thread_ts") or msg.get("ts", "")
+            event_id, user, channel, thread_ts = self._extract_action_fields(body)
+            if not self._EVENT_ID_RE.match(event_id):
+                logger.warning("Slack darwin_reject rejected invalid event_id from user=%s", user)
+                return
 
             decision = await self._authorize_plan_decision(
                 client, event_id=event_id, user=user, channel=channel,
@@ -807,9 +932,18 @@ class SlackChannel:
 
             # A rejection supersedes any prior approval stamp (see queue.py reject_event) --
             # otherwise GET /{event_id}/approval keeps reporting a stale approved_mr_sha.
-            if event_doc.approved_by or event_doc.approved_mr_id or event_doc.approved_mr_sha:
+            if (
+                event_doc.approved_by
+                or event_doc.approved_mr_id
+                or event_doc.approved_mr_sha
+                or getattr(event_doc, "approval_requested_sha", None)
+            ):
                 clear_res = self._blackboard.stamp_event(
-                    event_id, approved_by=None, approved_mr_id=None, approved_mr_sha=None,
+                    event_id,
+                    approved_by=None,
+                    approved_mr_id=None,
+                    approved_mr_sha=None,
+                    approval_requested_sha=None,
                 )
                 if inspect.isawaitable(clear_res):
                     await clear_res

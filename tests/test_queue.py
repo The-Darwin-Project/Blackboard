@@ -808,7 +808,11 @@ async def test_reject_event_enforces_same_rbac_as_approve(monkeypatch):
             )
             assert resp_owner.status_code == 200
             mock_bb.stamp_event.assert_awaited_with(
-                "evt-rej0002", approved_by=None, approved_mr_id=None, approved_mr_sha=None,
+                "evt-rej0002",
+                approved_by=None,
+                approved_mr_id=None,
+                approved_mr_sha=None,
+                approval_requested_sha=None,
             )
 
         app.dependency_overrides.clear()

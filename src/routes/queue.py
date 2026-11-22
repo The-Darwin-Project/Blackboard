@@ -58,7 +58,8 @@ import time
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
@@ -74,7 +75,18 @@ from ..auth import (
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
 from ..utils.prompt_sanitize import sanitize_title
-from ..utils.vcs_approval import normalize_gitlab_host, resolve_ca_bundle, resolve_live_head_sha
+from ..utils.vcs_approval import (
+    check_approval_sha_drift,
+    extract_context_head_sha,
+    normalize_gitlab_host,
+    resolve_ca_bundle,
+    resolve_live_head_sha,
+)
+
+
+class ApproveRequest(BaseModel):
+    """Optional typed request body for SHA-pinned plan approval."""
+    expected_sha: Optional[str] = Field(None, max_length=64, description="Confirmed HEAD SHA after drift warning")
 
 
 class RejectRequest(BaseModel):
@@ -425,14 +437,25 @@ async def get_event_approval(
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
-    is_approved = bool(event.approved_by)
+    status_str = event.status.value if hasattr(event.status, "value") else str(event.status)
+    is_approved = bool(event.approved_by) and status_str not in (
+        EventStatus.WAITING_APPROVAL.value,
+        EventStatus.CLOSED.value,
+        EventStatus.RESOLVED.value,
+    )
+    raw_req = getattr(event, "approval_requested_sha", None)
+    req_sha = raw_req if isinstance(raw_req, str) and raw_req else None
+    ctx_sha = extract_context_head_sha(event)
+    sha_drifted = bool(req_sha and isinstance(ctx_sha, str) and ctx_sha and ctx_sha != req_sha)
     return {
         "approved": is_approved,
         "approved_by": event.approved_by,
         "approved_mr_id": event.approved_mr_id,
         "approved_mr_sha": event.approved_mr_sha,
+        "approval_requested_sha": req_sha,
+        "sha_drifted": sha_drifted,
         "event_id": event.id,
-        "status": event.status.value if hasattr(event.status, "value") else str(event.status),
+        "status": status_str,
     }
 
 
@@ -440,6 +463,7 @@ async def get_event_approval(
 async def approve_event(
     event_id: str,
     request: Request,
+    body: Optional[ApproveRequest] = Body(default=None),
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
     """Approve a pending plan in an event conversation.
@@ -471,26 +495,58 @@ async def approve_event(
         )
         raise HTTPException(status_code=403, detail="Forbidden: User not authorized to approve this event")
 
-    mr_id, mr_sha = await resolve_live_head_sha(event)
+    try:
+        mr_id, mr_sha = await resolve_live_head_sha(event)
+    except Exception as exc:
+        logger.warning("approve_event: resolve_live_head_sha failed for %s (%s)", event_id, type(exc).__name__)
+        mr_id, mr_sha = None, None
+    fresh_event = await blackboard.get_event(event_id)
+    if not fresh_event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    expected_sha = body.expected_sha if isinstance(body, ApproveRequest) else None
+    drift = check_approval_sha_drift(fresh_event, mr_sha, expected_sha=expected_sha)
+    if not drift.allowed:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": drift.detail,
+                "code": drift.code,
+                "approval_requested_sha": drift.approval_requested_sha,
+                "live_sha": drift.live_sha,
+            },
+        )
 
     clean_by, clean_name = resolve_approval_identity(user.email, user.label)
+    raw_fresh_req = getattr(fresh_event, "approval_requested_sha", None)
+    fresh_req_sha = raw_fresh_req if isinstance(raw_fresh_req, str) else None
 
-    # Stamp approval metadata onto EventDocument
+    # Stamp approval metadata onto EventDocument (atomic CAS)
     stamp_res = blackboard.stamp_event(
         event_id,
+        _expected_requested_sha=fresh_req_sha,
         approved_by=clean_by,
         approved_mr_id=mr_id,
         approved_mr_sha=mr_sha,
+        approval_requested_sha=None,
     )
-    if inspect.isawaitable(stamp_res):
-        await stamp_res
+    stamped = await stamp_res if inspect.isawaitable(stamp_res) else stamp_res
+    if stamped is False:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Event state changed concurrently; please refresh and retry.",
+                "code": "closed",
+                "approval_requested_sha": fresh_req_sha,
+                "live_sha": mr_sha,
+            },
+        )
 
     thought_msg = "User approved the plan."
     if mr_id and mr_sha:
         thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
 
     turn = ConversationTurn(
-        turn=len(event.conversation) + 1,
+        turn=len(fresh_event.conversation) + 1,
         actor="user",
         action="approve",
         thoughts=thought_msg,
@@ -560,9 +616,18 @@ async def reject_event(
     # A rejection supersedes any prior approval stamp on this event -- otherwise
     # GET /{event_id}/approval keeps reporting approved=true with a stale approved_mr_sha
     # from an earlier (now-superseded) plan revision at the same commit SHA.
-    if event.approved_by or event.approved_mr_id or event.approved_mr_sha:
+    if (
+        event.approved_by
+        or event.approved_mr_id
+        or event.approved_mr_sha
+        or getattr(event, "approval_requested_sha", None)
+    ):
         clear_res = blackboard.stamp_event(
-            event_id, approved_by=None, approved_mr_id=None, approved_mr_sha=None,
+            event_id,
+            approved_by=None,
+            approved_mr_id=None,
+            approved_mr_sha=None,
+            approval_requested_sha=None,
         )
         if inspect.isawaitable(clear_res):
             await clear_res

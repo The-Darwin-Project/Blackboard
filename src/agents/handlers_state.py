@@ -10,9 +10,10 @@
 #    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
 # 8. [Pattern]: wait_for_agent shares count_agent_waits_in_dispatch_epoch() (from tool_gates.py)
 #    with the WAIT_LOOP gate -- single source of truth for epoch-scoped wait counting.
-# 9. [Pattern]: request_user_approval broadcasts event_status_changed(waiting_approval) after
-#    park_for_approval() succeeds, gated on re-reading the event's actual status (not just
-#    "we called park") since the #240 CLOSED-race guard can make park_for_approval a no-op.
+# 9. [Pattern]: request_user_approval resolves live HEAD SHA and awaits park_for_approval()
+#    BEFORE append_and_broadcast(pendingApproval=True) and event_status_changed(waiting_approval),
+#    gating both broadcasts on re-reading event.status == WAITING_APPROVAL so the #240 CLOSED-race
+#    guard suppresses phantom approval buttons and eliminates pre-park TOCTOU.
 #    Mirrors Brain.resume_if_parked()'s symmetric broadcast on the way back out (#240).
 # 10. [Constraint]: wait_for_user never schedules ctx.get_idle_timeout() -- it has no idle-timeout
 #     backstop and must never auto-close, regardless of duration. classify_event's re-arm (fired
@@ -83,31 +84,49 @@ async def handle_request_user_approval(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
     plan_summary = args.get("plan_summary", "")
-    ctx.mark_waiting_for_user(event_id)
-    turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
-        actor="brain",
-        action="request_approval",
-        thoughts=plan_summary,
-        pendingApproval=True,
-        waitingFor="user",
-    )
-    await ctx.append_and_broadcast(event_id, turn)
     bb = ctx.get_blackboard()
-    await bb.park_for_approval(event_id)
+    pre_park_event = await bb.get_event(event_id)
+    live_sha: str | None = None
+    if pre_park_event is not None:
+        from ..utils.vcs_approval import extract_context_head_sha, resolve_live_head_sha
+
+        try:
+            _, live_sha = await resolve_live_head_sha(pre_park_event)
+        except Exception as exc:
+            logger.warning(
+                "handle_request_user_approval: resolve_live_head_sha failed for %s (%s)",
+                event_id,
+                type(exc).__name__,
+            )
+        if not live_sha:
+            fallback_sha = extract_context_head_sha(pre_park_event)
+            if fallback_sha:
+                logger.warning(
+                    "handle_request_user_approval: falling back to cached context HEAD SHA %s for %s",
+                    fallback_sha[:8],
+                    event_id,
+                )
+                live_sha = fallback_sha
+    await bb.park_for_approval(event_id, approval_requested_sha=live_sha)
     event = await bb.get_event(event_id)
     if event and event.status == EventStatus.WAITING_APPROVAL:
-        # Only the UI queue-sidebar refresh, not the turn itself -- the request_approval
-        # turn already broadcasts via append_and_broadcast above. Skipped if park_for_approval
-        # no-op'd (event already CLOSED, #240 race guard) so we don't announce a park that
-        # didn't happen.
+        ctx.mark_waiting_for_user(event_id)
+        turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain",
+            action="request_approval",
+            thoughts=plan_summary,
+            pendingApproval=True,
+            waitingFor="user",
+        )
+        await ctx.append_and_broadcast(event_id, turn)
         await ctx.broadcast({
             "type": "event_status_changed",
             "event_id": event_id,
             "status": EventStatus.WAITING_APPROVAL.value,
         })
-    if event and event.source in ("slack", "chat"):
-        ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
+        if event.source in ("slack", "chat"):
+            ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
     return False
 
 

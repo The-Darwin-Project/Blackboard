@@ -7204,6 +7204,8 @@ class Brain:
             if spec.resource_type == "gitlab_pipeline"
             else f"GitHub PR #{spec.resource_ref.pr_number} ({spec.resource_ref.owner}/{spec.resource_ref.repo})"
             if spec.resource_type == "github_pr"
+            else f"GitHub Workflow Run #{spec.resource_ref.run_id} ({spec.resource_ref.owner}/{spec.resource_ref.repo})"
+            if spec.resource_type == "github_run"
             else f"Kargo {spec.resource_ref.project}/{spec.resource_ref.stage}"
         )
         notification = (

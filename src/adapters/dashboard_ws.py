@@ -13,7 +13,7 @@
 #    ASGI close() before accept() is treated as a rejected handshake -> browser gets HTTP 403 / code 1006, never 4001.
 # 10. [Pattern]: _handle_user_message uses auth.can_append_message for ownership checks. Structured [Audit]
 #     logs emitted at call site, not inside auth.py.
-# 11. [Pattern]: WS error envelope schema: {"type": "error", "kind": "auth_rejected"|"rate_limited"|"invalid_payload"|"error", "event_id": str, "message": str}.
+# 11. [Pattern]: WS error envelope schema: {"type": "error", "kind": "auth_rejected"|"rate_limited"|"invalid_payload"|"sha_drift"|"sha_unresolvable"|"closed"|"error", "event_id": str, "message": str}.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from ..auth import (
 from ..agents.event_namer import spawn_event_namer_task
 from ..models import ConversationTurn, EventEvidence
 from ..utils.prompt_sanitize import fallback_title
-from ..utils.vcs_approval import resolve_live_head_sha
+from ..utils.vcs_approval import check_approval_sha_drift, resolve_live_head_sha
 
 if TYPE_CHECKING:
     from ..agents.brain import Brain
@@ -263,27 +263,60 @@ class DashboardWSAdapter:
             })
             return
 
-        mr_id, mr_sha = await resolve_live_head_sha(event)
+        try:
+            mr_id, mr_sha = await resolve_live_head_sha(event)
+        except Exception as exc:
+            logger.warning("WS _handle_approve: resolve_live_head_sha failed for %s (%s)", event_id, type(exc).__name__)
+            mr_id, mr_sha = None, None
+        fresh_event = await self._blackboard.get_event(event_id)
+        if not fresh_event:
+            return
+        raw_expected = data.get("expected_sha")
+        expected_sha = raw_expected if isinstance(raw_expected, str) else None
+        drift = check_approval_sha_drift(fresh_event, mr_sha, expected_sha=expected_sha)
+        if not drift.allowed:
+            await ws.send_json({
+                "type": "error",
+                "kind": drift.code,
+                "event_id": event_id,
+                "approval_requested_sha": drift.approval_requested_sha,
+                "live_sha": drift.live_sha,
+                "message": drift.detail,
+            })
+            return
 
         clean_by, clean_name = resolve_approval_identity(
             getattr(user, "email", None), getattr(user, "label", None)
         )
+        raw_fresh_req = getattr(fresh_event, "approval_requested_sha", None)
+        fresh_req_sha = raw_fresh_req if isinstance(raw_fresh_req, str) else None
 
         stamp_res = self._blackboard.stamp_event(
             event_id,
+            _expected_requested_sha=fresh_req_sha,
             approved_by=clean_by,
             approved_mr_id=mr_id,
             approved_mr_sha=mr_sha,
+            approval_requested_sha=None,
         )
-        if inspect.isawaitable(stamp_res):
-            await stamp_res
+        stamped = await stamp_res if inspect.isawaitable(stamp_res) else stamp_res
+        if stamped is False:
+            await ws.send_json({
+                "type": "error",
+                "kind": "closed",
+                "event_id": event_id,
+                "approval_requested_sha": fresh_req_sha,
+                "live_sha": mr_sha,
+                "message": "Event state changed concurrently; please refresh and retry.",
+            })
+            return
 
         thought_msg = "User approved the plan."
         if mr_id and mr_sha:
             thought_msg = f"User approved plan for MR/PR !{mr_id} at HEAD {mr_sha[:8]}."
 
         turn = ConversationTurn(
-            turn=len(event.conversation) + 1,
+            turn=len(fresh_event.conversation) + 1,
             actor="user",
             action="approve",
             thoughts=thought_msg,

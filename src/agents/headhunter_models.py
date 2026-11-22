@@ -26,11 +26,17 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         "[REDACTED_JWT]",
     ),
     (re.compile(r"github_pat_[A-Za-z0-9_]{1,255}"), "[REDACTED_TOKEN]"),
-    (re.compile(r"gl(?:pat|oas|rt|dt)-[A-Za-z0-9_-]{1,128}"), "[REDACTED_TOKEN]"),
+    (
+        re.compile(
+            r"gl(?:pat|oas|oa|rt|dt|cbt|ptt|soat|ft|imt|agent)-(?:[A-Za-z0-9_-]|\.(?=[A-Za-z0-9_-])){1,256}"
+        ),
+        "[REDACTED_TOKEN]",
+    ),
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{1,255}"), "[REDACTED_TOKEN]"),
     (re.compile(r"(?i)((?:private_token|access_token)\s*=\s*)[^&\s]{1,256}"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)(Bearer\s+)\S{1,512}"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)(PRIVATE-TOKEN\s*[:=]\s*)\S{1,512}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(Bearer\s+)\S{1,2048}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(\bBasic[ \t]+)[A-Za-z0-9+/=_-]{4,2048}(?![A-Za-z0-9+/=_-])"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(PRIVATE-TOKEN\s*[:=]\s*)\S{1,2048}"), r"\1[REDACTED]"),
     (
         re.compile(
             r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,255}\.[A-Za-z0-9.-]{1,255}"

@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ import httpx
 from ..models import ConversationTurn
 from ..utils import redact_pii
 from ..utils.maintainers import resolve_maintainer_emails
+from ..utils.prompt_sanitize import sanitize_untrusted_line
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -858,40 +860,159 @@ async def handle_search_open_incidents(
 # ---------------------------------------------------------------------------
 # refresh_github_context
 # ---------------------------------------------------------------------------
+_GH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _valid_gh_segment(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned or cleaned in (".", "..") or not _GH_SEGMENT_RE.match(cleaned):
+        return None
+    return cleaned
+
+
+def _parse_poll_interval(raw: object, default: int = 30) -> int:
+    """Safely parse poll_interval, rejecting None/bool/non-int and clamping to [10, 300]."""
+    if raw is None or isinstance(raw, bool):
+        val = default
+    else:
+        try:
+            val = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            val = default
+    return max(10, min(val, 300))
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 async def handle_refresh_github_context(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
     bb = ctx.get_blackboard()
     event_check = await bb.get_event(event_id)
-    if event_check and event_check.event and event_check.event.evidence:
-        if getattr(event_check.event.evidence, "github_issue_context", None):
-            return await _reject_context_conflict(
-                ctx, event_id, "refresh_github_context",
-                "This event has GitHub Issue context, not a GitHub PR. Cannot attach github_context.",
-                response_parts,
-            )
-        if getattr(event_check.event.evidence, "gitlab_context", None):
-            return await _reject_context_conflict(
-                ctx, event_id, "refresh_github_context",
-                "This event has GitLab context, not GitHub. Use refresh_gitlab_context instead.",
-                response_parts,
-            )
+    ev_evidence = (
+        event_check.event.evidence
+        if event_check and event_check.event and event_check.event.evidence
+        else None
+    )
+    if ev_evidence and getattr(ev_evidence, "gitlab_context", None):
+        return await _reject_context_conflict(
+            ctx, event_id, "refresh_github_context",
+            "This event has GitLab context, not GitHub. Use refresh_gitlab_context instead.",
+            response_parts,
+        )
 
-    condition = args.get("check_condition", "")
-    headhunter = ctx.get_agent_instance("_headhunter")
-    gh_platform = getattr(headhunter, "_github", None) if headhunter else None
-    if not gh_platform:
-        result_text = "GitHub integration not available. Use select_agent to check PR state manually."
+    async def _emit(evidence_text: str) -> bool:
         turn = ConversationTurn(
             turn=(await ctx.next_turn_number(event_id)),
-            actor="brain", action="tool_result",
+            actor="brain",
+            action="tool_result",
             waitingFor="refresh_github_context",
-            evidence=result_text,
+            evidence=evidence_text,
             response_parts=response_parts,
         )
         await ctx.append_and_broadcast(event_id, turn)
         return True
 
+    condition = args.get("check_condition", "")
+    headhunter = ctx.get_agent_instance("_headhunter")
+    gh_platform = getattr(headhunter, "_github", None) if headhunter else None
+    if not gh_platform:
+        return await _emit("GitHub integration not available. Use select_agent to check PR state manually.")
+
+    state_watcher = ctx.get_state_watcher()
+
+    # Mode 1: GitHub Actions workflow run_id refresh & subscription
+    if "run_id" in args and args["run_id"] is not None:
+        raw_run_id = args["run_id"]
+        if not _is_positive_int(raw_run_id):
+            return await _emit(f"Error: invalid run_id {raw_run_id!r} (must be a positive integer).")
+
+        arg_owner = args.get("owner")
+        arg_repo = args.get("repo")
+        if arg_owner is not None or arg_repo is not None:
+            owner = _valid_gh_segment(arg_owner)
+            repo = _valid_gh_segment(arg_repo)
+            if not owner or not repo:
+                return await _emit(
+                    f"Error: invalid owner/repo ({arg_owner!r}/{arg_repo!r}); "
+                    "must match ^[A-Za-z0-9_.-]+$ and not be '.' or '..'."
+                )
+        else:
+            gh_ctx = getattr(ev_evidence, "github_context", None) if ev_evidence else None
+            raw_owner = gh_ctx.get("owner") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "owner", None)
+            raw_repo = gh_ctx.get("repo") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "repo", None)
+            owner = _valid_gh_segment(raw_owner)
+            repo = _valid_gh_segment(raw_repo)
+            if not owner or not repo:
+                return await _emit("Error: owner and repo are required for run_id mode when event has no github_context.")
+
+        try:
+            run_state = await gh_platform.poll_github_run_status(owner, repo, raw_run_id)
+        except httpx.HTTPStatusError as e:
+            return await _emit(f"Run ID: {raw_run_id}\nError: GitHub returned HTTP {e.response.status_code}.")
+        except Exception as e:
+            return await _emit(f"Run ID: {raw_run_id}\nError: GitHub run status check failed ({type(e).__name__}).")
+
+        run_status = run_state.get("run_status", "unknown")
+        run_conclusion = run_state.get("run_conclusion", "none")
+        result_text = (
+            f"Workflow Run ID: {raw_run_id}\n"
+            f"Repo: {owner}/{repo}\n"
+            f"Run Status: {run_status}\n"
+            f"Conclusion: {run_conclusion}"
+        )
+        subscription_active = False
+        if args.get("subscribe") and state_watcher:
+            from ..scheduling import SubscriptionSpec, GitHubRunRef
+            interval = _parse_poll_interval(args.get("poll_interval"))
+            poll_fn = getattr(headhunter, "poll_github_run_status", gh_platform.poll_github_run_status)
+            spec = SubscriptionSpec(
+                event_id=event_id,
+                resource_type="github_run",
+                resource_ref=GitHubRunRef(owner=owner, repo=repo, run_id=raw_run_id),
+                poll_fn=poll_fn,
+                interval=interval,
+                state_key=gh_platform.extract_github_run_state_key(run_state),
+                registered_at=time.time(),
+                cycle_id=ctx.get_cycle_id(event_id),
+            )
+            subscription_active = state_watcher.register(spec)
+            if subscription_active:
+                await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
+
+        evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
+        if args.get("subscribe"):
+            evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
+        return await _emit(evidence)
+
+    # Mode 2: GitHub Issue refresh when event has github_issue_context
+    if ev_evidence and getattr(ev_evidence, "github_issue_context", None):
+        if (args.get("pr_url") or "").strip():
+            return await _reject_context_conflict(
+                ctx, event_id, "refresh_github_context",
+                "This event has GitHub Issue context, not PR context. Cannot attach a pr_url.",
+                response_parts,
+            )
+        issue_state = await gh_platform.refresh_issue_state(event_id)
+        if "error" in issue_state:
+            result_text = f"Issue Refresh Error: {sanitize_untrusted_line(issue_state['error'], max_len=200)}"
+        else:
+            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in (issue_state.get("labels") or []) if lbl]
+            safe_assignees = [sanitize_untrusted_line(a, max_len=120) for a in (issue_state.get("assignees") or []) if a]
+            result_text = (
+                f"Issue State: {sanitize_untrusted_line(issue_state.get('state') or 'unknown', max_len=40)}\n"
+                f"Labels: {', '.join(safe_labels) or 'none'}\n"
+                f"Assignees: {', '.join(safe_assignees) or 'none'}\n"
+                f"Updated At: {sanitize_untrusted_line(issue_state.get('updated_at') or 'unknown', max_len=64)}"
+            )
+        result_text += "\nsubscription_active: false"
+        return await _emit(f"Checking: {condition}\n{result_text}" if condition else result_text)
+
+    # Mode 3: GitHub PR refresh & subscription
     override_owner = None
     override_repo = None
     override_pr_number = None
@@ -901,15 +1022,7 @@ async def handle_refresh_github_context(
         if parsed:
             override_owner, override_repo, override_pr_number = parsed
         else:
-            turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="refresh_github_context",
-                evidence=f"Could not parse PR URL: {pr_url}",
-                response_parts=response_parts,
-            )
-            await ctx.append_and_broadcast(event_id, turn)
-            return True
+            return await _emit(f"Could not parse PR URL: {pr_url}")
 
     state = await gh_platform.refresh_pr_state(
         event_id,
@@ -934,31 +1047,61 @@ async def handle_refresh_github_context(
             f"Severity: {state.get('severity', '?')}\n"
             f"Error: {state['error']}"
         )
-    elif pr_state in ("closed",):
-        result_text = (
-            f"PR State: {pr_state}\n"
-            f"Checks: {state.get('check_status', '?')}\n"
-            f"Severity: {state.get('severity', '?')}"
-        )
+    elif pr_state in ("merged", "closed"):
+        from datetime import datetime as _dt
+        lines = [
+            f"PR State: {pr_state}",
+            f"Checks: {state.get('check_status', '?')}",
+            f"Severity: {state.get('severity', '?')}",
+        ]
+        changed_at = state.get("merged_at") or state.get("closed_at") or ""
+        if changed_at:
+            try:
+                dt = _dt.fromisoformat(changed_at.replace("Z", "+00:00"))
+                age = max(0, int(time.time() - dt.timestamp()))
+                m, s = divmod(age, 60)
+                lines.append(f"{pr_state.title()} {m}m {s}s ago")
+            except (ValueError, TypeError):
+                pass
+        result_text = "\n".join(lines)
     else:
-        result_text = (
-            f"PR State: {pr_state}\n"
-            f"Checks: {state['check_status']}\n"
-            f"Severity: {state['severity']}"
-        )
+        lines = [
+            f"PR State: {pr_state}",
+            f"Checks: {state['check_status']}",
+        ]
+        mergeable_state = str(state.get("mergeable_state") or "").lower()
+        is_draft = bool(state.get("draft", False))
+        if is_draft or mergeable_state == "draft":
+            lines.append("Merge Blocked: PR is a draft (not ready for review)")
+        elif mergeable_state == "dirty":
+            lines.append("Merge Blocked: merge conflicts (dirty — requires conflict resolution)")
+        elif mergeable_state == "behind":
+            lines.append("Merge Blocked: branch is behind base (needs rebase/update)")
+        elif mergeable_state == "blocked":
+            lines.append("Merge Blocked: blocked by branch protection (required checks or reviews)")
+        elif mergeable_state == "unstable":
+            lines.append("Merge Warning: unstable (non-required checks failing)")
+        elif mergeable_state:
+            lines.append(f"Merge Readiness: {sanitize_untrusted_line(mergeable_state, max_len=40)}")
+        failed_checks = state.get("failed_checks")
+        if isinstance(failed_checks, list) and failed_checks:
+            safe_failed = [sanitize_untrusted_line(c, max_len=120) for c in failed_checks[:10] if c]
+            if safe_failed:
+                lines.append(f"Failed Checks: {', '.join(safe_failed)}")
+        lines.append(f"Severity: {state['severity']}")
+        result_text = "\n".join(lines)
 
     subscription_active = False
-    state_watcher = ctx.get_state_watcher()
     if args.get("subscribe") and state_watcher and "error" not in state:
         event = await bb.get_event(event_id)
         gh_ctx = getattr(event.event.evidence, "github_context", None) if event and event.event and event.event.evidence else None
         if gh_ctx:
             from ..scheduling import SubscriptionSpec, GitHubPrRef
-            interval = max(15, min(int(args.get("poll_interval", 30)), 300))
+            interval = _parse_poll_interval(args.get("poll_interval"))
             owner = gh_ctx.get("owner", "") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "owner", "")
             repo = gh_ctx.get("repo", "") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "repo", "")
             pr_num = gh_ctx.get("pr_number", 0) if isinstance(gh_ctx, dict) else getattr(gh_ctx, "pr_number", 0)
-            if owner and repo and pr_num:
+            if owner and repo and _is_positive_int(pr_num):
                 spec = SubscriptionSpec(
                     event_id=event_id,
                     resource_type="github_pr",
@@ -976,15 +1119,7 @@ async def handle_refresh_github_context(
     evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
     if args.get("subscribe"):
         evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
-    turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
-        actor="brain", action="tool_result",
-        waitingFor="refresh_github_context",
-        evidence=evidence,
-        response_parts=response_parts,
-    )
-    await ctx.append_and_broadcast(event_id, turn)
-    return True
+    return await _emit(evidence)
 
 
 # ---------------------------------------------------------------------------

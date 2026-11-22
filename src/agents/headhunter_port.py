@@ -104,6 +104,18 @@ class VcsPlatformPort(Protocol):
         """
         ...
 
+    async def queue_item(
+        self,
+        work_item: VcsWorkItem | dict[str, Any],
+        position: int = 1,
+    ) -> Any:
+        """Park a work item in the platform queue when the flow gate is closed."""
+        ...
+
+    async def get_queued_items(self) -> Sequence[VcsWorkItem | dict[str, Any]]:
+        """Return currently queued work items in FIFO order."""
+        ...
+
     async def close(self) -> None:
         """Release adapter-owned HTTP resources (never close borrowed shared singletons)."""
         ...

@@ -68,13 +68,20 @@ class GitHubPrRef:
     pr_number: int
 
 
-ResourceRef = GitLabMrRef | GitLabPipelineRef | KargoStageRef | GitHubPrRef
+@dataclass(frozen=True)
+class GitHubRunRef:
+    owner: str
+    repo: str
+    run_id: int
+
+
+ResourceRef = GitLabMrRef | GitLabPipelineRef | KargoStageRef | GitHubPrRef | GitHubRunRef
 
 
 @dataclass
 class SubscriptionSpec:
     event_id: str
-    resource_type: Literal["gitlab_mr", "gitlab_pipeline", "kargo_stage", "github_pr"]
+    resource_type: Literal["gitlab_mr", "gitlab_pipeline", "kargo_stage", "github_pr", "github_run"]
     resource_ref: ResourceRef
     poll_fn: Callable[..., Awaitable[StateKey]]
     interval: int
@@ -262,6 +269,10 @@ class StateWatcher:
             elif isinstance(ref, GitHubPrRef):
                 result = await sub.spec.poll_fn(
                     owner=ref.owner, repo=ref.repo, pr_number=ref.pr_number,
+                )
+            elif isinstance(ref, GitHubRunRef):
+                result = await sub.spec.poll_fn(
+                    owner=ref.owner, repo=ref.repo, run_id=ref.run_id,
                 )
             elif isinstance(ref, GitLabPipelineRef):
                 result = await sub.spec.poll_fn(

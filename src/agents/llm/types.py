@@ -1276,14 +1276,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "refresh_github_context",
         "description": (
-            "Quick-check: re-fetch current PR and check-run state from GitHub "
-            "WITHOUT dispatching an agent. Returns a snapshot of the current state. "
-            "Works for any event source -- headhunter events carry PR context "
-            "automatically; for chat/slack events where an agent created a PR, "
-            "supply the PR URL from the agent's completion report. "
-            "Can optionally subscribe to background state monitoring -- the system "
-            "watches for PR/check-run state changes (merged, checks completed, "
-            "failed) and injects a notification turn when something changes."
+            "Quick-check: re-fetch current GitHub PR/check-run state, GitHub Actions "
+            "workflow run status (via run_id), or GitHub Issue state/labels/assignees "
+            "WITHOUT dispatching an agent. Works for any event source -- headhunter "
+            "events carry PR or Issue context automatically; for chat/slack events "
+            "where an agent created a PR, supply pr_url. Can optionally subscribe to "
+            "background state monitoring for PRs or workflow runs (merged, checks "
+            "completed, run finished, failed) and inject a notification turn on change."
         ),
         "input_schema": {
             "type": "object",
@@ -1300,6 +1299,21 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "created a PR). The system extracts owner, repo, and PR "
                         "number from the URL and hydrates the event context."
                     ),
+                },
+                "run_id": {
+                    "type": "integer",
+                    "description": (
+                        "Optional GitHub Actions workflow run ID to inspect and/or subscribe to. "
+                        "Uses owner/repo args if provided, otherwise falls back to event github_context."
+                    ),
+                },
+                "owner": {
+                    "type": "string",
+                    "description": "Optional GitHub repository owner when using run_id without github_context.",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Optional GitHub repository name when using run_id without github_context.",
                 },
                 "subscribe": {
                     "type": "boolean",

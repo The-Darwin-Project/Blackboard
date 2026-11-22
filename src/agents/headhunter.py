@@ -149,7 +149,11 @@ def _raise_if_systemic_failure(
     the breaker closed.
     """
     if attempted >= _SYSTEMIC_FAILURE_MIN_BATCH and failed == attempted:
-        if errors and all(HeadhunterCircuitBreaker.is_auth_exempt(err) for err in errors):
+        if (
+            errors
+            and len(errors) == failed
+            and all(HeadhunterCircuitBreaker.is_auth_exempt(err) for err in errors)
+        ):
             raise RuntimeError(
                 f"{platform} {phase}: all {attempted} item(s) failed with auth/permission errors"
             ) from errors[0]
@@ -302,6 +306,7 @@ class Headhunter:
         self._max_output_tokens = _safe_int("LLM_MAX_TOKENS_HEADHUNTER", 10000)
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_pending: int = 0
+        self._gitlab_queued: int = 0
         self._github_pending: int = 0
         self._github_issue_pending: int = 0
         self._github_queued: int = 0
@@ -472,7 +477,7 @@ class Headhunter:
         """Build structured prompt with full context for LLM analysis (VcsContext or dict)."""
         extras: dict[str, Any] = context.raw if isinstance(context, VcsContext) else context
 
-        merge_val = extras.get("merge_status")
+        merge_val = extras.get("merge_status") or extras.get("mergeable_state")
         if not merge_val:
             mergeable = extras.get("mergeable")
             if mergeable is None or mergeable == "":
@@ -510,7 +515,8 @@ class Headhunter:
             f"Action: {sanitize_untrusted_line(raw_action, max_len=80)}",
             f"MR: {title}",
             f"State: {sanitize_untrusted_line(raw_state, max_len=60)} | "
-            f"Merge status: {sanitize_untrusted_line(merge_val, max_len=60)}",
+            f"Merge status: {sanitize_untrusted_line(merge_val, max_len=60)}"
+            + (" | Draft: true" if extras.get("draft") else ""),
             f"Branch: {src_branch} -> {tgt_branch}",
             f"Author: {author}",
             f"Pipeline: {sanitize_untrusted_line(raw_ci, max_len=60)}",
@@ -560,6 +566,27 @@ class Headhunter:
         review_feedback = extras.get("review_feedback")
         if review_feedback:
             parts.append(self._render_review_feedback(review_feedback))
+        pr_review_comments = extras.get("pr_review_comments")
+        if isinstance(pr_review_comments, list) and pr_review_comments:
+            rc_lines: list[str] = []
+            for entry in pr_review_comments[:20]:
+                if not isinstance(entry, dict):
+                    continue
+                kind = sanitize_untrusted_line(entry.get("kind") or "review", max_len=32)
+                e_author = sanitize_untrusted_line(entry.get("author") or "?", max_len=80)
+                meta_bits = [f"{kind} by {e_author}"]
+                if entry.get("state"):
+                    meta_bits.append(f"state={sanitize_untrusted_line(entry['state'], max_len=40)}")
+                if entry.get("path"):
+                    meta_bits.append(f"path={sanitize_untrusted_line(entry['path'], max_len=160)}")
+                rc_lines.append("[" + " ".join(meta_bits) + "]")
+                if entry.get("diff_hunk"):
+                    rc_lines.append(sanitize_untrusted_block(entry["diff_hunk"], max_len=600))
+                if entry.get("body"):
+                    rc_lines.append(sanitize_untrusted_block(entry["body"], max_len=1000))
+            if rc_lines:
+                rc_joined = sanitize_untrusted_block("\n".join(rc_lines), max_len=_COMMENT_LIMIT)
+                parts.append(f"<pr_review_comments>\n{rc_joined}\n</pr_review_comments>")
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
@@ -654,6 +681,7 @@ class Headhunter:
         """Pending items from last poll cycle (not yet converted to events)."""
         return (
             self._gitlab_pending
+            + self._gitlab_queued
             + self._github_pending
             + self._github_issue_pending
             + self._github_queued
@@ -885,6 +913,8 @@ class Headhunter:
                 try:
                     context = await platform.fetch_context(item)
                     if context is None:
+                        if hasattr(platform, "remove_queued_item"):
+                            await platform.remove_queued_item(item)
                         remaining_queued = [q for q in remaining_queued if q is not item]
                         continue
                     plan_text = await self.analyze_and_plan(context, si)
@@ -920,19 +950,26 @@ class Headhunter:
                 if queue_fn is None:
                     logger.info(f"Headhunter flow gate closed mid-cycle ({platform_label}) -- stopping")
                     break
-                attempted_b += 1
                 position = len(remaining_queued) + 1
                 try:
                     queued_ok = await queue_fn(item, position)
-                    if queued_ok is False:
+                    if not queued_ok and getattr(queued_ok, "permanent", False):
+                        logger.info(
+                            f"{platform_label} queue item permanently rejected for "
+                            f"{self._item_label(item)} (not counting toward systemic failure)"
+                        )
+                    elif not queued_ok:
+                        attempted_b += 1
                         failed_b += 1
                         logger.warning(
                             f"{platform_label} queue item failed (label rejected) for {self._item_label(item)}"
                         )
                     else:
+                        attempted_b += 1
                         remaining_queued.append(self._mark_item_queued(item))
                         newly_queued_in_phase_b += 1
                 except Exception as e:
+                    attempted_b += 1
                     failed_b += 1
                     errors_b.append(e)
                     logger.warning(
@@ -966,38 +1003,67 @@ class Headhunter:
 
     async def _poll_and_process(self) -> None:
         """Single GitLab poll cycle (thin delegate over unified _drain_platform_phase_ab)."""
-        if not await self.check_flow_gate():
-            logger.debug("Headhunter flow gate closed -- skipping GitLab cycle")
-            return
+        # Active-event wake-up sweep runs on every cycle (allowlisted human notes + hex-SHA pushes)
+        if hasattr(self._gitlab, "poll_active_events_wakeup"):
+            try:
+                await self._gitlab.poll_active_events_wakeup()
+            except Exception as e:
+                logger.warning(f"GitLab active-event wake-up sweep failed (non-fatal): {e}")
 
+        # Always poll regardless of gate state so items queue in Redis FIFO behind closed gate
         todos = await self._gitlab.poll_work_items()
-        self._gitlab_pending = len(todos)
+        queued_items = [
+            t for t in todos
+            if (isinstance(t, dict) and (t.get("_queued") or t.get("queued")))
+            or getattr(t, "queued", False)
+        ]
+        new_items = [
+            t for t in todos
+            if not (
+                (isinstance(t, dict) and (t.get("_queued") or t.get("queued")))
+                or getattr(t, "queued", False)
+            )
+        ]
+        self._gitlab_pending = len(new_items)
+
+        def _sync_gitlab_queued(remaining: list[Any]) -> None:
+            self._gitlab_queued = len(remaining)
+
+        gate_open = await self.check_flow_gate()
         if not todos:
+            self._gitlab_queued = 0
             logger.debug("Headhunter GitLab: no actionable items")
             return
 
-        logger.info(f"Headhunter GitLab: {len(todos)} actionable item(s)")
-        await self._drain_platform_phase_ab(
-            self._gitlab,
-            [],
-            todos,
-            platform_label="GitLab",
+        logger.info(
+            f"Headhunter GitLab: {len(queued_items)} queued, {len(new_items)} new item(s) "
+            f"(gate={'open' if gate_open else 'closed'})"
         )
+        _, newly_queued = await self._drain_platform_phase_ab(
+            self._gitlab,
+            queued_items,
+            new_items,
+            platform_label="GitLab",
+            queue_fn=self._gitlab.queue_item,
+            on_queue_update=_sync_gitlab_queued,
+            gate_closed_initial=not gate_open,
+        )
+        self._gitlab_pending = max(0, self._gitlab_pending - newly_queued)
 
     async def _github_poll_and_process(self) -> None:
-        """Single GitHub poll cycle (thin delegate over unified _drain_platform_phase_ab + Phase C/D).
-
-        Order: (1) reset queued cache, (2) poll ALL items (always — gate must not skip poll,
-        UI needs queued state), (3) separate queued/new, (4) check gate: if open promote queued
-        + process new via _drain_platform_phase_ab; if closed queue new items via the same
-        drain helper so failures are tracked and exposed cleanly. (5) poll issues (Phase C) &
-        review feedback (Phase D).
-        """
+        """Poll GitHub PRs (Phase A/B), active HEAD drift, Issues (Phase C), and review feedback (Phase D)."""
         # Reset queued cache at top of cycle
         self._github._last_queued_prs = []
 
         # Always poll regardless of gate state — UI needs queued count even when gate is closed
         prs = await self._github.poll_work_items()
+
+        # Unconditional active PR HEAD drift clearing (independent of flow gate & Phase D)
+        if hasattr(self._github, "check_active_pr_head_drift"):
+            try:
+                await self._github.check_active_pr_head_drift()
+            except Exception as e:
+                logger.warning(f"GitHub active PR HEAD drift check failed (non-fatal): {e}")
         queued_items = sorted(
             [p for p in prs if p.get("queued")],
             key=lambda x: x.get("created_at", ""),
@@ -1013,22 +1079,6 @@ class Headhunter:
         if not gate_open:
             logger.debug("Headhunter flow gate closed -- queuing new PRs, observing queued state")
             self._github_feedback_pending = 0  # Phase D is skipped while the gate is closed
-            _, newly_queued_in_phase_b = await self._drain_platform_phase_ab(
-                self._github,
-                queued_items,
-                new_items,
-                platform_label="GitHub",
-                phase_prefix="PR ",
-                queue_fn=self._github._queue_pr,
-                on_queue_update=_sync_github_queued,
-                gate_closed_initial=True,
-            )
-            self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
-            try:
-                await self._github_poll_issues()
-            except Exception as e:
-                logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
-            return
 
         _, newly_queued_in_phase_b = await self._drain_platform_phase_ab(
             self._github,
@@ -1036,14 +1086,15 @@ class Headhunter:
             new_items,
             platform_label="GitHub",
             phase_prefix="PR ",
-            queue_fn=self._github._queue_pr,
+            queue_fn=self._github.queue_item,
             on_queue_update=_sync_github_queued,
+            gate_closed_initial=not gate_open,
         )
 
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
         self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
 
-        if not queued_items and not new_items:
+        if gate_open and not queued_items and not new_items:
             logger.debug("Headhunter GitHub: no actionable PRs")
 
         # Phase C: Poll Issues (darwin-work label)
@@ -1051,6 +1102,9 @@ class Headhunter:
             await self._github_poll_issues()
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
+
+        if not gate_open:
+            return
 
         # Phase D: PR review feedback / @mentions (flag-gated, flow-gate gated). Non-fatal like
         # Phase C: an optional feature must never abort _github_poll_and_process or feed the circuit breaker.
@@ -1092,16 +1146,7 @@ class Headhunter:
                 )
 
     async def _github_poll_issues(self) -> None:
-        """Poll GitHub Issues (darwin-work label), queue/promote to mirror PR Phase A/B.
-
-        `_poll_issues` filters server-side by `labels=darwin-work` only — this is
-        intentional (see _queue_issue) so already-queued issues (which keep
-        darwin-work + gain darwin-queued) still surface here. Classification into
-        queued/new happens client-side by checking for the darwin-queued label.
-        Gate open: promote queued FIFO, then process new (queuing any that arrive
-        after the gate closes mid-loop). Gate closed: queue all new items and
-        expose queued state for /headhunter/pending observability.
-        """
+        """Poll GitHub Issues (darwin-work), queue/promote FIFO, and expose queued cache."""
         self._github._last_queued_issues = []
 
         prev_pending = self._github_issue_pending
@@ -1125,7 +1170,12 @@ class Headhunter:
                 position = len(queued_items) + len(newly_queued) + 1
                 try:
                     queued_ok = await self._github._queue_issue(issue, position)
-                    if queued_ok is not False:
+                    if not queued_ok and getattr(queued_ok, "permanent", False):
+                        logger.info(
+                            f"GitHub queue issue permanently rejected for "
+                            f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}"
+                        )
+                    elif queued_ok:
                         newly_queued.append({**issue, "queued": True})
                 except Exception as e:
                     logger.warning(
@@ -1183,24 +1233,33 @@ class Headhunter:
         attempted_b = 0
         failed_b = 0
         for issue in new_items:
-            attempted_b += 1
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 position = len(remaining_queued) + 1
                 try:
                     queued_ok = await self._github._queue_issue(issue, position)
-                    if queued_ok is False:
+                    if not queued_ok and getattr(queued_ok, "permanent", False):
+                        logger.info(
+                            f"GitHub queue issue permanently rejected for "
+                            f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')} "
+                            "(not counting toward systemic failure)"
+                        )
+                    elif not queued_ok:
+                        attempted_b += 1
                         failed_b += 1
                     else:
+                        attempted_b += 1
                         remaining_queued.append({**issue, "queued": True})
                         newly_queued_in_phase_b += 1
                 except Exception as e:
+                    attempted_b += 1
                     failed_b += 1
                     logger.warning(
                         f"GitHub queue issue failed for "
                         f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
                     )
                 continue
+            attempted_b += 1
             try:
                 si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
                 plan_text = await self.analyze_and_plan(issue, si)
@@ -1378,6 +1437,15 @@ class Headhunter:
     async def poll_github_pr_status(self, owner: str, repo: str, pr_number: int) -> dict:
         """Delegate to GitHub adapter. Registered as StateWatcher poll fn."""
         return await self._github.poll_github_pr_status(owner, repo, pr_number)
+
+    async def poll_github_run_status(self, owner: str, repo: str, run_id: int) -> dict:
+        """Delegate to GitHub adapter. Registered as StateWatcher poll fn."""
+        return await self._github.poll_github_run_status(owner, repo, run_id)
+
+    @staticmethod
+    def extract_github_run_state_key(state: dict) -> dict:
+        """Delegate to GitHub adapter. Used by StateWatcher."""
+        return GitHubPlatform.extract_github_run_state_key(state)
 
     @staticmethod
     def extract_github_state_key(state: dict) -> dict:

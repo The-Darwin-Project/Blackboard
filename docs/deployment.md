@@ -151,7 +151,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `HEADHUNTER_GITHUB_ENABLED` | Enable GitHub PR polling | `false` |
 | `HEADHUNTER_GITHUB_POLL_INTERVAL` | PR poll interval (seconds) | (see code) |
 | `HEADHUNTER_GITHUB_REPOS` | Comma-separated `owner/repo` list (empty = auto-discover from installation) | (empty) |
-| `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Action allowlist: `review_requested` (label flow), `review_feedback`, `mention` | `review_requested,review_feedback,mention` |
+| `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Phase D review-response action allowlist: `review_feedback`, `mention` | `review_feedback,mention` |
 | `HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED` | Respond to PR reviews / `@darwin-project-ai` mentions from trusted humans | `false` |
 | `HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS` | `author_association` values allowed to instruct Darwin | `OWNER,MEMBER,COLLABORATOR` |
 | `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS` | CI/robot logins that never trigger (even if COLLABORATOR) | `openshift-ci-robot,openshift-merge-robot` |

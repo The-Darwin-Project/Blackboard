@@ -43,3 +43,4 @@ docs/*-Review_*.md
 docs/*Review*.md
 docs/events/**
 docs/evt-*.md
+gemini-sidecar/REFACTOR-DOC.md
