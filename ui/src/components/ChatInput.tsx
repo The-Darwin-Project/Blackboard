@@ -82,6 +82,7 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
     console.warn('[ChatInput] Received error envelope:', msg);
     const errText = typeof msg.message === 'string' ? msg.message : 'Message rejected by server';
     setErrorMessage(errText);
+    if (msg.kind === 'sha_drift' || msg.kind === 'sha_unresolvable' || msg.kind === 'closed') return;
 
     // Non-clobbering draft restore from lastSubmissionRef
     const lastSub = lastSubmissionRef.current;

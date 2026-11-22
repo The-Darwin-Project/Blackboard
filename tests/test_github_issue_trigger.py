@@ -1008,53 +1008,123 @@ class TestATDDT11ThreeWayVcsExclusivity:
     @pytest.mark.asyncio
     async def test_update_event_vcs_context_unwatches_when_event_missing(self):
         """Given event key is absent in Redis
-        When update_event_gitlab_context() / update_event_github_context() returns early
+        When update_event_{gitlab,github,github_issue}_context() returns early
         Then pipe.unwatch() is awaited before returning."""
         from src.state.blackboard import BlackboardState
 
-        for method_name in ("update_event_gitlab_context", "update_event_github_context"):
+        for method_name in (
+            "update_event_gitlab_context",
+            "update_event_github_context",
+            "update_event_github_issue_context",
+        ):
             pipe = _InMemoryWatchPipeline({})
             bb = BlackboardState.__new__(BlackboardState)
             bb.redis = MagicMock()
             bb.redis.pipeline = MagicMock(return_value=pipe)
 
-            await getattr(bb, method_name)("evt-missing", {"status": "x"})
+            ok = await getattr(bb, method_name)("evt-missing", {"status": "x"})
+            assert ok is False
             pipe.unwatch.assert_awaited_once()
             pipe.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_update_event_github_issue_context_rejects_on_gitlab_or_github_conflict(self):
+        """H8: update_event_github_issue_context enforces 3-way exclusivity and awaits pipe.unwatch()."""
+        import json
+        from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+        from src.state.blackboard import BlackboardState
+
+        for conflict_field, payload in (
+            ("gitlab_context", {"project_id": 1, "mr_iid": 2}),
+            ("github_context", {"owner": "o", "repo": "r", "pr_number": 3}),
+        ):
+            ev = EventDocument(
+                id=f"evt-t11-{conflict_field}",
+                source="headhunter",
+                service="svc",
+                status=EventStatus.ACTIVE,
+                event=EventInput(
+                    reason="test",
+                    evidence=EventEvidence(
+                        display_text="test",
+                        source_type="headhunter",
+                        domain="complicated",
+                        severity="info",
+                        **{conflict_field: payload},
+                    ),
+                ),
+            )
+            key = f"{BlackboardState.EVENT_PREFIX}{ev.id}"
+            store = {key: json.dumps(ev.model_dump())}
+            pipe = _InMemoryWatchPipeline(store)
+            bb = BlackboardState.__new__(BlackboardState)
+            bb.redis = MagicMock()
+            bb.redis.pipeline = MagicMock(return_value=pipe)
+
+            ok = await bb.update_event_github_issue_context(ev.id, {"state": "closed"})
+            assert ok is False
+            pipe.unwatch.assert_awaited_once()
+            pipe.execute.assert_not_awaited()
+            reloaded = EventDocument(**json.loads(store[key]))
+            assert reloaded.event.evidence.github_issue_context is None
+
+    @pytest.mark.asyncio
     async def test_refresh_handlers_reject_github_issue_context_cleanly(self):
         """Given an event has github_issue_context
-        When handle_refresh_gitlab_context() or handle_refresh_github_context() runs
-        Then a clean tool_result error is appended and neither refresh_*_state is invoked."""
+        When handle_refresh_gitlab_context() runs, it rejects cleanly;
+        When handle_refresh_github_context() runs, it refreshes live Issue state/labels/assignees."""
         from src.agents.handlers_integration import (
             handle_refresh_github_context,
             handle_refresh_gitlab_context,
         )
 
         ev = _make_issue_event_doc("evt-t11-handler")
-        for handler, tool_name in (
-            (handle_refresh_gitlab_context, "refresh_gitlab_context"),
-            (handle_refresh_github_context, "refresh_github_context"),
-        ):
-            bb = MagicMock()
-            bb.get_event = AsyncMock(return_value=ev)
-            hh = MagicMock()
-            hh.refresh_mr_state = AsyncMock()
-            hh._github = MagicMock()
-            hh._github.refresh_pr_state = AsyncMock()
 
-            ctx = MagicMock()
-            ctx.get_blackboard.return_value = bb
-            ctx.get_agent_instance.return_value = hh
-            ctx.next_turn_number = AsyncMock(return_value=2)
-            ctx.append_and_broadcast = AsyncMock()
+        # 1. refresh_gitlab_context still rejects github_issue_context cleanly
+        bb_gl = MagicMock()
+        bb_gl.get_event = AsyncMock(return_value=ev)
+        hh_gl = MagicMock()
+        hh_gl.refresh_mr_state = AsyncMock()
+        ctx_gl = MagicMock()
+        ctx_gl.get_blackboard.return_value = bb_gl
+        ctx_gl.get_agent_instance.return_value = hh_gl
+        ctx_gl.next_turn_number = AsyncMock(return_value=2)
+        ctx_gl.append_and_broadcast = AsyncMock()
 
-            handled = await handler(ctx, ev.id, {}, None)
-            assert handled is True
-            hh.refresh_mr_state.assert_not_awaited()
-            hh._github.refresh_pr_state.assert_not_awaited()
-            turn = ctx.append_and_broadcast.call_args[0][1]
-            assert turn.waitingFor == tool_name
-            assert "issue" in (turn.evidence or "").lower()
+        handled_gl = await handle_refresh_gitlab_context(ctx_gl, ev.id, {}, None)
+        assert handled_gl is True
+        hh_gl.refresh_mr_state.assert_not_awaited()
+        turn_gl = ctx_gl.append_and_broadcast.call_args[0][1]
+        assert turn_gl.waitingFor == "refresh_gitlab_context"
+        assert "issue" in (turn_gl.evidence or "").lower()
+
+        # 2. refresh_github_context refreshes live Issue state via refresh_issue_state()
+        bb_gh = MagicMock()
+        bb_gh.get_event = AsyncMock(return_value=ev)
+        hh_gh = MagicMock()
+        hh_gh._github = MagicMock()
+        hh_gh._github.refresh_pr_state = AsyncMock()
+        hh_gh._github.refresh_issue_state = AsyncMock(return_value={
+            "state": "open",
+            "labels": ["darwin-work", "triage"],
+            "assignees": ["alice"],
+            "updated_at": "2026-11-22T12:00:00Z",
+        })
+        ctx_gh = MagicMock()
+        ctx_gh.get_blackboard.return_value = bb_gh
+        ctx_gh.get_agent_instance.return_value = hh_gh
+        ctx_gh.get_state_watcher.return_value = None
+        ctx_gh.next_turn_number = AsyncMock(return_value=2)
+        ctx_gh.append_and_broadcast = AsyncMock()
+
+        handled_gh = await handle_refresh_github_context(ctx_gh, ev.id, {}, None)
+        assert handled_gh is True
+        hh_gh._github.refresh_pr_state.assert_not_awaited()
+        hh_gh._github.refresh_issue_state.assert_awaited_once_with(ev.id)
+        turn_gh = ctx_gh.append_and_broadcast.call_args[0][1]
+        assert turn_gh.waitingFor == "refresh_github_context"
+        evidence_text = (turn_gh.evidence or "").lower()
+        assert "open" in evidence_text
+        assert "triage" in evidence_text
+        assert "alice" in evidence_text
 

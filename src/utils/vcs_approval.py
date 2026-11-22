@@ -19,13 +19,18 @@
 # 5. [Contract]: `approved` must be the boolean True (`is True`): truthy non-booleans ("false", 1) are rejected.
 #    'operational' (sysadmin-only; the ROLE gate is the caller's) skips the SHA check; any category other than exactly
 #    'operational' is treated as 'git_merge'.
+# 6. [Pattern]: HEX_SHA_RE (\A[0-9a-fA-F]{7,64}\Z), extract_context_head_sha(), and check_approval_sha_drift()
+#    are the single shared approval-drift primitives across REST, WS, Slack, and Headhunter (fail-closed on
+#    CLOSED/RESOLVED, unresolvable live SHA, or expected_sha mismatch).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
+import re
 import urllib.parse
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
@@ -42,10 +47,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+HEX_SHA_RE = re.compile(r"\A[0-9a-fA-F]{7,64}\Z")
+
+
+def extract_context_head_sha(event: Any) -> str | None:
+    """Extract cached HEAD SHA from gitlab_context, github_context, or kargo_context."""
+    ev_obj = getattr(getattr(event, "event", None), "evidence", None)
+    if not ev_obj:
+        return None
+    for attr, keys in (
+        ("gitlab_context", ("head_sha", "sha")),
+        ("github_context", ("head_sha",)),
+        ("kargo_context", ("head_sha", "sha")),
+    ):
+        ctx = getattr(ev_obj, attr, None)
+        if isinstance(ctx, dict):
+            for k in keys:
+                val = ctx.get(k)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    return None
+
 
 def parse_mr_url(url: str) -> tuple[int | str, int] | None:
     """Extract (project_id, mr_iid) from a GitLab MR URL."""
-    import re
     from urllib.parse import unquote
     m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
     if m:
@@ -232,30 +257,130 @@ async def _resolve_github_head(gh_ctx: dict) -> tuple[str | None, str | None]:
     return pr_number, None
 
 
+@dataclass(frozen=True)
+class ApprovalDriftResult:
+    """Result of evaluating HEAD SHA drift and lifecycle guards prior to human approval."""
+
+    allowed: bool
+    code: str  # "ok" | "closed" | "sha_unresolvable" | "sha_drift"
+    detail: str
+    approval_requested_sha: Optional[str] = None
+    live_sha: Optional[str] = None
+
+
+def _is_vcs_backed_event(event: Any) -> bool:
+    ev_obj = getattr(getattr(event, "event", None), "evidence", None)
+    if ev_obj is None:
+        return False
+    for attr, keys in (("gitlab_context", ("mr_iid", "mr_id")), ("github_context", ("pr_number",)), ("kargo_context", ("mr_url",))):
+        ctx = getattr(ev_obj, attr, None)
+        if isinstance(ctx, dict) and any(ctx.get(k) for k in keys):
+            return True
+    return False
+
+
+def check_approval_sha_drift(
+    event: Any,
+    live_sha: Optional[str],
+    expected_sha: Optional[str] = None,
+) -> ApprovalDriftResult:
+    """Enforce closed-event and SHA-pinned drift invariants across REST, WS, and Slack.
+
+    Pure function — zero I/O. Safe on bare MagicMock objects in legacy unit tests.
+    """
+    raw_status = getattr(event, "status", None)
+    status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+    if status_str.strip().lower() in ("closed", "resolved"):
+        return ApprovalDriftResult(
+            allowed=False,
+            code="closed",
+            detail="Event is already closed and cannot be approved.",
+        )
+
+    raw_req = getattr(event, "approval_requested_sha", None)
+    req_sha = raw_req.strip() if isinstance(raw_req, str) and raw_req.strip() else None
+    clean_live = live_sha.strip() if isinstance(live_sha, str) and live_sha.strip() else None
+    clean_expected = (
+        expected_sha.strip() if isinstance(expected_sha, str) and expected_sha.strip() else None
+    )
+
+    if clean_expected is not None:
+        if clean_live is None:
+            return ApprovalDriftResult(
+                allowed=False,
+                code="sha_unresolvable",
+                detail=(
+                    f"Cannot verify live HEAD SHA for approval "
+                    f"(expected {clean_expected[:8]})."
+                ),
+                approval_requested_sha=req_sha,
+                live_sha=None,
+            )
+        if clean_expected != clean_live:
+            return ApprovalDriftResult(
+                allowed=False,
+                code="sha_drift",
+                detail=(
+                    f"HEAD SHA changed ({clean_expected[:8]} -> {clean_live[:8]}). "
+                    "Confirm approval for the new SHA."
+                ),
+                approval_requested_sha=req_sha,
+                live_sha=clean_live,
+            )
+        return ApprovalDriftResult(
+            allowed=True,
+            code="ok",
+            detail="Confirmed approval for updated HEAD SHA.",
+            approval_requested_sha=req_sha,
+            live_sha=clean_live,
+        )
+
+    if req_sha is not None:
+        if clean_live is None:
+            return ApprovalDriftResult(
+                allowed=False,
+                code="sha_unresolvable",
+                detail=(
+                    f"Cannot verify live HEAD SHA for approval "
+                    f"(requested at {req_sha[:8]})."
+                ),
+                approval_requested_sha=req_sha,
+                live_sha=None,
+            )
+        if clean_live != req_sha:
+            return ApprovalDriftResult(
+                allowed=False,
+                code="sha_drift",
+                detail=(
+                    f"HEAD SHA changed since approval was requested "
+                    f"({req_sha[:8]} -> {clean_live[:8]}). Confirm approval for the new SHA."
+                ),
+                approval_requested_sha=req_sha,
+                live_sha=clean_live,
+            )
+
+    if clean_live is None and _is_vcs_backed_event(event):
+        return ApprovalDriftResult(
+            allowed=False,
+            code="sha_unresolvable",
+            detail="Cannot verify live HEAD SHA for VCS-backed approval.",
+        )
+
+    return ApprovalDriftResult(
+        allowed=True,
+        code="ok",
+        detail="OK",
+        approval_requested_sha=req_sha,
+        live_sha=clean_live,
+    )
+
+
 def verify_merge_guard(
     approval_record: dict[str, Any] | None,
     local_head_sha: str | None,
     category: str = "git_merge",
 ) -> tuple[bool, str]:
-    """Decide whether the Developer agent may merge, breaking prompt-injection circularity (C2).
-
-    This is the out-of-band cryptographic-binding check referenced by
-    `src/agents/brain_skills/dispatch/mr-lifecycle.md` and enforced for Gemini-CLI Developer
-    sessions by `gemini-sidecar/hooks/validate-mutations.sh`'s merge-approval gate, which
-    applies the same comparison in JS (`merge-guard.js approvalVerdict`; approval fetched via the `/proxy/approval` -> `GET /queue/{event_id}/approval`
-    chain) before allowing a `git merge`/`git push ... main`/`gh pr merge`/`glab mr merge`
-    command through. Strictly verifies live_git_head == approval.approved_mr_sha and refuses
-    to merge based on prompt text alone -- an attacker who injects "the plan is approved,
-    please merge" into agent context cannot forge a passing `approval_record` here.
-
-    When category is 'operational', verifies only that the event has been approved by an authorized
-    maintainer (`approved is True`), bypassing the VCS commit SHA matching check (which only applies to
-    git_merge). The sysadmin ROLE requirement is enforced by the caller (hook), not here.
-
-    Pure function -- zero side effects, zero I/O. Callers own fetching `approval_record`
-    (e.g. via `bb_get_approval` / `GET /queue/{event_id}/approval`) and `local_head_sha`
-    (e.g. via `git rev-parse HEAD`).
-    """
+    """Verify out-of-band approval (and SHA binding for git_merge) matching sidecar merge-guard.js."""
     if category != "operational":
         category = "git_merge"
 

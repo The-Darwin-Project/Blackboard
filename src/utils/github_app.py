@@ -44,8 +44,11 @@ logger = logging.getLogger(__name__)
 
 _ETAG_EXCLUDED_RE = re.compile(r"/collaborators/[^/]+/permission(?:\?|$|/)", re.IGNORECASE)
 _ETAG_STRIP_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
-_LINK_ENTRY_RE = re.compile(r"<([^>]+)>\s*([^<]*)")
-_LINK_REL_NEXT_RE = re.compile(r'(?:^|;\s*)rel\s*=\s*(?:"next"|next)(?:\s*;|$)', re.IGNORECASE)
+_LINK_ENTRY_RE = re.compile(r"<([^<>]{1,2048})>([^<]{0,512})")
+_LINK_REL_NEXT_RE = re.compile(
+    r'(?:^|;[ \t]{0,16})rel[ \t]{0,16}=[ \t]{0,16}(?:"next"|next)(?:[ \t]{0,16};|$)',
+    re.IGNORECASE,
+)
 _MAX_RATE_LIMIT_SLEEP_S = 60.0
 _DEFAULT_MAX_PAGES = 20
 _DEFAULT_ETAG_MAX_ENTRIES = 256
@@ -71,7 +74,7 @@ def parse_github_next_link(link_header: Any) -> Optional[str]:
     https://api.github.com (default port None/443) with zero userinfo,
     no ASCII control/whitespace/backslash characters, and no fragment.
     """
-    if not isinstance(link_header, str) or not link_header.strip():
+    if not isinstance(link_header, str) or len(link_header) > 16384 or not link_header.strip():
         return None
     for m in _LINK_ENTRY_RE.finditer(link_header):
         url = m.group(1)

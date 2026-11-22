@@ -470,6 +470,7 @@ class EventDocument(BaseModel):
     approved_by: Optional[str] = Field(None, description="Authenticated user who approved")
     approved_mr_id: Optional[str] = Field(None, description="Approved MR IID or PR number")
     approved_mr_sha: Optional[str] = Field(None, description="Live HEAD SHA captured at approval time")
+    approval_requested_sha: Optional[str] = Field(None, description="Live HEAD SHA captured when approval was requested")
 
     @field_validator("created_by_email", mode="before")
     @classmethod

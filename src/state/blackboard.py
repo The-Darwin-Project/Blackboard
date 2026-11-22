@@ -30,9 +30,11 @@ Redis Schema (Flat Keys - PoC Simple):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -40,6 +42,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
 from redis.exceptions import ResponseError, WatchError
+
+from ..utils.vcs_approval import HEX_SHA_RE
 
 from ..models import (
     AppNode,
@@ -76,6 +80,8 @@ CONVERSATION_TTL_SECONDS = 86400
 # service's health collapses to "unknown". Must exceed ArgoCD's reconciliation
 # interval (typically 3-5 minutes) to avoid false "gray node" flapping.
 ZOMBIE_THRESHOLD = float(os.getenv("ARGOCD_ZOMBIE_THRESHOLD", "360"))
+_UNSET = object()
+_WATCH_MAX_RETRIES = 10
 
 
 def infer_node_type(service_name: str) -> NodeType:
@@ -1727,34 +1733,52 @@ return 1
 
     _event_fields: set[str] = set(EventDocument.model_fields.keys())
 
-    async def stamp_event(self, event_id: str, **fields) -> None:
-        """Atomically set fields on an event document (WATCH/MULTI/EXEC).
-
-        Used for mid-lifecycle value stream timestamps that cannot be set inline
-        at creation or closure. append_turn() loads a fresh event copy, so
-        in-memory mutations on event objects in brain.py are NOT persisted by it.
-        """
+    async def stamp_event(
+        self,
+        event_id: str,
+        *,
+        _expected_requested_sha: object = _UNSET,
+        max_retries: int = _WATCH_MAX_RETRIES,
+        **fields,
+    ) -> bool:
+        """Atomically set fields on an EventDocument (WATCH/MULTI/EXEC) with approval CAS."""
         invalid = set(fields) - self._event_fields
         if invalid:
             logger.warning(f"stamp_event: unknown fields {invalid} for event {event_id}, skipping")
-            return
+            return False
         key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, max_retries)
         async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(retries):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
                     if not data:
-                        return
+                        await pipe.unwatch()
+                        return False
                     event = EventDocument(**json.loads(data))
+                    if fields.get("approved_by") is not None and event.status in (
+                        EventStatus.CLOSED,
+                        EventStatus.RESOLVED,
+                    ):
+                        await pipe.unwatch()
+                        return False
+                    if _expected_requested_sha is not _UNSET and (
+                        getattr(event, "approval_requested_sha", None) != _expected_requested_sha
+                    ):
+                        await pipe.unwatch()
+                        return False
                     for field, value in fields.items():
                         setattr(event, field, value)
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
                     await pipe.execute()
-                    break
+                    return True
                 except WatchError:
-                    continue
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
+        return False
 
     async def update_event_title_if_not_user(
         self,
@@ -2029,6 +2053,268 @@ return 1
         key = f"darwin:github:issue:{owner}:{repo}:{number}"
         return await self.redis.exists(key) > 0
 
+    # --- GitLab hybrid FIFO queue & bounded MR SHA tracking ---
+
+    _GITLAB_QUEUE_KEY = "darwin:gitlab:queue"
+    _GITLAB_QUEUE_META_KEY = "darwin:gitlab:queue:meta"
+    _GITLAB_MR_SHA_KEY = "darwin:gitlab:mr_sha"
+
+    @staticmethod
+    def _validate_gitlab_ids(project_id: int, mr_iid: int) -> tuple[int, int]:
+        if isinstance(project_id, bool) or isinstance(mr_iid, bool):
+            raise TypeError("project_id and mr_iid must be integers, not bool")
+        pid, iid = int(project_id), int(mr_iid)
+        if pid <= 0 or iid <= 0:
+            raise ValueError("project_id and mr_iid must be positive integers")
+        return pid, iid
+
+    async def enqueue_gitlab_mr(
+        self,
+        project_id: int,
+        mr_iid: int,
+        metadata: dict,
+        *,
+        score: float | None = None,
+        action_priority: dict[str, int] | None = None,
+        max_retries: int = _WATCH_MAX_RETRIES,
+    ) -> bool:
+        """Atomically enqueue/merge a GitLab MR into the FIFO queue (WATCH/MULTI/EXEC, capped)."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        member = f"{pid}:{iid}"
+        initial_score = float(score) if score is not None else time.time()
+        try:
+            max_entries = max(1, int(os.getenv("HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES", "500")))
+        except (TypeError, ValueError):
+            max_entries = 500
+        retries = max(1, max_retries)
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for attempt in range(retries):
+                try:
+                    await pipe.watch(self._GITLAB_QUEUE_KEY, self._GITLAB_QUEUE_META_KEY)
+                    existing_score = await pipe.zscore(self._GITLAB_QUEUE_KEY, member)
+                    existing_raw = await pipe.hget(self._GITLAB_QUEUE_META_KEY, member)
+                    is_new = existing_score is None
+                    if is_new:
+                        current_size = await pipe.zcard(self._GITLAB_QUEUE_KEY)
+                        if current_size >= max_entries:
+                            await pipe.unwatch()
+                            logger.warning(
+                                "GitLab FIFO queue at capacity (%d/%d); rejecting %s",
+                                current_size,
+                                max_entries,
+                                member,
+                            )
+                            return False
+                    merged: dict = {}
+                    if existing_raw:
+                        try:
+                            text = (
+                                existing_raw.decode("utf-8", errors="replace")
+                                if isinstance(existing_raw, bytes)
+                                else str(existing_raw)
+                            )
+                            parsed = json.loads(text)
+                            if isinstance(parsed, dict):
+                                merged = dict(parsed)
+                        except (TypeError, ValueError):
+                            merged = {}
+
+                    incoming = dict(metadata)
+                    raw_prev_sibs = merged.get("_sibling_todo_ids")
+                    raw_new_sibs = incoming.get("_sibling_todo_ids")
+                    prev_siblings = raw_prev_sibs if isinstance(raw_prev_sibs, list) else []
+                    new_siblings = raw_new_sibs if isinstance(raw_new_sibs, list) else []
+                    combined_siblings: list[int] = []
+                    seen_sibs: set[int] = set()
+                    for sid in list(prev_siblings) + list(new_siblings):
+                        if sid is not None and not isinstance(sid, bool):
+                            try:
+                                iv = int(sid)
+                            except (TypeError, ValueError):
+                                continue
+                            if iv not in seen_sibs:
+                                seen_sibs.add(iv)
+                                combined_siblings.append(iv)
+
+                    prev_action = merged.get("action_name")
+                    new_action = incoming.get("action_name")
+                    if prev_action and new_action and action_priority:
+                        prev_rank = action_priority.get(str(prev_action), 99)
+                        new_rank = action_priority.get(str(new_action), 99)
+                        best_action = new_action if new_rank < prev_rank else prev_action
+                    else:
+                        best_action = new_action or prev_action
+
+                    prev_comment_posted = bool(merged.get("comment_posted", False))
+                    prev_head_sha = merged.get("head_sha") or ""
+                    new_head_sha = incoming.get("head_sha") or ""
+
+                    merged.update(incoming)
+                    merged["project_id"] = pid
+                    merged["mr_iid"] = iid
+                    merged["_sibling_todo_ids"] = combined_siblings
+                    if best_action is not None:
+                        merged["action_name"] = best_action
+                    if new_head_sha:
+                        merged["head_sha"] = new_head_sha
+                    elif prev_head_sha:
+                        merged["head_sha"] = prev_head_sha
+                    if prev_comment_posted or incoming.get("comment_posted"):
+                        merged["comment_posted"] = True
+
+                    final_score = float(existing_score) if existing_score is not None else initial_score
+                    merged.setdefault("enqueued_at", final_score)
+
+                    pipe.multi()
+                    if is_new:
+                        pipe.zadd(self._GITLAB_QUEUE_KEY, {member: final_score})
+                    pipe.hset(self._GITLAB_QUEUE_META_KEY, member, json.dumps(merged))
+                    await pipe.execute()
+                    return is_new
+                except WatchError:
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
+        return False
+
+    async def get_gitlab_queue_entry(self, project_id: int, mr_iid: int) -> dict | None:
+        """O(1) metadata lookup for a single queued GitLab MR."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        raw = await self.redis.hget(self._GITLAB_QUEUE_META_KEY, f"{pid}:{iid}")
+        if not raw:
+            return None
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            return None
+
+    async def list_gitlab_queue(self) -> list[dict]:
+        """Return queued GitLab MRs in FIFO order (ascending ZSET score)."""
+        members = await self.redis.zrange(self._GITLAB_QUEUE_KEY, 0, -1, withscores=True)
+        if not members:
+            return []
+        raw_meta = await self.redis.hgetall(self._GITLAB_QUEUE_META_KEY)
+        meta_map: dict[str, str] = {}
+        for k, v in raw_meta.items():
+            ks = k.decode("utf-8", errors="replace") if isinstance(k, bytes) else str(k)
+            vs = v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v)
+            meta_map[ks] = vs
+        items: list[dict] = []
+        for member_raw, score_val in members:
+            member = member_raw.decode("utf-8", errors="replace") if isinstance(member_raw, bytes) else str(member_raw)
+            raw = meta_map.get(member)
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+                if isinstance(entry, dict):
+                    entry.setdefault("score", float(score_val))
+                    items.append(entry)
+            except (TypeError, ValueError):
+                continue
+        return items
+
+    async def remove_gitlab_queue(self, project_id: int, mr_iid: int) -> None:
+        """Atomically remove a GitLab MR from both the FIFO ZSET and metadata HASH."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        member = f"{pid}:{iid}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            pipe.zrem(self._GITLAB_QUEUE_KEY, member)
+            pipe.hdel(self._GITLAB_QUEUE_META_KEY, member)
+            await pipe.execute()
+
+    async def get_gitlab_mr_sha(self, project_id: int, mr_iid: int) -> str | None:
+        """Return the stored head SHA for a tracked GitLab MR, or None."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        raw = await self.redis.hget(self._GITLAB_MR_SHA_KEY, f"{pid}:{iid}")
+        if not raw:
+            return None
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                sha = parsed.get("sha")
+                return str(sha) if sha else None
+        except (TypeError, ValueError):
+            pass
+        cleaned = text.strip()
+        return cleaned if HEX_SHA_RE.fullmatch(cleaned) else None
+
+    async def set_gitlab_mr_sha(
+        self, project_id: int, mr_iid: int, sha: str, *, recorded_at: float | None = None,
+    ) -> None:
+        """Store head SHA and timestamp for bounded GitLab MR re-trigger sweeps."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        payload = {
+            "sha": sha,
+            "recorded_at": float(recorded_at) if recorded_at is not None else time.time(),
+        }
+        await self.redis.hset(self._GITLAB_MR_SHA_KEY, f"{pid}:{iid}", json.dumps(payload))
+
+    async def delete_gitlab_mr_sha(self, project_id: int, mr_iid: int) -> None:
+        """Remove a tracked GitLab MR from the SHA re-trigger store."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        await self.redis.hdel(self._GITLAB_MR_SHA_KEY, f"{pid}:{iid}")
+
+    async def get_all_gitlab_mr_shas(self) -> dict[str, dict]:
+        """Return all tracked GitLab MR SHA entries as { 'pid:iid': {'sha': ..., 'recorded_at': ...} }."""
+        raw_all = await self.redis.hgetall(self._GITLAB_MR_SHA_KEY)
+        result: dict[str, dict] = {}
+        for k, v in raw_all.items():
+            ks = k.decode("utf-8", errors="replace") if isinstance(k, bytes) else str(k)
+            vs = v.decode("utf-8", errors="replace") if isinstance(v, bytes) else str(v)
+            try:
+                parsed = json.loads(vs)
+                if isinstance(parsed, dict) and parsed.get("sha"):
+                    try:
+                        rec_at = float(parsed.get("recorded_at") or 0.0)
+                    except (TypeError, ValueError):
+                        rec_at = 0.0
+                    result[ks] = {"sha": str(parsed["sha"]), "recorded_at": rec_at}
+                    continue
+            except (TypeError, ValueError):
+                pass
+            cleaned = vs.strip()
+            if cleaned and HEX_SHA_RE.fullmatch(cleaned):
+                result[ks] = {"sha": cleaned, "recorded_at": 0.0}
+        return result
+
+    # --- Active-event wake-up cursors (GitLab / GitHub) ---
+
+    async def get_wakeup_sha(self, platform: str, event_id: str) -> str | None:
+        """Read last observed HEAD SHA cursor for an active VCS event."""
+        raw = await self.redis.get(f"darwin:{platform}:wakeup:sha:{event_id}")
+        if not raw:
+            return None
+        return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+
+    async def set_wakeup_sha(
+        self, platform: str, event_id: str, sha: str, ttl_s: int = 604800,
+    ) -> None:
+        """Persist last observed HEAD SHA cursor for an active VCS event."""
+        await self.redis.set(f"darwin:{platform}:wakeup:sha:{event_id}", sha, ex=ttl_s)
+
+    async def has_wakeup_notes_cursor(self, platform: str, event_id: str) -> bool:
+        """Return True if a wake-up notes cursor set exists for this event."""
+        return bool(await self.redis.exists(f"darwin:{platform}:wakeup:notes:{event_id}"))
+
+    async def is_wakeup_note_seen(self, platform: str, event_id: str, note_id: str) -> bool:
+        """Check whether a note ID has already been recorded for this event."""
+        return bool(await self.redis.sismember(f"darwin:{platform}:wakeup:notes:{event_id}", str(note_id)))
+
+    async def mark_wakeup_notes_seen(
+        self, platform: str, event_id: str, note_ids: list[str], ttl_s: int = 604800,
+    ) -> None:
+        """Record one or more note IDs as seen and refresh TTL."""
+        cleaned = [str(nid) for nid in note_ids if nid is not None and str(nid)]
+        if not cleaned:
+            return
+        key = f"darwin:{platform}:wakeup:notes:{event_id}"
+        await self.redis.sadd(key, *cleaned)
+        await self.redis.expire(key, ttl_s)
+
     # --- GitHub PR review-feedback tracking (Headhunter review-response) ---
 
     _PR_FEEDBACK_CURSOR_KEY = "darwin:github:pr_feedback_cursor"
@@ -2193,28 +2479,35 @@ return 1
     # Approval Parking (park/resume for events awaiting human authorization)
     # =========================================================================
 
-    async def park_for_approval(self, event_id: str) -> None:
-        """Move event from active to waiting_approval set + update status atomically."""
+    async def park_for_approval(
+        self,
+        event_id: str,
+        approval_requested_sha: Optional[str] = None,
+        *,
+        max_retries: int = _WATCH_MAX_RETRIES,
+    ) -> None:
+        """Move event to waiting_approval set, clear stale approval fields, and stamp requested SHA atomically."""
         key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, max_retries)
         async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(retries):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
                     if not data:
+                        await pipe.unwatch()
                         logger.warning(f"park_for_approval: {event_id} not found")
                         return
                     event = EventDocument(**json.loads(data))
-                    if event.status == EventStatus.CLOSED:
-                        # Race with close_event(): the event was closed between the
-                        # decision to park and this write. Parking now would resurrect
-                        # a closed event (flip it back to WAITING_APPROVAL) and re-add
-                        # it to EVENT_WAITING_APPROVAL as a zombie (#240).
+                    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+                        await pipe.unwatch()
                         logger.warning(f"park_for_approval: {event_id} already closed, skipping park")
                         return
-                    if event.status == EventStatus.WAITING_APPROVAL:
-                        return  # Already parked, idempotent
                     event.status = EventStatus.WAITING_APPROVAL
+                    event.approved_by = None
+                    event.approved_mr_id = None
+                    event.approved_mr_sha = None
+                    event.approval_requested_sha = approval_requested_sha
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
                     pipe.srem(self.EVENT_ACTIVE, event_id)
@@ -2225,8 +2518,20 @@ return 1
                     await pipe.execute()
                     break
                 except WatchError:
-                    continue
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
         logger.info(f"Parked event for approval: {event_id}")
+
+    async def clear_event_approval(self, event_id: str) -> None:
+        """Atomically clear all approval fields on an event document (WATCH/MULTI/EXEC)."""
+        await self.stamp_event(
+            event_id,
+            approved_by=None,
+            approved_mr_id=None,
+            approved_mr_sha=None,
+            approval_requested_sha=None,
+        )
 
     async def resume_from_approval(self, event_id: str) -> None:
         """Move event from waiting_approval back to active set + update status atomically."""
@@ -2330,92 +2635,81 @@ return 1
                     continue
         logger.debug(f"Brain phase set on event {event_id}: {brain_phase}")
 
-    async def update_event_gitlab_context(self, event_id: str, updates: dict) -> bool:
-        """Patch gitlab_context fields on an active event's evidence (WATCH/MULTI).
-
-        Merges `updates` into the existing gitlab_context dict. Also updates
-        evidence.severity if 'severity' key is present in updates (source
-        reclassification on refresh -- does NOT touch brain_severity).
-        Rejects if github_context or github_issue_context already exists (3-way one-of invariant).
-        Returns True if persisted, False if event is missing or rejected on conflict.
-        """
+    async def _update_event_vcs_context(
+        self,
+        event_id: str,
+        updates: dict,
+        *,
+        target_attr: str,
+        conflict_attrs: tuple[str, ...],
+        copy_severity: bool = False,
+        max_retries: int = _WATCH_MAX_RETRIES,
+    ) -> bool:
+        """Atomically patch one of the three mutually-exclusive VCS context dicts (WATCH/MULTI)."""
         key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, max_retries)
         async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(retries):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
                     if not data:
-                        logger.warning(f"Event {event_id} not found for gitlab_context update")
+                        logger.warning(f"Event {event_id} not found for {target_attr} update")
                         await pipe.unwatch()
                         return False
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
-                        if (
-                            event.event.evidence.github_context is not None
-                            or event.event.evidence.github_issue_context is not None
-                        ):
+                        if any(getattr(event.event.evidence, a) is not None for a in conflict_attrs):
                             logger.warning(
-                                f"Rejecting gitlab_context update on event {event_id}: conflicting GitHub context already set"
+                                f"Rejecting {target_attr} update on event {event_id}: conflicting VCS context already set"
                             )
                             await pipe.unwatch()
                             return False
-                        gl = event.event.evidence.gitlab_context or {}
-                        gl.update(updates)
-                        event.event.evidence.gitlab_context = gl
-                        if "severity" in updates:
+                        ctx = dict(getattr(event.event.evidence, target_attr) or {})
+                        ctx.update(updates)
+                        setattr(event.event.evidence, target_attr, ctx)
+                        if copy_severity and "severity" in updates:
                             event.event.evidence.severity = updates["severity"]
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
                     await pipe.execute()
                     break
                 except WatchError:
-                    continue
-        logger.debug(f"GitLab context updated on event {event_id}: {list(updates.keys())}")
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
+        logger.debug(f"{target_attr} updated on event {event_id}: {list(updates.keys())}")
         return True
+
+    async def update_event_gitlab_context(self, event_id: str, updates: dict) -> bool:
+        """Patch gitlab_context fields on an active event's evidence (3-way VCS exclusivity)."""
+        return await self._update_event_vcs_context(
+            event_id,
+            updates,
+            target_attr="gitlab_context",
+            conflict_attrs=("github_context", "github_issue_context"),
+            copy_severity=True,
+        )
 
     async def update_event_github_context(self, event_id: str, updates: dict) -> bool:
-        """Patch github_context fields on an active event's evidence (WATCH/MULTI).
+        """Patch github_context fields on an active event's evidence (3-way VCS exclusivity)."""
+        return await self._update_event_vcs_context(
+            event_id,
+            updates,
+            target_attr="github_context",
+            conflict_attrs=("gitlab_context", "github_issue_context"),
+            copy_severity=True,
+        )
 
-        Merges `updates` into the existing github_context dict. Also updates
-        evidence.severity if 'severity' key is present in updates.
-        Rejects if gitlab_context or github_issue_context already exists (3-way one-of invariant).
-        Returns True if persisted, False if event is missing or rejected on conflict.
-        """
-        key = f"{self.EVENT_PREFIX}{event_id}"
-        async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
-                try:
-                    await pipe.watch(key)
-                    data = await pipe.get(key)
-                    if not data:
-                        logger.warning(f"Event {event_id} not found for github_context update")
-                        await pipe.unwatch()
-                        return False
-                    event = EventDocument(**json.loads(data))
-                    if isinstance(event.event.evidence, EventEvidence):
-                        if (
-                            event.event.evidence.gitlab_context is not None
-                            or event.event.evidence.github_issue_context is not None
-                        ):
-                            logger.warning(
-                                f"Rejecting github_context update on event {event_id}: conflicting VCS context already set"
-                            )
-                            await pipe.unwatch()
-                            return False
-                        gc = event.event.evidence.github_context or {}
-                        gc.update(updates)
-                        event.event.evidence.github_context = gc
-                        if "severity" in updates:
-                            event.event.evidence.severity = updates["severity"]
-                    pipe.multi()
-                    pipe.set(key, json.dumps(event.model_dump()))
-                    await pipe.execute()
-                    break
-                except WatchError:
-                    continue
-        logger.debug(f"GitHub context updated on event {event_id}: {list(updates.keys())}")
-        return True
+    async def update_event_github_issue_context(self, event_id: str, updates: dict) -> bool:
+        """Patch github_issue_context fields on an active event's evidence (3-way VCS exclusivity)."""
+        return await self._update_event_vcs_context(
+            event_id,
+            updates,
+            target_attr="github_issue_context",
+            conflict_attrs=("gitlab_context", "github_context"),
+            copy_severity=False,
+        )
 
     async def update_event_kargo_context(self, event_id: str, updates: dict) -> None:
         """Patch kargo_context fields on an active event's evidence (WATCH/MULTI).

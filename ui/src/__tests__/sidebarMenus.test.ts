@@ -108,6 +108,18 @@ describe('eventMenuItems', () => {
     expect(issueItem).toBeDefined();
     expect(issueItem?.label).toBe('Open Issue in GitHub');
   });
+
+  it('sends expected_sha on approve when approval_requested_sha is present', () => {
+    const send = vi.fn();
+    const pinned = { id: 'evt-pin', status: 'waiting_approval', source: 'headhunter', approval_requested_sha: 'abc12345' };
+    eventMenuItems(pinned, vi.fn(), send, true).find(i => i.id === 'approve')?.onClick();
+    expect(send).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-pin', expected_sha: 'abc12345' });
+
+    send.mockClear();
+    const unpinned = { id: 'evt-unpin', status: 'waiting_approval', source: 'headhunter' };
+    eventMenuItems(unpinned, vi.fn(), send, true).find(i => i.id === 'approve')?.onClick();
+    expect(send).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-unpin' });
+  });
 });
 
 describe('eventMenuItems label precedence and URL validation', () => {

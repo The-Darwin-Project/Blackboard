@@ -23,7 +23,7 @@ import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContex
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
-import type { AgentRegistryEntry, EventEvidence, KargoStageStatus } from '../api/types';
+import type { AgentRegistryEntry, ApprovalErrorKind, EventEvidence, KargoStageStatus } from '../api/types';
 
 const EVIDENCE_SEVERITIES: readonly string[] = ['info', 'warning', 'critical'];
 const isEvidenceSeverity = (v: unknown): v is EventEvidence['brain_severity'] =>
@@ -44,6 +44,13 @@ export interface KargoEventResult {
   detail: string;
 }
 
+export interface ApprovalErrorState {
+  eventId?: string;
+  kind: ApprovalErrorKind;
+  message: string;
+  liveSha?: string;
+}
+
 export interface OpsControl {
   selectedEventId: string | null;
   selectEvent: (id: string) => void;
@@ -62,6 +69,9 @@ export interface OpsControl {
   toggleAutoHotspot: () => void;
   connected: boolean;
   send: (data: Record<string, unknown>) => void;
+  approvalError: ApprovalErrorState | null;
+  dismissApprovalError: () => void;
+  confirmApprovalDrift: () => void;
 }
 
 const OpsControlContext = createContext<OpsControl | null>(null);
@@ -144,6 +154,13 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
+  const [approvalError, setApprovalError] = useState<ApprovalErrorState | null>(null);
+  const dismissApprovalError = useCallback(() => setApprovalError(null), []);
+  const confirmApprovalDrift = useCallback(() => {
+    if (!approvalError?.eventId || !approvalError.liveSha) return;
+    send({ type: 'approve', event_id: approvalError.eventId, expected_sha: approvalError.liveSha });
+    setApprovalError(null);
+  }, [approvalError, send]);
   const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateWaitingApproval, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
@@ -173,6 +190,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
     } else if (msg.type === 'event_closed') {
       const closedId = msg.event_id as string;
       if (closedId) {
+        setApprovalError(prev => (prev?.eventId === closedId ? null : prev));
         optimisticRemoveEvent(closedId);
         invalidateEvent(closedId);
         invalidateActive();
@@ -197,6 +215,9 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         }
       }
     } else if (msg.type === 'event_status_changed') {
+      if (typeof msg.event_id === 'string' && msg.event_id) {
+        setApprovalError(prev => (prev?.eventId === msg.event_id ? null : prev));
+      }
       if (msg.event_id && msg.status === 'deferred' && msg.defer_until) {
         optimisticPatchEvent(msg.event_id as string, {
           status: 'deferred',
@@ -239,6 +260,17 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       setKargoStages((msg.stages as KargoStageStatus[]) ?? []);
     } else if (msg.type === 'kargo_event_result') {
       setKargoEventResult({ status: msg.status as KargoEventResult['status'], detail: msg.detail as string });
+    } else if (msg.type === 'error') {
+      const kind = msg.kind;
+      if (kind === 'sha_drift' || kind === 'sha_unresolvable' || kind === 'closed') {
+        const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+        setApprovalError({
+          eventId: str(msg.event_id),
+          kind,
+          message: str(msg.message) ?? 'Approval rejected',
+          liveSha: str(msg.live_sha),
+        });
+      }
     }
   });
 
@@ -260,17 +292,34 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
     toggleAutoHotspot,
     connected,
     send,
+    approvalError,
+    dismissApprovalError,
+    confirmApprovalDrift,
   }), [
     selectedEventId, selectEvent, deselectEvent,
     ephemeralAgents, registeredAgents,
     kargoStages, kargoEventResult,
     contentTiles, hotspotTileId, setHotspot, openContentTile, closeContentTile,
     autoHotspot, toggleAutoHotspot, connected, send,
+    approvalError, dismissApprovalError, confirmApprovalDrift,
   ]);
 
   return (
     <OpsControlContext.Provider value={value}>
       {children}
+      {approvalError && (
+        <div role="alert" className="fixed bottom-4 right-4 z-50 flex gap-2 rounded bg-slate-900 p-2 text-sm text-red-200">
+          <span>{approvalError.message}</span>
+          {approvalError.kind === 'sha_drift' && approvalError.liveSha && approvalError.eventId && (
+            <button type="button" onClick={confirmApprovalDrift} className="rounded bg-amber-600 px-2 py-1 text-xs text-white">
+              Confirm New SHA
+            </button>
+          )}
+          <button type="button" onClick={dismissApprovalError} className="rounded border px-2 py-1 text-xs">
+            Dismiss
+          </button>
+        </div>
+      )}
     </OpsControlContext.Provider>
   );
 }

@@ -26,3 +26,23 @@ def _safe_int(env_key: str, default: int) -> int:
 
 _COMMENT_LIMIT = _safe_int("HEADHUNTER_COMMENT_LIMIT", 2000)
 _DESC_SAFETY_CAP = _safe_int("HEADHUNTER_DESCRIPTION_CAP", 100_000)
+
+
+class BoolOutcome:
+    """Boolean-compatible result distinguishing permanent rejection from transient failure."""
+
+    __slots__ = ("ok", "permanent")
+
+    def __init__(self, ok: bool, *, permanent: bool = False):
+        self.ok = ok
+        self.permanent = permanent
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, bool):
+            return self.ok == other
+        if isinstance(other, BoolOutcome):
+            return self.ok == other.ok and self.permanent == other.permanent
+        return NotImplemented

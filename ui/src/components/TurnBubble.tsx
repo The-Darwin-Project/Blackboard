@@ -1,15 +1,15 @@
 // BlackBoard/ui/src/components/TurnBubble.tsx
 // @ai-rules:
-// 1. [Pattern]: Receives ConversationTurn + eventId + attachment. Pure display component.
+// 1. [Pattern]: Receives ConversationTurn + eventId + attachment; renders turn display plus interactive approval/reject/feedback controls backed by REST APIs.
 // 2. [Pattern]: AI-generated badge shown for all non-user turns (transparency compliance).
 // 3. [Pattern]: StatusBadge is exported for use in ConversationFeed event header.
 // 4. [Gotcha]: Transient errors (429, 503) rendered as "Brain retrying..." with spinner, not full bubble.
 // 5. [Contract]: VMER-2340 delivery receipt -- <StatusCheck status={turn.status} /> renders on every standard actor card (human and agent), never on early-return rows (thoughts/phase/dispatcher/reflex/tool_result/triage/wait/transient error).
 // 6. [Contract]: Receipt sits in the right header cluster (marginLeft:auto, flexShrink:0) AFTER the timestamp and BEFORE the "View" button. Titles: Sent/Delivered/Evaluated/Executed (backend 'processed' = 'Executed').
 // 7. [Gotcha]: Missing/unknown status falls back to 'Sent' (prototype-safe Object.hasOwn lookup in STATUS_CHECKS). Do not add per-status branches outside that table.
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { approveEvent, rejectEvent, submitFeedback } from '../api/client';
+import { ApiError, approveEvent, rejectEvent, submitFeedback } from '../api/client';
 import type { ConversationTurn, MessageStatus } from '../api/types';
 import { ACTOR_COLORS, ACTOR_LABELS, STATUS_COLORS, PHASE_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
@@ -19,6 +19,106 @@ import { getCodeString } from 'rehype-rewrite';
 import MermaidBlock from './MermaidBlock';
 import MarkdownViewer from './MarkdownViewer';
 import ExtendedThinkingAccordion from './workspace/ExtendedThinkingAccordion';
+
+interface ShaDriftState {
+  requestedSha?: string;
+  liveSha?: string;
+  code?: string;
+  detail: string;
+}
+
+const DRIFT_BOX_STYLE = { display: 'flex', flexDirection: 'column', gap: 6, background: '#451a0366', border: '1px solid #f59e0b88', borderRadius: 6, padding: '8px 10px', fontSize: 12, color: '#fde68a' } as const;
+const ERR_BOX_STYLE = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#7f1d1d66', border: '1px solid #ef444488', borderRadius: 6, padding: '6px 10px', fontSize: 12, color: '#fecaca' } as const;
+const DISMISS_BTN_STYLE = { background: 'transparent', color: '#fecaca', border: 'none', cursor: 'pointer', fontWeight: 700 } as const;
+
+function ApproveButton({ eventId, onStatusChange }: { eventId: string; onStatusChange?: () => void }) {
+  const [drift, setDrift] = useState<ShaDriftState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const inFlightRef = useRef(false);
+  const reqSeqRef = useRef(0);
+
+  useEffect(() => {
+    reqSeqRef.current += 1;
+    inFlightRef.current = false;
+    setDrift(null);
+    setError(null);
+    setBusy(false);
+    return () => { reqSeqRef.current += 1; };
+  }, [eventId]);
+
+  const submitApprove = async (expectedSha?: string) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    const seq = reqSeqRef.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await (expectedSha ? approveEvent(eventId, expectedSha) : approveEvent(eventId));
+      if (reqSeqRef.current !== seq) return;
+      setDrift(null);
+      setError(null);
+      onStatusChange?.();
+    } catch (err) {
+      if (reqSeqRef.current !== seq) return;
+      if (err instanceof ApiError && err.status === 409) {
+        const body = err.body || {};
+        const requestedSha = typeof body.approval_requested_sha === 'string' ? body.approval_requested_sha.trim() || undefined : undefined;
+        const liveSha = typeof body.live_sha === 'string' ? body.live_sha.trim() || undefined : undefined;
+        const code = typeof body.code === 'string' ? body.code.trim() || undefined : undefined;
+        setDrift({ requestedSha, liveSha, code, detail: err.detail || 'HEAD SHA changed since approval was requested.' });
+      } else {
+        setError(err instanceof ApiError && err.detail ? err.detail : 'Approval failed. Please try again.');
+      }
+    } finally {
+      if (reqSeqRef.current === seq) {
+        inFlightRef.current = false;
+        setBusy(false);
+      }
+    }
+  };
+
+  const busyStyle = { cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1 } as const;
+  const errorBanner = error && (
+    <div role="alert" style={ERR_BOX_STYLE}>
+      <span>{error}</span>
+      <button type="button" aria-label="Dismiss approval error" onClick={() => setError(null)} style={DISMISS_BTN_STYLE}>×</button>
+    </div>
+  );
+
+  if (drift) {
+    const isShaDrift = drift.code === 'sha_drift' || (!drift.code && Boolean(drift.requestedSha && drift.liveSha));
+    return (
+      <div role="alert" style={DRIFT_BOX_STYLE}>
+        <div>
+          {isShaDrift
+            ? `HEAD SHA drifted${drift.requestedSha && drift.liveSha ? `: ${drift.requestedSha.slice(0, 8)} → ${drift.liveSha.slice(0, 8)}` : `: ${drift.detail}`}`
+            : `Approval blocked: ${drift.detail}`}
+        </div>
+        {errorBanner}
+        <div style={{ display: 'flex', gap: 8 }}>
+          {drift.liveSha && isShaDrift && (
+            <button type="button" disabled={busy} onClick={() => submitApprove(drift.liveSha)} style={{ background: '#f59e0b', color: '#0f172a', border: 'none', padding: '5px 12px', borderRadius: 6, fontWeight: 600, ...busyStyle }}>
+              {busy ? 'Approving…' : 'Approve New SHA'}
+            </button>
+          )}
+          <button type="button" disabled={busy} onClick={() => { setDrift(null); setError(null); }} style={{ background: '#334155', color: '#e2e8f0', border: 'none', padding: '5px 10px', borderRadius: 6, ...busyStyle }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 6 }}>
+      <button type="button" disabled={busy} onClick={() => submitApprove()} style={{ background: '#22c55e', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, fontWeight: 600, ...busyStyle }}>
+        {busy ? 'Approving…' : 'Approve'}
+      </button>
+      {errorBanner}
+    </div>
+  );
+}
 
 export function StatusBadge({ status }: { status: string }) {
   const s = STATUS_COLORS[status] || STATUS_COLORS.closed;
@@ -403,8 +503,8 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
         {turn.evidence && <MarkdownPreview source={turn.evidence} style={{ margin: '4px 0', fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       </div>
       {turn.pendingApproval && eventId && (
-        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-          <button onClick={() => approveEvent(eventId).then(() => onStatusChange?.())} style={{ background: '#22c55e', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Approve</button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <ApproveButton eventId={eventId} onStatusChange={onStatusChange} />
           <RejectButton eventId={eventId!} onStatusChange={onStatusChange} />
         </div>
       )}

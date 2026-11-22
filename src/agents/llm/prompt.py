@@ -57,6 +57,7 @@ def _is_untrusted_vcs_event(event: EventDocument, ev: EventEvidence | None) -> b
         getattr(ev, "gitlab_context", None)
         or getattr(ev, "github_context", None)
         or getattr(ev, "github_issue_context", None)
+        or getattr(ev, "kargo_context", None)
     ):
         return True
     return False
@@ -104,7 +105,11 @@ def _build_identity_block(
     ev = evidence if is_structured else None
     redact_vcs = _is_untrusted_vcs_event(event, ev)
     raw_evidence_text = ev.display_text if isinstance(ev, EventEvidence) else str(evidence)
-    evidence_text = sanitize_untrusted_line(raw_evidence_text, max_len=500, redact=redact_vcs)
+    evidence_text = sanitize_untrusted_line(
+        raw_evidence_text,
+        max_len=500 if redact_vcs else _DESC_SAFETY_CAP,
+        redact=redact_vcs,
+    )
     reason_text = sanitize_untrusted_block(
         event.event.reason, max_len=_DESC_SAFETY_CAP, redact=redact_vcs,
     )

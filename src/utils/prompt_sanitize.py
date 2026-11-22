@@ -78,9 +78,9 @@ _BRAIN_FENCE_PATTERN = (
 )
 # Decay-reference OPEN tag is also removed if unclosed (bounded, linear).
 _EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"
-# Linear bounded pattern covering all 6 Headhunter prompt fences (open/close/whitespace/attributes).
+# Linear bounded pattern covering all 7 Headhunter prompt fences (open/close/whitespace/attributes).
 _HEADHUNTER_FENCE_PATTERN = (
-    r"<\s*(?:/\s*)?(?:description|job_log|comments|mention_request|issue_body|review_feedback)\b"
+    r"<\s*(?:/\s*)?(?:description|job_log|comments|mention_request|issue_body|review_feedback|pr_review_comments)\b"
     r"(?:[^<>]{0,512}>)?"
 )
 # Model control tokens that must never reach users or prompts. Each matches as <name> or </name>.

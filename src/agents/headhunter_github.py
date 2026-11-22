@@ -4,7 +4,8 @@
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitHub API via AsyncGitHubClient only.
 # 3. [Pattern]: Dedup by (owner, repo, pr_number). Label truth table: active>review>queued>done.
 #    github_issue_context.issue_number also covered by get_active_keys() + Redis dedup.
-# 4. [Pattern]: Brain-facing methods (refresh_pr_state, poll_github_pr_status, extract_github_state_key)
+# 4. [Pattern]: Brain-facing methods (refresh_pr_state, refresh_issue_state, poll_github_pr_status,
+#    poll_github_run_status, extract_github_state_key, extract_github_run_state_key)
 #    are NOT part of VcsPlatformPort — they're GitHub-specific, accessed via Headhunter delegates.
 # 5. [Pattern]: _load_github_si() loads from headhunter_skills/github-pr-triage.md with emergency fallback.
 #    _load_issue_triage_instruction() loads from URL (HEADHUNTER_GITHUB_SKILL_<LABEL>), 5-min cache.
@@ -39,9 +40,10 @@
 #     Bootstrap pre-marks existing items seen. Items are marked seen and the cursor advanced ONLY
 #     after create_event/append succeeds, never at poll time (debounce must not consume them), and
 #     ONLY for items actually delivered (_select_deliverable): leftovers keep the old cursor ts.
-# 22. [Constraint]: Trust gate (_feedback_reject_reason) is fail-closed: Darwin's own login, any
-#     [bot]/Bot-type login, HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS and untrusted
-#     author_association are dropped. Same gate filters fetch_context recent_comments.
+# 22. [Constraint]: Trust gate (_is_comment_author_trusted = _feedback_reject_reason + write permission) is
+#     fail-closed: Darwin's own login, any [bot]/Bot-type login, HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS,
+#     untrusted author_association, and non-writers are dropped across recent_comments, PR reviews, and
+#     inline review comments.
 # 23. [Constraint]: Review-response events NEVER touch darwin-* labels or the pr_sha re-trigger
 #     store (would start an unintended darwin-review on Darwin's own PR). See _NO_LABEL_ACTIONS.
 # 24. [Pattern]: Feedback poll: one PR's 429/5xx is isolated (healthy PRs' items returned); raised only when 2+ PRs polled and ALL failed 429/5xx. Headhunter Phase D treats any error as non-fatal (never feeds the circuit breaker). 404/422 per PR skip it.
@@ -68,37 +70,18 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
+from .headhunter_utils import BoolOutcome as _LabelResult, _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
+from ..utils.vcs_approval import HEX_SHA_RE
 
 logger = logging.getLogger(__name__)
-
-
-class _LabelResult:
-    """Boolean-compatible result for label mutations distinguishing permanent 403/404 from transient errors."""
-
-    __slots__ = ("ok", "permanent")
-
-    def __init__(self, ok: bool, *, permanent: bool = False):
-        self.ok = ok
-        self.permanent = permanent
-
-    def __bool__(self) -> bool:
-        return self.ok
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, bool):
-            return self.ok == other
-        if isinstance(other, _LabelResult):
-            return self.ok == other.ok and self.permanent == other.permanent
-        return NotImplemented
 
 
 _SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
@@ -169,9 +152,11 @@ _FEEDBACK_MAX_PAGES = 5
 _FEEDBACK_POLL_CONCURRENCY = 5
 _PERM_CACHE_TTL = 600.0  # 10-min in-memory cache for repo collaborator write-permission checks
 _WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
-_DEFAULT_TRIGGER_REASONS = "review_requested,review_feedback,mention"
+_DEFAULT_TRIGGER_REASONS = "review_feedback,mention"
 _PR_REF_URL = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 _PR_REF_SHORT = re.compile(r"(?<![\w/.-])([\w.-]+)/([\w.-]+)#(\d+)")
+_GITHUB_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_WAKEUP_CURSOR_TTL = 7 * 86400
 
 
 def _csv_env(name: str, default: str) -> list[str]:
@@ -238,7 +223,7 @@ class GitHubPlatform:
         repos_env = os.getenv("HEADHUNTER_GITHUB_REPOS", "")
         if repos_env.strip():
             self._repos = [r.strip() for r in repos_env.split(",") if r.strip()]
-        # Action allowlist: review_requested (label flow, never gated), review_feedback, mention.
+        # Trigger allowlist for review-response polling (review_feedback, mention); PR label flow is separate.
         self._trigger_reasons: set[str] = set(
             (r.strip() for r in os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", _DEFAULT_TRIGGER_REASONS).split(",") if r.strip())
         )
@@ -558,8 +543,27 @@ class GitHubPlatform:
         )
         return result
 
+    @staticmethod
+    async def _client_get_paginated(
+        client: Any,
+        path: str,
+        params: dict | None = None,
+        *,
+        max_pages: int = 5,
+        use_etag: bool = False,
+    ) -> list[Any]:
+        """Follow host-pinned Link pagination on real AsyncGitHubClient; fallback to client.get for mock stubs."""
+        from ..utils.github_app import AsyncGitHubClient
+
+        if isinstance(client, AsyncGitHubClient):
+            return await client.get_paginated(
+                path, params=params, max_pages=max_pages, use_etag=use_etag,
+            )
+        resp = await client.get(path, params=params)
+        return [resp]
+
     async def _list_from_repos(self, client, repos: list[str], installation_id: str) -> list[dict]:
-        """List open PRs from the given repos.
+        """List open PRs from the given repos (Link-paginated).
 
         All open PRs are candidates — dedup against active events prevents
         flooding. Users opt in by installing the App on their repo.
@@ -569,12 +573,17 @@ class GitHubPlatform:
             if self._is_tombstoned(repo_full, "pulls"):
                 continue
             try:
-                resp = await client.get(
+                responses = await self._client_get_paginated(
+                    client,
                     f"/repos/{repo_full}/pulls",
                     params={"state": "open", "per_page": "30"},
+                    max_pages=5,
                 )
-                for pr_data in resp.json():
-                    prs.append(self._normalize_pr_data(repo_full, pr_data, installation_id))
+                for resp in responses:
+                    batch = resp.json()
+                    if isinstance(batch, list):
+                        for pr_data in batch:
+                            prs.append(self._normalize_pr_data(repo_full, pr_data, installation_id))
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
                     self._tombstone(repo_full, "pulls")
@@ -582,6 +591,116 @@ class GitHubPlatform:
                     continue
                 raise
         return prs
+
+    async def _get_wakeup_sha(self, event_id: str) -> str | None:
+        if hasattr(self.blackboard, "get_wakeup_sha"):
+            return await self.blackboard.get_wakeup_sha("github", event_id)
+        if not hasattr(self, "_wakeup_seen_sha_mem"):
+            self._wakeup_seen_sha_mem: dict[str, str] = {}
+        return self._wakeup_seen_sha_mem.get(event_id)
+
+    async def _set_wakeup_sha(self, event_id: str, sha: str) -> None:
+        if hasattr(self.blackboard, "set_wakeup_sha"):
+            await self.blackboard.set_wakeup_sha("github", event_id, sha, ttl_s=_WAKEUP_CURSOR_TTL)
+        else:
+            if not hasattr(self, "_wakeup_seen_sha_mem"):
+                self._wakeup_seen_sha_mem = {}
+            self._wakeup_seen_sha_mem[event_id] = sha
+
+    async def check_active_pr_head_drift(self) -> int:
+        """Detect HEAD SHA drift on active/deferred/waiting_approval GitHub PRs; clear stale approvals."""
+        from ..models import ConversationTurn
+
+        if not self._last_open_prs:
+            return 0
+        pr_by_key: dict[tuple[str, str, int], dict] = {}
+        for pr in self._last_open_prs:
+            owner = str(pr.get("owner") or "").lower()
+            repo = str(pr.get("repo") or "").lower()
+            num = pr.get("number")
+            if owner and repo and isinstance(num, int) and not isinstance(num, bool) and num > 0:
+                pr_by_key[(owner, repo, num)] = pr
+        if not pr_by_key:
+            return 0
+
+        active_ids = await self.blackboard.get_active_events()
+        waiting_ids = await self.blackboard.get_waiting_approval_events()
+        event_ids = list(dict.fromkeys(list(active_ids) + list(waiting_ids)))
+        if not event_ids:
+            return 0
+
+        drift_count = 0
+
+        for eid in event_ids:
+            try:
+                event = await self.blackboard.get_event(eid)
+                if not event or not getattr(event, "event", None) or not getattr(event.event, "evidence", None):
+                    continue
+                status_val = event.status.value if hasattr(event.status, "value") else str(event.status)
+                if status_val not in ("active", "deferred", "waiting_approval"):
+                    continue
+                gh_ctx = getattr(event.event.evidence, "github_context", None)
+                if not isinstance(gh_ctx, dict):
+                    continue
+                owner = str(gh_ctx.get("owner") or "")
+                repo = str(gh_ctx.get("repo") or "")
+                pr_num = gh_ctx.get("pr_number")
+                if not owner or not repo or isinstance(pr_num, bool) or not isinstance(pr_num, int) or pr_num <= 0:
+                    continue
+                pr = pr_by_key.get((owner.lower(), repo.lower(), pr_num))
+                if not pr:
+                    continue
+                live_sha = str(pr.get("head_sha") or "")
+                if not HEX_SHA_RE.match(live_sha):
+                    continue
+
+                # Unconditionally clear stale approval even when refresh_pr_state already updated ctx head_sha
+                approved_sha = getattr(event, "approved_mr_sha", None)
+                if (
+                    status_val in ("active", "deferred")
+                    and isinstance(approved_sha, str)
+                    and approved_sha
+                    and live_sha != approved_sha
+                    and hasattr(self.blackboard, "clear_event_approval")
+                ):
+                    await self.blackboard.clear_event_approval(eid)
+
+                prev_sha = await self._get_wakeup_sha(eid)
+                if not prev_sha:
+                    prev_sha = str(gh_ctx.get("head_sha") or "")
+
+                if prev_sha and live_sha != prev_sha:
+                    if status_val in ("active", "deferred") and (
+                        getattr(event, "approved_by", None) or getattr(event, "approved_mr_sha", None)
+                    ):
+                        if hasattr(self.blackboard, "clear_event_approval"):
+                            await self.blackboard.clear_event_approval(eid)
+
+                    turn = ConversationTurn(
+                        turn=0,
+                        actor="headhunter",
+                        action="evidence",
+                        thoughts=f"New commits pushed to GitHub PR #{pr_num} (HEAD: {live_sha[:8]})",
+                        evidence=f"GitHub PR {owner}/{repo}#{pr_num} HEAD updated to {live_sha}",
+                    )
+                    try:
+                        await self.blackboard.append_turn(eid, turn)
+                    except Exception as exc:
+                        logger.warning(f"GitHub active HEAD drift turn write failed for {eid}: {exc}")
+                    else:
+                        if hasattr(self.blackboard, "update_event_github_context"):
+                            try:
+                                await self.blackboard.update_event_github_context(eid, {"head_sha": live_sha})
+                            except Exception:
+                                pass
+                        await self._set_wakeup_sha(eid, live_sha)
+                        drift_count += 1
+                elif not prev_sha:
+                    await self._set_wakeup_sha(eid, live_sha)
+            except Exception as exc:
+                logger.debug(f"GitHub active HEAD drift check failed for {eid}: {exc}")
+
+        return drift_count
 
     async def poll_issues_all_installations(self) -> list[dict]:
         """Fan out Issue polling across all discovered installations.
@@ -626,7 +745,8 @@ class GitHubPlatform:
             if self._is_tombstoned(repo_full, "issues"):
                 continue
             try:
-                resp = await client.get(
+                responses = await self._client_get_paginated(
+                    client,
                     f"/repos/{repo_full}/issues",
                     params={
                         "labels": self._work_label,
@@ -635,20 +755,25 @@ class GitHubPlatform:
                         "direction": "asc",
                         "per_page": "30",
                     },
+                    max_pages=5,
                 )
-                for item in resp.json():
-                    if "pull_request" in item:
+                for resp in responses:
+                    batch = resp.json()
+                    if not isinstance(batch, list):
                         continue
-                    normalized = self._normalize_issue_data(repo_full, item, installation_id)
-                    key = (normalized["owner"], normalized["repo"], normalized["issue_number"])
-                    if key in active_keys:
-                        continue
-                    already = await self.blackboard.get_github_issue_processed(
-                        normalized["owner"], normalized["repo"], normalized["issue_number"]
-                    )
-                    if already:
-                        continue
-                    issues.append(normalized)
+                    for item in batch:
+                        if "pull_request" in item:
+                            continue
+                        normalized = self._normalize_issue_data(repo_full, item, installation_id)
+                        key = (normalized["owner"], normalized["repo"], normalized["issue_number"])
+                        if key in active_keys:
+                            continue
+                        already = await self.blackboard.get_github_issue_processed(
+                            normalized["owner"], normalized["repo"], normalized["issue_number"]
+                        )
+                        if already:
+                            continue
+                        issues.append(normalized)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
                     self._tombstone(repo_full, "issues")
@@ -809,6 +934,92 @@ class GitHubPlatform:
         ).lower()
         return bool(head_full and base_full and head_full != base_full)
 
+    @staticmethod
+    def _safe_check_url(raw: object) -> str:
+        url = raw.strip() if isinstance(raw, str) else ""
+        if not url or len(url) > 500 or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+            return ""
+        try:
+            p = urllib.parse.urlparse(url)
+        except ValueError:
+            return ""
+        return url if p.scheme.lower() == "https" and p.netloc else ""
+
+    async def _fetch_checks_and_legacy_status(
+        self, client: Any, owner: str, repo: str, head_sha: str,
+    ) -> tuple[str, list[str], str]:
+        """Fetch paginated /check-runs AND legacy /commits/{sha}/status, returning (status, failed_names, first_url)."""
+        check_runs: list[dict] = []
+        check_responses = await self._client_get_paginated(
+            client,
+            f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+            params={"per_page": "50"},
+            max_pages=5,
+        )
+        for resp in check_responses:
+            data = resp.json()
+            if isinstance(data, dict) and isinstance(data.get("check_runs"), list):
+                check_runs.extend(data["check_runs"])
+
+        failed_names: list[str] = []
+        first_fail_url = ""
+
+        def _add_fail(raw: object) -> None:
+            s = sanitize_untrusted_line(raw, max_len=120) if raw else ""
+            if s and s not in failed_names:
+                failed_names.append(s)
+
+        for cr in check_runs:
+            if cr.get("conclusion") == "failure":
+                if not first_fail_url and cr.get("html_url"):
+                    first_fail_url = self._safe_check_url(cr["html_url"])
+                _add_fail(cr.get("name"))
+
+        check_status = self._aggregate_check_status(check_runs)
+
+        # Combine with legacy Commit Status API (/commits/{sha}/status — e.g. Prow/Jenkins)
+        try:
+            status_resp = await client.get(f"/repos/{owner}/{repo}/commits/{head_sha}/status")
+            status_data = status_resp.json()
+            if isinstance(status_data, dict):
+                statuses = status_data.get("statuses") or []
+                legacy_state = str(status_data.get("state") or "").lower()
+                for st in statuses:
+                    if isinstance(st, dict) and str(st.get("state") or "").lower() in ("failure", "error"):
+                        _add_fail(st.get("context"))
+                        if not first_fail_url and st.get("target_url"):
+                            first_fail_url = self._safe_check_url(st["target_url"])
+                # GitHub returns state="pending" with empty statuses=[] when no legacy statuses exist
+                if statuses or legacy_state in ("failure", "error"):
+                    if legacy_state in ("failure", "error"):
+                        check_status = "failure"
+                    elif legacy_state == "pending" and check_status not in ("failure", "pending"):
+                        check_status = "pending"
+                    elif legacy_state == "success" and check_status == "unknown":
+                        check_status = "success"
+        except Exception as exc:
+            logger.debug(f"GitHub legacy commit status fetch skipped for {owner}/{repo}@{head_sha[:8]}: {exc}")
+
+        return check_status, failed_names[:10], first_fail_url
+
+    async def _is_comment_author_trusted(
+        self, client: Any, owner: str, repo: str, user: dict | None, association: str | None,
+    ) -> bool:
+        """Fail-closed gate requiring BOTH _feedback_reject_reason() pass AND write permission."""
+        user = user or {}
+        login = (user.get("login") or "").strip()
+        if not login:
+            return False
+        if login.lower() == _bot_login().lower():
+            return True
+        if self._feedback_reject_reason(user, association):
+            return False
+        try:
+            return await self._has_write_permission(client, owner, repo, login)
+        except Exception as exc:
+            logger.debug(f"Write-permission check failed (fail-closed) for {login} on {owner}/{repo}: {exc}")
+            return False
+
     async def fetch_context(self, work_item: dict) -> dict:
         """Enrich a PR work item with full context from GitHub API."""
         owner = work_item["owner"]
@@ -836,35 +1047,48 @@ class GitHubPlatform:
         try:
             pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{number}")
             pr = pr_resp.json()
-            context["head_sha"] = (pr.get("head") or {}).get("sha", "")
+            context["head_sha"] = (pr.get("head") or {}).get("sha", "") or context["head_sha"]
             context["head_branch"] = (pr.get("head") or {}).get("ref", "")
             context["base_branch"] = (pr.get("base") or {}).get("ref", "")
             context["pr_body"] = (pr.get("body") or "")[:_DESC_SAFETY_CAP]
             context["mergeable"] = pr.get("mergeable")
+            context["mergeable_state"] = pr.get("mergeable_state") or ""
+            context["draft"] = bool(pr.get("draft", False))
+            context["pr_state"] = "merged" if pr.get("merged") else pr.get("state", context["pr_state"])
+            if pr.get("merged_at"):
+                context["merged_at"] = pr["merged_at"]
+            if pr.get("closed_at"):
+                context["closed_at"] = pr["closed_at"]
             context["changed_files"] = []
 
-            files_resp = await client.get(
+            file_responses = await self._client_get_paginated(
+                client,
                 f"/repos/{owner}/{repo}/pulls/{number}/files",
                 params={"per_page": "30"},
+                max_pages=5,
             )
-            context["changed_files"] = [f.get("filename", "") for f in files_resp.json()[:20]]
+            changed_files: list[str] = []
+            for fresp in file_responses:
+                fdata = fresp.json()
+                if isinstance(fdata, list):
+                    for f in fdata:
+                        if isinstance(f, dict):
+                            changed_files.append(f.get("filename", ""))
+            context["changed_files"] = changed_files[:50]
         except Exception as e:
             logger.warning(f"GitHub PR detail fetch failed for {owner}/{repo}#{number}: {e}")
 
         head_sha = context.get("head_sha")
         if head_sha:
             try:
-                check_resp = await client.get(
-                    f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-                    params={"per_page": "50"},
+                check_status, failed_names, first_fail_url = await self._fetch_checks_and_legacy_status(
+                    client, owner, repo, head_sha,
                 )
-                check_data = check_resp.json()
-                check_runs = check_data.get("check_runs", [])
-                failed = [cr for cr in check_runs if cr.get("conclusion") == "failure"]
-                context["check_status"] = self._aggregate_check_status(check_runs)
-                if failed:
-                    context["check_run_url"] = failed[0].get("html_url", "")
-                    context["failed_checks"] = [cr.get("name", "") for cr in failed[:5]]
+                context["check_status"] = check_status
+                if failed_names:
+                    context["failed_checks"] = failed_names[:5]
+                if first_fail_url:
+                    context["check_run_url"] = first_fail_url
             except Exception as e:
                 logger.debug(f"GitHub check-runs fetch failed: {e}")
                 context["check_status"] = "unknown"
@@ -877,30 +1101,93 @@ class GitHubPlatform:
                 params={"per_page": "10", "direction": "desc"},
             )
             comments = comments_resp.json()
-            bot_name = _bot_login().lower()
             recent = []
             total_len = 0
-            for c in comments:
-                user = c.get("user") or {}
-                login = user.get("login", "")
-                # Darwin's own comments are kept for context; everyone else must pass the
-                # same fail-closed trust gate as review feedback (prompt-injection surface).
-                if login.lower() != bot_name:
-                    reason = self._feedback_reject_reason(user, c.get("author_association", ""))
-                    if reason:
-                        logger.debug(f"Dropping PR comment from {login or '?'} ({reason}) on {owner}/{repo}#{number}")
+            if isinstance(comments, list):
+                for c in comments:
+                    if not isinstance(c, dict):
                         continue
-                entry = f"[{login or '?'}]: {(c.get('body') or '')[:5000]}"
-                total_len += len(entry)
-                if total_len > _COMMENT_LIMIT:
-                    break
-                recent.append(entry)
-                if len(recent) >= 5:
-                    break
+                    user = c.get("user") or {}
+                    login = user.get("login", "")
+                    if not await self._is_comment_author_trusted(client, owner, repo, user, c.get("author_association", "")):
+                        logger.debug(f"Dropping PR comment from {login or '?'} on {owner}/{repo}#{number}")
+                        continue
+                    safe_login = sanitize_untrusted_line(login or "?", max_len=80)
+                    safe_body = sanitize_untrusted_block(c.get("body") or "", max_len=5000)
+                    entry = f"[{safe_login}]: {safe_body}"
+                    total_len += len(entry)
+                    if total_len > _COMMENT_LIMIT:
+                        break
+                    recent.append(entry)
+                    if len(recent) >= 5:
+                        break
             if recent:
                 context["recent_comments"] = recent
         except Exception as e:
             logger.debug(f"GitHub comments fetch failed: {e}")
+
+        # Bounded PR reviews & inline review comments (separate 10+10 budgets so reviews never starve inline comments)
+        review_entries: list[dict] = []
+        try:
+            rev_resp = await client.get(
+                f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                params={"per_page": "30"},
+            )
+            revs = rev_resp.json()
+            if isinstance(revs, list):
+                for rv in revs[-30:]:
+                    if not isinstance(rv, dict):
+                        continue
+                    body_raw = (rv.get("body") or "").strip()
+                    if not body_raw:
+                        continue
+                    user = rv.get("user") or {}
+                    if not await self._is_comment_author_trusted(client, owner, repo, user, rv.get("author_association", "")):
+                        continue
+                    review_entries.append({
+                        "kind": "review",
+                        "author": sanitize_untrusted_line(user.get("login") or "?", max_len=80),
+                        "state": sanitize_untrusted_line(rv.get("state") or "", max_len=40),
+                        "body": sanitize_untrusted_block(body_raw, max_len=2000),
+                    })
+                review_entries = review_entries[-10:]
+        except Exception as e:
+            logger.debug(f"GitHub PR reviews fetch failed: {e}")
+
+        inline_entries: list[dict] = []
+        try:
+            rc_resp = await client.get(
+                f"/repos/{owner}/{repo}/pulls/{number}/comments",
+                params={"per_page": "20", "sort": "created", "direction": "desc"},
+            )
+            rcs = rc_resp.json()
+            if isinstance(rcs, list):
+                for rc in rcs[:20]:
+                    if not isinstance(rc, dict):
+                        continue
+                    body_raw = (rc.get("body") or "").strip()
+                    if not body_raw:
+                        continue
+                    user = rc.get("user") or {}
+                    if not await self._is_comment_author_trusted(client, owner, repo, user, rc.get("author_association", "")):
+                        continue
+                    entry_dict: dict[str, Any] = {
+                        "kind": "review_comment",
+                        "author": sanitize_untrusted_line(user.get("login") or "?", max_len=80),
+                        "path": sanitize_untrusted_line(rc.get("path") or "", max_len=200),
+                        "body": sanitize_untrusted_block(body_raw, max_len=2000),
+                    }
+                    if rc.get("diff_hunk"):
+                        entry_dict["diff_hunk"] = sanitize_untrusted_block(rc["diff_hunk"], max_len=_DIFF_HUNK_CAP)
+                    inline_entries.append(entry_dict)
+                    if len(inline_entries) >= 10:
+                        break
+        except Exception as e:
+            logger.debug(f"GitHub PR review comments fetch failed: {e}")
+
+        pr_review_entries = review_entries + inline_entries
+        if pr_review_entries:
+            context["pr_review_comments"] = pr_review_entries
 
         return context
 
@@ -972,6 +1259,8 @@ class GitHubPlatform:
             "pr_title": context.get("pr_title", ""),
             "pr_body": context.get("pr_body", ""),
             "pr_state": context.get("pr_state", "open"),
+            "draft": bool(context.get("draft", False)),
+            "mergeable_state": context.get("mergeable_state", ""),
             "pr_url": context.get("pr_url", f"https://github.com/{owner}/{repo}/pull/{pr_number}"),
             "check_status": check_status,
             "check_run_url": context.get("check_run_url", ""),
@@ -1313,20 +1602,28 @@ class GitHubPlatform:
         try:
             pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
             pr = pr_resp.json()
-            pr_state = pr.get("state", "unknown")
-            head_sha = pr.get("head", {}).get("sha", "")
+            pr_state = "merged" if pr.get("merged") else pr.get("state", "unknown")
+            head_sha = (pr.get("head") or {}).get("sha", "")
+            draft = bool(pr.get("draft", False))
+            mergeable = pr.get("mergeable")
+            mergeable_state = pr.get("mergeable_state") or ""
+            merged_at = pr.get("merged_at")
+            closed_at = pr.get("closed_at")
 
-            check_resp = await client.get(
-                f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-                params={"per_page": "50"},
-            )
-            check_runs = check_resp.json().get("check_runs", [])
-            check_status = self._aggregate_check_status(check_runs)
+            if head_sha:
+                check_status, _, _ = await self._fetch_checks_and_legacy_status(
+                    client, owner, repo, head_sha,
+                )
+            else:
+                check_status = "unknown"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                result = {"error": "PR not found", "pr_state": "closed", "check_status": "unknown", "severity": "info"}
-                await self.blackboard.update_event_github_context(event_id, result)
-                return result
+                return {
+                    "error": "PR not found",
+                    "pr_state": "closed",
+                    "check_status": "unknown",
+                    "severity": "info",
+                }
             return {"error": f"GitHub API error: {e.response.status_code}", "pr_state": "unknown",
                     "check_status": "unknown", "severity": "warning"}
         except Exception as e:
@@ -1335,14 +1632,83 @@ class GitHubPlatform:
 
         action = (gh_ctx or {}).get("action", "review_requested")
         severity = self.classify_severity(action, check_status)
-        result = {
+        result: dict[str, Any] = {
             "pr_state": pr_state,
             "check_status": check_status,
             "severity": severity,
+            "draft": draft,
+            "mergeable": mergeable,
+            "mergeable_state": mergeable_state,
         }
+        if head_sha:
+            result["head_sha"] = head_sha
+        if merged_at:
+            result["merged_at"] = merged_at
+        if closed_at:
+            result["closed_at"] = closed_at
 
         await self.blackboard.update_event_github_context(event_id, result)
         logger.info(f"Refreshed PR state for {event_id}: check={check_status}, pr={pr_state}")
+        return result
+
+    async def refresh_issue_state(self, event_id: str) -> dict:
+        """Re-fetch live GitHub Issue state/labels/assignees and update github_issue_context (404 non-mutating)."""
+        event = await self.blackboard.get_event(event_id)
+        if not event:
+            return {"error": f"Event {event_id} not found"}
+
+        gic = None
+        if event.event.evidence and hasattr(event.event.evidence, "github_issue_context"):
+            gic = event.event.evidence.github_issue_context
+        if not isinstance(gic, dict):
+            return {"error": "No GitHub Issue context available on this event."}
+
+        owner = gic.get("owner")
+        repo = gic.get("repo")
+        issue_number = gic.get("issue_number")
+        if (
+            not owner
+            or not repo
+            or isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+            or issue_number <= 0
+        ):
+            return {"error": "Incomplete GitHub Issue reference in event context."}
+
+        client = await self._get_client_for_repo(owner, repo)
+        if not client:
+            return {"error": "GitHub client unavailable"}
+
+        try:
+            resp = await client.get(f"/repos/{owner}/{repo}/issues/{issue_number}")
+            issue = resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return {"error": "Issue not found"}
+            return {"error": f"GitHub API error: {e.response.status_code}"}
+        except Exception as e:
+            logger.warning(f"GitHub refresh_issue_state failed for {event_id}: {e}")
+            return {"error": f"GitHub API unavailable ({type(e).__name__})"}
+
+        if not isinstance(issue, dict):
+            return {"error": "GitHub API returned unexpected issue payload"}
+
+        result = {
+            "state": sanitize_untrusted_line(issue.get("state") or "unknown", max_len=40),
+            "labels": [
+                sanitize_untrusted_line(l.get("name") or "", max_len=120)
+                for l in (issue.get("labels") or [])
+                if isinstance(l, dict) and l.get("name")
+            ],
+            "assignees": [
+                sanitize_untrusted_line((a or {}).get("login") or "", max_len=120)
+                for a in (issue.get("assignees") or [])
+                if isinstance(a, dict) and (a or {}).get("login")
+            ],
+            "updated_at": sanitize_untrusted_line(issue.get("updated_at") or "", max_len=64),
+        }
+        await self.blackboard.update_event_github_issue_context(event_id, result)
+        logger.info(f"Refreshed Issue state for {event_id}: state={result['state']}")
         return result
 
     async def poll_github_pr_status(self, owner: str, repo: str, pr_number: int) -> dict:
@@ -1353,16 +1719,39 @@ class GitHubPlatform:
 
         pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
         pr = pr_resp.json()
-        head_sha = pr.get("head", {}).get("sha", "")
+        head_sha = (pr.get("head") or {}).get("sha", "")
+        pr_state = "merged" if pr.get("merged") else pr.get("state", "unknown")
 
-        check_resp = await client.get(
-            f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-            params={"per_page": "50"},
-        )
-        check_runs = check_resp.json().get("check_runs", [])
+        if head_sha:
+            check_status, _, _ = await self._fetch_checks_and_legacy_status(
+                client, owner, repo, head_sha,
+            )
+        else:
+            check_status = "unknown"
         return {
-            "pr_state": pr.get("state", "unknown"),
-            "check_status": self._aggregate_check_status(check_runs),
+            "pr_state": pr_state,
+            "check_status": check_status,
+        }
+
+    async def poll_github_run_status(self, owner: str, repo: str, run_id: int) -> dict:
+        """Lightweight read-only poll for a GitHub Actions workflow run (canonical 2-key state_key)."""
+        client = await self._get_client_for_repo(owner, repo)
+        if not client:
+            raise RuntimeError(f"No installation found for {owner}/{repo}")
+
+        resp = await client.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}")
+        data = resp.json()
+        return self.extract_github_run_state_key({
+            "run_status": data.get("status") or "unknown",
+            "run_conclusion": data.get("conclusion") or "none",
+        })
+
+    @staticmethod
+    def extract_github_run_state_key(state: dict) -> dict:
+        """Canonical state_key builder for GitHub Actions workflow run polling."""
+        return {
+            "run_status": state.get("run_status", "unknown"),
+            "run_conclusion": state.get("run_conclusion", "none"),
         }
 
     @staticmethod
@@ -1375,30 +1764,38 @@ class GitHubPlatform:
 
     @staticmethod
     def parse_pr_url(url: str) -> tuple[str, str, int] | None:
-        """Extract (owner, repo, pr_number) from a GitHub PR URL.
+        """Extract (owner, repo, pr_number) from a GitHub PR URL with strict segment validation.
 
         Supports: https://github.com/owner/repo/pull/123
-        Only accepts github.com as host (defense-in-depth).
+        Only accepts github.com/www.github.com with zero userinfo and strict ^[A-Za-z0-9_.-]+$
+        owner/repo (rejecting '.', '..', '?', '#', '%', '@').
         """
-        sep = "/pull/"
-        if sep not in url:
+        if not isinstance(url, str) or not url.strip():
             return None
-        left, right = url.split(sep, 1)
-        pr_str = right.split("/")[0].split("?")[0].split("#")[0]
-        if not pr_str.isdigit():
+        try:
+            parsed = urllib.parse.urlsplit(url.strip())
+        except ValueError:
             return None
-        without_proto = left.split("://", 1)[-1]
-        path_parts = without_proto.split("/")
-        if len(path_parts) < 3:
+        if parsed.scheme not in ("http", "https"):
             return None
-        host = path_parts[0]
-        if host not in ("github.com", "www.github.com"):
+        if parsed.username is not None or parsed.password is not None:
             return None
-        owner = path_parts[1]
-        repo = path_parts[2]
-        if ".." in owner or ".." in repo or "/" in owner or "/" in repo:
+        if (parsed.hostname or "").lower() not in ("github.com", "www.github.com"):
             return None
-        return owner, repo, int(pr_str)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) < 4 or parts[2] != "pull":
+            return None
+        owner, repo, pr_str = parts[0], parts[1], parts[3]
+        if not pr_str.isascii() or not pr_str.isdigit():
+            return None
+        if owner in (".", "..") or repo in (".", ".."):
+            return None
+        if not _GITHUB_SEGMENT_RE.match(owner) or not _GITHUB_SEGMENT_RE.match(repo):
+            return None
+        pr_num = int(pr_str)
+        if pr_num < 1:
+            return None
+        return owner, repo, pr_num
 
     # =========================================================================
     # Review-Feedback Response (issue #340)
@@ -1448,7 +1845,8 @@ class GitHubPlatform:
         if cached is not None and now < cached[1]:
             return cached[0]
         try:
-            resp = await client.get(f"/repos/{owner}/{repo}/collaborators/{login}/permission")
+            safe_login = urllib.parse.quote(login, safe="")
+            resp = await client.get(f"/repos/{owner}/{repo}/collaborators/{safe_login}/permission")
             data = resp.json()
             if not isinstance(data, dict):
                 raise ValueError(f"unexpected permission payload type {type(data).__name__}")
@@ -2006,14 +2404,19 @@ class GitHubPlatform:
     # Queue Helpers
     # =========================================================================
 
-    async def _queue_pr(self, pr: dict, position: int) -> bool:
-        """Acknowledge a PR into the darwin-queued state.
+    async def queue_item(self, work_item: Any, position: int = 1) -> bool | _LabelResult:
+        """VcsPlatformPort queue hook — parks a GitHub PR via darwin-queued label."""
+        if not isinstance(work_item, dict):
+            raw = getattr(work_item, "raw", None)
+            work_item = raw if isinstance(raw, dict) and raw else work_item.to_dict()
+        return await self._queue_pr(work_item, position)
 
-        Label ordering: ADD darwin-queued BEFORE removing darwin-review (prevents orphan).
-        Comment is informational — failure is silent (best-effort) and gated on label add success.
-        Idempotency: if darwin-queued already present (pod restart), skip comment.
-        Returns True if the label was added successfully, False otherwise.
-        """
+    async def get_queued_items(self) -> list[dict]:
+        """VcsPlatformPort queue read — returns currently queued PRs."""
+        return list(self._last_queued_prs)
+
+    async def _queue_pr(self, pr: dict, position: int) -> bool | _LabelResult:
+        """Park PR in darwin-queued (ADD before REMOVE); returns True, permanent _LabelResult, or False."""
         owner = pr["owner"]
         repo = pr["repo"]
         number = pr["number"]
@@ -2031,18 +2434,12 @@ class GitHubPlatform:
                 f"**Darwin** acknowledged your PR — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
+        if not added and getattr(added, "permanent", False):
+            return added
         return bool(added)
 
-    async def _queue_issue(self, issue: dict, position: int) -> bool:
-        """Acknowledge a GitHub Issue into the darwin-queued state.
-
-        Unlike _queue_pr, this does NOT remove darwin-work: `_poll_issues` filters
-        server-side on `labels=darwin-work`, so removing it here would make queued
-        issues invisible to future polls. darwin-queued is purely additive.
-        Comment is informational — failure is silent (best-effort) and gated on label add success.
-        Idempotency: if darwin-queued already present (pod restart), skip comment.
-        Returns True if the label was added successfully, False otherwise.
-        """
+    async def _queue_issue(self, issue: dict, position: int) -> bool | _LabelResult:
+        """Add darwin-queued label (keeping darwin-work); returns True, permanent _LabelResult, or False."""
         owner = issue["owner"]
         repo = issue["repo"]
         number = issue["issue_number"]
@@ -2058,6 +2455,8 @@ class GitHubPlatform:
                 f"**Darwin** acknowledged this issue — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
+        if not added and getattr(added, "permanent", False):
+            return added
         return bool(added)
 
     # =========================================================================

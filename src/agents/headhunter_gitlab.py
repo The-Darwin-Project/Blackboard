@@ -15,11 +15,12 @@
 # 9. [Gotcha]: project_id may be a numeric id OR a path ("group/proj", seeded by Kargo gitlab_context). Any
 #    URL that interpolates a gitlab_context/StateWatcher project_id MUST go through _enc_project_id()
 #    (quote(unquote(...), safe="")); a raw "/" would split the API path.
-# 10. [Pattern]: Todo dismissal lifecycle — open MRs dismiss all sibling todo_ids ONLY on event close via
-#     two-phase post_feedback() (feedback_note_sent -> sibling mark_as_done -> feedback_sent). Terminal
-#     (merged/closed) MRs and proven-unauthorized @mention todos are best-effort dismissed during poll/fetch
-#     via bounded _dismiss_todos_best_effort(); unauthorized mention rejection dismisses ONLY its own todo ID
-#     (never sibling todos), and poll_work_items() prefers authorized mention authors over unauthorized/bot ones.
+# 10. [Pattern]: Todo dismissal & feedback lifecycle — open MRs dismiss sibling todo_ids on event close via
+#     three-phase post_feedback() (Phase 1 MR comment -> Phase 2 sibling mark_as_done -> Phase 3 live MR
+#     SHA update/delete + best-effort darwin-done label -> mark_feedback_sent). stale/duplicate closes skip
+#     Phase 1 comment and Phase 3 darwin-done label PUT while still updating/deleting mr_sha so synthetic
+#     SHA-sweep events never infinite-loop; transient Phase 3 HTTP/Redis failures return early to retry.
+#     Terminal MRs and unauthorized @mentions are best-effort dismissed via _dismiss_todos_best_effort().
 """
 GitLab Platform Adapter for Headhunter.
 
@@ -28,12 +29,15 @@ Also exposes Brain-facing methods for refresh_gitlab_context and StateWatcher in
 """
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 import logging
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -41,7 +45,8 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 from ..utils import vcs_approval as _vcs_approval
-from .headhunter_utils import _DESC_SAFETY_CAP
+from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
+from .headhunter_utils import BoolOutcome as _QueueResult, _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +60,46 @@ ACTION_PRIORITY = {
     "review_requested": 3,
     "directly_addressed": 4,
     "mentioned": 5,
+    "new_commits": 6,
 }
+
+_QUEUE_POS_MARKER = "<!-- darwin-queue-pos -->"
+_SHA_SWEEP_MAX_AGE_S = 30 * 86400
+_SHA_SWEEP_CONCURRENCY = 5
+_WAKEUP_CURSOR_TTL = 7 * 86400
+
+
+def _valid_positive_int(value: object) -> int | None:
+    """Coerce a positive integer (rejecting bool, <=0, and non-numeric values)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        iv = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return iv if iv > 0 else None
+
+
+def _parse_ts_epoch(value: object) -> float | None:
+    """Parse an epoch float/int or ISO-8601 timestamp string to UTC epoch seconds."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            fv = float(s)
+            return fv if fv > 0 else None
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
 
 MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
@@ -127,6 +171,8 @@ class GitLabPlatform:
         self._enabled_flag = enabled
         self._gitlab_host = _vcs_approval.normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
         self._client: httpx.AsyncClient | None = None
+        self._wakeup_seen_notes_mem: dict[str, set[int]] = {}
+        self._wakeup_seen_sha_mem: dict[str, str] = {}
         # Fail fast: GITLAB_SSL_VERIFY=false/0/no raises ValueError here, at startup.
         _vcs_approval.resolve_ca_bundle(self._gitlab_host)
 
@@ -225,7 +271,7 @@ class GitLabPlatform:
         if not isinstance(raw, str):
             return None
         cleaned = raw.strip()
-        if not (cleaned.isascii() and cleaned.isdigit()):
+        if not (cleaned.isascii() and cleaned.isdigit()) or len(cleaned) > 10:
             return None
         nxt = int(cleaned)
         return nxt if nxt > current_page else None
@@ -306,14 +352,390 @@ class GitLabPlatform:
                 continue
             ctx = getattr(event.event.evidence, "gitlab_context", None) if event.event and event.event.evidence else None
             if ctx:
-                pid = ctx.get("project_id", 0) if isinstance(ctx, dict) else getattr(ctx, "project_id", 0)
-                iid = ctx.get("mr_iid", 0) if isinstance(ctx, dict) else getattr(ctx, "mr_iid", 0)
+                raw_pid = ctx.get("project_id", 0) if isinstance(ctx, dict) else getattr(ctx, "project_id", 0)
+                raw_iid = ctx.get("mr_iid", 0) if isinstance(ctx, dict) else getattr(ctx, "mr_iid", 0)
+                pid = _valid_positive_int(raw_pid)
+                iid = _valid_positive_int(raw_iid)
                 if pid and iid:
                     keys.add((pid, iid))
         return keys
 
+    @staticmethod
+    def _unwrap_work_item(work_item: Any) -> dict:
+        if isinstance(work_item, dict):
+            return work_item
+        raw = getattr(work_item, "raw", None)
+        if isinstance(raw, dict) and raw:
+            return raw
+        if hasattr(work_item, "to_dict"):
+            return work_item.to_dict()
+        return {}
+
+    @staticmethod
+    def _extract_work_item_key(work_item: Any) -> tuple[int, int]:
+        """Extract numeric (project_id, mr_iid) from a GitLab todo, queue dict, or VcsWorkItem."""
+        wi = GitLabPlatform._unwrap_work_item(work_item)
+        if "project" in wi and "target" in wi:
+            pid = _valid_positive_int((wi.get("project") or {}).get("id")) or 0
+            iid = _valid_positive_int((wi.get("target") or {}).get("iid")) or 0
+            return pid, iid
+        pid = _valid_positive_int(wi.get("project_id")) or 0
+        iid = _valid_positive_int(wi.get("mr_iid")) or 0
+        return pid, iid
+
+    @staticmethod
+    def _extract_work_item_sha(work_item: dict) -> str:
+        target = work_item.get("target") or {}
+        return (
+            target.get("sha")
+            or (target.get("diff_refs") or {}).get("head_sha")
+            or work_item.get("head_sha")
+            or ""
+        )
+
+    @staticmethod
+    def _truncate_work_item_for_queue(work_item: dict) -> dict:
+        """Return a shallow copy of work_item with target.description capped to _DESC_SAFETY_CAP."""
+        copy_wi = dict(work_item)
+        target = copy_wi.get("target")
+        if isinstance(target, dict) and isinstance(target.get("description"), str):
+            target_copy = dict(target)
+            target_copy["description"] = target_copy["description"][:_DESC_SAFETY_CAP]
+            copy_wi["target"] = target_copy
+        return copy_wi
+
+    @staticmethod
+    def _extract_project_path_from_mr(mr_data: dict, fallback_pid: int) -> str:
+        refs = mr_data.get("references") or {}
+        full_ref = refs.get("full") or ""
+        if isinstance(full_ref, str) and "!" in full_ref:
+            path = full_ref.split("!", 1)[0].strip()
+            if path:
+                return path
+        web_url = mr_data.get("web_url") or ""
+        if "/-/merge_requests/" in web_url:
+            prefix = web_url.split("/-/merge_requests/", 1)[0]
+            parsed = urllib.parse.urlsplit(prefix)
+            path = parsed.path.strip("/")
+            if path:
+                return path
+        return str(fallback_pid)
+
+    async def _enqueue_gitlab_mr(self, pid: int, iid: int, meta: dict) -> bool:
+        """Delegate enqueue_gitlab_mr passing ACTION_PRIORITY when supported by the repository."""
+        if not hasattr(self.blackboard, "enqueue_gitlab_mr"):
+            return True
+        try:
+            return bool(await self.blackboard.enqueue_gitlab_mr(pid, iid, meta, action_priority=ACTION_PRIORITY))
+        except TypeError:
+            return bool(await self.blackboard.enqueue_gitlab_mr(pid, iid, meta))
+
+    @staticmethod
+    def _is_mention_authorized(work_item: dict) -> bool:
+        if work_item.get("action_name", "") not in ("directly_addressed", "mentioned"):
+            return True
+        author = ((work_item.get("author") or {}).get("username") or "").strip().lower()
+        if not author:
+            return True
+        bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot").lower()
+        allowed = _get_allowed_mention_authors()
+        return author != bot and (not allowed or author in allowed)
+
+    async def queue_item(self, work_item: Any, position: int = 1) -> bool | _QueueResult:
+        """Park a GitLab MR work item in Redis FIFO queue and post idempotent position comment."""
+        wi = self._unwrap_work_item(work_item)
+        pid, iid = self._extract_work_item_key(wi)
+        if not pid or not iid:
+            return False
+
+        if not self._is_mention_authorized(wi):
+            own_ids = [wi["id"]] if wi.get("id") else []
+            await self._dismiss_todos_best_effort(
+                self._get_client(), self._headers(), own_ids, "unauthorized mention",
+            )
+            return _QueueResult(False, permanent=True)
+
+        raw_sibs = wi.get("_sibling_todo_ids")
+        sibs = (
+            [s for s in (_valid_positive_int(x) for x in raw_sibs) if s is not None]
+            if isinstance(raw_sibs, list)
+            else ([sid] if (sid := _valid_positive_int(wi.get("id"))) is not None else [])
+        )
+
+        # O(1) lookup for existing queue entry before mutating (avoids O(N) list_gitlab_queue scan)
+        existing_entry: dict | None = None
+        if hasattr(self.blackboard, "get_gitlab_queue_entry"):
+            try:
+                existing_entry = await self.blackboard.get_gitlab_queue_entry(pid, iid)
+            except Exception:
+                existing_entry = None
+        elif hasattr(self.blackboard, "list_gitlab_queue"):
+            try:
+                for entry in await self.blackboard.list_gitlab_queue():
+                    if _valid_positive_int(entry.get("project_id")) == pid and _valid_positive_int(entry.get("mr_iid")) == iid:
+                        existing_entry = entry
+                        break
+            except Exception:
+                pass
+        existing_comment_posted = bool(existing_entry.get("comment_posted", False)) if isinstance(existing_entry, dict) else False
+
+        stored_wi = self._truncate_work_item_for_queue(wi)
+        meta = {
+            "project_id": pid,
+            "mr_iid": iid,
+            "action_name": wi.get("action_name", "assigned"),
+            "head_sha": self._extract_work_item_sha(wi),
+            "_sibling_todo_ids": sibs,
+            "work_item": stored_wi,
+            "comment_posted": existing_comment_posted,
+        }
+        enqueued = await self._enqueue_gitlab_mr(pid, iid, meta)
+        if existing_entry is None and not enqueued:
+            return _QueueResult(False, permanent=True)
+
+        if not existing_comment_posted:
+            enc_pid = self._enc_project_id(pid)
+            already_has_marker = False
+            try:
+                notes_resp = await self._get(
+                    self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}/notes"),
+                    params={"sort": "desc", "per_page": "20"},
+                )
+                if notes_resp.is_success:
+                    notes_data = notes_resp.json()
+                    if isinstance(notes_data, list):
+                        already_has_marker = any(
+                            _QUEUE_POS_MARKER in (n.get("body") or "")
+                            for n in notes_data
+                            if isinstance(n, dict)
+                        )
+            except Exception as exc:
+                logger.debug(f"GitLabPlatform: queue marker check failed for !{iid}: {exc}")
+
+            comment_ok = already_has_marker
+            if not already_has_marker:
+                try:
+                    post_resp = await self._get_client().post(
+                        self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}/notes"),
+                        headers=self._headers(),
+                        json={
+                            "body": (
+                                f"{_QUEUE_POS_MARKER} Darwin has queued this MR "
+                                f"(position #{position}) while active capacity frees up."
+                            )
+                        },
+                    )
+                    if post_resp.is_success:
+                        comment_ok = True
+                    elif post_resp.status_code == 403:
+                        logger.debug(f"GitLabPlatform: queue comment 403 on !{iid} (best-effort skip)")
+                        comment_ok = True
+                except Exception as exc:
+                    logger.debug(f"GitLabPlatform: queue comment post failed for !{iid}: {exc}")
+
+            if comment_ok:
+                meta["comment_posted"] = True
+                try:
+                    await self._enqueue_gitlab_mr(pid, iid, meta)
+                except Exception:
+                    pass
+        return True
+
+    async def remove_queued_item(self, work_item: Any) -> None:
+        """Remove a GitLab MR work item from the Redis FIFO queue (e.g. when fetch_context drops it)."""
+        pid, iid = self._extract_work_item_key(work_item)
+        if pid and iid and hasattr(self.blackboard, "remove_gitlab_queue"):
+            try:
+                await self.blackboard.remove_gitlab_queue(pid, iid)
+            except Exception:
+                pass
+
+    async def get_queued_items(self) -> list[dict]:
+        """Return queued GitLab work items in FIFO order from Redis."""
+        if not hasattr(self.blackboard, "list_gitlab_queue"):
+            return []
+        entries = await self.blackboard.list_gitlab_queue()
+        items: list[dict] = []
+        for entry in entries:
+            wi = entry.get("work_item")
+            if isinstance(wi, dict):
+                item = dict(wi)
+                if entry.get("_sibling_todo_ids") is not None:
+                    item["_sibling_todo_ids"] = list(entry["_sibling_todo_ids"])
+                if entry.get("action_name"):
+                    item["action_name"] = entry["action_name"]
+                item["queued"] = True
+                items.append(item)
+            else:
+                item = dict(entry)
+                item["queued"] = True
+                items.append(item)
+        return items
+
+    async def _sweep_gitlab_mr_shas(
+        self,
+        active_mr_keys: set[tuple[int, int]],
+        seen_keys: set[tuple[int, int]],
+    ) -> list[dict]:
+        """Bounded live-HEAD sweep ONLY for MRs tracked in darwin:gitlab:mr_sha (zero scope=all)."""
+        if not hasattr(self.blackboard, "get_all_gitlab_mr_shas"):
+            return []
+        all_shas = await self.blackboard.get_all_gitlab_mr_shas()
+        if not all_shas:
+            return []
+
+        now = time.time()
+        try:
+            max_entries = max(1, int(os.getenv("HEADHUNTER_GITLAB_SHA_MAX_ENTRIES", "500")))
+        except (TypeError, ValueError):
+            max_entries = 500
+
+        valid_entries: list[tuple[int, int, str, float]] = []
+        for member, info in all_shas.items():
+            try:
+                pid_s, iid_s = str(member).split(":", 1)
+                pid = _valid_positive_int(pid_s)
+                iid = _valid_positive_int(iid_s)
+            except (TypeError, ValueError):
+                continue
+            if not pid or not iid:
+                continue
+            sha = info.get("sha") if isinstance(info, dict) else str(info or "")
+            try:
+                recorded_at = float(info.get("recorded_at") or 0.0) if isinstance(info, dict) else 0.0
+            except (TypeError, ValueError):
+                recorded_at = 0.0
+            if recorded_at > 0 and (now - recorded_at) > _SHA_SWEEP_MAX_AGE_S:
+                try:
+                    await self.blackboard.delete_gitlab_mr_sha(pid, iid)
+                except Exception:
+                    pass
+                continue
+            valid_entries.append((pid, iid, str(sha or ""), recorded_at))
+
+        if len(valid_entries) > max_entries:
+            valid_entries.sort(key=lambda e: e[3])
+            excess = len(valid_entries) - max_entries
+            for pid, iid, _, _ in valid_entries[:excess]:
+                try:
+                    await self.blackboard.delete_gitlab_mr_sha(pid, iid)
+                except Exception:
+                    pass
+            valid_entries = valid_entries[excess:]
+
+        candidates = [
+            (pid, iid, sha)
+            for pid, iid, sha, _ in valid_entries
+            if (pid, iid) not in active_mr_keys and (pid, iid) not in seen_keys
+        ]
+        if not candidates:
+            return []
+
+        sem = asyncio.Semaphore(_SHA_SWEEP_CONCURRENCY)
+        rate_limited = asyncio.Event()
+
+        async def _check_one(pid: int, iid: int, stored_sha: str) -> dict | None:
+            if rate_limited.is_set():
+                return None
+            async with sem:
+                if rate_limited.is_set():
+                    return None
+                enc_pid = self._enc_project_id(pid)
+                try:
+                    resp = await self._get(
+                        self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}"),
+                    )
+                except Exception as exc:
+                    logger.debug(f"GitLabPlatform: SHA sweep GET failed for {pid}!{iid}: {exc}")
+                    return None
+                if resp.status_code == 429:
+                    rate_limited.set()
+                    logger.warning("GitLabPlatform: SHA sweep hit HTTP 429; aborting remaining checks")
+                    return None
+                if resp.status_code == 404:
+                    try:
+                        await self.blackboard.delete_gitlab_mr_sha(pid, iid)
+                    except Exception as exc:
+                        logger.debug(f"GitLabPlatform: delete_gitlab_mr_sha failed for {pid}!{iid}: {exc}")
+                    return None
+                if resp.status_code == 403:
+                    logger.debug(f"GitLabPlatform: SHA sweep 403 for {pid}!{iid} (skipping without strike)")
+                    return None
+                if not resp.is_success:
+                    return None
+                try:
+                    mr_data = resp.json()
+                except ValueError:
+                    return None
+                if not isinstance(mr_data, dict):
+                    return None
+                mr_state = mr_data.get("state", "")
+                if mr_state in ("merged", "closed"):
+                    try:
+                        await self.blackboard.delete_gitlab_mr_sha(pid, iid)
+                    except Exception as exc:
+                        logger.debug(f"GitLabPlatform: delete_gitlab_mr_sha failed for {pid}!{iid}: {exc}")
+                    return None
+                live_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha") or ""
+                if not (stored_sha and live_sha and live_sha != stored_sha):
+                    return None
+
+                # Best-effort remove visual darwin-done label on re-trigger (403 tolerated)
+                try:
+                    labels = mr_data.get("labels") or []
+                    if not labels or "darwin-done" in labels:
+                        await self._get_client().put(
+                            self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}"),
+                            headers=self._headers(),
+                            json={"remove_labels": "darwin-done"},
+                        )
+                except Exception:
+                    pass
+
+                live_pid = _valid_positive_int(mr_data.get("project_id")) or pid
+                project_path = self._extract_project_path_from_mr(mr_data, live_pid)
+                return {
+                    "id": None,
+                    "action_name": "new_commits",
+                    "created_at": mr_data.get("updated_at") or "",
+                    "target_type": "MergeRequest",
+                    "target_url": mr_data.get("web_url") or "",
+                    "project": {
+                        "id": live_pid,
+                        "path_with_namespace": project_path,
+                    },
+                    "target": {
+                        "iid": iid,
+                        "title": mr_data.get("title") or f"MR !{iid}",
+                        "state": mr_state or "opened",
+                        "sha": live_sha,
+                        "diff_refs": {"head_sha": live_sha},
+                        "merge_status": mr_data.get("detailed_merge_status") or mr_data.get("merge_status") or "",
+                        "source_branch": mr_data.get("source_branch") or "",
+                        "target_branch": mr_data.get("target_branch") or "",
+                        "description": (mr_data.get("description") or "")[:_DESC_SAFETY_CAP],
+                        "author": mr_data.get("author") or {},
+                        "labels": mr_data.get("labels") or [],
+                        "milestone": mr_data.get("milestone"),
+                    },
+                    "_sibling_todo_ids": [],
+                    "_synthetic_sha_sweep": True,
+                }
+
+        results = await asyncio.gather(
+            *(_check_one(p, i, s) for p, i, s in candidates),
+            return_exceptions=True,
+        )
+        items: list[dict] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning(f"GitLabPlatform: SHA sweep worker raised: {r}")
+            elif r is not None:
+                items.append(r)
+        return items
+
     async def poll_work_items(self) -> list[dict]:
-        """Fetch ALL pending GitLab todos (paginated), filter actionable, group by MR."""
+        """Fetch pending GitLab todos, reconcile FIFO queue, and run bounded SHA sweep."""
         all_todos: list[dict] = []
         page = 1
         per_page = 100
@@ -336,8 +758,6 @@ class GitLabPlatform:
             logger.warning(f"GitLabPlatform: hit max_pages ({max_pages}), {len(all_todos)} todos fetched")
 
         actionable = [t for t in all_todos if t.get("action_name") in V1_ACTIONABLE]
-        if not actionable:
-            return []
         actionable.sort(key=lambda t: t.get("created_at", ""))
 
         active_mr_keys = await self.get_active_keys()
@@ -359,7 +779,7 @@ class GitLabPlatform:
                 return (prio, 0)
             return (prio, 0)
 
-        result = []
+        live_by_key: dict[tuple[int, int], dict] = {}
         skipped_terminal = 0
         terminal_todo_ids: list[int] = []
         for key, group in grouped.items():
@@ -372,8 +792,8 @@ class GitLabPlatform:
                 terminal_todo_ids.extend(t["id"] for t in group if t.get("id"))
                 logger.debug(f"GitLabPlatform: skipping terminal MR {key} (state={mr_state})")
                 continue
-            best["_sibling_todo_ids"] = [t["id"] for t in group]
-            result.append(best)
+            best["_sibling_todo_ids"] = [t["id"] for t in group if t.get("id") is not None]
+            live_by_key[key] = best
 
         if terminal_todo_ids:
             try:
@@ -383,12 +803,328 @@ class GitLabPlatform:
             except Exception as exc:
                 logger.debug(f"GitLabPlatform: best-effort terminal todo cleanup failed: {exc}")
 
-        result.sort(key=lambda t: t.get("created_at", ""))
+        # Reconcile Redis FIFO queue against live todos
+        reconciled_queued: list[dict] = []
+        reconciled_keys: set[tuple[int, int]] = set()
+        if hasattr(self.blackboard, "list_gitlab_queue"):
+            queued_entries = await self.blackboard.list_gitlab_queue()
+            ordered_slots: list[dict | None] = [None] * len(queued_entries)
+            synthetic_tasks: list[tuple[int, int, int, dict]] = []
+            for idx, qentry in enumerate(queued_entries):
+                pid = _valid_positive_int(qentry.get("project_id"))
+                iid = _valid_positive_int(qentry.get("mr_iid"))
+                if not pid or not iid:
+                    continue
+                key = (pid, iid)
+                if key in active_mr_keys:
+                    await self.blackboard.remove_gitlab_queue(pid, iid)
+                    continue
+                if key in live_by_key:
+                    live_item = live_by_key[key]
+                    q_sibs = qentry.get("_sibling_todo_ids") if isinstance(qentry.get("_sibling_todo_ids"), list) else []
+                    l_sibs = live_item.get("_sibling_todo_ids") if isinstance(live_item.get("_sibling_todo_ids"), list) else []
+                    merged_sibs = list(dict.fromkeys(
+                        [s for s in (_valid_positive_int(x) for x in q_sibs) if s is not None]
+                        + [s for s in (_valid_positive_int(x) for x in l_sibs) if s is not None]
+                    ))
+                    live_item["_sibling_todo_ids"] = merged_sibs
+                    q_action = qentry.get("action_name")
+                    l_action = live_item.get("action_name", "assigned")
+                    if q_action and ACTION_PRIORITY.get(str(q_action), 99) < ACTION_PRIORITY.get(str(l_action), 99):
+                        live_item["action_name"] = q_action
+                    live_item["queued"] = True
+                    await self._enqueue_gitlab_mr(
+                        pid,
+                        iid,
+                        {
+                            "project_id": pid,
+                            "mr_iid": iid,
+                            "action_name": live_item.get("action_name", "assigned"),
+                            "head_sha": self._extract_work_item_sha(live_item),
+                            "_sibling_todo_ids": merged_sibs,
+                            "work_item": self._truncate_work_item_for_queue(live_item),
+                            "comment_posted": bool(qentry.get("comment_posted", False)),
+                        },
+                    )
+                    ordered_slots[idx] = live_item
+                    reconciled_keys.add(key)
+                elif qentry.get("action_name") == "new_commits" and not qentry.get("_sibling_todo_ids"):
+                    synthetic_tasks.append((idx, pid, iid, qentry))
+                else:
+                    # Todo dismissed or MR merged/closed -> evict from FIFO queue
+                    await self.blackboard.remove_gitlab_queue(pid, iid)
+
+            if synthetic_tasks:
+                synth_sem = asyncio.Semaphore(_SHA_SWEEP_CONCURRENCY)
+
+                async def _reconcile_synthetic(slot_idx: int, pid: int, iid: int, qentry: dict) -> None:
+                    async with synth_sem:
+                        enc_pid = self._enc_project_id(pid)
+                        still_open = True
+                        refreshed_sha = ""
+                        try:
+                            mr_resp = await self._get(self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}"))
+                            if mr_resp.status_code == 404:
+                                still_open = False
+                            elif mr_resp.is_success:
+                                mr_data = mr_resp.json()
+                                if isinstance(mr_data, dict):
+                                    if mr_data.get("state") in ("merged", "closed"):
+                                        still_open = False
+                                    else:
+                                        refreshed_sha = (
+                                            mr_data.get("sha")
+                                            or (mr_data.get("diff_refs") or {}).get("head_sha")
+                                            or ""
+                                        )
+                        except Exception:
+                            still_open = True
+                        if still_open and isinstance(qentry.get("work_item"), dict):
+                            wi = dict(qentry["work_item"])
+                            if refreshed_sha:
+                                target = dict(wi.get("target") or {})
+                                target["sha"] = refreshed_sha
+                                target["diff_refs"] = {"head_sha": refreshed_sha}
+                                wi["target"] = target
+                                wi["head_sha"] = refreshed_sha
+                            wi["queued"] = True
+                            ordered_slots[slot_idx] = wi
+                            reconciled_keys.add((pid, iid))
+                        else:
+                            await self.blackboard.remove_gitlab_queue(pid, iid)
+
+                synth_results = await asyncio.gather(
+                    *(_reconcile_synthetic(i, p, m, qe) for i, p, m, qe in synthetic_tasks),
+                    return_exceptions=True,
+                )
+                for sr in synth_results:
+                    if isinstance(sr, BaseException):
+                        logger.warning(f"GitLabPlatform: synthetic queue reconcile error: {sr}")
+
+            reconciled_queued = [item for item in ordered_slots if item is not None]
+
+        new_items = [item for key, item in live_by_key.items() if key not in reconciled_keys]
+        new_items.sort(key=lambda t: t.get("created_at", ""))
+
+        seen_keys = reconciled_keys | set(live_by_key.keys())
+        sweep_items = await self._sweep_gitlab_mr_shas(active_mr_keys, seen_keys)
+
+        result = reconciled_queued + new_items + sweep_items
         logger.info(
             f"GitLab poll: {len(all_todos)} total, {len(actionable)} actionable, "
-            f"{len(active_mr_keys)} active, {skipped_terminal} terminal, {len(result)} new"
+            f"{len(active_mr_keys)} active, {skipped_terminal} terminal, "
+            f"{len(reconciled_queued)} queued, {len(new_items)} new, {len(sweep_items)} sha_retrigger"
         )
         return result
+
+    async def _get_wakeup_sha(self, event_id: str) -> str | None:
+        if hasattr(self.blackboard, "get_wakeup_sha"):
+            return await self.blackboard.get_wakeup_sha("gitlab", event_id)
+        return self._wakeup_seen_sha_mem.get(event_id)
+
+    async def _set_wakeup_sha(self, event_id: str, sha: str) -> None:
+        if hasattr(self.blackboard, "set_wakeup_sha"):
+            await self.blackboard.set_wakeup_sha("gitlab", event_id, sha, ttl_s=_WAKEUP_CURSOR_TTL)
+        else:
+            self._wakeup_seen_sha_mem[event_id] = sha
+
+    async def _is_wakeup_note_seen(self, event_id: str, note_id: str) -> bool:
+        if hasattr(self.blackboard, "is_wakeup_note_seen"):
+            return await self.blackboard.is_wakeup_note_seen("gitlab", event_id, note_id)
+        return str(note_id) in {str(x) for x in self._wakeup_seen_notes_mem.get(event_id, set())}
+
+    async def _mark_wakeup_notes_seen(self, event_id: str, note_ids: list[str]) -> None:
+        if not note_ids:
+            return
+        if hasattr(self.blackboard, "mark_wakeup_notes_seen"):
+            await self.blackboard.mark_wakeup_notes_seen("gitlab", event_id, note_ids, ttl_s=_WAKEUP_CURSOR_TTL)
+        else:
+            seen_set = self._wakeup_seen_notes_mem.setdefault(event_id, set())
+            for nid_str in note_ids:
+                try:
+                    seen_set.add(int(nid_str))
+                except (TypeError, ValueError):
+                    pass
+
+    async def poll_active_events_wakeup(self) -> int:
+        """Poll active/deferred/waiting_approval GitLab MR events for allowlisted notes & hex-SHA pushes."""
+        from ..models import ConversationTurn
+
+        active_ids = await self.blackboard.get_active_events()
+        waiting_ids = await self.blackboard.get_waiting_approval_events()
+        event_ids = list(dict.fromkeys(list(active_ids) + list(waiting_ids)))
+        if not event_ids:
+            return 0
+
+        allowed_authors = _get_allowed_mention_authors()
+        darwin_bot_lower = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot").lower()
+        appended_count = 0
+
+        for eid in event_ids:
+            try:
+                event = await self.blackboard.get_event(eid)
+            except Exception:
+                continue
+            if not event or not getattr(event, "event", None) or not getattr(event.event, "evidence", None):
+                continue
+            status_val = event.status.value if hasattr(event.status, "value") else str(event.status)
+            if status_val not in ("active", "deferred", "waiting_approval"):
+                continue
+            gl_ctx = getattr(event.event.evidence, "gitlab_context", None)
+            if not isinstance(gl_ctx, dict):
+                continue
+            project_id = gl_ctx.get("project_id")
+            mr_iid = _valid_positive_int(gl_ctx.get("mr_iid"))
+            if not project_id or not mr_iid:
+                continue
+
+            try:
+                enc_pid = self._enc_project_id(project_id)
+            except ValueError:
+                continue
+
+            # 1. Live HEAD SHA check (push wake-up + active approval drift clearing)
+            try:
+                mr_resp = await self._get(
+                    self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}"),
+                )
+                if mr_resp.is_success:
+                    mr_data = mr_resp.json()
+                    if isinstance(mr_data, dict):
+                        live_sha = (
+                            mr_data.get("sha")
+                            or (mr_data.get("diff_refs") or {}).get("head_sha")
+                            or ""
+                        )
+                        if isinstance(live_sha, str) and _vcs_approval.HEX_SHA_RE.match(live_sha):
+                            # Unconditionally clear stale active/deferred approval even if refresh_mr_state updated ctx head_sha
+                            approved_sha = getattr(event, "approved_mr_sha", None)
+                            if (
+                                status_val in ("active", "deferred")
+                                and isinstance(approved_sha, str)
+                                and approved_sha
+                                and live_sha != approved_sha
+                                and hasattr(self.blackboard, "clear_event_approval")
+                            ):
+                                await self.blackboard.clear_event_approval(eid)
+
+                            prev_sha = await self._get_wakeup_sha(eid)
+                            if not prev_sha:
+                                prev_sha = gl_ctx.get("head_sha") or gl_ctx.get("sha") or ""
+
+                            if prev_sha and live_sha != prev_sha:
+                                if status_val in ("active", "deferred") and (
+                                    getattr(event, "approved_by", None)
+                                    or getattr(event, "approved_mr_sha", None)
+                                ):
+                                    if hasattr(self.blackboard, "clear_event_approval"):
+                                        await self.blackboard.clear_event_approval(eid)
+
+                                push_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="headhunter",
+                                    action="evidence",
+                                    thoughts=f"New commits pushed to GitLab MR !{mr_iid} (HEAD: {live_sha[:8]})",
+                                    evidence=f"GitLab MR !{mr_iid} HEAD updated to {live_sha}",
+                                )
+                                try:
+                                    await self.blackboard.append_turn(eid, push_turn)
+                                except Exception as exc:
+                                    logger.warning(f"GitLab wake-up push turn write failed for {eid}: {exc}")
+                                else:
+                                    if hasattr(self.blackboard, "update_event_gitlab_context"):
+                                        try:
+                                            await self.blackboard.update_event_gitlab_context(
+                                                eid, {"head_sha": live_sha, "sha": live_sha},
+                                            )
+                                        except Exception:
+                                            pass
+                                    await self._set_wakeup_sha(eid, live_sha)
+                                    appended_count += 1
+                            elif not prev_sha:
+                                await self._set_wakeup_sha(eid, live_sha)
+            except Exception as exc:
+                logger.debug(f"GitLab wake-up MR fetch failed for {eid}: {exc}")
+
+            # 2. Allowlisted human notes check (deduped via EventRepository notes cursor)
+            try:
+                notes_resp = await self._get(
+                    self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/notes"),
+                    params={"sort": "desc", "per_page": "20"},
+                )
+                if not notes_resp.is_success:
+                    continue
+                notes_data = notes_resp.json()
+                if not isinstance(notes_data, list):
+                    continue
+
+                baseline_ts = _parse_ts_epoch(getattr(event, "queued_at", None)) or _parse_ts_epoch(
+                    getattr(getattr(event, "event", None), "timeDate", None)
+                )
+                new_formatted: list[str] = []
+                new_note_ids: list[str] = []
+                historical_note_ids: list[str] = []
+
+                for note in notes_data:
+                    if not isinstance(note, dict) or note.get("system"):
+                        continue
+                    note_id = note.get("id")
+                    if note_id is None:
+                        continue
+                    author_obj = note.get("author") or {}
+                    if isinstance(author_obj, dict) and author_obj.get("bot") is True:
+                        continue
+                    author_raw = (author_obj.get("username") or "").strip() if isinstance(author_obj, dict) else ""
+                    author_lower = author_raw.lower()
+                    if not author_lower or author_lower == darwin_bot_lower:
+                        continue
+                    # Fail closed: never allow empty/* allowlist to open wake-up note ingestion
+                    if not allowed_authors or author_lower not in allowed_authors:
+                        continue
+
+                    nid_str = str(note_id)
+                    if await self._is_wakeup_note_seen(eid, nid_str):
+                        continue
+
+                    note_ts = _parse_ts_epoch(note.get("created_at"))
+                    if baseline_ts is not None and note_ts is not None and note_ts < (baseline_ts - 1.0):
+                        historical_note_ids.append(nid_str)
+                        continue
+
+                    safe_author = sanitize_untrusted_line(author_raw, max_len=80)
+                    safe_body = sanitize_untrusted_block(note.get("body") or "", max_len=2000)
+                    if not safe_body.strip():
+                        continue
+                    new_note_ids.append(nid_str)
+                    new_formatted.append(f"[{safe_author}]: {safe_body}")
+
+                if historical_note_ids:
+                    await self._mark_wakeup_notes_seen(eid, historical_note_ids)
+
+                if new_formatted:
+                    chronological = list(reversed(new_formatted))
+                    framed = (
+                        f"New GitLab MR !{mr_iid} human comment(s) (untrusted data):\n"
+                        f"<comments>\n" + "\n\n".join(chronological) + "\n</comments>"
+                    )
+                    note_turn = ConversationTurn(
+                        turn=0,
+                        actor="headhunter",
+                        action="evidence",
+                        thoughts=f"New allowlisted comment on GitLab MR !{mr_iid}",
+                        evidence=framed,
+                    )
+                    try:
+                        await self.blackboard.append_turn(eid, note_turn)
+                    except Exception as exc:
+                        logger.warning(f"GitLab wake-up note turn write failed for {eid}: {exc}")
+                    else:
+                        await self._mark_wakeup_notes_seen(eid, new_note_ids)
+                        appended_count += 1
+            except Exception as exc:
+                logger.debug(f"GitLab wake-up notes fetch failed for {eid}: {exc}")
+
+        return appended_count
 
     async def _dismiss_todos_best_effort(
         self,
@@ -557,25 +1293,59 @@ class GitLabPlatform:
         allowed_authors = _get_allowed_mention_authors() if is_mention_action else set()
         own_todo_ids = [work_item["id"]] if work_item.get("id") else []
 
-        if is_mention_action:
+        if not self._is_mention_authorized(work_item):
             todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
-            if todo_author:
-                todo_author_lower = todo_author.lower()
-                if todo_author_lower == darwin_bot_lower or (
-                    allowed_authors and todo_author_lower not in allowed_authors
-                ):
-                    await self._dismiss_todos_best_effort(
-                        self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
-                    )
-                    logger.info(
-                        f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
-                        f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
-                    )
+            await self._dismiss_todos_best_effort(
+                self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
+            )
+            logger.info(
+                f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
+                f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
+            )
+            return None
+
+        # Live MR freshness guard: skip stale/mid-flight merged or closed MRs cleanly
+        mr_404_empty = False
+        try:
+            mr_resp = await self._get(
+                self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}"),
+            )
+            if mr_resp.status_code == 404:
+                if mr_resp.content:
+                    if hasattr(self.blackboard, "remove_gitlab_queue"):
+                        await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
+                    logger.info(f"GitLabPlatform: MR !{mr_iid} returned 404 during fetch_context; skipping")
                     return None
+                mr_404_empty = True
+            elif mr_resp.is_success:
+                mr_data = mr_resp.json()
+                if isinstance(mr_data, dict):
+                    live_state = mr_data.get("state", "")
+                    if live_state in ("merged", "closed"):
+                        if hasattr(self.blackboard, "remove_gitlab_queue"):
+                            await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
+                        logger.info(
+                            f"GitLabPlatform: MR !{mr_iid} became {live_state} mid-flight; skipping"
+                        )
+                        return None
+                    if live_state:
+                        context["mr_state"] = live_state
+                    live_merge = mr_data.get("detailed_merge_status") or mr_data.get("merge_status")
+                    if live_merge:
+                        context["merge_status"] = live_merge
+                    live_sha = mr_data.get("sha") or (mr_data.get("diff_refs") or {}).get("head_sha")
+                    if live_sha:
+                        context["head_sha"] = live_sha
+        except Exception as exc:
+            logger.debug(f"GitLabPlatform: live MR freshness check skipped for !{mr_iid}: {exc}")
 
         diffs_resp = await self._get(
             self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/diffs"),
         )
+        if mr_404_empty and diffs_resp.status_code == 404:
+            if hasattr(self.blackboard, "remove_gitlab_queue"):
+                await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
+            return None
         if diffs_resp.is_success:
             diffs_data = diffs_resp.json()
             if isinstance(diffs_data, list):
@@ -709,6 +1479,12 @@ class GitLabPlatform:
                 return None
             if ci_notes:
                 context["recent_notes"] = ci_notes
+            seen_note_ids = [
+                str(n["id"]) for n in all_notes
+                if isinstance(n, dict) and n.get("id") is not None
+            ]
+            if seen_note_ids:
+                context["_seen_note_ids"] = seen_note_ids
 
         return context
 
@@ -754,7 +1530,19 @@ class GitLabPlatform:
         severity = self.classify_severity(action_name, pipeline_status)
         maintainer = await self.resolve_maintainer(project_path, todo)
         logger.info(f"GitLab severity: {severity} for {action_name}/{pipeline_status}")
-        head_sha = target.get("sha") or (target.get("diff_refs") or {}).get("head_sha")
+        head_sha = (
+            context.get("head_sha")
+            or target.get("sha")
+            or (target.get("diff_refs") or {}).get("head_sha")
+        )
+        todo_id = todo.get("id")
+        raw_siblings = todo.get("_sibling_todo_ids")
+        if isinstance(raw_siblings, list):
+            todo_ids = [s for s in raw_siblings if s is not None]
+        elif todo_id is not None:
+            todo_ids = [todo_id]
+        else:
+            todo_ids = []
         evidence = EventEvidence(
             display_text=f"GitLab: {action_name} on !{target['iid']} in {project_path}",
             source_type="headhunter",
@@ -763,8 +1551,8 @@ class GitLabPlatform:
             domain_confidence="default",
             severity=severity,
             gitlab_context={
-                "todo_id": todo["id"],
-                "todo_ids": todo.get("_sibling_todo_ids") or [todo["id"]],
+                "todo_id": todo_id,
+                "todo_ids": todo_ids,
                 "action_name": action_name,
                 "project_id": project["id"],
                 "project_path": project_path,
@@ -797,11 +1585,22 @@ class GitLabPlatform:
             reason=clean_plan,
             evidence=evidence,
         )
+        seen_note_ids = context.get("_seen_note_ids")
+        if isinstance(seen_note_ids, list) and seen_note_ids:
+            try:
+                await self._mark_wakeup_notes_seen(event_id, [str(x) for x in seen_note_ids])
+            except Exception as exc:
+                logger.debug(f"GitLabPlatform: seeding wake-up notes cursor failed for {event_id}: {exc}")
+        if hasattr(self.blackboard, "remove_gitlab_queue"):
+            try:
+                await self.blackboard.remove_gitlab_queue(project["id"], target["iid"])
+            except Exception:
+                pass
         logger.info(f"GitLab event created: {event_id} for {todo['action_name']} on !{target['iid']}")
         return event_id
 
     async def post_feedback(self, event: object) -> None:
-        """Post GitLab feedback (comment + mark_as_done) for a closed event."""
+        """Post GitLab feedback (comment + mark_as_done + live MR SHA sync) for a closed event."""
         if await self.blackboard.is_feedback_sent(event.id):
             return
 
@@ -811,22 +1610,35 @@ class GitLabPlatform:
         if not gl_ctx:
             return
 
-        todo_ids = gl_ctx.get("todo_ids") or ([gl_ctx["todo_id"]] if gl_ctx.get("todo_id") else [])
+        raw_todo_ids = gl_ctx.get("todo_ids")
+        if isinstance(raw_todo_ids, list):
+            todo_ids = [t for t in raw_todo_ids if t is not None]
+        elif gl_ctx.get("todo_id") is not None:
+            todo_ids = [gl_ctx["todo_id"]]
+        else:
+            todo_ids = []
         project_id = gl_ctx.get("project_id")
-        mr_iid = gl_ctx.get("mr_iid")
+        mr_iid = _valid_positive_int(gl_ctx.get("mr_iid"))
         if not project_id or not mr_iid:
             return
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
         encoded_project_id = self._enc_project_id(project_id)
+        numeric_pid = _valid_positive_int(project_id)
 
         if close_reason in ("stale", "duplicate") and not todo_ids:
-            if not await self.blackboard.is_feedback_note_sent(event.id):
-                await self.blackboard.mark_feedback_note_sent(event.id)
-            await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"GitLab duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid}")
-            return
+            tracked_sha = (
+                await self.blackboard.get_gitlab_mr_sha(numeric_pid, mr_iid)
+                if numeric_pid is not None and hasattr(self.blackboard, "get_gitlab_mr_sha")
+                else None
+            )
+            if not tracked_sha and gl_ctx.get("action_name") != "new_commits":
+                if not await self.blackboard.is_feedback_note_sent(event.id):
+                    await self.blackboard.mark_feedback_note_sent(event.id)
+                await self.blackboard.mark_feedback_sent(event.id)
+                logger.info(f"GitLab duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid}")
+                return
 
         client = self._get_client()
         headers = self._headers()
@@ -891,6 +1703,64 @@ class GitLabPlatform:
             elif not done_resp.is_success:
                 logger.warning(f"GitLab mark_as_done failed ({done_resp.status_code}) for todo {tid} ({event.id})")
                 return
+
+        # Phase 3: Fetch live MR state BEFORE recording SHA for bounded sweep (runs even on stale/duplicate
+        # so synthetic SHA-sweep events update mr_sha and never infinite-loop). Transient HTTP/Redis errors
+        # return early before mark_feedback_sent so feedback retries cleanly.
+        try:
+            live_resp = await self._get(
+                self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
+            )
+        except Exception as live_exc:
+            logger.warning(f"GitLab post_feedback Phase 3 live MR GET failed for {event.id}: {live_exc}")
+            return
+
+        status_code = live_resp.status_code
+        if isinstance(status_code, int) and (status_code in _RETRYABLE_STATUSES or status_code >= 500):
+            if status_code == 401:
+                self._invalidate_token()
+            logger.warning(f"GitLab post_feedback Phase 3 transient HTTP {status_code} for {event.id}")
+            return
+
+        try:
+            if status_code == 404:
+                if numeric_pid is not None and hasattr(self.blackboard, "delete_gitlab_mr_sha"):
+                    await self.blackboard.delete_gitlab_mr_sha(numeric_pid, mr_iid)
+            elif live_resp.is_success:
+                mr_data = live_resp.json()
+                if isinstance(mr_data, dict):
+                    live_pid = _valid_positive_int(mr_data.get("project_id"))
+                    if live_pid is not None:
+                        numeric_pid = live_pid
+                    mr_state = mr_data.get("state", "")
+                    if mr_state in ("merged", "closed"):
+                        if numeric_pid is not None and hasattr(self.blackboard, "delete_gitlab_mr_sha"):
+                            await self.blackboard.delete_gitlab_mr_sha(numeric_pid, mr_iid)
+                    else:
+                        live_sha = (
+                            mr_data.get("sha")
+                            or (mr_data.get("diff_refs") or {}).get("head_sha")
+                            or gl_ctx.get("head_sha")
+                            or gl_ctx.get("sha")
+                            or ""
+                        )
+                        if numeric_pid is not None and live_sha and hasattr(self.blackboard, "set_gitlab_mr_sha"):
+                            await self.blackboard.set_gitlab_mr_sha(numeric_pid, mr_iid, str(live_sha))
+                        # Optional visual darwin-done label (skipped for stale/duplicate; best-effort 403 tolerated)
+                        if close_reason not in ("stale", "duplicate"):
+                            try:
+                                lbl_resp = await client.put(
+                                    self._api_url(f"/projects/{encoded_project_id}/merge_requests/{mr_iid}"),
+                                    headers=headers,
+                                    json={"add_labels": "darwin-done"},
+                                )
+                                if lbl_resp.status_code == 403:
+                                    logger.debug(f"GitLab darwin-done label 403 on !{mr_iid} (best-effort skip)")
+                            except Exception as lbl_exc:
+                                logger.debug(f"GitLab darwin-done label PUT failed on !{mr_iid}: {lbl_exc}")
+        except Exception as sha_exc:
+            logger.warning(f"GitLab post_feedback Phase 3 SHA persistence failed for {event.id}: {sha_exc}")
+            return
 
         await self.blackboard.mark_feedback_sent(event.id)
         logger.info(f"GitLab feedback posted for {event.id}: {close_reason} on !{mr_iid}")

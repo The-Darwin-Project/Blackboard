@@ -17,9 +17,9 @@ vi.mock('../hooks', () => ({
 
 // Capture the latest handler ChatInput registers via useWSMessage so tests can
 // simulate an inbound WS error envelope without a real WebSocketProvider.
-let latestWsHandler: ((msg: { type: string; event_id?: string; message?: unknown }) => void) | null = null;
+let latestWsHandler: ((msg: { type: string; kind?: string; event_id?: string; message?: unknown }) => void) | null = null;
 vi.mock('../contexts/WebSocketContext', () => ({
-  useWSMessage: (handler: (msg: { type: string; event_id?: string; message?: unknown }) => void) => {
+  useWSMessage: (handler: (msg: { type: string; kind?: string; event_id?: string; message?: unknown }) => void) => {
     latestWsHandler = handler;
   },
 }));
@@ -254,6 +254,21 @@ describe('ChatInput Step 9 resilience (WS error envelope handling)', () => {
       latestWsHandler!({ type: 'error', message: 'stale error' });
     });
 
+    expect(textarea.value).toBe('');
+  });
+
+  it('surfaces sha_drift approval error without restoring last submission draft', () => {
+    const wsSend = vi.fn();
+    render(<ChatInput eventId="evt-1" wsSend={wsSend} />);
+    const textarea = getTextarea();
+    fireEvent.change(textarea, { target: { value: 'chat msg' } });
+    fireEvent.submit(textarea.closest('form')!);
+
+    act(() => {
+      latestWsHandler!({ type: 'error', kind: 'sha_drift', event_id: 'evt-1', message: 'HEAD SHA changed' });
+    });
+
+    expect(screen.getByText('HEAD SHA changed')).toBeTruthy();
     expect(textarea.value).toBe('');
   });
 });

@@ -25,13 +25,38 @@ import type { ConversationTurn, MessageStatus } from '../api/types';
 // =============================================================================
 // Layer 3: Protocol Driver & Helpers
 // =============================================================================
-const { approveEvent, rejectEvent, submitFeedback } = vi.hoisted(() => ({
-  approveEvent: vi.fn(),
-  rejectEvent: vi.fn(),
-  submitFeedback: vi.fn(),
-}));
+const { approveEvent, rejectEvent, submitFeedback, MockApiError } = vi.hoisted(() => {
+  class MockApiError extends Error {
+    readonly status: number;
+    readonly statusText: string;
+    readonly endpoint: string;
+    readonly detail?: string;
+    readonly body?: Record<string, unknown>;
+    constructor(
+      status: number,
+      statusText: string,
+      endpoint: string,
+      detail?: string,
+      body?: Record<string, unknown>
+    ) {
+      super(`API Error [${status}] ${endpoint}: ${detail || statusText}`);
+      this.name = 'ApiError';
+      this.status = status;
+      this.statusText = statusText;
+      this.endpoint = endpoint;
+      this.detail = detail;
+      this.body = body;
+    }
+  }
+  return {
+    approveEvent: vi.fn(),
+    rejectEvent: vi.fn(),
+    submitFeedback: vi.fn(),
+    MockApiError,
+  };
+});
 
-vi.mock('../api/client', () => ({ approveEvent, rejectEvent, submitFeedback }));
+vi.mock('../api/client', () => ({ approveEvent, rejectEvent, submitFeedback, ApiError: MockApiError }));
 
 vi.mock('./MermaidBlock', () => ({
   default: ({ code }: { code: string }) => <div data-testid="mermaid-block">{code}</div>,
@@ -569,6 +594,181 @@ describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
     renderTurnBubble({ actor: 'brain', action: 'request_approval', ...turnOverrides }, propsOverrides);
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+  });
+
+  it('T-17f: Given 409 SHA drift on Approve, When user confirms new SHA, Then inline diff (req[:8] -> live[:8]) renders and retry passes expectedSha', async () => {
+    const SHA_1 = '11111111aaaa0000000000000000000000000000';
+    const SHA_2 = '22222222bbbb0000000000000000000000000000';
+    const onStatusChange = vi.fn();
+
+    approveEvent
+      .mockRejectedValueOnce(
+        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed', {
+          detail: 'HEAD SHA changed',
+          approval_requested_sha: SHA_1,
+          live_sha: SHA_2,
+        })
+      )
+      .mockResolvedValueOnce({ status: 'approved' });
+
+    renderTurnBubble(
+      { actor: 'brain', action: 'request_approval', pendingApproval: true },
+      { eventId: 'evt-1', onStatusChange }
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(approveEvent).toHaveBeenCalledWith('evt-1');
+
+    // Inline SHA drift confirmation displays 8-char prefixes
+    await waitFor(() => {
+      expect(screen.getByText(/11111111/)).toBeInTheDocument();
+      expect(screen.getByText(/22222222/)).toBeInTheDocument();
+    });
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // Confirming retries with expectedSha=SHA_2
+    const confirmBtn = screen.getByRole('button', { name: /Approve New SHA|Confirm/i });
+    fireEvent.click(confirmBtn);
+
+    expect(approveEvent).toHaveBeenNthCalledWith(2, 'evt-1', SHA_2);
+    await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
+  });
+
+  it('T-17g: Given 2nd-order SHA drift (SHA_2 -> SHA_3) on confirm retry, Then inline prompt updates to SHA_3 and retries with SHA_3', async () => {
+    const SHA_1 = '11111111aaaa0000000000000000000000000000';
+    const SHA_2 = '22222222bbbb0000000000000000000000000000';
+    const SHA_3 = '33333333cccc0000000000000000000000000000';
+    const onStatusChange = vi.fn();
+
+    approveEvent
+      .mockRejectedValueOnce(
+        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed', {
+          detail: 'HEAD SHA changed',
+          approval_requested_sha: SHA_1,
+          live_sha: SHA_2,
+        })
+      )
+      .mockRejectedValueOnce(
+        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed again', {
+          detail: 'HEAD SHA changed again',
+          approval_requested_sha: SHA_1,
+          live_sha: SHA_3,
+        })
+      )
+      .mockResolvedValueOnce({ status: 'approved' });
+
+    renderTurnBubble(
+      { actor: 'brain', action: 'request_approval', pendingApproval: true },
+      { eventId: 'evt-1', onStatusChange }
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(screen.getByText(/22222222/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Approve New SHA|Confirm/i }));
+    expect(approveEvent).toHaveBeenNthCalledWith(2, 'evt-1', SHA_2);
+
+    // Updates inline prompt to SHA_3 instead of firing onStatusChange
+    await waitFor(() => expect(screen.getByText(/33333333/)).toBeInTheDocument());
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Approve New SHA|Confirm/i }));
+    expect(approveEvent).toHaveBeenNthCalledWith(3, 'evt-1', SHA_3);
+    await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
+  });
+
+  it('T-17h (H9): Double-clicking Approve rapidly fires approveEvent only once (synchronous inFlightRef lock)', async () => {
+    let resolveApprove!: (val: unknown) => void;
+    approveEvent.mockReturnValueOnce(new Promise((res) => { resolveApprove = res; }));
+
+    renderTurnBubble(
+      { actor: 'brain', action: 'request_approval', pendingApproval: true },
+      { eventId: 'evt-dbl' }
+    );
+
+    const btn = screen.getByRole('button', { name: 'Approve' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(approveEvent).toHaveBeenCalledTimes(1);
+
+    resolveApprove({ status: 'approved' });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('T-17i (H9): Changing eventId cancels in-flight approval side effects and clears stale drift/error state', async () => {
+    let resolveFirst!: (val: unknown) => void;
+    approveEvent.mockReturnValueOnce(new Promise((res) => { resolveFirst = res; }));
+    const onStatusChange = vi.fn();
+    const approvalTurn = createMockTurn({ actor: 'brain', action: 'request_approval', pendingApproval: true });
+
+    const { rerender } = render(
+      <TurnBubble turn={approvalTurn} eventId="evt-a" onStatusChange={onStatusChange} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    rerender(<TurnBubble turn={approvalTurn} eventId="evt-b" onStatusChange={onStatusChange} />);
+
+    resolveFirst({ status: 'approved' });
+    await Promise.resolve();
+    expect(onStatusChange).not.toHaveBeenCalled();
+  });
+
+  it('T-17j (H9): Non-409 error renders dismissible alert on both Approve and Approve New SHA', async () => {
+    const SHA_1 = '11111111aaaa0000000000000000000000000000';
+    const SHA_2 = '22222222bbbb0000000000000000000000000000';
+    approveEvent
+      .mockRejectedValueOnce(new MockApiError(500, 'Server Error', '/queue/evt-err/approve', 'Redis unavailable'))
+      .mockRejectedValueOnce(
+        new MockApiError(409, 'Conflict', '/queue/evt-err/approve', 'HEAD SHA changed', {
+          code: 'sha_drift',
+          approval_requested_sha: SHA_1,
+          live_sha: SHA_2,
+        })
+      )
+      .mockRejectedValueOnce(new MockApiError(403, 'Forbidden', '/queue/evt-err/approve', 'Not authorized'));
+
+    renderTurnBubble(
+      { actor: 'brain', action: 'request_approval', pendingApproval: true },
+      { eventId: 'evt-err' }
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Redis unavailable'));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss approval error' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    // Retry triggers 409 drift -> then Approve New SHA fails with 403 -> inline error alert shown
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve New SHA' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Approve New SHA' }));
+    await waitFor(() => expect(screen.getByText('Not authorized')).toBeInTheDocument());
+  });
+
+  it('T-17k (H9): 409 closed/sha_unresolvable renders Approval blocked without Approve New SHA and Cancel dismisses', async () => {
+    approveEvent.mockRejectedValueOnce(
+      new MockApiError(409, 'Conflict', '/queue/evt-closed/approve', 'Event is already closed and cannot be approved.', {
+        code: 'closed',
+        detail: 'Event is already closed and cannot be approved.',
+      })
+    );
+
+    renderTurnBubble(
+      { actor: 'brain', action: 'request_approval', pendingApproval: true },
+      { eventId: 'evt-closed' }
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        'Approval blocked: Event is already closed and cannot be approved.'
+      )
+    );
+    expect(screen.queryByText(/HEAD SHA drifted/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Approve New SHA/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
   });
 });
 

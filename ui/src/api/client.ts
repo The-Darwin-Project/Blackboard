@@ -69,12 +69,14 @@ export class ApiError extends Error {
   readonly statusText: string;
   readonly endpoint: string;
   readonly detail?: string;
+  readonly body?: Record<string, unknown>;
 
   constructor(
     status: number,
     statusText: string,
     endpoint: string,
-    detail?: string
+    detail?: string,
+    body?: Record<string, unknown>
   ) {
     super(`API Error [${status}] ${endpoint}: ${detail || statusText}`);
     this.name = 'ApiError';
@@ -82,6 +84,7 @@ export class ApiError extends Error {
     this.statusText = statusText;
     this.endpoint = endpoint;
     this.detail = detail;
+    this.body = body;
   }
 
   get isNotFound(): boolean {
@@ -116,18 +119,23 @@ async function fetchApi<T>(
   });
 
   if (!response.ok) {
-    // Try to extract error detail from response body
+    // Try to extract error detail and structured body from response
     let detail: string | undefined;
+    let body: Record<string, unknown> | undefined;
     try {
       const errorBody = await response.json();
-      detail = errorBody.detail || errorBody.message || errorBody.error;
+      if (errorBody && typeof errorBody === 'object' && !Array.isArray(errorBody)) {
+        body = errorBody as Record<string, unknown>;
+        const rawDetail = errorBody.detail ?? errorBody.message ?? errorBody.error;
+        detail = typeof rawDetail === 'string' && rawDetail.trim() ? rawDetail : undefined;
+      }
     } catch {
       // Response body is not JSON or empty
     }
     if (response.status === 401 && _onUnauthorized) {
       _onUnauthorized();
     }
-    throw new ApiError(response.status, response.statusText, endpoint, detail);
+    throw new ApiError(response.status, response.statusText, endpoint, detail, body);
   }
 
   return response.json();
@@ -165,9 +173,10 @@ export async function getEventDocument(eventId: string): Promise<EventDocument> 
   return fetchApi<EventDocument>(`/queue/${encodeURIComponent(eventId)}`);
 }
 
-export async function approveEvent(eventId: string): Promise<unknown> {
+export async function approveEvent(eventId: string, expectedSha?: string): Promise<unknown> {
   return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/approve`, {
     method: 'POST',
+    ...(expectedSha ? { body: JSON.stringify({ expected_sha: expectedSha }) } : {}),
   });
 }
 
