@@ -707,3 +707,193 @@ class TestJsPythonVerdictParity:
                     if py != js:
                         mismatches.append((record, local, category, py, js))
         assert not mismatches, f"JS/Python verdict drift: {mismatches}"
+
+
+# =========================================================================
+# Batch 1 ATDD (Step 5 / T-9): GitHub App installation token resolution in
+# _resolve_github_head(), eager missing-.pem vs lazy corrupt-.pem fallback,
+# CA bundle preservation
+# =========================================================================
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_github_manager_vcs():
+    """Teardown guard ensuring shared manager singleton never leaks across vcs_approval tests."""
+    from src.utils.github_app import reset_installation_manager
+
+    reset_installation_manager()
+    yield
+    reset_installation_manager()
+
+
+class TestATDDT9VcsApprovalGitHubAppAuth:
+    """Layer 1-4 ATDD scenarios for T-9 in src/utils/vcs_approval.py."""
+
+    @pytest.mark.asyncio
+    async def test_private_repo_authenticates_with_github_app_token_and_ca_bundle(self, monkeypatch, tmp_path):
+        """Given a private GitHub App-only repo (GITHUB_TOKEN='', GITHUB_APP_ID set)
+        When _resolve_github_head() runs
+        Then get_installation_manager() unpacks (inst_id, client), sends
+        Authorization: Bearer <app_token>, and uses resolve_ca_bundle() verify=."""
+        ca_file = tmp_path / "ca.crt"
+        ca_file.write_text("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n")
+        monkeypatch.setenv("GITHUB_TOKEN", "")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca_file))
+        monkeypatch.delenv("GITLAB_SSL_VERIFY", raising=False)
+
+        mock_gh_client = AsyncMock()
+        mock_gh_client.get_token = AsyncMock(return_value="ghs_app_installation_token_xyz")
+        mock_mgr = MagicMock()
+        mock_mgr.get_client_for_repo = AsyncMock(return_value=("inst-123", mock_gh_client))
+
+        mock_http_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "live-app-sha-999"}}))
+        gh_ctx = {"pr_number": "314", "owner": "private-org", "repo": "secret-repo", "head_sha": "stale"}
+
+        with (
+            patch("src.utils.vcs_approval.get_installation_manager", return_value=mock_mgr) as mock_get_mgr,
+            patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls),
+        ):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert mock_get_mgr.called, "_resolve_github_head must consult get_installation_manager()"
+        assert (pr_number, sha) == ("314", "live-app-sha-999")
+        mock_mgr.get_client_for_repo.assert_awaited_once_with("private-org", "secret-repo")
+        mock_gh_client.get_token.assert_awaited_once()
+        assert mock_http_cls.call_args.kwargs["verify"] == str(ca_file)
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert get_kwargs["headers"]["Authorization"] == "Bearer ghs_app_installation_token_xyz"
+
+    @pytest.mark.asyncio
+    async def test_corrupt_pem_lazy_get_token_failure_falls_back_to_pat_without_raising(self, monkeypatch, tmp_path):
+        """Run #5 C-5a Path B: Given a present-but-corrupt .pem file (passes _find_pem_file
+        in __init__ so get_installation_manager() returns a live manager, then fails lazily in
+        _load_private_key/_create_jwt during get_token/discovery) and GITHUB_TOKEN is set
+        When _resolve_github_head() runs
+        Then lazy failure is caught without raising and falls back to GITHUB_TOKEN PAT."""
+        from src.utils.github_app import get_installation_manager
+
+        corrupt_pem = tmp_path / "corrupt.pem"
+        corrupt_pem.write_text("NOT-A-VALID-RSA-PRIVATE-KEY")
+        monkeypatch.setenv("GITHUB_APP_ID", "123456")
+        monkeypatch.setenv("GITHUB_PRIVATE_KEY_PATH", str(corrupt_pem))
+        monkeypatch.delenv("GITHUB_INSTALLATION_ID", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_pat_fallback_token")
+
+        mgr = get_installation_manager()
+        assert mgr is not None
+
+        mock_http_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "pat-fallback-sha"}}))
+        gh_ctx = {"pr_number": "42", "owner": "org", "repo": "repo", "head_sha": "stale"}
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert (pr_number, sha) == ("42", "pat-fallback-sha")
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert get_kwargs["headers"]["Authorization"] == "Bearer ghp_pat_fallback_token"
+
+    @pytest.mark.asyncio
+    async def test_corrupt_pem_with_empty_pat_fails_closed_on_private_404_without_raising(self, monkeypatch, tmp_path):
+        """Run #5 C-5a Path B (no PAT): Given corrupt .pem and GITHUB_TOKEN=''
+        When _resolve_github_head() queries a private repo returning 404
+        Then lazy App error is swallowed and returns (pr_number, None) fail-closed."""
+        from src.utils.github_app import get_installation_manager
+
+        corrupt_pem = tmp_path / "corrupt.pem"
+        corrupt_pem.write_text("NOT-A-VALID-KEY")
+        monkeypatch.setenv("GITHUB_APP_ID", "123456")
+        monkeypatch.setenv("GITHUB_PRIVATE_KEY_PATH", str(corrupt_pem))
+        monkeypatch.setenv("GITHUB_TOKEN", "")
+
+        assert get_installation_manager() is not None
+
+        mock_http_cls = _mock_client(get_return=_resp(404))
+        gh_ctx = {"pr_number": "42", "owner": "org", "repo": "private", "head_sha": "stale"}
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert (pr_number, sha) == ("42", None)
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert "Authorization" not in get_kwargs.get("headers", {})
+
+    @pytest.mark.asyncio
+    async def test_missing_pem_path_with_app_id_set_still_queries_without_auth_header(self, monkeypatch, tmp_path):
+        """Run #5 C-5a Path A end-to-end: Given GITHUB_APP_ID set with missing .pem path
+        and GITHUB_TOKEN=''
+        When _resolve_github_head() runs
+        Then get_installation_manager() returns None cleanly and public query succeeds without
+        Authorization header."""
+        from src.utils.github_app import get_installation_manager
+
+        monkeypatch.setenv("GITHUB_APP_ID", "123456")
+        monkeypatch.setenv("GITHUB_PRIVATE_KEY_PATH", str(tmp_path / "missing-dir"))
+        monkeypatch.setenv("GITHUB_TOKEN", "")
+
+        assert get_installation_manager() is None
+
+        mock_http_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "public-sha"}}))
+        gh_ctx = {"pr_number": "265", "owner": "o", "repo": "r", "head_sha": "stale"}
+        with patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert (pr_number, sha) == ("265", "public-sha")
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert "Authorization" not in get_kwargs.get("headers", {})
+
+    @pytest.mark.asyncio
+    async def test_repo_cache_miss_logs_warning_and_falls_back_to_pat(self, monkeypatch, caplog):
+        """F-14/F-23: Given get_client_for_repo() returns None (repo cache miss)
+        When _resolve_github_head() runs
+        Then an explicit warning is logged and GITHUB_TOKEN PAT is used."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_cache_miss_pat")
+        mock_mgr = MagicMock()
+        mock_mgr.get_client_for_repo = AsyncMock(return_value=None)
+        mock_http_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "pat-miss-sha"}}))
+        gh_ctx = {"pr_number": "88", "owner": "uninstalled-org", "repo": "repo", "head_sha": "stale"}
+
+        with (
+            patch("src.utils.vcs_approval.get_installation_manager", return_value=mock_mgr),
+            patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls),
+            caplog.at_level("WARNING"),
+        ):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert (pr_number, sha) == ("88", "pat-miss-sha")
+        assert any("missed repo" in r.message for r in caplog.records)
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert get_kwargs["headers"]["Authorization"] == "Bearer ghp_cache_miss_pat"
+
+    @pytest.mark.asyncio
+    async def test_app_token_lookup_timeout_falls_back_to_pat(self, monkeypatch, caplog):
+        """F-14: Given App token resolution exceeds the 10s wait_for timeout
+        When _resolve_github_head() runs
+        Then TimeoutError is caught, logged by exception type, and falls back to GITHUB_TOKEN."""
+        import asyncio as _asyncio
+
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_timeout_pat")
+        mock_mgr = MagicMock()
+
+        async def _hang(*a, **k):
+            await _asyncio.sleep(30)
+
+        mock_mgr.get_client_for_repo = AsyncMock(side_effect=_hang)
+        mock_http_cls = _mock_client(get_return=_resp(200, {"head": {"sha": "timeout-fallback-sha"}}))
+        gh_ctx = {"pr_number": "91", "owner": "slow-org", "repo": "repo", "head_sha": "stale"}
+
+        async def _instant_timeout(coro, timeout=None):
+            coro.close()
+            raise _asyncio.TimeoutError()
+
+        with (
+            patch("src.utils.vcs_approval.get_installation_manager", return_value=mock_mgr),
+            patch("src.utils.vcs_approval.asyncio.wait_for", side_effect=_instant_timeout) as mock_wait_for,
+            patch("src.utils.vcs_approval.httpx.AsyncClient", mock_http_cls),
+            caplog.at_level("WARNING"),
+        ):
+            pr_number, sha = await _resolve_github_head(gh_ctx)
+
+        assert (pr_number, sha) == ("91", "timeout-fallback-sha")
+        assert mock_wait_for.call_args.kwargs.get("timeout") == 10
+        assert any("TimeoutError" in r.message for r in caplog.records)
+        _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
+        assert get_kwargs["headers"]["Authorization"] == "Bearer ghp_timeout_pat"
+

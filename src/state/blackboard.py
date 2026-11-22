@@ -2001,6 +2001,14 @@ return 1
         """Mark headhunter feedback as sent (48h TTL covers 24h scan window + margin)."""
         await self.redis.set(f"darwin:headhunter:feedback:{event_id}", "1", ex=ttl)
 
+    async def is_feedback_note_sent(self, event_id: str) -> bool:
+        """Check if headhunter feedback note (Phase 1) was already posted for an event."""
+        return bool(await self.redis.get(f"darwin:headhunter:feedback_note:{event_id}"))
+
+    async def mark_feedback_note_sent(self, event_id: str, ttl: int = 172800) -> None:
+        """Mark headhunter feedback note as posted (48h TTL matches mark_feedback_sent)."""
+        await self.redis.set(f"darwin:headhunter:feedback_note:{event_id}", "1", ex=ttl)
+
     _PR_SHA_KEY = "darwin:github:pr_sha"
 
     async def set_github_pr_sha(self, owner: str, repo: str, pr_number: int, sha: str) -> None:
@@ -2322,12 +2330,14 @@ return 1
                     continue
         logger.debug(f"Brain phase set on event {event_id}: {brain_phase}")
 
-    async def update_event_gitlab_context(self, event_id: str, updates: dict) -> None:
+    async def update_event_gitlab_context(self, event_id: str, updates: dict) -> bool:
         """Patch gitlab_context fields on an active event's evidence (WATCH/MULTI).
 
         Merges `updates` into the existing gitlab_context dict. Also updates
         evidence.severity if 'severity' key is present in updates (source
         reclassification on refresh -- does NOT touch brain_severity).
+        Rejects if github_context or github_issue_context already exists (3-way one-of invariant).
+        Returns True if persisted, False if event is missing or rejected on conflict.
         """
         key = f"{self.EVENT_PREFIX}{event_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
@@ -2337,12 +2347,19 @@ return 1
                     data = await pipe.get(key)
                     if not data:
                         logger.warning(f"Event {event_id} not found for gitlab_context update")
-                        return
+                        await pipe.unwatch()
+                        return False
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
-                        if event.event.evidence.github_context is not None:
-                            logger.warning(f"Rejecting gitlab_context update on event {event_id}: github_context already set")
-                            return
+                        if (
+                            event.event.evidence.github_context is not None
+                            or event.event.evidence.github_issue_context is not None
+                        ):
+                            logger.warning(
+                                f"Rejecting gitlab_context update on event {event_id}: conflicting GitHub context already set"
+                            )
+                            await pipe.unwatch()
+                            return False
                         gl = event.event.evidence.gitlab_context or {}
                         gl.update(updates)
                         event.event.evidence.gitlab_context = gl
@@ -2355,13 +2372,15 @@ return 1
                 except WatchError:
                     continue
         logger.debug(f"GitLab context updated on event {event_id}: {list(updates.keys())}")
+        return True
 
-    async def update_event_github_context(self, event_id: str, updates: dict) -> None:
+    async def update_event_github_context(self, event_id: str, updates: dict) -> bool:
         """Patch github_context fields on an active event's evidence (WATCH/MULTI).
 
         Merges `updates` into the existing github_context dict. Also updates
         evidence.severity if 'severity' key is present in updates.
-        Rejects if gitlab_context already exists (one-of invariant).
+        Rejects if gitlab_context or github_issue_context already exists (3-way one-of invariant).
+        Returns True if persisted, False if event is missing or rejected on conflict.
         """
         key = f"{self.EVENT_PREFIX}{event_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
@@ -2371,12 +2390,19 @@ return 1
                     data = await pipe.get(key)
                     if not data:
                         logger.warning(f"Event {event_id} not found for github_context update")
-                        return
+                        await pipe.unwatch()
+                        return False
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
-                        if event.event.evidence.gitlab_context is not None:
-                            logger.warning(f"Rejecting github_context update on event {event_id}: gitlab_context already set")
-                            return
+                        if (
+                            event.event.evidence.gitlab_context is not None
+                            or event.event.evidence.github_issue_context is not None
+                        ):
+                            logger.warning(
+                                f"Rejecting github_context update on event {event_id}: conflicting VCS context already set"
+                            )
+                            await pipe.unwatch()
+                            return False
                         gc = event.event.evidence.github_context or {}
                         gc.update(updates)
                         event.event.evidence.github_context = gc
@@ -2389,6 +2415,7 @@ return 1
                 except WatchError:
                     continue
         logger.debug(f"GitHub context updated on event {event_id}: {list(updates.keys())}")
+        return True
 
     async def update_event_kargo_context(self, event_id: str, updates: dict) -> None:
         """Patch kargo_context fields on an active event's evidence (WATCH/MULTI).

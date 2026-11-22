@@ -881,3 +881,176 @@ class TestSystemicFailureEscalationPreservesQueueState:
 
         remaining_numbers = {i["issue_number"] for i in hh._github._last_queued_issues}
         assert remaining_numbers == {1, 2}
+
+
+# =========================================================================
+# Batch 1 ATDD (Step 7 / T-11): 3-Way VCS Context Exclusivity & defensive
+# pipe.unwatch() cleanup in BlackboardState + handlers_integration
+# =========================================================================
+
+
+class _InMemoryWatchPipeline:
+    """Layer 3 Protocol Driver: Redis WATCH/MULTI/EXEC pipeline stub exposing unwatch = AsyncMock()."""
+
+    def __init__(self, store: dict[str, str]):
+        self._store = store
+        self._pending: list[tuple[str, str]] = []
+        self.watch = AsyncMock()
+        self.unwatch = AsyncMock()
+        self.multi = MagicMock()
+        self.execute = AsyncMock(side_effect=self._do_execute)
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self._pending.append((key, value))
+
+    async def _do_execute(self):
+        for k, v in self._pending:
+            self._store[k] = v
+        self._pending.clear()
+        return [True]
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _make_issue_event_doc(event_id: str = "evt-issue-t11"):
+    from src.models import EventDocument, EventInput
+
+    return EventDocument(
+        id=event_id,
+        source="headhunter",
+        service="BlackBoard",
+        subject_type="github_issue",
+        event=EventInput(
+            reason="Triage issue #11",
+            evidence=EventEvidence(
+                display_text="GitHub Issue #11",
+                source_type="headhunter",
+                domain="complicated",
+                severity="info",
+                github_issue_context={
+                    "owner": "The-Darwin-Project",
+                    "repo": "BlackBoard",
+                    "issue_number": 11,
+                    "title": "Issue exclusivity test",
+                    "html_url": "https://github.com/The-Darwin-Project/BlackBoard/issues/11",
+                },
+            ),
+        ),
+    )
+
+
+class TestATDDT11ThreeWayVcsExclusivity:
+    """Layer 1-4 ATDD scenarios for T-11 (3-way VCS context exclusivity)."""
+
+    @pytest.mark.asyncio
+    async def test_update_event_gitlab_context_rejects_when_github_issue_context_set_and_unwatches(self):
+        """Given an event with github_issue_context stored in Redis
+        When update_event_gitlab_context() is called
+        Then pipe.unwatch() is awaited before early return, execute() is NOT called,
+        gitlab_context stays None, and stored EventDocument still deserializes cleanly."""
+        import json
+        from src.models import EventDocument
+        from src.state.blackboard import BlackboardState
+
+        ev = _make_issue_event_doc("evt-t11-gl")
+        key = f"{BlackboardState.EVENT_PREFIX}{ev.id}"
+        store = {key: json.dumps(ev.model_dump())}
+        pipe = _InMemoryWatchPipeline(store)
+        bb = BlackboardState.__new__(BlackboardState)
+        bb.redis = MagicMock()
+        bb.redis.pipeline = MagicMock(return_value=pipe)
+
+        await bb.update_event_gitlab_context(ev.id, {"pipeline_status": "failed"})
+
+        pipe.unwatch.assert_awaited_once()
+        pipe.execute.assert_not_awaited()
+        reloaded = EventDocument(**json.loads(store[key]))
+        assert reloaded.event.evidence.gitlab_context is None
+        assert reloaded.event.evidence.github_issue_context is not None
+
+    @pytest.mark.asyncio
+    async def test_update_event_github_context_rejects_when_github_issue_context_set_and_unwatches(self):
+        """Given an event with github_issue_context stored in Redis
+        When update_event_github_context() is called
+        Then pipe.unwatch() is awaited before early return, execute() is NOT called,
+        github_context stays None, and stored EventDocument still deserializes cleanly."""
+        import json
+        from src.models import EventDocument
+        from src.state.blackboard import BlackboardState
+
+        ev = _make_issue_event_doc("evt-t11-gh")
+        key = f"{BlackboardState.EVENT_PREFIX}{ev.id}"
+        store = {key: json.dumps(ev.model_dump())}
+        pipe = _InMemoryWatchPipeline(store)
+        bb = BlackboardState.__new__(BlackboardState)
+        bb.redis = MagicMock()
+        bb.redis.pipeline = MagicMock(return_value=pipe)
+
+        await bb.update_event_github_context(ev.id, {"check_status": "failure"})
+
+        pipe.unwatch.assert_awaited_once()
+        pipe.execute.assert_not_awaited()
+        reloaded = EventDocument(**json.loads(store[key]))
+        assert reloaded.event.evidence.github_context is None
+        assert reloaded.event.evidence.github_issue_context is not None
+
+    @pytest.mark.asyncio
+    async def test_update_event_vcs_context_unwatches_when_event_missing(self):
+        """Given event key is absent in Redis
+        When update_event_gitlab_context() / update_event_github_context() returns early
+        Then pipe.unwatch() is awaited before returning."""
+        from src.state.blackboard import BlackboardState
+
+        for method_name in ("update_event_gitlab_context", "update_event_github_context"):
+            pipe = _InMemoryWatchPipeline({})
+            bb = BlackboardState.__new__(BlackboardState)
+            bb.redis = MagicMock()
+            bb.redis.pipeline = MagicMock(return_value=pipe)
+
+            await getattr(bb, method_name)("evt-missing", {"status": "x"})
+            pipe.unwatch.assert_awaited_once()
+            pipe.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refresh_handlers_reject_github_issue_context_cleanly(self):
+        """Given an event has github_issue_context
+        When handle_refresh_gitlab_context() or handle_refresh_github_context() runs
+        Then a clean tool_result error is appended and neither refresh_*_state is invoked."""
+        from src.agents.handlers_integration import (
+            handle_refresh_github_context,
+            handle_refresh_gitlab_context,
+        )
+
+        ev = _make_issue_event_doc("evt-t11-handler")
+        for handler, tool_name in (
+            (handle_refresh_gitlab_context, "refresh_gitlab_context"),
+            (handle_refresh_github_context, "refresh_github_context"),
+        ):
+            bb = MagicMock()
+            bb.get_event = AsyncMock(return_value=ev)
+            hh = MagicMock()
+            hh.refresh_mr_state = AsyncMock()
+            hh._github = MagicMock()
+            hh._github.refresh_pr_state = AsyncMock()
+
+            ctx = MagicMock()
+            ctx.get_blackboard.return_value = bb
+            ctx.get_agent_instance.return_value = hh
+            ctx.next_turn_number = AsyncMock(return_value=2)
+            ctx.append_and_broadcast = AsyncMock()
+
+            handled = await handler(ctx, ev.id, {}, None)
+            assert handled is True
+            hh.refresh_mr_state.assert_not_awaited()
+            hh._github.refresh_pr_state.assert_not_awaited()
+            turn = ctx.append_and_broadcast.call_args[0][1]
+            assert turn.waitingFor == tool_name
+            assert "issue" in (turn.evidence or "").lower()
+

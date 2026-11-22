@@ -68,10 +68,12 @@ class VcsPlatformPort(Protocol):
         """
         ...
 
-    async def fetch_context(self, work_item: dict) -> dict:
+    async def fetch_context(self, work_item: dict) -> dict | None:
         """Enrich a work item with platform-specific context.
 
-        Returns a context dict consumed by the LLM analysis prompt.
+        Returns a context dict consumed by the LLM analysis prompt, or None to
+        skip the item without creating an event (e.g. unauthorized @mention or
+        fail-closed notes fetch failure).
         Must include fields the prompt builder expects (action_name,
         mr_title/pr_title, pipeline_status/check_status, etc.).
         """

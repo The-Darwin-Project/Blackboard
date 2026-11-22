@@ -337,7 +337,13 @@ from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
-from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
+from ..utils.prompt_sanitize import (
+    PROMPT_NAME_MAX_LEN,
+    sanitize_prompt_text,
+    sanitize_untrusted_block,
+    sanitize_untrusted_line,
+    strip_xml_fences,
+)
 from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
@@ -1453,22 +1459,32 @@ class Brain:
         """Return True if both events have github_context (or github_issue_context) with different identifiers."""
         if not (a.event and a.event.evidence and b.event and b.event.evidence):
             return False
-        a_ev, b_ev = a.event.evidence, b.event.evidence
-        a_gh = getattr(a_ev, "github_context", None) or {}
-        b_gh = getattr(b_ev, "github_context", None) or {}
-        if a_gh.get("pr_number") and b_gh.get("pr_number"):
-            return a_gh["pr_number"] != b_gh["pr_number"]
-        a_issue = getattr(a_ev, "github_issue_context", None) or {}
-        b_issue = getattr(b_ev, "github_issue_context", None) or {}
-        if a_issue.get("issue_number") and b_issue.get("issue_number"):
-            return a_issue["issue_number"] != b_issue["issue_number"]
-        if (a_gh or a_issue) and (b_gh or b_issue):
-            return (a_gh.get("pr_number") or a_issue.get("issue_number")) != (b_gh.get("pr_number") or b_issue.get("issue_number"))
-        return False
+
+        def _extract_ref(ev) -> tuple[dict, int | str | None] | None:
+            gh = getattr(ev, "github_context", None) or {}
+            if gh.get("pr_number"):
+                return gh, gh["pr_number"]
+            issue = getattr(ev, "github_issue_context", None) or {}
+            if issue.get("issue_number"):
+                return issue, issue["issue_number"]
+            if gh or issue:
+                ctx = gh or issue
+                return ctx, gh.get("pr_number") or issue.get("issue_number")
+            return None
+
+        a_ref = _extract_ref(a.event.evidence)
+        b_ref = _extract_ref(b.event.evidence)
+        if not a_ref or not b_ref:
+            return False
+        a_ctx, a_num = a_ref
+        b_ctx, b_num = b_ref
+        if a_ctx.get("owner") and a_ctx.get("repo") and b_ctx.get("owner") and b_ctx.get("repo"):
+            return (a_ctx["owner"], a_ctx["repo"], a_num) != (b_ctx["owner"], b_ctx["repo"], b_num)
+        return a_num != b_num
 
     @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
-        """Extract normalized MR/PR URL from gitlab_context, kargo_context, or github_context.
+        """Extract normalized MR/PR/Issue URL from gitlab_context, kargo_context, github_context, or github_issue_context.
 
         Returns None safely for legacy string evidence (pre-EventEvidence data).
         """
@@ -1487,6 +1503,10 @@ class Brain:
             gh = getattr(ev, "github_context", None)
             if isinstance(gh, dict) and gh.get("pr_url"):
                 url = gh["pr_url"]
+        if not url:
+            gh_issue = getattr(ev, "github_issue_context", None)
+            if isinstance(gh_issue, dict) and gh_issue.get("html_url"):
+                url = gh_issue["html_url"]
         if url:
             return url.split("#")[0].rstrip("/")
         return None
@@ -1519,10 +1539,11 @@ class Brain:
         evidence = duplicate.event.evidence if duplicate.event else None
         if evidence and hasattr(evidence, "gitlab_context") and evidence.gitlab_context:
             gl = evidence.gitlab_context
+            mr_title = sanitize_untrusted_line(gl.get("mr_title", ""), max_len=200)
             lines.append("")
             lines.append("## GitLab Context")
             lines.append(f"- **Project:** {gl.get('project_path', '')}")
-            lines.append(f"- **MR:** !{gl.get('mr_iid', '')} - {gl.get('mr_title', '')}")
+            lines.append(f"- **MR:** !{gl.get('mr_iid', '')} - {mr_title}")
             lines.append(f"- **MR URL:** {gl.get('target_url', '')}")
             lines.append(f"- **Pipeline:** {gl.get('pipeline_status', 'unknown')}")
             lines.append(f"- **Merge Status:** {gl.get('merge_status', '')}")
@@ -1535,14 +1556,31 @@ class Brain:
             instr = Brain._extract_bot_instructions(mr_desc)
             if instr:
                 lines.append("")
-                lines.append(instr)
+                lines.append(sanitize_untrusted_block(instr, max_len=32_000))
         gh = getattr(evidence, "github_context", None) or (isinstance(evidence, dict) and evidence.get("github_context"))
         if gh:
-            body = gh.get("pr_body", "") if isinstance(gh, dict) else getattr(gh, "pr_body", "")
+            _g = gh.get if isinstance(gh, dict) else (lambda k, d="": getattr(gh, k, d))
+            pr_title = sanitize_untrusted_line(_g("pr_title", ""), max_len=200)
+            lines.append("")
+            lines.append("## GitHub Context")
+            lines.append(f"- **Repo:** {_g('owner', '')}/{_g('repo', '')}")
+            lines.append(f"- **PR:** #{_g('pr_number', '')} - {pr_title}")
+            lines.append(f"- **PR URL:** {_g('pr_url', '')}")
+            lines.append(f"- **Checks:** {_g('check_status', 'unknown')}")
+            if _g("head_branch") or _g("base_branch"):
+                head_br = sanitize_untrusted_line(_g("head_branch", ""), max_len=200)
+                base_br = sanitize_untrusted_line(_g("base_branch", ""), max_len=200)
+                lines.append(f"- **Branches:** {head_br} -> {base_br}")
+            lines.append(f"- **Author:** {_g('author', '')}")
+            maintainer = _g("maintainer", {}) or {}
+            if maintainer:
+                emails = maintainer.get("emails", []) if isinstance(maintainer, dict) else getattr(maintainer, "emails", [])
+                lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
+            body = _g("pr_body", "") or _g("body", "")
             instr = Brain._extract_bot_instructions(body)
             if instr:
                 lines.append("")
-                lines.append(instr)
+                lines.append(sanitize_untrusted_block(instr, max_len=32_000))
         if evidence and hasattr(evidence, "kargo_context") and evidence.kargo_context:
             kc = evidence.kargo_context
             lines.append("")
@@ -3733,7 +3771,11 @@ class Brain:
                 else:
                     logger.warning(f"Domain skill not found: {domain_file}")
             else:
-                initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
+                phase_paths = self._skill_loader.get_all_paths_for_phase(phase)
+                if phase == "context":
+                    gitlab_tagged = set(self._skill_loader.find_paths_by_tag("gitlab") or [])
+                    phase_paths = [p for p in phase_paths if p not in gitlab_tagged]
+                initial_paths.extend(phase_paths)
 
         maintainer_env = maintainer_env_key(getattr(event, "subject_type", None))
         template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv(maintainer_env, "")}
@@ -3748,43 +3790,32 @@ class Brain:
         # Live event state header -- first thing the LLM reads, before all skill instructions.
         resolved_contents.insert(0, self._build_event_state_header(event, context_flags))
 
-        # Evidence-driven context: inject Kargo skills when kargo_context is present
-        if (event.event and event.event.evidence
-                and hasattr(event.event.evidence, "kargo_context")
-                and event.event.evidence.kargo_context):
-            for kpath in self._skill_loader.find_paths_by_tag("kargo"):
-                result = self._skill_loader.get_with_meta(kpath)
-                if result:
-                    kbody, _ = result
-                    resolved_contents.append(_wrap_section(kpath, kbody, self._skill_loader.get_tag_type(kpath)))
-                else:
-                    logger.debug(f"Kargo tag '{kpath}' resolved to None in path_index")
+        # Evidence-driven context skills (deduplicated against already-loaded phase paths)
+        loaded_paths = {p for p, _ in resolved_pairs}
+        evidence = event.event.evidence if event.event else None
 
-        # Evidence-driven context: inject GitHub skills when github_context is present
-        if (event.event and event.event.evidence
-                and hasattr(event.event.evidence, "github_context")
-                and event.event.evidence.github_context):
-            for gpath in self._skill_loader.find_paths_by_tag("github"):
-                result = self._skill_loader.get_with_meta(gpath)
+        def _inject_evidence_paths(paths, tag: str) -> None:
+            for path in paths:
+                if path in loaded_paths:
+                    continue
+                result = self._skill_loader.get_with_meta(path)
                 if result:
-                    gbody, _ = result
-                    resolved_contents.append(_wrap_section(gpath, gbody, self._skill_loader.get_tag_type(gpath)))
-                else:
-                    logger.debug(f"GitHub tag '{gpath}' resolved to None in path_index")
-
-        # Evidence-driven context: inject CI gating skills when ci_context is present
-        if (event.event and event.event.evidence
-                and hasattr(event.event.evidence, "ci_context")
-                and event.event.evidence.ci_context):
-            for cpath in self._skill_loader.find_paths_by_tag("ci_gating"):
-                result = self._skill_loader.get_with_meta(cpath)
-                if result:
-                    cbody, _ = result
+                    body, _ = result
                     resolved_contents.append(
-                        _wrap_section(cpath, cbody, self._skill_loader.get_tag_type(cpath))
+                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
                     )
+                    loaded_paths.add(path)
                 else:
-                    logger.debug(f"CI gating tag '{cpath}' resolved to None in path_index")
+                    logger.debug(f"Evidence tag '{tag}' path '{path}' resolved to None in path_index")
+
+        if evidence and getattr(evidence, "kargo_context", None):
+            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("kargo"), "kargo")
+        if evidence and getattr(evidence, "gitlab_context", None):
+            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("gitlab"), "gitlab")
+        if evidence and getattr(evidence, "github_context", None):
+            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("github"), "github")
+        if evidence and getattr(evidence, "ci_context", None):
+            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("ci_gating"), "ci_gating")
 
         # Gated posture skills for chat/slack events (mutually exclusive)
         if context_flags and context_flags.get("is_first_human_turn"):
@@ -4253,7 +4284,10 @@ class Brain:
             svc = None
             if (subject_type == "service"
                     and event.service not in ("general", "system")
-                    and not (isinstance(evidence, EventEvidence) and evidence.gitlab_context)):
+                    and not (
+                        isinstance(evidence, EventEvidence)
+                        and (evidence.gitlab_context or evidence.github_context or evidence.github_issue_context)
+                    )):
                 svc = await self.blackboard.get_service(event.service)
 
             mermaid = ""
@@ -6370,6 +6404,12 @@ class Brain:
             gl = evidence.gitlab_context
             maintainer = gl.get("maintainer", {})
             emails = maintainer.get("emails", [])
+            if emails:
+                email = emails[0]
+        if not email and hasattr(evidence, "github_context") and evidence.github_context:
+            gh = evidence.github_context
+            maintainer = gh.get("maintainer", {}) if isinstance(gh, dict) else getattr(gh, "maintainer", {})
+            emails = (maintainer or {}).get("emails", [])
             if emails:
                 email = emails[0]
         if not email and event.slack_user_id:

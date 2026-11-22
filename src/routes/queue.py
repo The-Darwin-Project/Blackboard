@@ -74,7 +74,7 @@ from ..auth import (
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
 from ..utils.prompt_sanitize import sanitize_title
-from ..utils.vcs_approval import resolve_live_head_sha
+from ..utils.vcs_approval import normalize_gitlab_host, resolve_ca_bundle, resolve_live_head_sha
 
 
 class RejectRequest(BaseModel):
@@ -122,6 +122,7 @@ def _github_active_item(
     url_key: str,
     action: str,
     fallback_created_at: str,
+    is_issue: bool = False,
 ) -> dict:
     """Build a /headhunter/pending row for a Blackboard-sourced active GitHub PR/Issue event.
 
@@ -130,10 +131,12 @@ def _github_active_item(
     (Issue: issue_number/title/html_url) -- the two evidence shapes are mutually
     exclusive per EventEvidence's model validator (#233).
     """
+    num_field = "issue_number" if is_issue else "pr_number"
+    title_field = "issue_title" if is_issue else "pr_title"
     return {
         "platform": "github",
-        "pr_number": ctx.get(number_key),
-        "pr_title": ctx.get(title_key, ""),
+        num_field: ctx.get(number_key),
+        title_field: ctx.get(title_key, ""),
         "project_path": f"{ctx.get('owner', '')}/{ctx.get('repo', '')}",
         "author": ctx.get("author", ""),
         "created_at": ctx.get("created_at") or fallback_created_at,
@@ -1317,67 +1320,100 @@ async def jenkins_pending_items(
 
 @router.get("/headhunter/pending")
 async def headhunter_pending_todos():
-    """Return pending GitLab todos that the Headhunter would process next.
+    """Return pending GitLab todos and GitHub queued/active items for Headhunter UI observability.
 
-    Lightweight read-only endpoint for UI observability. No events created.
-    Returns empty list if Headhunter is disabled or GitLab is unavailable.
+    Lightweight read-only endpoint. No events created.
+    GitLab and GitHub blocks are isolated so failures or disabled flags on one platform
+    never hide items from the other.
     """
     import os
     import httpx
 
-    gitlab_host = os.getenv("GITLAB_HOST", "")
-    if not gitlab_host or os.getenv("HEADHUNTER_ENABLED", "false").lower() != "true":
-        return []
+    result: list[dict] = []
+    gitlab_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
+    # GitHub block shows whenever GitHub Headhunter is enabled OR general Headhunter is enabled
+    # (preserving back-compat with deployments that set HEADHUNTER_ENABLED=true without explicit GitHub flag).
+    show_github_block = gitlab_enabled or os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
+    gitlab_host = normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
 
-    from ..agents.headhunter import V1_ACTIONABLE, ACTION_PRIORITY
-    try:
-        from ..utils.gitlab_token import get_gitlab_auth
-        auth = get_gitlab_auth()
-        if not auth:
-            return []
-        token = auth.get_token()
-    except Exception:
-        return []
+    # Isolated GitLab pending todos block (all failures skip GitLab without hiding GitHub)
+    if gitlab_enabled and gitlab_host:
+        from ..agents.headhunter import V1_ACTIONABLE, ACTION_PRIORITY
+        token: str | None = None
+        try:
+            from ..utils.gitlab_token import get_gitlab_auth
+            auth = get_gitlab_auth()
+            if not auth:
+                logger.warning("GitLab pending todos skipped: GitLab auth not configured")
+            else:
+                token = auth.get_token()
+        except Exception as e:
+            logger.warning("GitLab pending todos skipped (token error: %s)", type(e).__name__)
 
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=15) as client:
-            resp = await client.get(
-                f"https://{gitlab_host}/api/v4/todos",
-                headers={"PRIVATE-TOKEN": token},
-                params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
-            )
-            if not resp.is_success:
-                return []
-            todos = resp.json()
-    except Exception:
-        return []
+        if token:
+            todos: list[dict] = []
+            try:
+                ca_bundle = resolve_ca_bundle(gitlab_host)
+                async with httpx.AsyncClient(verify=ca_bundle, timeout=15) as client:
+                    resp = await client.get(
+                        f"https://{gitlab_host}/api/v4/todos",
+                        headers={"PRIVATE-TOKEN": token},
+                        params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
+                    )
+                    if not resp.is_success:
+                        logger.warning(f"GitLab pending todos skipped: HTTP {resp.status_code}")
+                    else:
+                        parsed_todos = resp.json()
+                        if isinstance(parsed_todos, list):
+                            todos = parsed_todos
+                        else:
+                            logger.warning(
+                                "GitLab pending todos skipped: unexpected payload type %s",
+                                type(parsed_todos).__name__,
+                            )
+            except ValueError as e:
+                logger.error("GitLab pending todos blocked by TLS policy: %s", e)
+            except Exception as e:
+                logger.warning("GitLab pending todos skipped (request error: %s)", type(e).__name__)
 
-    result = []
-    for todo in todos:
-        action = todo.get("action_name", "")
-        if action not in V1_ACTIONABLE:
-            continue
-        target = todo.get("target", {})
-        mr_state = target.get("state")
-        if mr_state in ("merged", "closed"):
-            continue
-        project = todo.get("project", {})
-        result.append({
-            "todo_id": todo.get("id"),
-            "action": action,
-            "priority": ACTION_PRIORITY.get(action, 99),
-            "mr_iid": target.get("iid"),
-            "mr_title": target.get("title", ""),
-            "project_path": project.get("path_with_namespace", ""),
-            "author": target.get("author", {}).get("username", ""),
-            "pipeline_status": target.get("pipeline", {}).get("status", "unknown") if target.get("pipeline") else "unknown",
-            "created_at": todo.get("created_at", ""),
-            "target_url": todo.get("target_url", ""),
-        })
-    # Attach platform discriminator to GitLab items
-    for item in result:
-        item["platform"] = "gitlab"
-        item.setdefault("queue_position", None)
+            for todo in todos:
+                if not isinstance(todo, dict):
+                    continue
+                try:
+                    action = todo.get("action_name") or ""
+                    if action not in V1_ACTIONABLE:
+                        continue
+                    target = todo.get("target") or {}
+                    if not isinstance(target, dict):
+                        target = {}
+                    mr_state = target.get("state")
+                    if mr_state in ("merged", "closed"):
+                        continue
+                    project = todo.get("project") or {}
+                    if not isinstance(project, dict):
+                        project = {}
+                    author_obj = target.get("author") or {}
+                    pipeline_obj = target.get("pipeline") or {}
+                    result.append({
+                        "platform": "gitlab",
+                        "queue_position": None,
+                        "todo_id": todo.get("id"),
+                        "action": action,
+                        "priority": ACTION_PRIORITY.get(action, 99),
+                        "mr_iid": target.get("iid"),
+                        "mr_title": target.get("title") or "",
+                        "project_path": project.get("path_with_namespace") or "",
+                        "author": author_obj.get("username", "") if isinstance(author_obj, dict) else "",
+                        "pipeline_status": pipeline_obj.get("status", "unknown") if isinstance(pipeline_obj, dict) and pipeline_obj else "unknown",
+                        "created_at": todo.get("created_at") or "",
+                        "target_url": todo.get("target_url") or "",
+                    })
+                except Exception as e:
+                    logger.warning("Skipping malformed GitLab todo item (%s)", type(e).__name__)
+
+    if not show_github_block:
+        result.sort(key=lambda t: t.get("created_at") or "")
+        return result
 
     # Append GitHub queued PRs from agent cached state (single event loop, no lock needed)
     try:
@@ -1452,14 +1488,14 @@ async def headhunter_pending_todos():
             if gh_ctx:
                 result.append(_github_active_item(
                     gh_ctx, number_key="pr_number", title_key="pr_title", url_key="pr_url",
-                    action=action, fallback_created_at=event.event.timeDate,
+                    action=action, fallback_created_at=event.event.timeDate, is_issue=False,
                 ))
             elif gh_issue_ctx:
                 result.append(_github_active_item(
                     gh_issue_ctx, number_key="issue_number", title_key="title", url_key="html_url",
-                    action=action, fallback_created_at=event.event.timeDate,
+                    action=action, fallback_created_at=event.event.timeDate, is_issue=True,
                 ))
 
     # Sort after GitHub items are appended so FIFO ordering spans both platforms
-    result.sort(key=lambda t: t.get("created_at", ""))
+    result.sort(key=lambda t: t.get("created_at") or "")
     return result

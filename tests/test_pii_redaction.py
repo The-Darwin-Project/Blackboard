@@ -281,3 +281,24 @@ class TestRedactionIsNotQuadratic:
     def test_bounded_quantifiers_still_redact_realistic_values(self):
         assert redact_pii("mail alice.smith+tag@mail.example.co.uk now") == "mail [redacted-email] now"
         assert "[REDACTED]" in redact_pii("https://user:s3cretpass@host.example.com/path")
+
+    @pytest.mark.parametrize("repeats", [4_000, 15_000], ids=["108KB-pem-begin", "405KB-pem-begin"])
+    def test_repeated_unclosed_pem_begin_is_linear_and_fast(self, repeats):
+        """H1: Repeated unclosed BEGIN PRIVATE KEY markers must be strictly O(n) (<0.2s),
+        never quadratic, through both redact_pii() and sanitize_untrusted_block()."""
+        import time
+        from src.utils.prompt_sanitize import sanitize_untrusted_block
+
+        payload = "-----BEGIN PRIVATE KEY-----" * repeats
+
+        t0 = time.perf_counter()
+        out = redact_pii(payload)
+        dt = time.perf_counter() - t0
+        assert dt < 0.2, f"redact_pii took {dt:.4f}s on {len(payload)} chars"
+        assert out == "[REDACTED_PRIVATE_KEY]"
+
+        t1 = time.perf_counter()
+        out_block = sanitize_untrusted_block(payload, max_len=100_000)
+        dt_block = time.perf_counter() - t1
+        assert dt_block < 0.2, f"sanitize_untrusted_block took {dt_block:.4f}s on {len(payload)} chars"
+        assert out_block == "[REDACTED_PRIVATE_KEY]"

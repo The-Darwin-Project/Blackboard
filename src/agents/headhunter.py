@@ -9,13 +9,19 @@
 #    Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
 # 6. [Pattern]: Circuit breaker per-head: 3 consecutive failures -> latch disable that head.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
-# 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
-# 9. [Pattern]: process_event_feedback routes by evidence context (github_context vs gitlab_context).
+# 8. [Gotcha]: For open MRs, mark_as_done is called in feedback (on close), NOT during poll;
+#    terminal (merged/closed) MRs and unauthorized-only @mention todos have no event lifecycle so
+#    best-effort dismissal during poll/fetch is allowed.
+# 9. [Pattern]: process_event_feedback / _dispatch_feedback route by evidence context
+#    (github_issue_context vs github_context vs gitlab_context; jira_context is quietly marked sent).
+#    _process_closed_events isolates per-event exceptions so one failure cannot starve remaining events.
 # 10. [Pattern]: issue_title sanitized (replace </ → < /) in _build_issue_analysis_prompt.
 # 11. [Pattern]: Phase B uses gate_closed flag — no per-item Redis gate re-check after first closure.
 # 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
-# 13. [Pattern]: No input truncation on descriptions — full text flows to gemini-4-argon (1M+ context).
-#     Output controlled by max_output_tokens. _COMMENT_LIMIT (default 2000) for aggregated notes only.
+# 13. [Pattern]: Descriptions flow up to _DESC_SAFETY_CAP (default 100,000 chars) via
+#     sanitize_untrusted_block(..., max_len=_DESC_SAFETY_CAP) so full text + trailing Bot Instructions reach
+#     gemini-4-argon (1M+ context) without 8KB clipping. Output controlled by max_output_tokens.
+#     _COMMENT_LIMIT (default 2000) for aggregated notes only.
 # 14. [Pattern]: analyze_and_plan returns plan_text only (str). Domain classification removed —
 #     events land in disorder, FRIDAY classifies during triage.
 # 15. [Pattern]: Per-item try/except in all GitHub drain loops (Phase A/B PRs, Phase A/B
@@ -38,9 +44,10 @@
 #     any Phase D error is caught + logged in _github_poll_and_process (non-fatal, resets the
 #     pending gauge) and never feeds the GitHub circuit breaker / _github_disabled latch.
 #     Feedback is rendered into the triage prompt as a fenced <review_feedback> block (closing tag stripped, author quote-stripped).
-# 19. [Security]: ALL prompt fences (description, job_log, comments, mention_request, issue_body, review_feedback)
-#     go through _sanitize_xml_fence (defined in headhunter_utils, re-exported here): linear regex, max 8 passes,
-#     then every '<' is dropped if a tag still reassembles. Never use a bare .replace("</x>", "") for a fence.
+# 19. [Security]: Untrusted blocks/scalars in _build_analysis_prompt and _emergency_plan go through
+#     prompt_sanitize.{sanitize_untrusted_block,sanitize_untrusted_line} (bounded linear XML fence strip for
+#     all Brain + Headhunter tags, PII redaction, control stripping, "[!call:" defang). _sanitize_xml_fence
+#     (from headhunter_utils, re-exported here) remains for _render_review_feedback/_build_issue_analysis_prompt.
 # 20. [Pattern]: analyze_and_plan(raise_on_error=True) (Phase D) raises on adapter unavailable, LLM error AND an
 #     empty plan so the feedback is retried next cycle; raise_on_error=False keeps the emergency-plan fallback.
 """
@@ -57,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -70,13 +78,15 @@ from .headhunter_github import GitHubPlatform
 from .headhunter_gitlab import (
     ACTION_PRIORITY,
     GitLabPlatform,
+    MAX_FAILED_LOG_CHARS,
     V1_ACTIONABLE,
 )
 from .headhunter_jira import HeadhunterJira
+from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 
 logger = logging.getLogger(__name__)
 
-from .headhunter_utils import _COMMENT_LIMIT, _safe_int  # noqa: E402
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int  # noqa: E402
 
 from .headhunter_utils import _XML_FENCE_TAG, _sanitize_xml_fence  # noqa: E402,F401
 
@@ -109,10 +119,15 @@ class Headhunter:
         self,
         blackboard: "BlackboardState",
         close_signal: asyncio.Event | None = None,
+        *,
+        gitlab_enabled: bool = True,
     ):
         self.blackboard = blackboard
         self._adapter = None
         self._close_signal = close_signal
+        self._poll_wake_signal = asyncio.Event()
+        self._feedback_task: asyncio.Task | None = None
+        self._feedback_inflight: set[str] = set()
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
         self._wip_counter: Callable[..., Awaitable[int]] | None = None
@@ -129,7 +144,7 @@ class Headhunter:
         self._github_feedback_pending: int = 0
 
         # Platform adapters
-        self._gitlab = GitLabPlatform(blackboard)
+        self._gitlab = GitLabPlatform(blackboard, enabled=gitlab_enabled)
         self._github = GitHubPlatform(blackboard)
         self._jira = HeadhunterJira(blackboard)
 
@@ -200,59 +215,112 @@ class Headhunter:
             return self._emergency_plan(context)
 
     @staticmethod
+    def _format_project(context: dict) -> str:
+        """Resolve canonical project/repo string from GitLab or GitHub context."""
+        return (
+            context.get("project_path")
+            or (
+                f"{context['owner']}/{context['repo']}"
+                if context.get("owner") and context.get("repo")
+                else context.get("repo")
+            )
+            or "unknown"
+        )
+
+    @staticmethod
     def _emergency_plan(context: dict) -> str:
         """Minimal YAML plan when LLM is unavailable."""
-        action = context.get("action_name", "unknown")
-        title = context.get("mr_title", context.get("pr_title", "unknown"))
-        project = context.get("project_path", context.get("repo", "unknown"))
+        action = sanitize_untrusted_line(
+            context.get("action_name") or context.get("action") or "unknown",
+            max_len=200,
+        )
+        title = sanitize_untrusted_line(
+            context.get("mr_title") or context.get("pr_title") or "unknown",
+            max_len=200,
+        )
+        project = sanitize_untrusted_line(Headhunter._format_project(context), max_len=200)
         raw_iid = context.get("mr_iid", context.get("pr_number", "?"))
         iid = f"!{raw_iid}" if context.get("mr_iid") else f"#{raw_iid}"
+        plan_scalar = json.dumps(f"Investigate {action} on {title}")
+        summary_scalar = json.dumps(
+            f"Investigate {action} on {iid} in {project}. LLM triage failed -- review manually."
+        )
         return (
-            f"---\nplan: Investigate {action} on {title}\n"
+            f"---\nplan: {plan_scalar}\n"
             f"service: {project.rsplit('/', 1)[-1]}\n"
             f"repository: {project}\n"
             f"risk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
             f"steps:\n  - id: \"1\"\n    agent: developer\n"
-            f"    summary: \"Investigate {action} on {iid} "
-            f"in {project}. LLM triage failed -- review manually.\"\n---"
+            f"    summary: {summary_scalar}\n---"
         )
 
     def _build_analysis_prompt(self, context: dict) -> str:
         """Build structured prompt with full context for LLM analysis."""
+        merge_val = context.get("merge_status")
+        if not merge_val:
+            mergeable = context.get("mergeable")
+            if mergeable is None or mergeable == "":
+                merge_val = "unknown"
+            elif isinstance(mergeable, bool):
+                merge_val = "true" if mergeable else "false"
+            else:
+                merge_val = str(mergeable)
+        project = sanitize_untrusted_line(self._format_project(context), max_len=200)
+        title = sanitize_untrusted_line(
+            context.get("mr_title") or context.get("pr_title") or "unknown",
+            max_len=200,
+        )
+        src_branch = sanitize_untrusted_line(
+            context.get("source_branch") or context.get("head_branch") or "?",
+            max_len=200,
+        )
+        tgt_branch = sanitize_untrusted_line(
+            context.get("target_branch") or context.get("base_branch") or "?",
+            max_len=200,
+        )
+        author = sanitize_untrusted_line(context.get("author", "unknown"), max_len=120)
         parts = [
-            f"Action: {context.get('action_name') or context.get('action') or 'unknown'}",
-            f"MR: {context.get('mr_title') or context.get('pr_title') or 'unknown'}",
+            f"Action: {sanitize_untrusted_line(context.get('action_name') or context.get('action') or 'unknown', max_len=80)}",
+            f"MR: {title}",
             f"State: {context.get('mr_state') or context.get('pr_state') or 'unknown'} | "
-            f"Merge status: {context.get('merge_status') or context.get('mergeable') or 'unknown'}",
-            f"Branch: {context.get('source_branch') or context.get('head_branch') or '?'} -> "
-            f"{context.get('target_branch') or context.get('base_branch') or '?'}",
-            f"Author: {context.get('author', 'unknown')}",
+            f"Merge status: {merge_val}",
+            f"Branch: {src_branch} -> {tgt_branch}",
+            f"Author: {author}",
             f"Pipeline: {context.get('pipeline_status') or context.get('check_status') or 'unknown'}",
         ]
         if context.get("pipeline_id"):
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
-        parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
-        if context.get("mr_description") or context.get("pr_body"):
-            desc = _sanitize_xml_fence(context.get('mr_description', context.get('pr_body', '')))
+        parts.append(f"Project: {project}")
+        raw_desc = context.get("mr_description") or context.get("pr_body") or ""
+        if raw_desc:
+            desc = sanitize_untrusted_block(raw_desc, max_len=_DESC_SAFETY_CAP)
             parts.append(f"<description>\n{desc}\n</description>")
         if context.get("changed_files"):
-            parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
+            safe_files = [sanitize_untrusted_line(f, max_len=120) for f in context["changed_files"][:10]]
+            parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(safe_files)}")
         if context.get("labels"):
-            parts.append(f"Labels: {', '.join(context['labels'])}")
+            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in context["labels"]]
+            parts.append(f"Labels: {', '.join(safe_labels)}")
         if context.get("failed_job_names"):
-            parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
+            safe_jobs = [sanitize_untrusted_line(j, max_len=120) for j in context["failed_job_names"]]
+            parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(safe_jobs)}")
+        if context.get("failed_checks"):
+            safe_checks = [sanitize_untrusted_line(c, max_len=120) for c in context["failed_checks"]]
+            parts.append(f"Failed checks: {', '.join(safe_checks)}")
         if context.get("failed_job_log"):
-            log = _sanitize_xml_fence(context['failed_job_log'])
+            log = sanitize_untrusted_block(context["failed_job_log"], max_len=MAX_FAILED_LOG_CHARS)
             parts.append(f"<job_log>\n{log}\n</job_log>")
-        if context.get("recent_notes") or context.get("recent_comments"):
-            notes = context.get("recent_notes", context.get("recent_comments", []))
-            joined = _sanitize_xml_fence("\n".join(notes)[:_COMMENT_LIMIT])
+        notes = context.get("recent_notes") or context.get("recent_comments") or []
+        if notes:
+            joined = sanitize_untrusted_block("\n".join(notes), max_len=_COMMENT_LIMIT)
             parts.append(f"<comments>\n{joined}\n</comments>")
         if context.get("mention_comment"):
-            author = context.get('mention_author', 'unknown').replace('"', '')
-            comment = _sanitize_xml_fence(context['mention_comment'])
-            parts.append(f"<mention_request author=\"{author}\">\n{comment}\n</mention_request>")
+            mention_author = sanitize_untrusted_line(
+                context.get("mention_author", "unknown"), max_len=120,
+            ).replace('"', "")
+            comment = sanitize_untrusted_block(context["mention_comment"])
+            parts.append(f"<mention_request author=\"{mention_author}\">\n{comment}\n</mention_request>")
         if context.get("review_feedback"):
             parts.append(self._render_review_feedback(context["review_feedback"]))
 
@@ -395,7 +463,7 @@ class Headhunter:
         logger.info("Headhunter started")
 
         if self._close_signal:
-            asyncio.create_task(self._feedback_loop())
+            self._feedback_task = asyncio.create_task(self._feedback_loop())
             logger.info("Headhunter feedback loop started (Signal + Poll hybrid)")
 
         gitlab_failures = 0
@@ -404,65 +472,72 @@ class Headhunter:
         _gitlab_disabled = False
         _github_disabled = False
 
-        while True:
-            # GitLab head
-            if self._gitlab.enabled() and not _gitlab_disabled:
-                try:
-                    await self._poll_and_process()
-                    gitlab_failures = 0
-                except Exception as e:
-                    gitlab_failures += 1
-                    logger.error(f"Headhunter GitLab poll failed ({gitlab_failures}/{max_failures}): {e}")
-                    if gitlab_failures >= max_failures:
-                        logger.critical("Headhunter GitLab head disabled after 3 consecutive failures")
-                        _gitlab_disabled = True
+        try:
+            while True:
+                # GitLab head
+                if self._gitlab.enabled() and not _gitlab_disabled:
+                    try:
+                        await self._poll_and_process()
+                        gitlab_failures = 0
+                    except Exception as e:
+                        gitlab_failures += 1
+                        logger.error(f"Headhunter GitLab poll failed ({gitlab_failures}/{max_failures}): {e}")
+                        if gitlab_failures >= max_failures:
+                            logger.critical("Headhunter GitLab head disabled after 3 consecutive failures")
+                            _gitlab_disabled = True
 
-            # GitHub head
-            if self._github.enabled() and not _github_disabled:
-                try:
-                    await self._github_poll_and_process()
-                    github_failures = 0
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code in (401, 403):
-                        logger.error(f"Headhunter GitHub auth error ({e.response.status_code}) — not counting toward circuit breaker")
-                    else:
+                # GitHub head
+                if self._github.enabled() and not _github_disabled:
+                    try:
+                        await self._github_poll_and_process()
+                        github_failures = 0
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code in (401, 403):
+                            logger.error(f"Headhunter GitHub auth error ({e.response.status_code}) — not counting toward circuit breaker")
+                        else:
+                            github_failures += 1
+                            logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
+                            if github_failures >= max_failures:
+                                logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
+                                _github_disabled = True
+                    except Exception as e:
                         github_failures += 1
                         logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
                         if github_failures >= max_failures:
                             logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
                             _github_disabled = True
-                except Exception as e:
-                    github_failures += 1
-                    logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
-                    if github_failures >= max_failures:
-                        logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
-                        _github_disabled = True
 
-            # Both heads latched off → exit
-            gitlab_dead = not self._gitlab.enabled() or _gitlab_disabled
-            github_dead = not self._github.enabled() or _github_disabled
-            if gitlab_dead and github_dead:
-                logger.critical("Headhunter: all VCS heads disabled, shutting down")
-                await self._github.close()
-                return
+                # Both heads latched off → exit
+                gitlab_dead = not self._gitlab.enabled() or _gitlab_disabled
+                github_dead = not self._github.enabled() or _github_disabled
+                if gitlab_dead and github_dead:
+                    logger.critical("Headhunter: all VCS heads disabled, shutting down")
+                    await self._github.close()
+                    return
 
-            # Jira head (independent error boundary)
-            if self._jira.enabled():
-                try:
-                    await self._jira.poll_and_process()
-                except Exception as e:
-                    logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
+                # Jira head (independent error boundary)
+                if self._jira.enabled():
+                    try:
+                        await self._jira.poll_and_process()
+                    except Exception as e:
+                        logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
 
-            # Sleep or wait for close signal
-            if self._close_signal:
-                try:
-                    await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
-                    self._close_signal.clear()
-                    logger.debug("Headhunter poll woke early: event closed, slot may be open")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(self._poll_interval)
+                # Sleep or wait for relayed poll-wake signal
+                if self._close_signal:
+                    try:
+                        await asyncio.wait_for(self._poll_wake_signal.wait(), timeout=self._poll_interval)
+                        self._poll_wake_signal.clear()
+                        logger.debug("Headhunter poll woke early: event closed, slot may be open")
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(self._poll_interval)
+        finally:
+            if self._feedback_task is not None:
+                if not self._feedback_task.done():
+                    self._feedback_task.cancel()
+                await asyncio.gather(self._feedback_task, return_exceptions=True)
+                self._feedback_task = None
 
     async def _poll_and_process(self) -> None:
         """Single GitLab poll cycle: check gate, fetch items, analyze, create events."""
@@ -483,6 +558,8 @@ class Headhunter:
                 logger.info("Headhunter flow gate closed mid-cycle -- stopping")
                 break
             context = await self._gitlab.fetch_context(todo)
+            if context is None:
+                continue
             plan_text = await self.analyze_and_plan(context, si)
             await self._gitlab.create_platform_event(todo, plan_text, context)
 
@@ -789,34 +866,56 @@ class Headhunter:
     # =========================================================================
 
     async def _feedback_loop(self) -> None:
-        """Process platform feedback for closed headhunter events."""
+        """Process platform feedback for closed headhunter events and relay wake signal to poll loop."""
         while True:
             try:
                 await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
             except asyncio.TimeoutError:
                 pass
-            self._close_signal.clear()
+            if self._close_signal.is_set():
+                self._close_signal.clear()
+                self._poll_wake_signal.set()
             try:
                 await self._process_closed_events()
             except Exception as e:
                 logger.warning(f"Headhunter feedback loop error (will retry): {e}")
+            if self._close_signal is not None and self._close_signal.is_set():
+                self._close_signal.clear()
+                self._poll_wake_signal.set()
+
+    async def _dispatch_feedback(self, event) -> None:
+        """Serialize and route feedback for a single closed headhunter event by VCS context."""
+        if event.id in self._feedback_inflight:
+            return
+        self._feedback_inflight.add(event.id)
+        try:
+            if await self.blackboard.is_feedback_sent(event.id):
+                return
+            evidence = event.event.evidence if event.event else None
+            if evidence and getattr(evidence, "github_issue_context", None):
+                await self._github.post_issue_feedback(event)
+            elif evidence and getattr(evidence, "github_context", None):
+                await self._github.post_feedback(event)
+            elif evidence and getattr(evidence, "gitlab_context", None):
+                await self._gitlab.post_feedback(event)
+            elif evidence and getattr(evidence, "jira_context", None):
+                logger.debug(f"Headhunter feedback not applicable for Jira mission {event.id}; marking sent")
+                await self.blackboard.mark_feedback_sent(event.id)
+            else:
+                logger.warning(f"Headhunter feedback skipped for {event.id}: unknown/missing VCS context")
+        finally:
+            self._feedback_inflight.discard(event.id)
 
     async def process_event_feedback(self, event_id: str) -> None:
         """Process feedback for a single closed headhunter event (called by Brain)."""
+        if event_id in self._feedback_inflight:
+            return
         if await self.blackboard.is_feedback_sent(event_id):
             return
         event = await self.blackboard.get_event(event_id)
         if not event:
             return
-        evidence = event.event.evidence if event.event else None
-        if evidence and getattr(evidence, "github_issue_context", None):
-            await self._github.post_issue_feedback(event)
-        elif evidence and getattr(evidence, "github_context", None):
-            await self._github.post_feedback(event)
-        elif evidence and getattr(evidence, "gitlab_context", None):
-            await self._gitlab.post_feedback(event)
-        else:
-            await self._gitlab.post_feedback(event)
+        await self._dispatch_feedback(event)
 
     async def _process_closed_events(self) -> None:
         """Scan closed headhunter events and post platform feedback."""
@@ -824,15 +923,12 @@ class Headhunter:
         if not closed_events:
             return
         for event in closed_events:
-            if await self.blackboard.is_feedback_sent(event.id):
-                continue
-            evidence = event.event.evidence if event.event else None
-            if evidence and getattr(evidence, "github_issue_context", None):
-                await self._github.post_issue_feedback(event)
-            elif evidence and getattr(evidence, "github_context", None):
-                await self._github.post_feedback(event)
-            else:
-                await self._gitlab.post_feedback(event)
+            try:
+                await self._dispatch_feedback(event)
+            except Exception as exc:
+                logger.warning(
+                    f"Headhunter feedback dispatch failed for {getattr(event, 'id', '?')}: {exc}"
+                )
 
     # =========================================================================
     # Brain-Facing Delegates (backward-compatible API)

@@ -253,8 +253,9 @@ async def lifespan(app: FastAPI):
             os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
             and bool(os.getenv("GITHUB_APP_ID"))
         )
+        should_start_headhunter = (headhunter_enabled and bool(gitlab_host)) or github_configured
         headhunter_close_signal: asyncio.Event | None = None
-        if headhunter_enabled and (gitlab_host or github_configured):
+        if should_start_headhunter:
             headhunter_close_signal = asyncio.Event()
             brain.set_headhunter_close_signal(headhunter_close_signal)
 
@@ -306,18 +307,22 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Slack channel disabled (SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set)")
         
-        # === HEADHUNTER (GitLab Todo Poller) ===
+        # === HEADHUNTER (VCS Todo/PR Poller) ===
         headhunter_task = None
-        if headhunter_enabled and (gitlab_host or github_configured):
+        if should_start_headhunter:
             from .agents.headhunter import Headhunter
             if headhunter_close_signal is None:
                 raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
-            headhunter = Headhunter(blackboard, close_signal=headhunter_close_signal)
+            headhunter = Headhunter(
+                blackboard,
+                close_signal=headhunter_close_signal,
+                gitlab_enabled=headhunter_enabled,
+            )
             headhunter.set_wip_counter(brain.count_global_wip)
             brain.agents["_headhunter"] = headhunter
             headhunter_task = asyncio.create_task(headhunter.run())
             platforms = []
-            if gitlab_host:
+            if headhunter_enabled and gitlab_host:
                 platforms.append("GitLab")
             if github_configured:
                 platforms.append("GitHub")
@@ -326,7 +331,7 @@ async def lifespan(app: FastAPI):
             if headhunter_enabled and not gitlab_host and not github_configured:
                 logger.warning("HEADHUNTER_ENABLED=true but no VCS platform configured -- Headhunter disabled")
             else:
-                logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false)")
+                logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=false)")
         
         # === KARGO OBSERVER ===
         kargo_observer = None
@@ -529,10 +534,19 @@ async def lifespan(app: FastAPI):
         await app.state.slack.stop()
         logger.info("Slack channel stopped")
     
-    # Stop Headhunter
-    if headhunter_task and not headhunter_task.done():
-        headhunter_task.cancel()
-        logger.info("Headhunter task cancelled")
+    # Stop Headhunter before closing shared GitHub installation manager
+    if headhunter_task:
+        if not headhunter_task.done():
+            headhunter_task.cancel()
+        await asyncio.gather(headhunter_task, return_exceptions=True)
+        logger.info("Headhunter task stopped")
+
+    # Close shared GitHub App installation manager (sole teardown owner)
+    try:
+        from .utils.github_app import close_installation_manager
+        await close_installation_manager()
+    except Exception as e:
+        logger.warning(f"Failed to close shared GitHub installation manager: {e}")
     
     # Stop ArgoCD observer
     if redis and argocd_observer:
