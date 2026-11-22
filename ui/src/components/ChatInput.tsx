@@ -76,13 +76,13 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   // Listen for WS error envelopes (Step 9)
   useWSMessage(useCallback((msg) => {
     if (msg.type !== 'error') return;
-    if (msg.kind === 'sha_drift' || msg.kind === 'sha_unresolvable' || msg.kind === 'closed') return;
     // Guard by event_id if present
     if (msg.event_id && msg.event_id !== eventId) return;
 
     console.warn('[ChatInput] Received error envelope:', msg);
     const errText = typeof msg.message === 'string' ? msg.message : 'Message rejected by server';
     setErrorMessage(errText);
+    if (msg.kind === 'sha_drift' || msg.kind === 'sha_unresolvable' || msg.kind === 'closed') return;
 
     // Non-clobbering draft restore from lastSubmissionRef
     const lastSub = lastSubmissionRef.current;

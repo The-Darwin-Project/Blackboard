@@ -354,15 +354,15 @@ class Headhunter:
         return "issue_number" in context
 
     @staticmethod
-    def _context_title(context: VcsContext | dict[str, Any]) -> str:
+    def _context_title(context: VcsContext | dict[str, Any], default: str = "?") -> str:
         if isinstance(context, VcsContext):
-            return context.title or "?"
+            return context.title or default
         return (
             context.get("mr_title")
             or context.get("pr_title")
             or context.get("issue_title")
             or context.get("title")
-            or "?"
+            or default
         )
 
     async def analyze_and_plan(
@@ -430,28 +430,12 @@ class Headhunter:
     def _emergency_plan(context: VcsContext | dict[str, Any]) -> str:
         """Minimal YAML plan when LLM is unavailable."""
         is_issue = Headhunter._is_issue_context(context)
+        raw_title = Headhunter._context_title(context, "unknown")
+        src = context.raw if isinstance(context, VcsContext) else context
+        raw_action = src.get("action_name") or src.get("action") or ("issue_triage" if is_issue else "unknown")
         if isinstance(context, VcsContext):
-            raw_action = (
-                context.raw.get("action_name")
-                or context.raw.get("action")
-                or ("issue_triage" if is_issue else "unknown")
-            )
-            raw_title = context.title or "unknown"
-            raw_iid: Any = context.item_id
-            iid = f"!{raw_iid}" if context.item_kind == "mr" else f"#{raw_iid}"
+            iid = f"!{context.item_id}" if context.item_kind == "mr" else f"#{context.item_id}"
         else:
-            raw_action = (
-                context.get("action_name")
-                or context.get("action")
-                or ("issue_triage" if is_issue else "unknown")
-            )
-            raw_title = (
-                context.get("mr_title")
-                or context.get("pr_title")
-                or context.get("issue_title")
-                or context.get("title")
-                or "unknown"
-            )
             raw_iid = context.get("mr_iid", context.get("pr_number", context.get("issue_number", "?")))
             iid = f"!{raw_iid}" if context.get("mr_iid") else f"#{raw_iid}"
 
@@ -473,6 +457,10 @@ class Headhunter:
             f"    summary: {summary_scalar}\n---"
         )
 
+    @staticmethod
+    def _line_list(vals: Any, max_len: int = 120) -> str:
+        return ", ".join(sanitize_untrusted_line(v, max_len=max_len) for v in vals)
+
     def _build_analysis_prompt(self, context: VcsContext | dict[str, Any]) -> str:
         """Build structured prompt with full context for LLM analysis (VcsContext or dict)."""
         extras: dict[str, Any] = context.raw if isinstance(context, VcsContext) else context
@@ -488,9 +476,9 @@ class Headhunter:
                 merge_val = str(mergeable)
 
         project = sanitize_untrusted_line(self._format_project(context), max_len=200)
+        raw_title = self._context_title(context, "unknown")
+        raw_action = extras.get("action_name") or extras.get("action") or "unknown"
         if isinstance(context, VcsContext):
-            raw_action = extras.get("action_name") or extras.get("action") or "unknown"
-            raw_title = context.title or "unknown"
             raw_state = context.state or "unknown"
             raw_src = context.source_branch or "?"
             raw_tgt = context.target_branch or "?"
@@ -498,8 +486,6 @@ class Headhunter:
             raw_ci = context.ci_status or "unknown"
             raw_desc = context.description or ""
         else:
-            raw_action = context.get("action_name") or context.get("action") or "unknown"
-            raw_title = context.get("mr_title") or context.get("pr_title") or context.get("title") or "unknown"
             raw_state = context.get("mr_state") or context.get("pr_state") or context.get("state") or "unknown"
             raw_src = context.get("source_branch") or context.get("head_branch") or "?"
             raw_tgt = context.get("target_branch") or context.get("base_branch") or "?"
@@ -507,18 +493,14 @@ class Headhunter:
             raw_ci = context.get("pipeline_status") or context.get("check_status") or context.get("ci_status") or "unknown"
             raw_desc = context.get("mr_description") or context.get("pr_body") or context.get("description") or ""
 
-        title = sanitize_untrusted_line(raw_title, max_len=200)
-        src_branch = sanitize_untrusted_line(raw_src, max_len=200)
-        tgt_branch = sanitize_untrusted_line(raw_tgt, max_len=200)
-        author = sanitize_untrusted_line(raw_author, max_len=120)
         parts = [
             f"Action: {sanitize_untrusted_line(raw_action, max_len=80)}",
-            f"MR: {title}",
+            f"MR: {sanitize_untrusted_line(raw_title, max_len=200)}",
             f"State: {sanitize_untrusted_line(raw_state, max_len=60)} | "
             f"Merge status: {sanitize_untrusted_line(merge_val, max_len=60)}"
             + (" | Draft: true" if extras.get("draft") else ""),
-            f"Branch: {src_branch} -> {tgt_branch}",
-            f"Author: {author}",
+            f"Branch: {sanitize_untrusted_line(raw_src, max_len=200)} -> {sanitize_untrusted_line(raw_tgt, max_len=200)}",
+            f"Author: {sanitize_untrusted_line(raw_author, max_len=120)}",
             f"Pipeline: {sanitize_untrusted_line(raw_ci, max_len=60)}",
         ]
         pipeline_id = extras.get("pipeline_id")
@@ -530,23 +512,19 @@ class Headhunter:
             parts.append(f"<description>\n{desc}\n</description>")
         changed_files = extras.get("changed_files")
         if changed_files:
-            safe_files = [sanitize_untrusted_line(f, max_len=120) for f in changed_files[:10]]
-            parts.append(f"Changed files ({len(changed_files)}): {', '.join(safe_files)}")
+            parts.append(f"Changed files ({len(changed_files)}): {self._line_list(changed_files[:10])}")
         labels = extras.get("labels")
         if labels:
-            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in labels]
-            parts.append(f"Labels: {', '.join(safe_labels)}")
+            parts.append(f"Labels: {self._line_list(labels)}")
         failed_job_names = extras.get("failed_job_names")
         if failed_job_names:
-            safe_jobs = [sanitize_untrusted_line(j, max_len=120) for j in failed_job_names]
             parts.append(
                 f"Failed jobs ({extras.get('failed_job_count', '?')}/{extras.get('total_job_count', '?')} total): "
-                f"{', '.join(safe_jobs)}"
+                f"{self._line_list(failed_job_names)}"
             )
         failed_checks = extras.get("failed_checks")
         if failed_checks:
-            safe_checks = [sanitize_untrusted_line(c, max_len=120) for c in failed_checks]
-            parts.append(f"Failed checks: {', '.join(safe_checks)}")
+            parts.append(f"Failed checks: {self._line_list(failed_checks)}")
         failed_job_log = extras.get("failed_job_log")
         if failed_job_log:
             log = sanitize_untrusted_block(failed_job_log, max_len=MAX_FAILED_LOG_CHARS)
@@ -557,10 +535,7 @@ class Headhunter:
             parts.append(f"<comments>\n{joined}\n</comments>")
         mention_comment = extras.get("mention_comment")
         if mention_comment:
-            raw_mention_author = str(extras.get("mention_author") or "unknown")
-            for ch in ('"', "<", ">", "]"):
-                raw_mention_author = raw_mention_author.replace(ch, "")
-            mention_author = sanitize_untrusted_line(raw_mention_author, max_len=120)
+            mention_author = self._attr(extras.get("mention_author") or "unknown", max_len=120)
             comment = sanitize_untrusted_block(mention_comment)
             parts.append(f"<mention_request author=\"{mention_author}\">\n{comment}\n</mention_request>")
         review_feedback = extras.get("review_feedback")
@@ -572,13 +547,13 @@ class Headhunter:
             for entry in pr_review_comments[:20]:
                 if not isinstance(entry, dict):
                     continue
-                kind = sanitize_untrusted_line(entry.get("kind") or "review", max_len=32)
-                e_author = sanitize_untrusted_line(entry.get("author") or "?", max_len=80)
+                kind = self._attr(entry.get("kind") or "review", max_len=32)
+                e_author = self._attr(entry.get("author") or "?", max_len=80)
                 meta_bits = [f"{kind} by {e_author}"]
                 if entry.get("state"):
-                    meta_bits.append(f"state={sanitize_untrusted_line(entry['state'], max_len=40)}")
+                    meta_bits.append(f"state={self._attr(entry['state'], max_len=40)}")
                 if entry.get("path"):
-                    meta_bits.append(f"path={sanitize_untrusted_line(entry['path'], max_len=160)}")
+                    meta_bits.append(f"path={self._attr(entry['path'], max_len=160)}")
                 rc_lines.append("[" + " ".join(meta_bits) + "]")
                 if entry.get("diff_hunk"):
                     rc_lines.append(sanitize_untrusted_block(entry["diff_hunk"], max_len=600))
@@ -592,33 +567,30 @@ class Headhunter:
         return "\n".join(parts)
 
     @staticmethod
+    def _attr(value: object, max_len: int = 200) -> str:
+        raw = "" if value is None else str(value)
+        for ch in ('"', "<", ">", "]"):
+            raw = raw.replace(ch, "")
+        return sanitize_untrusted_line(raw, max_len=max_len)
+
+    @staticmethod
     def _render_review_feedback(items: list[dict]) -> str:
-        """Render GitHub review feedback as a single fenced block (untrusted reviewer text).
-
-        Every free-text field is sanitized through prompt_sanitize so it cannot close the fence,
-        smuggle control chars/PII, or inject '[!call:'; attribute metacharacters (", <, >, ])
-        are stripped BEFORE sanitize_untrusted_line so post-strip cannot reassemble '[!call:'.
-        """
-        def _attr(value: object) -> str:
-            raw = "" if value is None else str(value)
-            for ch in ('"', "<", ">", "]"):
-                raw = raw.replace(ch, "")
-            return sanitize_untrusted_line(raw, max_len=200)
-
+        """Render GitHub review feedback as a single fenced block."""
+        attr = Headhunter._attr
         lines: list[str] = []
         for it in items:
             head = (
-                f'[{_attr(it.get("kind"))} id={_attr(it.get("id"))} author="{_attr(it.get("author"))}" '
-                f'assoc={_attr(it.get("author_association"))} state={_attr(it.get("state"))}'
+                f'[{attr(it.get("kind"))} id={attr(it.get("id"))} author="{attr(it.get("author"))}" '
+                f'assoc={attr(it.get("author_association"))} state={attr(it.get("state"))}'
             )
             if it.get("review_id"):
-                head += f' review_id={_attr(it["review_id"])}'
+                head += f' review_id={attr(it["review_id"])}'
             if it.get("in_reply_to_id"):
-                head += f' in_reply_to={_attr(it["in_reply_to_id"])}'
+                head += f' in_reply_to={attr(it["in_reply_to_id"])}'
             if it.get("path"):
-                head += f' path="{_attr(it["path"])}" line={_attr(it.get("line"))}'
+                head += f' path="{attr(it["path"])}" line={attr(it.get("line"))}'
             if it.get("html_url"):
-                head += f' url={_attr(it["html_url"])}'
+                head += f' url={attr(it["html_url"])}'
             lines.append(head + "]")
             if it.get("diff_hunk"):
                 lines.append(
@@ -656,12 +628,10 @@ class Headhunter:
         ]
         labels = extras.get("labels")
         if labels:
-            safe_labels = [sanitize_untrusted_line(lbl, max_len=120) for lbl in labels]
-            parts.append(f"Labels: {', '.join(safe_labels)}")
+            parts.append(f"Labels: {Headhunter._line_list(labels)}")
         assignees = extras.get("assignees")
         if assignees:
-            safe_assignees = [sanitize_untrusted_line(a, max_len=120) for a in assignees]
-            parts.append(f"Assignees: {', '.join(safe_assignees)}")
+            parts.append(f"Assignees: {Headhunter._line_list(assignees)}")
         body = sanitize_untrusted_block(raw_body, max_len=_DESC_SAFETY_CAP)
         if body:
             parts.append(f"<issue_body>\n{body}\n</issue_body>")
@@ -703,30 +673,14 @@ class Headhunter:
         """Back off when system is at global WIP capacity."""
         if self._wip_counter is not None:
             try:
-                wip_used = await self._wip_counter(include_new=True)
+                return await self._wip_counter(include_new=True) < self._wip_cap
             except Exception as e:
-                logger.warning(
-                    "Injected WIP counter failed in check_flow_gate, falling back to local: %s",
-                    e,
-                )
-                try:
-                    wip_used = await self._local_count_wip()
-                except Exception as local_err:
-                    logger.error(
-                        "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
-                        local_err,
-                    )
-                    return False
-        else:
-            try:
-                wip_used = await self._local_count_wip()
-            except Exception as local_err:
-                logger.error(
-                    "Local WIP count failed in check_flow_gate, assuming gate closed: %s",
-                    local_err,
-                )
-                return False
-        return wip_used < self._wip_cap
+                logger.warning("Injected WIP counter failed in check_flow_gate, falling back to local: %s", e)
+        try:
+            return await self._local_count_wip() < self._wip_cap
+        except Exception as local_err:
+            logger.error("Local WIP count failed in check_flow_gate, assuming gate closed: %s", local_err)
+            return False
 
     # =========================================================================
     # Main Loop (Circuit Breaker)
@@ -744,16 +698,29 @@ class Headhunter:
             cur = cur.__cause__ if cur.__cause__ is not None else cur.__context__
         return "?"
 
+    async def _run_gitlab_wakeup(self) -> None:
+        if hasattr(self._gitlab, "poll_active_events_wakeup"):
+            try:
+                await self._gitlab.poll_active_events_wakeup()
+            except Exception as e:
+                logger.warning(f"GitLab active-event wake-up sweep failed (non-fatal): {e}")
+
     async def _run_platform_head(
         self,
         key: str,
         label: str,
         enabled: bool,
         poll_fn: Callable[[], Awaitable[None]],
+        *,
+        on_breaker_open: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Execute one platform poll cycle under its half-open circuit breaker."""
         cb = self._breakers[key]
-        if not enabled or not cb.should_attempt():
+        if not enabled:
+            return
+        if not cb.should_attempt():
+            if on_breaker_open is not None:
+                await on_breaker_open()
             return
         try:
             await poll_fn()
@@ -808,6 +775,7 @@ class Headhunter:
                 # GitLab head (half-open circuit breaker; 401/403 exempt)
                 await self._run_platform_head(
                     "gitlab", "GitLab", self._gitlab.enabled(), self._poll_and_process,
+                    on_breaker_open=self._run_gitlab_wakeup,
                 )
 
                 # GitHub head (half-open circuit breaker; 401/403 exempt)
@@ -1003,27 +971,13 @@ class Headhunter:
 
     async def _poll_and_process(self) -> None:
         """Single GitLab poll cycle (thin delegate over unified _drain_platform_phase_ab)."""
-        # Active-event wake-up sweep runs on every cycle (allowlisted human notes + hex-SHA pushes)
-        if hasattr(self._gitlab, "poll_active_events_wakeup"):
-            try:
-                await self._gitlab.poll_active_events_wakeup()
-            except Exception as e:
-                logger.warning(f"GitLab active-event wake-up sweep failed (non-fatal): {e}")
+        await self._run_gitlab_wakeup()
 
         # Always poll regardless of gate state so items queue in Redis FIFO behind closed gate
         todos = await self._gitlab.poll_work_items()
-        queued_items = [
-            t for t in todos
-            if (isinstance(t, dict) and (t.get("_queued") or t.get("queued")))
-            or getattr(t, "queued", False)
-        ]
-        new_items = [
-            t for t in todos
-            if not (
-                (isinstance(t, dict) and (t.get("_queued") or t.get("queued")))
-                or getattr(t, "queued", False)
-            )
-        ]
+        is_q = lambda t: (isinstance(t, dict) and (t.get("_queued") or t.get("queued"))) or getattr(t, "queued", False)
+        queued_items = [t for t in todos if is_q(t)]
+        new_items = [t for t in todos if not is_q(t)]
         self._gitlab_pending = len(new_items)
 
         def _sync_gitlab_queued(remaining: list[Any]) -> None:
@@ -1163,25 +1117,26 @@ class Headhunter:
         new_items = [i for i in issues if self._github._queued_label not in i.get("labels", [])]
         self._github_issue_pending = len(new_items)
 
+        def _iref(issue: dict) -> str:
+            return f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}"
+
+        async def _try_queue_issue(issue: dict, pos: int) -> str:
+            try:
+                ok = await self._github._queue_issue(issue, pos)
+                if not ok and getattr(ok, "permanent", False):
+                    logger.info(f"GitHub queue issue permanently rejected for {_iref(issue)}")
+                    return "perm"
+                return "ok" if ok else "fail"
+            except Exception as e:
+                logger.warning(f"GitHub queue issue failed for {_iref(issue)}: {e}")
+                return "fail"
+
         if not await self.check_flow_gate():
             logger.debug("Headhunter flow gate closed -- queuing new issues, observing queued state")
             newly_queued: list[dict] = []
             for issue in new_items:
-                position = len(queued_items) + len(newly_queued) + 1
-                try:
-                    queued_ok = await self._github._queue_issue(issue, position)
-                    if not queued_ok and getattr(queued_ok, "permanent", False):
-                        logger.info(
-                            f"GitHub queue issue permanently rejected for "
-                            f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}"
-                        )
-                    elif queued_ok:
-                        newly_queued.append({**issue, "queued": True})
-                except Exception as e:
-                    logger.warning(
-                        f"GitHub queue issue failed for "
-                        f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
-                    )
+                if await _try_queue_issue(issue, len(queued_items) + len(newly_queued) + 1) == "ok":
+                    newly_queued.append({**issue, "queued": True})
             self._github._last_queued_issues = queued_items + newly_queued
             self._github_issue_queued = len(self._github._last_queued_issues)
             self._github_issue_pending = max(0, self._github_issue_pending - len(newly_queued))
@@ -1189,6 +1144,11 @@ class Headhunter:
 
         if issues:
             logger.info(f"Headhunter GitHub Issues: {len(issues)} actionable issue(s)")
+
+        async def _process_issue(issue: dict) -> None:
+            si, warn = await self._github._load_issue_triage_instruction(issue.get("labels", []))
+            plan = await self.analyze_and_plan(issue, si)
+            await self._github.create_issue_event({**issue, "_skill_size_warning": warn} if warn else issue, plan)
 
         # Phase A: Promote oldest queued Issues first (FIFO)
         remaining_queued = list(queued_items)
@@ -1199,32 +1159,13 @@ class Headhunter:
                 break
             attempted_a += 1
             try:
-                # Load label-specific SI then triage via LLM (same path as PR triage).
-                # skill_warning is non-None when skill URL exceeded 10KB cap.
-                si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
-                plan_text = await self.analyze_and_plan(issue, si)
-                event_issue = {**issue, "_skill_size_warning": skill_warning} if skill_warning else issue
-                await self._github.create_issue_event(event_issue, plan_text)
-                # Remove by identity, not position -- a prior item may have failed
-                # and been skipped, so the promoted item is not necessarily index 0.
+                await _process_issue(issue)
                 remaining_queued = [q for q in remaining_queued if q is not issue]
             except Exception as e:
                 failed_a += 1
-                logger.warning(
-                    f"GitHub queued issue processing failed for "
-                    f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
-                )
-                continue
-        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
-        # reflect current queue state even when Phase A hits a systemic failure and
-        # raises past this point. Otherwise the cache stays stale-empty (reset at
-        # cycle top) for the outage window this feature exists to surface.
+                logger.warning(f"GitHub queued issue failed for {_iref(issue)}: {e}")
         self._github._last_queued_issues = remaining_queued
         self._github_issue_queued = len(remaining_queued)
-        # A fully-failed multi-item batch is more likely systemic (auth/outage)
-        # than N coincidental poison pills -- escalate so it's visible, even though
-        # the Phase C caller intentionally swallows it (issue failures must not
-        # trip the shared PR/Issue GitHub circuit breaker -- see issue #230).
         _raise_if_systemic_failure("Issue Phase A (queued promote)", attempted_a, failed_a)
 
         # Phase B: Process new issues (darwin-work label, not yet queued).
@@ -1235,48 +1176,21 @@ class Headhunter:
         for issue in new_items:
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
-                position = len(remaining_queued) + 1
-                try:
-                    queued_ok = await self._github._queue_issue(issue, position)
-                    if not queued_ok and getattr(queued_ok, "permanent", False):
-                        logger.info(
-                            f"GitHub queue issue permanently rejected for "
-                            f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')} "
-                            "(not counting toward systemic failure)"
-                        )
-                    elif not queued_ok:
-                        attempted_b += 1
-                        failed_b += 1
-                    else:
-                        attempted_b += 1
-                        remaining_queued.append({**issue, "queued": True})
-                        newly_queued_in_phase_b += 1
-                except Exception as e:
+                res = await _try_queue_issue(issue, len(remaining_queued) + 1)
+                if res == "ok":
+                    attempted_b += 1
+                    remaining_queued.append({**issue, "queued": True})
+                    newly_queued_in_phase_b += 1
+                elif res == "fail":
                     attempted_b += 1
                     failed_b += 1
-                    logger.warning(
-                        f"GitHub queue issue failed for "
-                        f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
-                    )
                 continue
             attempted_b += 1
             try:
-                si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
-                plan_text = await self.analyze_and_plan(issue, si)
-                if skill_warning:
-                    issue = {**issue, "_skill_size_warning": skill_warning}
-                await self._github.create_issue_event(issue, plan_text)
+                await _process_issue(issue)
             except Exception as e:
                 failed_b += 1
-                logger.warning(
-                    f"GitHub issue processing failed for "
-                    f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}: {e}"
-                )
-                continue
-        # Bookkeeping BEFORE the escalation raise below -- /headhunter/pending must
-        # reflect current queue state even when Phase B hits a systemic failure and
-        # raises past this point. Otherwise the cache stays stale-empty (reset at
-        # cycle top) for the outage window this feature exists to surface.
+                logger.warning(f"GitHub issue failed for {_iref(issue)}: {e}")
         self._github._last_queued_issues = remaining_queued
         self._github_issue_queued = len(remaining_queued)
         _raise_if_systemic_failure("Issue Phase B (new items)", attempted_b, failed_b)

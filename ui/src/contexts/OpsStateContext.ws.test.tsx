@@ -1,16 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ActiveEvent } from '../api/types';
 
 type WSHandler = (msg: Record<string, unknown>) => void;
 let wsHandler: WSHandler | null = null;
+const mockSend = vi.fn();
 
 vi.mock('./WebSocketContext', () => ({
   useWSMessage: (h: WSHandler) => { wsHandler = h; },
   useWSReconnect: () => {},
-  useWSConnection: () => ({ connected: true, reconnecting: false, send: vi.fn() }),
+  useWSConnection: () => ({ connected: true, reconnecting: false, send: mockSend }),
 }));
 vi.mock('../hooks/useKargo', () => ({
   useKargoStages: () => ({ data: [] }),
@@ -137,5 +138,41 @@ describe('OpsControlProvider event_closed selection lifecycle', () => {
     act(() => wsHandler!({ type: 'event_closed', event_id: 'evt-other' }));
     expect(result.current.selectedEventId).toBe('evt-1');
     expect(sessionStorage.getItem(STORAGE_KEY)).toBe('evt-1');
+  });
+});
+
+describe('OpsControlProvider approval error banner', () => {
+  beforeEach(() => { mockSend.mockClear(); });
+  afterEach(() => { cleanup(); });
+
+  const mountProvider = () => {
+    const qc = new QueryClient();
+    return render(
+      createElement(QueryClientProvider, { client: qc },
+        createElement(OpsControlProvider, null, createElement('div', null, 'child')),
+      ),
+    );
+  };
+
+  it('renders sha_drift alert with Confirm New SHA action and clears on confirm', () => {
+    mountProvider();
+    act(() => wsHandler!({
+      type: 'error', kind: 'sha_drift', event_id: 'evt-d', live_sha: 'deadbeef1', message: 'HEAD SHA drifted',
+    }));
+    expect(screen.getByRole('alert').textContent).toContain('HEAD SHA drifted');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm New SHA' }));
+    expect(mockSend).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-d', expected_sha: 'deadbeef1' });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('renders closed alert without Confirm New SHA and dismisses via Dismiss button', () => {
+    mountProvider();
+    act(() => wsHandler!({
+      type: 'error', kind: 'closed', event_id: 'evt-c', message: 'Event is already closed',
+    }));
+    expect(screen.getByRole('alert').textContent).toContain('Event is already closed');
+    expect(screen.queryByRole('button', { name: 'Confirm New SHA' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

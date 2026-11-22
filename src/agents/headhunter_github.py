@@ -77,31 +77,11 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
+from .headhunter_utils import BoolOutcome as _LabelResult, _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 from ..utils.vcs_approval import HEX_SHA_RE
 
 logger = logging.getLogger(__name__)
-
-
-class _LabelResult:
-    """Boolean-compatible result for label mutations distinguishing permanent 403/404 from transient errors."""
-
-    __slots__ = ("ok", "permanent")
-
-    def __init__(self, ok: bool, *, permanent: bool = False):
-        self.ok = ok
-        self.permanent = permanent
-
-    def __bool__(self) -> bool:
-        return self.ok
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, bool):
-            return self.ok == other
-        if isinstance(other, _LabelResult):
-            return self.ok == other.ok and self.permanent == other.permanent
-        return NotImplemented
 
 
 _SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
@@ -954,6 +934,17 @@ class GitHubPlatform:
         ).lower()
         return bool(head_full and base_full and head_full != base_full)
 
+    @staticmethod
+    def _safe_check_url(raw: object) -> str:
+        url = raw.strip() if isinstance(raw, str) else ""
+        if not url or len(url) > 500 or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+            return ""
+        try:
+            p = urllib.parse.urlparse(url)
+        except ValueError:
+            return ""
+        return url if p.scheme.lower() == "https" and p.netloc else ""
+
     async def _fetch_checks_and_legacy_status(
         self, client: Any, owner: str, repo: str, head_sha: str,
     ) -> tuple[str, list[str], str]:
@@ -972,14 +963,17 @@ class GitHubPlatform:
 
         failed_names: list[str] = []
         first_fail_url = ""
+
+        def _add_fail(raw: object) -> None:
+            s = sanitize_untrusted_line(raw, max_len=120) if raw else ""
+            if s and s not in failed_names:
+                failed_names.append(s)
+
         for cr in check_runs:
             if cr.get("conclusion") == "failure":
                 if not first_fail_url and cr.get("html_url"):
-                    first_fail_url = cr["html_url"]
-                raw_name = cr.get("name") or ""
-                safe_name = sanitize_untrusted_line(raw_name, max_len=120) if raw_name else ""
-                if safe_name and safe_name not in failed_names:
-                    failed_names.append(safe_name)
+                    first_fail_url = self._safe_check_url(cr["html_url"])
+                _add_fail(cr.get("name"))
 
         check_status = self._aggregate_check_status(check_runs)
 
@@ -992,12 +986,9 @@ class GitHubPlatform:
                 legacy_state = str(status_data.get("state") or "").lower()
                 for st in statuses:
                     if isinstance(st, dict) and str(st.get("state") or "").lower() in ("failure", "error"):
-                        raw_ctx = st.get("context") or ""
-                        ctx_name = sanitize_untrusted_line(raw_ctx, max_len=120) if raw_ctx else ""
-                        if ctx_name and ctx_name not in failed_names:
-                            failed_names.append(ctx_name)
+                        _add_fail(st.get("context"))
                         if not first_fail_url and st.get("target_url"):
-                            first_fail_url = st["target_url"]
+                            first_fail_url = self._safe_check_url(st["target_url"])
                 # GitHub returns state="pending" with empty statuses=[] when no legacy statuses exist
                 if statuses or legacy_state in ("failure", "error"):
                     if legacy_state in ("failure", "error"):

@@ -268,6 +268,17 @@ class ApprovalDriftResult:
     live_sha: Optional[str] = None
 
 
+def _is_vcs_backed_event(event: Any) -> bool:
+    ev_obj = getattr(getattr(event, "event", None), "evidence", None)
+    if ev_obj is None:
+        return False
+    for attr, keys in (("gitlab_context", ("mr_iid", "mr_id")), ("github_context", ("pr_number",)), ("kargo_context", ("mr_url",))):
+        ctx = getattr(ev_obj, attr, None)
+        if isinstance(ctx, dict) and any(ctx.get(k) for k in keys):
+            return True
+    return False
+
+
 def check_approval_sha_drift(
     event: Any,
     live_sha: Optional[str],
@@ -347,6 +358,13 @@ def check_approval_sha_drift(
                 approval_requested_sha=req_sha,
                 live_sha=clean_live,
             )
+
+    if clean_live is None and _is_vcs_backed_event(event):
+        return ApprovalDriftResult(
+            allowed=False,
+            code="sha_unresolvable",
+            detail="Cannot verify live HEAD SHA for VCS-backed approval.",
+        )
 
     return ApprovalDriftResult(
         allowed=True,

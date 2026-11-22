@@ -308,6 +308,8 @@ export interface TokenUsageDict {
   calls: number;
 }
 
+export type ApprovalErrorKind = 'sha_drift' | 'sha_unresolvable' | 'closed';
+
 export interface EventDocument {
   id: string;
   title?: string | null;
@@ -323,6 +325,7 @@ export interface EventDocument {
   unread_notes?: number;
   token_usage?: TokenUsageDict;
   created_by_email?: string | null;
+  approval_requested_sha?: string | null;
 }
 
 // =============================================================================

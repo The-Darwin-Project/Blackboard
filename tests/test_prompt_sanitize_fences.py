@@ -16,7 +16,8 @@ ALL_FENCES = [
     "<blackboard_evidence_reference>", '<blackboard_evidence_reference turn="9" tool="x" chars="5">',
     "</blackboard_evidence_reference>", "<functionResponse>", "</functionResponse>",
     "<functionCall>", "</functionCall>", "<context>", "</context>", "<description>", "</description>",
-    "</job_log>", "</comments>", "</mention_request>", "</issue_body>", "--- CONVERSATION ---",
+    "</job_log>", "</comments>", "</mention_request>", "</issue_body>",
+    "<pr_review_comments>", "</pr_review_comments>", "--- CONVERSATION ---",
 ]
 
 
@@ -39,6 +40,7 @@ def test_open_tag_is_removed_with_its_attributes_not_left_as_residue():
         "</func</functionResponse>tionResponse>",
         "<con<context>text>",
         "</descr</description>iption>",
+        "</pr_re</pr_review_comments>view_comments>",
         "--- CONV--- CONVERSATION ---ERSATION ---",
         "</blackboard_evidence_ref</blackboard_evidence_reference>erence>",
         "</fu</func</functionResponse>tionResponse>nctionResponse>",
@@ -46,8 +48,8 @@ def test_open_tag_is_removed_with_its_attributes_not_left_as_residue():
 )
 def test_nested_split_tags_cannot_reassemble(payload):
     out = strip_xml_fences(payload)
-    for forbidden in ("</functionResponse>", "<context>", "</description>", "--- CONVERSATION ---",
-                      "</blackboard_evidence_reference>"):
+    for forbidden in ("</functionResponse>", "<context>", "</description>", "</pr_review_comments>",
+                      "--- CONVERSATION ---", "</blackboard_evidence_reference>"):
         assert forbidden not in out
 
 

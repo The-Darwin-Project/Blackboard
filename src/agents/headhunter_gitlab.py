@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 from ..utils import vcs_approval as _vcs_approval
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
-from .headhunter_utils import _DESC_SAFETY_CAP
+from .headhunter_utils import BoolOutcome as _QueueResult, _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -430,21 +430,37 @@ class GitLabPlatform:
         except TypeError:
             return bool(await self.blackboard.enqueue_gitlab_mr(pid, iid, meta))
 
-    async def queue_item(self, work_item: Any, position: int = 1) -> bool:
+    @staticmethod
+    def _is_mention_authorized(work_item: dict) -> bool:
+        if work_item.get("action_name", "") not in ("directly_addressed", "mentioned"):
+            return True
+        author = ((work_item.get("author") or {}).get("username") or "").strip().lower()
+        if not author:
+            return True
+        bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot").lower()
+        allowed = _get_allowed_mention_authors()
+        return author != bot and (not allowed or author in allowed)
+
+    async def queue_item(self, work_item: Any, position: int = 1) -> bool | _QueueResult:
         """Park a GitLab MR work item in Redis FIFO queue and post idempotent position comment."""
         wi = self._unwrap_work_item(work_item)
         pid, iid = self._extract_work_item_key(wi)
         if not pid or not iid:
             return False
 
+        if not self._is_mention_authorized(wi):
+            own_ids = [wi["id"]] if wi.get("id") else []
+            await self._dismiss_todos_best_effort(
+                self._get_client(), self._headers(), own_ids, "unauthorized mention",
+            )
+            return _QueueResult(False, permanent=True)
+
         raw_sibs = wi.get("_sibling_todo_ids")
-        if isinstance(raw_sibs, list):
-            sibs = [s for s in (_valid_positive_int(x) for x in raw_sibs) if s is not None]
-        elif wi.get("id") is not None:
-            sid = _valid_positive_int(wi.get("id"))
-            sibs = [sid] if sid is not None else []
-        else:
-            sibs = []
+        sibs = (
+            [s for s in (_valid_positive_int(x) for x in raw_sibs) if s is not None]
+            if isinstance(raw_sibs, list)
+            else ([sid] if (sid := _valid_positive_int(wi.get("id"))) is not None else [])
+        )
 
         # O(1) lookup for existing queue entry before mutating (avoids O(N) list_gitlab_queue scan)
         existing_entry: dict | None = None
@@ -475,7 +491,7 @@ class GitLabPlatform:
         }
         enqueued = await self._enqueue_gitlab_mr(pid, iid, meta)
         if existing_entry is None and not enqueued:
-            return False
+            return _QueueResult(False, permanent=True)
 
         if not existing_comment_posted:
             enc_pid = self._enc_project_id(pid)
@@ -1277,21 +1293,16 @@ class GitLabPlatform:
         allowed_authors = _get_allowed_mention_authors() if is_mention_action else set()
         own_todo_ids = [work_item["id"]] if work_item.get("id") else []
 
-        if is_mention_action:
+        if not self._is_mention_authorized(work_item):
             todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
-            if todo_author:
-                todo_author_lower = todo_author.lower()
-                if todo_author_lower == darwin_bot_lower or (
-                    allowed_authors and todo_author_lower not in allowed_authors
-                ):
-                    await self._dismiss_todos_best_effort(
-                        self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
-                    )
-                    logger.info(
-                        f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
-                        f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
-                    )
-                    return None
+            await self._dismiss_todos_best_effort(
+                self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
+            )
+            logger.info(
+                f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
+                f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
+            )
+            return None
 
         # Live MR freshness guard: skip stale/mid-flight merged or closed MRs cleanly
         mr_404_empty = False

@@ -75,6 +75,7 @@ from ..auth import (
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
 from ..utils.prompt_sanitize import sanitize_title
+from ..utils import vcs_approval as _vcs_approval
 from ..utils.vcs_approval import (
     check_approval_sha_drift,
     extract_context_head_sha,
@@ -82,6 +83,7 @@ from ..utils.vcs_approval import (
     resolve_ca_bundle,
     resolve_live_head_sha,
 )
+_ORIG_RESOLVE_LIVE_HEAD_SHA = resolve_live_head_sha
 
 
 class ApproveRequest(BaseModel):
@@ -496,7 +498,8 @@ async def approve_event(
         raise HTTPException(status_code=403, detail="Forbidden: User not authorized to approve this event")
 
     try:
-        mr_id, mr_sha = await resolve_live_head_sha(event)
+        _resolver = resolve_live_head_sha if resolve_live_head_sha is not _ORIG_RESOLVE_LIVE_HEAD_SHA else _vcs_approval.resolve_live_head_sha
+        mr_id, mr_sha = await _resolver(event)
     except Exception as exc:
         logger.warning("approve_event: resolve_live_head_sha failed for %s (%s)", event_id, type(exc).__name__)
         mr_id, mr_sha = None, None

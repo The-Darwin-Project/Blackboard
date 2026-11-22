@@ -81,7 +81,7 @@ export function agentMenuItems(
 }
 
 export function eventMenuItems(
-  evt: { id: string; status: string; source: string; evidence?: unknown },
+  evt: { id: string; status: string; source: string; evidence?: unknown; approval_requested_sha?: string | null },
   selectEvent: (id: string) => void,
   send: (data: Record<string, unknown>) => void,
   connected: boolean,
@@ -123,7 +123,15 @@ export function eventMenuItems(
     ] : []),
     ...(evt.status === 'waiting_approval' ? [{
       id: 'approve', label: 'Approve Plan', icon: <Check size={18} />, color: '#22c55e',
-      onClick: () => { if (connected) send({ type: 'approve', event_id: evt.id }); },
+      onClick: () => {
+        if (connected) {
+          send({
+            type: 'approve',
+            event_id: evt.id,
+            ...(evt.approval_requested_sha ? { expected_sha: evt.approval_requested_sha } : {}),
+          });
+        }
+      },
     }] : []),
     { id: 'stop', label: 'Force Close', icon: <Square size={18} />, danger: true,
       onClick: () => { if (window.confirm(`Force close ${evt.id}?`)) send({ type: 'emergency_stop' }); },
