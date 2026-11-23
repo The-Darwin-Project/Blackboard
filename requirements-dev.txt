@@ -10,6 +10,8 @@
 pytest>=8.0.0
 pytest-asyncio>=0.25.0
 fakeredis>=2.26.0
+# fakeredis 2.40.0 crashes on redis 8.2.0 (_get_args_to_warn __closure__ AttributeError).
+redis<8.2.0
 
 # Knowledge-graph CI tests (tests/test_graphify_ci_integration.py) need the graphify runtime.
 # NOTE: "graphifyy" (double-y) is the official PyPI package for Graphify-Labs/graphify (CLI: graphify) -- not a typo.
