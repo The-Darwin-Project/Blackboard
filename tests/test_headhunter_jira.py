@@ -1014,3 +1014,41 @@ class TestBrainPlanToolChoiceAndAnalysisReuse:
         assert state["last_comment_id"] == "c3"
         assert state["analysis"] == "Updated plan"
 
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_strips_yaml_document_delimiters(self, jira_head):
+        """Fallback YAML wrapped in '---' document markers must parse cleanly without ComposerError."""
+        from src.agents.llm.types import LLMChunk
+
+        delimited = "Here is the plan:\n---\nplan: Rebuild v4.12\nsteps:\n  - id: s1\n    agent: sysadmin\n    summary: Audit\n---"
+
+        async def _stream(**kwargs):
+            yield LLMChunk(text=delimited, done=False)
+            yield LLMChunk(done=True)
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            result = await jira_head._run_brain_plan("jira content", "approved plan")
+
+        assert result.startswith("plan: Rebuild v4.12")
+        assert "---" not in result
+
+    @pytest.mark.asyncio
+    async def test_todo_caches_fresh_analysis_before_brain_plan(self, jira_head, stub_blackboard):
+        """Fresh To Do analysis is cached in Redis before _run_brain_plan so retries skip re-analyzing."""
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_resolve_system_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="Fresh analysis") as mock_analyze,
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, side_effect=RuntimeError("transient")),
+        ):
+            await jira_head.poll_and_process()
+
+        mock_analyze.assert_called_once()
+        state = await jira_head._get_issue_state("VMER-2452")
+        assert state["phase"] == "analyzed"
+        assert state["analysis"] == "Fresh analysis"
+
+

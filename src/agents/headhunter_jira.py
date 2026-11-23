@@ -610,6 +610,10 @@ class HeadhunterJira:
             if in_fence:
                 yaml_lines.append(line)
         if yaml_lines:
+            while yaml_lines and yaml_lines[0].strip() in ("---", "..."):
+                yaml_lines.pop(0)
+            while yaml_lines and yaml_lines[-1].strip() in ("---", "..."):
+                yaml_lines.pop()
             return "\n".join(yaml_lines).strip()
         # No fences found -- try to find YAML by looking for '---' delimiters
         start = None
@@ -617,12 +621,17 @@ class HeadhunterJira:
             if line.strip() == "---" and start is None:
                 start = i
                 continue
-            if line.strip() == "---" and start is not None:
-                return "\n".join(lines[start:i + 1]).strip()
+            if line.strip() in ("---", "...") and start is not None:
+                return "\n".join(lines[start + 1:i]).strip()
         # Last resort: return everything after stripping common LLM preambles
         for i, line in enumerate(lines):
-            if line.strip().startswith("plan:") or line.strip() == "---":
+            if line.strip().startswith("plan:"):
                 return "\n".join(lines[i:]).strip()
+            if line.strip() == "---":
+                tail = lines[i + 1:]
+                while tail and tail[-1].strip() in ("---", "..."):
+                    tail.pop()
+                return "\n".join(tail).strip()
         return raw.strip()
 
     async def analyze_and_comment(self, issue: dict) -> tuple[str, str] | None:
@@ -868,6 +877,9 @@ class HeadhunterJira:
                 if not analysis_text:
                     system_prompt = await self._resolve_system_prompt(issue)
                     analysis_text = await self._run_claude_analysis(jira_content, system_prompt)
+                    await self._record_analysis(
+                        key, state.get("last_comment_id", "") if state else "", analysis_text
+                    )
                 plan_yaml = await self._run_brain_plan(jira_content, analysis_text)
                 mission_label = self._resolve_mission_label(issue)
                 event_id = await self.create_jira_event(issue, plan_yaml, mission_label=mission_label)
