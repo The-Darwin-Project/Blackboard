@@ -1,11 +1,21 @@
 // BlackBoard/ui/src/components/ops/__tests__/EventSidebar.test.tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, within, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import EventSidebar from '../EventSidebar';
 import { useOpsControl } from '../../../contexts/OpsStateContext';
-import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending, useJenkinsPending } from '../../../hooks/useQueue';
+import {
+  useActiveEvents,
+  useWaitingApprovalEvents,
+  useHeadhunterPending,
+  useHeadhunterStatus,
+  useTriggerHeadhunterPoll,
+  useResetHeadhunterBreaker,
+  useHeadhunterItemAction,
+  useAlignerPending,
+  useJenkinsPending,
+} from '../../../hooks/useQueue';
 import { useSchedules } from '../../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../../hooks/useJira';
 import { getClosedEvents } from '../../../api/client';
@@ -19,6 +29,10 @@ vi.mock('../../../hooks/useQueue', () => ({
   useActiveEvents: vi.fn(),
   useWaitingApprovalEvents: vi.fn(),
   useHeadhunterPending: vi.fn(),
+  useHeadhunterStatus: vi.fn(),
+  useTriggerHeadhunterPoll: vi.fn(),
+  useResetHeadhunterBreaker: vi.fn(),
+  useHeadhunterItemAction: vi.fn(),
   useAlignerPending: vi.fn(),
   useJenkinsPending: vi.fn(),
 }));
@@ -87,6 +101,7 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     selectEventMock = vi.fn();
     setHotspotMock = vi.fn();
     vi.mocked(getClosedEvents).mockResolvedValue([]);
@@ -112,11 +127,20 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
 
     vi.mocked(useWaitingApprovalEvents).mockReturnValue({ data: [] } as never);
     vi.mocked(useHeadhunterPending).mockReturnValue({ data: [] } as never);
+    vi.mocked(useHeadhunterStatus).mockReturnValue({ data: undefined } as never);
+    vi.mocked(useTriggerHeadhunterPoll).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
+    vi.mocked(useResetHeadhunterBreaker).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
+    vi.mocked(useHeadhunterItemAction).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
     vi.mocked(useAlignerPending).mockReturnValue({ data: [] } as never);
     vi.mocked(useJenkinsPending).mockReturnValue({ data: [] } as never);
     vi.mocked(useSchedules).mockReturnValue({ data: [] } as never);
     vi.mocked(useJiraMissions).mockReturnValue({ data: [] } as never);
     vi.mocked(useJiraActions).mockReturnValue({} as never);
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    cleanup();
   });
 
   const setupOpsControl = (
@@ -508,6 +532,267 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
       expect(handle).not.toBeNull();
       expect(handle!.classList.contains('w-1.5')).toBe(true);
       expect(handle!.classList.contains('right-0')).toBe(true);
+    });
+  });
+
+  describe('Headhunter Queue VCS parity (T-16)', () => {
+    const glTodo = {
+      todo_id: 101,
+      platform: 'gitlab' as const,
+      action: 'queued',
+      priority: 1,
+      mr_iid: 12,
+      mr_title: 'Fix TLS',
+      project_path: 'group/repo',
+      author: 'alice',
+      pipeline_status: 'success',
+      check_status: 'passed',
+      queue_position: 1,
+      created_at: '2026-11-22T10:00:00Z',
+      target_url: 'https://gitlab.com/group/repo/-/merge_requests/12',
+    };
+
+    const ghTodo = {
+      platform: 'github' as const,
+      action: 'queued',
+      priority: 1,
+      pr_number: 45,
+      pr_title: 'Add webhook',
+      project_path: 'org/app',
+      author: 'bob',
+      pipeline_status: 'failed',
+      check_status: 'failed',
+      queue_position: 2,
+      created_at: '2026-11-22T10:01:00Z',
+      target_url: 'https://github.com/org/app/pull/45',
+    };
+
+    it('renders distinct GitLab and GitHub SourceIcons on Headhunter items', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo, ghTodo] } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      expect(within(section).getByTitle('gitlab')).toBeInTheDocument();
+      expect(within(section).getByTitle('github')).toBeInTheDocument();
+    });
+
+    it('renders Q{queue_position} badge and check/pipeline status dots for passed, failed, running, and pending', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({
+        data: [
+          { ...glTodo, todo_id: 1, mr_iid: 1, queue_position: 1, check_status: 'passed', pipeline_status: 'success' },
+          { ...ghTodo, pr_number: 2, queue_position: 2, check_status: 'failed', pipeline_status: 'failed' },
+          { ...ghTodo, pr_number: 3, queue_position: 3, check_status: 'running', pipeline_status: 'running' },
+          { ...glTodo, todo_id: 4, mr_iid: 4, queue_position: 4, check_status: 'pending', pipeline_status: 'pending' },
+        ],
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      expect(within(section).getByText('Q1')).toBeInTheDocument();
+      expect(within(section).getByText('Q2')).toBeInTheDocument();
+      expect(within(section).getByText('Q3')).toBeInTheDocument();
+      expect(within(section).getByText('Q4')).toBeInTheDocument();
+
+      expect(within(section).getByTitle(/passed/i)).toBeInTheDocument();
+      expect(within(section).getByTitle(/failed/i)).toBeInTheDocument();
+      expect(within(section).getByTitle(/running/i)).toBeInTheDocument();
+      expect(within(section).getByTitle(/pending/i)).toBeInTheDocument();
+    });
+
+    it('filters displayed Headhunter items via All | GitLab | GitHub platform filter toggles', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo, ghTodo] } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      const allBtn = within(section).getByRole('button', { name: /^All$/i });
+      const glBtn = within(section).getByRole('button', { name: /^GitLab$/i });
+      const ghBtn = within(section).getByRole('button', { name: /^GitHub$/i });
+
+      expect(within(section).getByText('!12 Fix TLS')).toBeInTheDocument();
+      expect(within(section).getByText('#45 Add webhook')).toBeInTheDocument();
+
+      fireEvent.click(glBtn);
+      expect(within(section).getByText('!12 Fix TLS')).toBeInTheDocument();
+      expect(within(section).queryByText('#45 Add webhook')).toBeNull();
+
+      fireEvent.click(ghBtn);
+      expect(within(section).queryByText('!12 Fix TLS')).toBeNull();
+      expect(within(section).getByText('#45 Add webhook')).toBeInTheDocument();
+
+      fireEvent.click(allBtn);
+      expect(within(section).getByText('!12 Fix TLS')).toBeInTheDocument();
+      expect(within(section).getByText('#45 Add webhook')).toBeInTheDocument();
+    });
+
+    it('renders breaker banner when GitLab breaker is open with Reset calling resetBreaker("gitlab") and Poll Now calling triggerPoll()', () => {
+      const resetMutate = vi.fn();
+      const pollMutate = vi.fn();
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo] } as never);
+      vi.mocked(useResetHeadhunterBreaker).mockReturnValue({ mutate: resetMutate, isPending: false } as never);
+      vi.mocked(useTriggerHeadhunterPoll).mockReturnValue({ mutate: pollMutate, isPending: false } as never);
+      vi.mocked(useHeadhunterStatus).mockReturnValue({
+        data: {
+          platforms: {
+            gitlab: {
+              enabled: true,
+              pending_count: 1,
+              queued_count: 1,
+              last_poll_at: 1700000000,
+              partial_error: null,
+              breaker: { state: 'open', consecutive_failures: 3, next_retry_at: 1700000300, last_error: 'GitLab 502' },
+            },
+            github: {
+              enabled: true,
+              pending_count: 0,
+              queued_count: 0,
+              last_poll_at: 1700000000,
+              partial_error: null,
+              breaker: { state: 'closed', consecutive_failures: 0, next_retry_at: null, last_error: null },
+            },
+          },
+        },
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      expect(within(section).getByText(/open/i)).toBeInTheDocument();
+
+      fireEvent.click(within(section).getByRole('button', { name: /Reset/i }));
+      expect(resetMutate).toHaveBeenCalledWith('gitlab');
+
+      fireEvent.click(within(section).getByRole('button', { name: /Poll Now/i }));
+      expect(pollMutate).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders breaker banner when GitHub breaker is half_open and Reset calls resetBreaker("github")', () => {
+      const resetMutate = vi.fn();
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [ghTodo] } as never);
+      vi.mocked(useResetHeadhunterBreaker).mockReturnValue({ mutate: resetMutate, isPending: false } as never);
+      vi.mocked(useHeadhunterStatus).mockReturnValue({
+        data: {
+          platforms: {
+            gitlab: {
+              enabled: true,
+              pending_count: 0,
+              queued_count: 0,
+              last_poll_at: 1700000000,
+              partial_error: null,
+              breaker: { state: 'closed', consecutive_failures: 0, next_retry_at: null, last_error: null },
+            },
+            github: {
+              enabled: true,
+              pending_count: 1,
+              queued_count: 1,
+              last_poll_at: 1700000000,
+              partial_error: null,
+              breaker: { state: 'half_open', consecutive_failures: 3, next_retry_at: null, last_error: 'GitHub 503' },
+            },
+          },
+        },
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      expect(within(section).getByText(/half[_ ]open/i)).toBeInTheDocument();
+
+      fireEvent.click(within(section).getByRole('button', { name: /Reset/i }));
+      expect(resetMutate).toHaveBeenCalledWith('github');
+    });
+
+    it('renders "No matching todos" when platform filter yields 0 items', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo] } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      fireEvent.click(within(section).getByRole('button', { name: /^GitHub$/i }));
+      expect(within(section).getByText('No matching todos')).toBeInTheDocument();
+      expect(within(section).queryByText('No pending todos')).toBeNull();
+    });
+
+    it('renders failed mutation error alert banner and dismisses it cleanly', () => {
+      const resetFn = vi.fn();
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo] } as never);
+      vi.mocked(useResetHeadhunterBreaker).mockReturnValue({
+        mutate: vi.fn(),
+        isPending: false,
+        error: new Error('Breaker reset failed'),
+        reset: resetFn,
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      const alert = within(section).getByRole('alert');
+      expect(alert.textContent).toContain('Breaker reset failed');
+
+      fireEvent.click(within(section).getByRole('button', { name: 'Dismiss error' }));
+      expect(within(section).queryByRole('alert')).toBeNull();
+      expect(resetFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders debounced notice when mutation returns debounced: true', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo] } as never);
+      vi.mocked(useTriggerHeadhunterPoll).mockReturnValue({
+        mutate: vi.fn(),
+        isPending: false,
+        data: { triggered: false, debounced: true },
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      const status = within(section).getByRole('status');
+      expect(status.textContent).toContain('Poll request debounced');
+    });
+
+    it('disables Promote/Requeue/Dismiss menu actions while hhItemAction.isPending is true', () => {
+      const itemMutate = vi.fn();
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo] } as never);
+      vi.mocked(useHeadhunterItemAction).mockReturnValue({
+        mutate: itemMutate,
+        isPending: true,
+      } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      fireEvent.contextMenu(within(section).getByText('!12 Fix TLS'));
+
+      for (const label of ['Promote', 'Requeue', 'Dismiss']) {
+        const item = screen.getByRole('menuitem', { name: label }) as HTMLButtonElement;
+        expect(item.disabled).toBe(true);
+        fireEvent.click(item);
+      }
+      expect(itemMutate).not.toHaveBeenCalled();
+    });
+
+    it('renders red sublabel for failed GitHub check_status', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [ghTodo] } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      const sublabel = within(section).getByText('queued');
+      expect(sublabel.style.color).toBe(hexToRgb('#ef4444'));
+    });
+
+    it('closes open Headhunter context menu when platform filter changes', () => {
+      setupOpsControl([]);
+      vi.mocked(useHeadhunterPending).mockReturnValue({ data: [glTodo, ghTodo] } as never);
+      renderSidebar();
+
+      const { section } = groupSection('Headhunter Queue');
+      fireEvent.contextMenu(within(section).getByText('!12 Fix TLS'));
+      expect(screen.getByRole('menu')).toBeInTheDocument();
+
+      fireEvent.click(within(section).getByRole('button', { name: /^GitHub$/i }));
+      expect(screen.queryByRole('menu')).toBeNull();
     });
   });
 });

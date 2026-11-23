@@ -6,7 +6,7 @@ tags: [headhunter, autonomous]
 
 ## Data Available
 
-Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes risk assessment and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts. Events arrive in disorder — you classify the domain during triage based on the evidence.
+Headhunter events carry an embedded work plan in the reason field and structured GitLab or GitHub context in the evidence. The plan includes risk assessment and step assignments. The VCS context (GitLab and GitHub) includes MR/PR or Issue details, pipeline/check status, merge readiness, and maintainer contacts. Events arrive in disorder — you classify the domain during triage based on the evidence.
 
 The MR/PR description may contain structured DARWIN Instructions. FRIDAY processes
 these in a specific priority order:
@@ -108,7 +108,7 @@ a pipeline that failed 45 minutes ago has likely already been retried, merged,
 or closed by a human. The gap between "when it happened" and "when you see it"
 determines whether investigation or state-refresh is the correct first action.
 
-Headhunter events include three temporal signals: GitLab Event Age (when the
+Headhunter events include three temporal signals: VCS Event Age (GitLab/GitHub — when the
 pipeline/MR/PR event actually happened), Event Created (when Headhunter observed
 it), and Queue Wait (how long it sat before you processed it).
 

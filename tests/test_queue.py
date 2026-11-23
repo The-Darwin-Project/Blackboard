@@ -1,13 +1,12 @@
 # BlackBoard/tests/test_queue.py
 # @ai-rules:
 # 1. [Gotcha]: Patch lifespan like test_health.py so app import does not require live Redis.
-# 2. [Pattern]: ASGITransport + httpx.AsyncClient for in-process GET tests.
-# 3. [Constraint]: Queue headhunter route tests mock GitLab via src.routes.queue.httpx.AsyncClient.
+# 2. [Pattern]: ASGITransport + httpx.AsyncClient for in-process GET/POST tests.
+# 3. [Constraint]: GET /queue/headhunter/pending is pure-Redis (zero outbound httpx calls);
+#    tests patch httpx.AsyncClient to raise AssertionError and provide Redis snapshots via mock_bb.get_headhunter_snapshot.
 # 4. [Pattern]: Queue active/closed tests mock blackboard.get_active_events + get_event to verify response shape.
-# 5. [Pattern]: /headhunter/pending active-GitHub coverage mocks dependencies._blackboard directly
-#    (get_active_events_with_status + get_event) since the route calls get_blackboard() itself
-#    inside a try/except rather than via Depends() -- GitLab side must still be mocked (empty
-#    todos) since the active-event lookup runs after it in the same handler (#233).
+# 5. [Pattern]: /headhunter/pending merges Redis snapshots (get_headhunter_snapshot) with active and
+#    waiting_approval Blackboard headhunter events (get_active_events_with_status + get_waiting_approval_events + get_event).
 # 6. [Pattern]: Per-item get_event() fetch uses asyncio.gather(return_exceptions=True) (#233
 #    review, HIGH fix) -- isolation/None-race/no-context/mixed-source/sort tests set
 #    get_active_events_with_status() to a multi-id dict and use an AsyncMock side_effect
@@ -15,6 +14,7 @@
 """Route-level tests for queue API."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -26,27 +26,117 @@ from httpx import ASGITransport, AsyncClient
 from tests.test_headhunter import _make_todo
 
 
+def _forbid_http_client(*args, **kwargs):
+    raise AssertionError("HTTP call forbidden in pure-Redis /pending")
+
+
+def _make_snapshot(
+    platform: str,
+    *,
+    enabled: bool = True,
+    items: list | None = None,
+    last_poll_at: float | None = 1_700_000_000.0,
+    partial_error: str | None = None,
+    breaker_state: str = "closed",
+    consecutive_failures: int = 0,
+    next_retry_at: float | None = None,
+    last_error: str | None = None,
+):
+    from src.agents.headhunter_models import (
+        PlatformBreakerStatus,
+        PlatformQueueItem,
+        PlatformSnapshot,
+    )
+
+    norm_items: list[PlatformQueueItem] = []
+    for item in items or []:
+        if isinstance(item, PlatformQueueItem):
+            norm_items.append(item)
+        else:
+            norm_items.append(PlatformQueueItem(**item))
+    queued_count = sum(1 for i in norm_items if i.status == "queued")
+    return PlatformSnapshot(
+        platform=platform,
+        enabled=enabled,
+        pending_count=len(norm_items),
+        queued_count=queued_count,
+        last_poll_at=last_poll_at,
+        partial_error=partial_error,
+        breaker=PlatformBreakerStatus(
+            state=breaker_state,
+            consecutive_failures=consecutive_failures,
+            next_retry_at=next_retry_at,
+            last_error=last_error,
+        ),
+        items=norm_items,
+    )
+
+
 @pytest.mark.asyncio
 async def test_headhunter_pending_filters_merged_and_closed_mrs():
-    opened = _make_todo(todo_id=1, mr_iid=1, mr_state="opened", action_name="review_requested")
-    merged = _make_todo(todo_id=2, mr_iid=2, mr_state="merged", action_name="review_requested")
-    closed = _make_todo(todo_id=3, mr_iid=3, mr_state="closed", action_name="review_requested")
-    unknown = _make_todo(todo_id=4, mr_iid=4, action_name="review_requested")
-    del unknown["target"]["state"]
+    """Pure-Redis /pending reads GitLab PlatformSnapshot with zero HTTP calls and excludes merged/closed items."""
+    gl_snap = _make_snapshot(
+        "gitlab",
+        items=[
+            {
+                "platform": "gitlab",
+                "item_kind": "mr",
+                "item_id": 1,
+                "project_ref": "group/repo",
+                "title": "Open MR",
+                "author": "alice",
+                "url": "https://gitlab.example.com/group/repo/-/merge_requests/1",
+                "ci_status": "success",
+                "status": "pending",
+                "enqueued_at": "2026-09-01T00:00:00Z",
+                "raw": {"todo_id": 101, "action": "review_requested"},
+            },
+            {
+                "platform": "gitlab",
+                "item_kind": "mr",
+                "item_id": 2,
+                "project_ref": "group/repo",
+                "title": "Merged MR",
+                "author": "alice",
+                "url": "https://gitlab.example.com/group/repo/-/merge_requests/2",
+                "status": "merged",
+                "enqueued_at": "2026-09-01T00:01:00Z",
+                "raw": {"todo_id": 102, "action": "review_requested", "mr_state": "merged"},
+            },
+            {
+                "platform": "gitlab",
+                "item_kind": "mr",
+                "item_id": 3,
+                "project_ref": "group/repo",
+                "title": "Closed MR",
+                "author": "alice",
+                "url": "https://gitlab.example.com/group/repo/-/merge_requests/3",
+                "status": "closed",
+                "enqueued_at": "2026-09-01T00:02:00Z",
+                "raw": {"todo_id": 103, "action": "review_requested", "mr_state": "closed"},
+            },
+            {
+                "platform": "gitlab",
+                "item_kind": "mr",
+                "item_id": 4,
+                "project_ref": "group/repo",
+                "title": "Queued MR",
+                "author": "bob",
+                "url": "https://gitlab.example.com/group/repo/-/merge_requests/4",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-09-01T00:03:00Z",
+                "raw": {"todo_id": 104, "action": "review_requested"},
+            },
+        ],
+    )
 
-    todos = [opened, merged, closed, unknown]
-
-    mock_resp = MagicMock()
-    mock_resp.is_success = True
-    mock_resp.json.return_value = todos
-
-    mock_client = AsyncMock()
-    mock_client.get = AsyncMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    mock_auth = MagicMock()
-    mock_auth.get_token.return_value = "fake-token"
+    mock_bb = AsyncMock()
+    mock_bb.get_headhunter_snapshot = AsyncMock(
+        side_effect=lambda platform: gl_snap if platform == "gitlab" else None
+    )
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+    mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
 
     with patch("src.main.lifespan") as mock_lifespan:
         mock_lifespan.return_value.__aenter__ = AsyncMock()
@@ -56,19 +146,18 @@ async def test_headhunter_pending_filters_merged_and_closed_mrs():
             {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
             clear=False,
         ):
-            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
-                with patch("httpx.AsyncClient", return_value=mock_client):
-                    from src import dependencies
-                    from src.main import app
+            with patch("httpx.AsyncClient", side_effect=_forbid_http_client):
+                from src import dependencies
+                from src.main import app
 
-                    original_bb = dependencies._blackboard
-                    dependencies._blackboard = MagicMock()
-                    try:
-                        transport = ASGITransport(app=app)
-                        async with AsyncClient(transport=transport, base_url="http://test") as client:
-                            resp = await client.get("/queue/headhunter/pending")
-                    finally:
-                        dependencies._blackboard = original_bb
+                original_bb = dependencies._blackboard
+                dependencies._blackboard = mock_bb
+                try:
+                    transport = ASGITransport(app=app)
+                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                        resp = await client.get("/queue/headhunter/pending")
+                finally:
+                    dependencies._blackboard = original_bb
 
     assert resp.status_code == 200
     data = resp.json()
@@ -285,19 +374,11 @@ def _make_headhunter_event(
 
 
 async def _get_headhunter_pending(mock_bb):
-    """GET /queue/headhunter/pending with GitLab mocked to return no todos and
-    dependencies._blackboard swapped for mock_bb (route calls get_blackboard() itself)."""
-    mock_resp = MagicMock()
-    mock_resp.is_success = True
-    mock_resp.json.return_value = []
-
-    mock_client = AsyncMock()
-    mock_client.get = AsyncMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    mock_auth = MagicMock()
-    mock_auth.get_token.return_value = "fake-token"
+    """GET /queue/headhunter/pending purely from Redis (zero outbound httpx calls)."""
+    if not isinstance(getattr(mock_bb, "get_headhunter_snapshot", None), AsyncMock):
+        mock_bb.get_headhunter_snapshot = AsyncMock(return_value=None)
+    if not isinstance(getattr(mock_bb, "get_waiting_approval_events", None), AsyncMock):
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
 
     with patch("src.main.lifespan") as mock_lifespan:
         mock_lifespan.return_value.__aenter__ = AsyncMock()
@@ -307,19 +388,18 @@ async def _get_headhunter_pending(mock_bb):
             {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
             clear=False,
         ):
-            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
-                with patch("httpx.AsyncClient", return_value=mock_client):
-                    from src import dependencies
-                    from src.main import app
+            with patch("httpx.AsyncClient", side_effect=_forbid_http_client):
+                from src import dependencies
+                from src.main import app
 
-                    original_bb = dependencies._blackboard
-                    dependencies._blackboard = mock_bb
-                    try:
-                        transport = ASGITransport(app=app)
-                        async with AsyncClient(transport=transport, base_url="http://test") as client:
-                            return await client.get("/queue/headhunter/pending")
-                    finally:
-                        dependencies._blackboard = original_bb
+                original_bb = dependencies._blackboard
+                dependencies._blackboard = mock_bb
+                try:
+                    transport = ASGITransport(app=app)
+                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                        return await client.get("/queue/headhunter/pending")
+                finally:
+                    dependencies._blackboard = original_bb
 
 
 @pytest.mark.asyncio
@@ -510,36 +590,42 @@ async def test_headhunter_pending_handles_get_event_none_delete_race():
 
 @pytest.mark.asyncio
 async def test_headhunter_pending_sorts_all_platforms_by_created_at():
-    """Final result.sort() interleaves GitLab todos, GitHub queued-cache PRs, and
-    Blackboard-active GitHub events chronologically by created_at, not grouped by source
-    (#233 review, MEDIUM test-coverage gap #4)."""
-    gitlab_todo = _make_todo(todo_id=1, mr_iid=1, mr_state="opened", action_name="review_requested")
-    gitlab_todo["created_at"] = "2026-01-01T00:00:00Z"
-
-    mock_resp = MagicMock()
-    mock_resp.is_success = True
-    mock_resp.json.return_value = [gitlab_todo]
-
-    mock_client = AsyncMock()
-    mock_client.get = AsyncMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    mock_auth = MagicMock()
-    mock_auth.get_token.return_value = "fake-token"
-
-    queued_pr = {
-        "number": 99,
-        "title": "Queued PR",
-        "owner": "The-Darwin-Project",
-        "repo": "Blackboard",
-        "user": "queued-author",
-        "created_at": "2026-01-03T00:00:00Z",
-        "html_url": "https://github.com/The-Darwin-Project/Blackboard/pull/99",
-    }
-    fake_headhunter_agent = SimpleNamespace(_github=SimpleNamespace(queued_prs=[queued_pr]))
-    mock_brain = MagicMock()
-    mock_brain.agents = {"_headhunter": fake_headhunter_agent}
+    """Pure-Redis /pending interleaves GitLab snapshot items, GitHub snapshot items, and
+    Blackboard-active GitHub events chronologically by created_at (#233)."""
+    gl_snap = _make_snapshot(
+        "gitlab",
+        items=[
+            {
+                "platform": "gitlab",
+                "item_kind": "mr",
+                "item_id": 1,
+                "project_ref": "group/repo",
+                "title": "GitLab MR",
+                "author": "gl-author",
+                "url": "https://gitlab.example.com/group/repo/-/merge_requests/1",
+                "status": "pending",
+                "enqueued_at": "2026-01-01T00:00:00Z",
+                "raw": {"todo_id": 1, "action": "review_requested"},
+            }
+        ],
+    )
+    gh_snap = _make_snapshot(
+        "github",
+        items=[
+            {
+                "platform": "github",
+                "item_kind": "pr",
+                "item_id": 99,
+                "project_ref": "The-Darwin-Project/Blackboard",
+                "title": "Queued PR",
+                "author": "queued-author",
+                "url": "https://github.com/The-Darwin-Project/Blackboard/pull/99",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-01-03T00:00:00Z",
+            }
+        ],
+    )
 
     active_event = _make_headhunter_event(
         "evt-sort0001",
@@ -554,7 +640,11 @@ async def test_headhunter_pending_sorts_all_platforms_by_created_at():
         },
     )
     mock_bb = AsyncMock()
+    mock_bb.get_headhunter_snapshot = AsyncMock(
+        side_effect=lambda platform: {"gitlab": gl_snap, "github": gh_snap}.get(platform)
+    )
     mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-sort0001": "active"})
+    mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
     mock_bb.get_event = AsyncMock(return_value=active_event)
 
     with patch("src.main.lifespan") as mock_lifespan:
@@ -562,25 +652,25 @@ async def test_headhunter_pending_sorts_all_platforms_by_created_at():
         mock_lifespan.return_value.__aexit__ = AsyncMock()
         with patch.dict(
             os.environ,
-            {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
+            {
+                "HEADHUNTER_ENABLED": "true",
+                "HEADHUNTER_GITHUB_ENABLED": "true",
+                "GITLAB_HOST": "gitlab.example.com",
+            },
             clear=False,
         ):
-            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
-                with patch("httpx.AsyncClient", return_value=mock_client):
-                    from src import dependencies
-                    from src.main import app
+            with patch("httpx.AsyncClient", side_effect=_forbid_http_client):
+                from src import dependencies
+                from src.main import app
 
-                    original_bb = dependencies._blackboard
-                    original_brain = dependencies._brain
-                    dependencies._blackboard = mock_bb
-                    dependencies._brain = mock_brain
-                    try:
-                        transport = ASGITransport(app=app)
-                        async with AsyncClient(transport=transport, base_url="http://test") as client:
-                            resp = await client.get("/queue/headhunter/pending")
-                    finally:
-                        dependencies._blackboard = original_bb
-                        dependencies._brain = original_brain
+                original_bb = dependencies._blackboard
+                dependencies._blackboard = mock_bb
+                try:
+                    transport = ASGITransport(app=app)
+                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                        resp = await client.get("/queue/headhunter/pending")
+                finally:
+                    dependencies._blackboard = original_bb
 
     assert resp.status_code == 200
     data = resp.json()
@@ -595,64 +685,60 @@ async def test_headhunter_pending_sorts_all_platforms_by_created_at():
 # =============================================================================
 
 
-async def _get_pending_with_mocked_github(hh_mock):
-    """GET /queue/headhunter/pending with GitLab returning no todos and
-    dependencies._brain.agents['_headhunter'] wired to hh_mock, so only the
-    GitHub queued-PR/queued-Issue append path is exercised."""
-    mock_resp = MagicMock()
-    mock_resp.is_success = True
-    mock_resp.json.return_value = []
-
-    mock_client = AsyncMock()
-    mock_client.get = AsyncMock(return_value=mock_resp)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    mock_auth = MagicMock()
-    mock_auth.get_token.return_value = "fake-token"
-
-    mock_brain = MagicMock()
-    mock_brain.agents = {"_headhunter": hh_mock}
+async def _get_pending_with_github_snapshot(gh_snap):
+    """GET /queue/headhunter/pending with GitHub snapshot fixture and zero HTTP calls."""
+    mock_bb = AsyncMock()
+    mock_bb.get_headhunter_snapshot = AsyncMock(
+        side_effect=lambda platform: gh_snap if platform == "github" else None
+    )
+    mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+    mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
 
     with patch("src.main.lifespan") as mock_lifespan:
         mock_lifespan.return_value.__aenter__ = AsyncMock()
         mock_lifespan.return_value.__aexit__ = AsyncMock()
         with patch.dict(
             os.environ,
-            {"HEADHUNTER_ENABLED": "true", "GITLAB_HOST": "gitlab.example.com"},
+            {"HEADHUNTER_ENABLED": "true", "HEADHUNTER_GITHUB_ENABLED": "true"},
             clear=False,
         ):
-            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
-                with patch("httpx.AsyncClient", return_value=mock_client):
-                    from src import dependencies
-                    from src.main import app
+            with patch("httpx.AsyncClient", side_effect=_forbid_http_client):
+                from src import dependencies
+                from src.main import app
 
-                    original_bb = dependencies._blackboard
-                    original_brain = dependencies._brain
-                    dependencies._blackboard = MagicMock()
-                    dependencies._brain = mock_brain
-                    try:
-                        transport = ASGITransport(app=app)
-                        async with AsyncClient(transport=transport, base_url="http://test") as client:
-                            return await client.get("/queue/headhunter/pending")
-                    finally:
-                        dependencies._blackboard = original_bb
-                        dependencies._brain = original_brain
+                original_bb = dependencies._blackboard
+                dependencies._blackboard = mock_bb
+                try:
+                    transport = ASGITransport(app=app)
+                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                        return await client.get("/queue/headhunter/pending")
+                finally:
+                    dependencies._blackboard = original_bb
 
 
 @pytest.mark.asyncio
 async def test_headhunter_pending_includes_queued_github_issues():
-    """Queued GitHub Issues must appear alongside queued PRs, using
+    """Queued GitHub Issues from Redis snapshot must appear alongside queued PRs, using
     issue-specific field names (issue_number/issue_title)."""
-    hh = MagicMock()
-    hh._github.queued_prs = []
-    hh._github.queued_issues = [{
-        "owner": "o", "repo": "r", "issue_number": 9, "issue_title": "Needs triage",
-        "author": "alice", "created_at": "2026-07-01T00:00:00Z",
-        "html_url": "https://github.com/o/r/issues/9",
-    }]
+    gh_snap = _make_snapshot(
+        "github",
+        items=[
+            {
+                "platform": "github",
+                "item_kind": "issue",
+                "item_id": 9,
+                "project_ref": "o/r",
+                "title": "Needs triage",
+                "author": "alice",
+                "url": "https://github.com/o/r/issues/9",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-07-01T00:00:00Z",
+            }
+        ],
+    )
 
-    resp = await _get_pending_with_mocked_github(hh)
+    resp = await _get_pending_with_github_snapshot(gh_snap)
 
     assert resp.status_code == 200
     data = resp.json()
@@ -668,30 +754,45 @@ async def test_headhunter_pending_includes_queued_github_issues():
 
 @pytest.mark.asyncio
 async def test_headhunter_pending_merges_and_sorts_queued_prs_and_issues():
-    """Queued PRs and queued Issues both surface, are globally sorted by
-    created_at (FIFO across platforms), and each keeps its own independent
-    1-based queue_position numbering within its own platform list."""
-    hh = MagicMock()
-    hh._github.queued_prs = [{
-        "number": 5, "title": "PR fix", "owner": "o", "repo": "r",
-        "user": "bob", "created_at": "2026-07-02T00:00:00Z",
-        "html_url": "https://github.com/o/r/pull/5",
-    }]
-    hh._github.queued_issues = [{
-        "owner": "o", "repo": "r", "issue_number": 9, "issue_title": "Issue triage",
-        "author": "alice", "created_at": "2026-07-01T00:00:00Z",
-        "html_url": "https://github.com/o/r/issues/9",
-    }]
+    """Queued PRs and queued Issues both surface from Redis snapshot, globally sorted by
+    created_at, with independent 1-based queue_position numbering."""
+    gh_snap = _make_snapshot(
+        "github",
+        items=[
+            {
+                "platform": "github",
+                "item_kind": "pr",
+                "item_id": 5,
+                "project_ref": "o/r",
+                "title": "PR fix",
+                "author": "bob",
+                "url": "https://github.com/o/r/pull/5",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-07-02T00:00:00Z",
+            },
+            {
+                "platform": "github",
+                "item_kind": "issue",
+                "item_id": 9,
+                "project_ref": "o/r",
+                "title": "Issue triage",
+                "author": "alice",
+                "url": "https://github.com/o/r/issues/9",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-07-01T00:00:00Z",
+            },
+        ],
+    )
 
-    resp = await _get_pending_with_mocked_github(hh)
+    resp = await _get_pending_with_github_snapshot(gh_snap)
 
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 2
-    # Global sort by created_at: the issue (07-01) precedes the PR (07-02)
     assert data[0]["issue_number"] == 9
     assert data[1]["pr_number"] == 5
-    # queue_position is numbered independently per platform list (both start at 1)
     assert data[0]["queue_position"] == 1
     assert data[1]["queue_position"] == 1
 
@@ -1037,92 +1138,71 @@ class TestPlanStepFarleyATDDScenarioT4:
 
 
 # =========================================================================
-# Batch 1 ATDD (Step 6 / T-10): /queue/headhunter/pending decoupling,
-# independent env gates, 4 GitLab skip paths, CA bundle & host normalization
+# Batch 1 ATDD (Step 6 / T-10) — Migrated to Pure-Redis Snapshots (Slice 2C)
 # =========================================================================
 
 
-async def _get_headhunter_pending_http(
+async def _get_headhunter_pending_redis(
     *,
     env: dict[str, str],
     mock_bb: AsyncMock,
-    mock_brain: MagicMock | None = None,
-    gitlab_auth: object = "DEFAULT",
-    gitlab_auth_exc: Exception | None = None,
-    gitlab_resp: MagicMock | None = None,
-    gitlab_get_exc: Exception | None = None,
-    capture_httpx_kwargs: list[dict] | None = None,
-    capture_get_urls: list[str] | None = None,
+    gitlab_snapshot: object = None,
+    github_snapshot: object = None,
+    gitlab_snapshot_exc: Exception | None = None,
+    github_snapshot_exc: Exception | None = None,
 ):
-    """Layer 3 Protocol Driver for GET /queue/headhunter/pending."""
-    if gitlab_resp is None:
-        gitlab_resp = MagicMock()
-        gitlab_resp.is_success = True
-        gitlab_resp.json.return_value = []
+    """Layer 3 Protocol Driver for pure-Redis GET /queue/headhunter/pending (zero HTTP)."""
+    async def _get_snap(platform: str):
+        if platform == "gitlab":
+            if gitlab_snapshot_exc is not None:
+                raise gitlab_snapshot_exc
+            return gitlab_snapshot
+        if platform == "github":
+            if github_snapshot_exc is not None:
+                raise github_snapshot_exc
+            return github_snapshot
+        return None
 
-    mock_client = AsyncMock()
-    if gitlab_get_exc is not None:
-        mock_client.get = AsyncMock(side_effect=gitlab_get_exc)
-    else:
-        async def _capture_get(url, **kwargs):
-            if capture_get_urls is not None:
-                capture_get_urls.append(str(url))
-            return gitlab_resp
-        mock_client.get = AsyncMock(side_effect=_capture_get)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-
-    def _client_factory(*args, **kwargs):
-        if capture_httpx_kwargs is not None:
-            capture_httpx_kwargs.append(kwargs)
-        return mock_client
-
-    if gitlab_auth == "DEFAULT":
-        mock_auth = MagicMock()
-        if gitlab_auth_exc is not None:
-            mock_auth.get_token.side_effect = gitlab_auth_exc
-        else:
-            mock_auth.get_token.return_value = "fake-token"
-    else:
-        mock_auth = gitlab_auth
+    mock_bb.get_headhunter_snapshot = AsyncMock(side_effect=_get_snap)
+    if not isinstance(getattr(mock_bb, "get_waiting_approval_events", None), AsyncMock):
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
 
     with patch("src.main.lifespan") as mock_lifespan:
         mock_lifespan.return_value.__aenter__ = AsyncMock()
         mock_lifespan.return_value.__aexit__ = AsyncMock()
         with patch.dict(os.environ, env, clear=False):
-            with patch("src.utils.gitlab_token.get_gitlab_auth", return_value=mock_auth):
-                with patch("httpx.AsyncClient", side_effect=_client_factory):
-                    from src import dependencies
-                    from src.main import app
+            with patch("httpx.AsyncClient", side_effect=_forbid_http_client):
+                from src import dependencies
+                from src.main import app
 
-                    original_bb = dependencies._blackboard
-                    original_brain = dependencies._brain
-                    dependencies._blackboard = mock_bb
-                    if mock_brain is not None:
-                        dependencies._brain = mock_brain
-                    try:
-                        transport = ASGITransport(app=app)
-                        async with AsyncClient(transport=transport, base_url="http://test") as client:
-                            return await client.get("/queue/headhunter/pending")
-                    finally:
-                        dependencies._blackboard = original_bb
-                        dependencies._brain = original_brain
+                original_bb = dependencies._blackboard
+                dependencies._blackboard = mock_bb
+                try:
+                    transport = ASGITransport(app=app)
+                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                        return await client.get("/queue/headhunter/pending")
+                finally:
+                    dependencies._blackboard = original_bb
 
 
 def _github_pending_fixtures():
-    queued_pr = {
-        "number": 77,
-        "title": "Queued PR",
-        "owner": "The-Darwin-Project",
-        "repo": "BlackBoard",
-        "user": "octocat",
-        "created_at": "2026-09-01T00:00:00Z",
-        "html_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/77",
-    }
-    fake_hh = SimpleNamespace(_github=SimpleNamespace(queued_prs=[queued_pr], queued_issues=[]))
-    mock_brain = MagicMock()
-    mock_brain.agents = {"_headhunter": fake_hh}
-
+    gh_snap = _make_snapshot(
+        "github",
+        items=[
+            {
+                "platform": "github",
+                "item_kind": "pr",
+                "item_id": 77,
+                "project_ref": "The-Darwin-Project/BlackBoard",
+                "title": "Queued PR",
+                "author": "octocat",
+                "url": "https://github.com/The-Darwin-Project/BlackBoard/pull/77",
+                "status": "queued",
+                "queue_position": 1,
+                "enqueued_at": "2026-09-01T00:00:00Z",
+            }
+        ],
+    )
     issue_event = _make_headhunter_event(
         "evt-issue-t10",
         github_issue_context={
@@ -1137,23 +1217,24 @@ def _github_pending_fixtures():
     )
     mock_bb = AsyncMock()
     mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-issue-t10": "active"})
+    mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
     mock_bb.get_event = AsyncMock(return_value=issue_event)
-    return mock_bb, mock_brain
+    return mock_bb, gh_snap
 
 
 class TestATDDT10QueuePendingDecoupling:
-    """Layer 1-4 ATDD scenarios for T-10 (/queue/headhunter/pending)."""
+    """Layer 1-4 ATDD scenarios for T-10 migrated to pure-Redis snapshots."""
 
     @pytest.mark.asyncio
     async def test_t10a_gitlab_host_unset_still_returns_github_queued_and_active_items(self):
-        """Given GITLAB_HOST="" and HEADHUNTER_GITHUB_ENABLED=true
+        """Given GITLAB_HOST="" and GitHub Redis snapshot + active issue event
         When GET /queue/headhunter/pending is called
-        Then HTTP 200 returns GitHub queued PRs and active Issues with issue_number/issue_title."""
-        mock_bb, mock_brain = _github_pending_fixtures()
-        resp = await _get_headhunter_pending_http(
+        Then HTTP 200 returns GitHub queued PRs and active Issues with zero outbound HTTP."""
+        mock_bb, gh_snap = _github_pending_fixtures()
+        resp = await _get_headhunter_pending_redis(
             env={"GITLAB_HOST": "", "HEADHUNTER_ENABLED": "true", "HEADHUNTER_GITHUB_ENABLED": "true"},
             mock_bb=mock_bb,
-            mock_brain=mock_brain,
+            github_snapshot=gh_snap,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -1164,18 +1245,12 @@ class TestATDDT10QueuePendingDecoupling:
         assert "pr_number" not in issues[0]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "failure_mode",
-        ["no_auth", "token_exc", "http_500", "connect_exc"],
-    )
-    async def test_t10b_all_four_gitlab_failures_skip_gitlab_and_return_github_items(self, failure_mode):
-        """Given GitLab hits any of the 4 failure modes (no auth, token exception, HTTP 500,
-        httpx/TLS error)
+    @pytest.mark.parametrize("failure_mode", ["none_snap", "partial_error", "redis_exc"])
+    async def test_t10b_gitlab_snapshot_failures_skip_gitlab_and_return_github_items(self, failure_mode):
+        """Given GitLab snapshot is missing, reports partial_error, or fails Redis lookup
         When GET /queue/headhunter/pending is called
-        Then GitLab is skipped without early-returning and GitHub queued & active items still appear."""
-        import httpx as httpx_mod
-
-        mock_bb, mock_brain = _github_pending_fixtures()
+        Then GitLab is isolated and GitHub queued & active items still appear with zero HTTP calls."""
+        mock_bb, gh_snap = _github_pending_fixtures()
         kwargs: dict = {
             "env": {
                 "GITLAB_HOST": "gitlab.example.com",
@@ -1183,21 +1258,16 @@ class TestATDDT10QueuePendingDecoupling:
                 "HEADHUNTER_GITHUB_ENABLED": "true",
             },
             "mock_bb": mock_bb,
-            "mock_brain": mock_brain,
+            "github_snapshot": gh_snap,
         }
-        if failure_mode == "no_auth":
-            kwargs["gitlab_auth"] = None
-        elif failure_mode == "token_exc":
-            kwargs["gitlab_auth_exc"] = RuntimeError("vault unavailable")
-        elif failure_mode == "http_500":
-            err_resp = MagicMock()
-            err_resp.is_success = False
-            err_resp.status_code = 500
-            kwargs["gitlab_resp"] = err_resp
-        elif failure_mode == "connect_exc":
-            kwargs["gitlab_get_exc"] = httpx_mod.ConnectError("TLS handshake failed")
+        if failure_mode == "partial_error":
+            kwargs["gitlab_snapshot"] = _make_snapshot(
+                "gitlab", partial_error="HTTP 500", breaker_state="open", items=[]
+            )
+        elif failure_mode == "redis_exc":
+            kwargs["gitlab_snapshot_exc"] = RuntimeError("redis timeout")
 
-        resp = await _get_headhunter_pending_http(**kwargs)
+        resp = await _get_headhunter_pending_redis(**kwargs)
         assert resp.status_code == 200
         data = resp.json()
         assert any(i.get("pr_number") == 77 for i in data), f"GitHub queued PR hidden on {failure_mode}"
@@ -1207,157 +1277,1333 @@ class TestATDDT10QueuePendingDecoupling:
     async def test_t10c_headhunter_enabled_false_with_github_enabled_true_returns_github_items(self):
         """Given HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=true
         When GET /queue/headhunter/pending is called
-        Then GitLab is skipped (0 GitLab HTTP calls) and GitHub items are still returned."""
-        mock_bb, mock_brain = _github_pending_fixtures()
-        captured_urls: list[str] = []
-        resp = await _get_headhunter_pending_http(
+        Then GitLab snapshot is skipped (zero HTTP calls) and GitHub items are returned."""
+        mock_bb, gh_snap = _github_pending_fixtures()
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 11,
+                    "project_ref": "org/repo",
+                    "title": "Hidden GL MR",
+                    "status": "pending",
+                }
+            ],
+        )
+        resp = await _get_headhunter_pending_redis(
             env={
                 "GITLAB_HOST": "gitlab.example.com",
                 "HEADHUNTER_ENABLED": "false",
                 "HEADHUNTER_GITHUB_ENABLED": "true",
             },
             mock_bb=mock_bb,
-            mock_brain=mock_brain,
-            capture_get_urls=captured_urls,
+            gitlab_snapshot=gl_snap,
+            github_snapshot=gh_snap,
         )
         assert resp.status_code == 200
-        assert captured_urls == []
         data = resp.json()
+        assert not any(i.get("platform") == "gitlab" for i in data)
         assert any(i.get("pr_number") == 77 for i in data)
         assert any(i.get("issue_number") == 233 for i in data)
 
     @pytest.mark.asyncio
-    async def test_t10d_gitlab_call_normalizes_host_and_uses_resolve_ca_bundle_never_verify_false(self, tmp_path):
-        """Given GITLAB_HOST='https://gitlab.example.com/' and a CA bundle
-        When GET /queue/headhunter/pending queries GitLab
-        Then host is normalized (no double scheme/slash) and httpx.AsyncClient uses resolve_ca_bundle,
-        never verify=False."""
-        ca = str(tmp_path / "ca.pem")
-        (tmp_path / "ca.pem").write_text("cert")
+    async def test_t10d_pure_redis_pending_makes_zero_httpx_calls_even_with_gitlab_host(self):
+        """Given GITLAB_HOST and HEADHUNTER_ENABLED=true
+        When GET /queue/headhunter/pending runs
+        Then zero outbound httpx.AsyncClient calls are made."""
         mock_bb = AsyncMock()
         mock_bb.get_active_events_with_status = AsyncMock(return_value={})
-        captured_kwargs: list[dict] = []
-        captured_urls: list[str] = []
-
-        with patch("src.routes.queue.resolve_ca_bundle", return_value=ca) as mock_ca:
-            resp = await _get_headhunter_pending_http(
-                env={
-                    "GITLAB_HOST": "https://gitlab.example.com/",
-                    "HEADHUNTER_ENABLED": "true",
-                    "HEADHUNTER_GITHUB_ENABLED": "false",
-                },
-                mock_bb=mock_bb,
-                capture_httpx_kwargs=captured_kwargs,
-                capture_get_urls=captured_urls,
-            )
-
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 5,
+                    "project_ref": "org/repo",
+                    "title": "Snapshot MR",
+                    "url": "https://gitlab.example.com/org/repo/-/merge_requests/5",
+                    "status": "pending",
+                    "enqueued_at": "2026-09-01T00:00:00Z",
+                    "raw": {"todo_id": 55, "action": "assigned"},
+                }
+            ],
+        )
+        resp = await _get_headhunter_pending_redis(
+            env={
+                "GITLAB_HOST": "https://gitlab.example.com/",
+                "HEADHUNTER_ENABLED": "true",
+                "HEADHUNTER_GITHUB_ENABLED": "false",
+            },
+            mock_bb=mock_bb,
+            gitlab_snapshot=gl_snap,
+        )
         assert resp.status_code == 200
-        mock_ca.assert_called_once_with("gitlab.example.com")
-        assert captured_kwargs and captured_kwargs[0].get("verify") == ca
-        assert captured_kwargs[0].get("verify") is not False
-        assert captured_urls == ["https://gitlab.example.com/api/v4/todos"]
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["mr_iid"] == 5
 
     @pytest.mark.asyncio
     async def test_t10e_both_flags_false_returns_empty_list(self):
-        """F-19: Given HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=false
+        """Given HEADHUNTER_ENABLED=false and HEADHUNTER_GITHUB_ENABLED=false
         When GET /queue/headhunter/pending is called
-        Then HTTP 200 returns [] with zero GitLab calls."""
-        mock_bb, mock_brain = _github_pending_fixtures()
-        captured_urls: list[str] = []
-        resp = await _get_headhunter_pending_http(
+        Then HTTP 200 returns [] with zero outbound HTTP calls."""
+        mock_bb, gh_snap = _github_pending_fixtures()
+        resp = await _get_headhunter_pending_redis(
             env={
                 "GITLAB_HOST": "gitlab.example.com",
                 "HEADHUNTER_ENABLED": "false",
                 "HEADHUNTER_GITHUB_ENABLED": "false",
             },
             mock_bb=mock_bb,
-            mock_brain=mock_brain,
-            capture_get_urls=captured_urls,
+            github_snapshot=gh_snap,
         )
         assert resp.status_code == 200
         assert resp.json() == []
-        assert captured_urls == []
 
     @pytest.mark.asyncio
-    async def test_t10f_gitlab_ssl_verify_false_logs_error_and_still_returns_github_items(self, caplog):
-        """F-16: Given GITLAB_SSL_VERIFY=false raises ValueError in resolve_ca_bundle()
-        When GET /queue/headhunter/pending runs
-        Then an ERROR is logged for TLS policy block and GitHub items are still returned."""
-        mock_bb, mock_brain = _github_pending_fixtures()
-        with caplog.at_level("ERROR"):
-            resp = await _get_headhunter_pending_http(
-                env={
-                    "GITLAB_HOST": "gitlab.example.com",
-                    "GITLAB_SSL_VERIFY": "false",
-                    "HEADHUNTER_ENABLED": "true",
-                    "HEADHUNTER_GITHUB_ENABLED": "true",
-                },
-                mock_bb=mock_bb,
-                mock_brain=mock_brain,
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert any(i.get("pr_number") == 77 for i in data)
-        assert any(i.get("issue_number") == 233 for i in data)
-        assert any(
-            r.levelname == "ERROR" and "TLS policy" in r.message
-            for r in caplog.records
-        )
-
-    @pytest.mark.asyncio
-    async def test_t10g_malformed_gitlab_payload_and_none_fields_do_not_crash_endpoint(self):
-        """F-16: Non-list JSON payload, target=None, and created_at=None must not raise 500."""
+    async def test_t10f_malformed_dict_snapshot_and_missing_fields_do_not_crash_endpoint(self):
+        """Malformed snapshot shapes, non-dict elements, non-numeric item_id, and None fields must not raise 500."""
         mock_bb = AsyncMock()
         mock_bb.get_active_events_with_status = AsyncMock(return_value={})
 
-        non_list_resp = MagicMock()
-        non_list_resp.is_success = True
-        non_list_resp.json.return_value = {"message": "unexpected dict"}
-        resp1 = await _get_headhunter_pending_http(
-            env={
-                "GITLAB_HOST": "gitlab.example.com",
-                "HEADHUNTER_ENABLED": "true",
-                "HEADHUNTER_GITHUB_ENABLED": "false",
-            },
-            mock_bb=mock_bb,
-            gitlab_resp=non_list_resp,
-        )
-        assert resp1.status_code == 200
-        assert resp1.json() == []
+        for bad_snap in ({"unexpected": "shape"}, {"items": "not-a-list"}):
+            resp1 = await _get_headhunter_pending_redis(
+                env={
+                    "GITLAB_HOST": "gitlab.example.com",
+                    "HEADHUNTER_ENABLED": "true",
+                    "HEADHUNTER_GITHUB_ENABLED": "false",
+                },
+                mock_bb=mock_bb,
+                gitlab_snapshot=bad_snap,
+            )
+            assert resp1.status_code == 200
+            assert resp1.json() == []
 
-        weird_todos_resp = MagicMock()
-        weird_todos_resp.is_success = True
-        weird_todos_resp.json.return_value = [
-            "not-a-dict",
-            {
-                "id": 1,
-                "action_name": "assigned",
-                "target": None,
-                "project": None,
-                "created_at": None,
-                "target_url": None,
-            },
-            {
-                "id": 2,
-                "action_name": "assigned",
-                "target": {"iid": 9, "title": "Valid", "state": "opened", "author": None, "pipeline": None},
-                "project": {"path_with_namespace": "org/repo"},
-                "created_at": "2026-09-01T00:00:00Z",
-                "target_url": "https://gitlab.example.com/org/repo/-/merge_requests/9",
-            },
-        ]
-        resp2 = await _get_headhunter_pending_http(
+        mixed_dict_snap = {
+            "platform": "gitlab",
+            "enabled": True,
+            "items": [
+                "not-a-dict",
+                None,
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": "abc",
+                    "project_ref": None,
+                    "title": None,
+                    "author": None,
+                    "url": None,
+                    "ci_status": None,
+                    "status": None,
+                    "enqueued_at": None,
+                    "raw": None,
+                },
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 9,
+                    "project_ref": "org/repo",
+                    "title": "Valid",
+                    "url": "https://gitlab.example.com/org/repo/-/merge_requests/9",
+                    "status": "pending",
+                    "enqueued_at": "2026-09-01T00:00:00Z",
+                    "raw": {"todo_id": 2, "action": "assigned"},
+                },
+            ],
+        }
+        resp2 = await _get_headhunter_pending_redis(
             env={
                 "GITLAB_HOST": "gitlab.example.com",
                 "HEADHUNTER_ENABLED": "true",
                 "HEADHUNTER_GITHUB_ENABLED": "false",
             },
             mock_bb=mock_bb,
-            gitlab_resp=weird_todos_resp,
+            gitlab_snapshot=mixed_dict_snap,
         )
         assert resp2.status_code == 200
         rows = resp2.json()
-        assert len(rows) == 2
-        assert rows[0]["todo_id"] == 1 and rows[0]["created_at"] == ""
-        assert rows[1]["todo_id"] == 2 and rows[1]["mr_iid"] == 9
+        assert any(r.get("mr_iid") == 9 and r.get("todo_id") == 2 for r in rows)
+        assert all(isinstance(r, dict) and isinstance(r.get("created_at"), str) for r in rows)
+
+
+# =========================================================================
+# Slice 2C ATDD (Step 8 / T-13): Pure-Redis /pending, /status & /active SHA
+# =========================================================================
+
+
+class HeadhunterQueueProtocolDriver:
+    """Layer 3 Protocol Driver for /queue/headhunter/* and /queue/active."""
+
+    def __init__(self, mock_bb: AsyncMock, mock_hh: Any = None):
+        self.mock_bb = mock_bb
+        self.mock_hh = mock_hh
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        env: dict[str, str] | None = None,
+        json_body: dict | None = None,
+        headers: dict[str, str] | None = None,
+        forbid_http: bool = True,
+    ):
+        mock_brain = MagicMock()
+        mock_brain.agents = {"_headhunter": self.mock_hh} if self.mock_hh is not None else {}
+
+        env_vars = {
+            "HEADHUNTER_ENABLED": "true",
+            "HEADHUNTER_GITHUB_ENABLED": "true",
+            "GITLAB_HOST": "gitlab.example.com",
+        }
+        if env:
+            env_vars.update(env)
+
+        with patch("src.main.lifespan") as mock_lifespan:
+            mock_lifespan.return_value.__aenter__ = AsyncMock()
+            mock_lifespan.return_value.__aexit__ = AsyncMock()
+            with patch.dict(os.environ, env_vars, clear=False):
+                ctx_http = (
+                    patch("httpx.AsyncClient", side_effect=_forbid_http_client)
+                    if forbid_http
+                    else patch("httpx.AsyncClient")
+                )
+                with ctx_http:
+                    from src import dependencies
+                    from src.main import app
+
+                    orig_bb = dependencies._blackboard
+                    orig_brain = dependencies._brain
+                    dependencies._blackboard = self.mock_bb
+                    dependencies._brain = mock_brain
+                    app.dependency_overrides[dependencies.get_blackboard] = lambda: self.mock_bb
+                    app.dependency_overrides[dependencies.get_brain] = lambda: mock_brain
+                    try:
+                        transport = ASGITransport(app=app)
+                        async with AsyncClient(transport=transport, base_url="http://test") as client:
+                            return await client.request(
+                                method, path, json=json_body, headers=headers or {}
+                            )
+                    finally:
+                        app.dependency_overrides.clear()
+                        dependencies._blackboard = orig_bb
+                        dependencies._brain = orig_brain
+
+
+class TestATDDT13PureRedisPendingAndStatus:
+    """Layer 1-4 ATDD scenarios for T-13 (pure-Redis /pending, /status, /active SHA)."""
+
+    @pytest.mark.asyncio
+    async def test_t13a_pending_merges_snapshots_active_and_waiting_without_duplicating_parked_gitlab_mr(self):
+        """Given GitLab snapshot (parked MR !42 + queued MR !99), GitHub snapshot (PR #77),
+        active Issue #233, and waiting_approval GitLab MR !42
+        When GET /queue/headhunter/pending is called
+        Then HTTP 200 returns list[dict] with zero outbound HTTP calls, additive status/check_status fields,
+        and MR !42 appears ONCE without duplication."""
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "title": "Parked MR 42",
+                    "author": "alice",
+                    "url": "https://gitlab.example.com/group/repo/-/merge_requests/42",
+                    "ci_status": "success",
+                    "status": "pending",
+                    "enqueued_at": "2026-09-01T00:00:00Z",
+                    "raw": {"todo_id": 420, "action": "review_requested", "project_id": 100},
+                },
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 99,
+                    "project_ref": "group/repo",
+                    "title": "Queued MR 99",
+                    "author": "bob",
+                    "url": "https://gitlab.example.com/group/repo/-/merge_requests/99",
+                    "ci_status": "failed",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "enqueued_at": "2026-09-01T00:02:00Z",
+                    "raw": {"todo_id": 421, "action": "assigned", "project_id": 100},
+                },
+            ],
+        )
+        gh_snap = _make_snapshot(
+            "github",
+            items=[
+                {
+                    "platform": "github",
+                    "item_kind": "pr",
+                    "item_id": 77,
+                    "project_ref": "The-Darwin-Project/BlackBoard",
+                    "title": "Queued PR 77",
+                    "author": "octocat",
+                    "url": "https://github.com/The-Darwin-Project/BlackBoard/pull/77",
+                    "ci_status": "success",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "enqueued_at": "2026-09-01T00:01:00Z",
+                }
+            ],
+        )
+
+        from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+
+        parked_gl = EventDocument(
+            id="evt-gl-wait42",
+            source="headhunter",
+            service="repo",
+            status=EventStatus.WAITING_APPROVAL,
+            event=EventInput(
+                reason="parked",
+                evidence=EventEvidence(
+                    display_text="GitLab MR !42",
+                    source_type="headhunter",
+                    domain="complicated",
+                    severity="info",
+                    gitlab_context={
+                        "todo_id": 420,
+                        "project_id": 100,
+                        "project_path": "group/repo",
+                        "mr_iid": 42,
+                        "mr_title": "Parked MR 42",
+                        "author": "alice",
+                        "pipeline_status": "success",
+                        "target_url": "https://gitlab.example.com/group/repo/-/merge_requests/42",
+                        "created_at": "2026-09-01T00:00:00Z",
+                    },
+                ),
+            ),
+        )
+        active_issue = _make_headhunter_event(
+            "evt-gh-issue233",
+            github_issue_context={
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "issue_number": 233,
+                "title": "Active issue",
+                "author": "octocat",
+                "html_url": "https://github.com/The-Darwin-Project/BlackBoard/issues/233",
+                "created_at": "2026-09-01T00:03:00Z",
+            },
+        )
+
+        events_by_id = {"evt-gl-wait42": parked_gl, "evt-gh-issue233": active_issue}
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: {"gitlab": gl_snap, "github": gh_snap}.get(p)
+        )
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-gh-issue233": "active"})
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=["evt-gl-wait42"])
+        mock_bb.get_event = AsyncMock(side_effect=lambda eid: events_by_id.get(eid))
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        resp = await driver.request("GET", "/queue/headhunter/pending")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+
+        mr42_rows = [r for r in data if r.get("platform") == "gitlab" and r.get("mr_iid") == 42]
+        assert len(mr42_rows) == 1, f"Parked GitLab MR !42 duplicated or missing: {mr42_rows}"
+        assert (mr42_rows[0].get("status") == "waiting_approval") or (
+            mr42_rows[0].get("action") == "waiting_approval"
+        )
+
+        mr99_rows = [r for r in data if r.get("platform") == "gitlab" and r.get("mr_iid") == 99]
+        assert len(mr99_rows) == 1
+        assert mr99_rows[0]["queue_position"] == 1
+        assert mr99_rows[0]["pipeline_status"] == "failed"
+
+        pr77_rows = [r for r in data if r.get("platform") == "github" and r.get("pr_number") == 77]
+        assert len(pr77_rows) == 1
+        assert pr77_rows[0]["check_status"] == "success"
+        assert pr77_rows[0]["queue_position"] == 1
+        assert pr77_rows[0]["status"] == "queued"
+
+        assert any(r.get("issue_number") == 233 for r in data)
+
+    @pytest.mark.asyncio
+    async def test_t13b_cold_start_expired_snapshot_returns_active_and_waiting_and_null_last_poll_at(self):
+        """Given expired/missing Redis snapshots (get_headhunter_snapshot returns None)
+        When GET /queue/headhunter/pending and GET /queue/headhunter/status are called
+        Then /pending returns active + waiting_approval Blackboard events and /status reports last_poll_at: null."""
+        from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+
+        waiting_pr = EventDocument(
+            id="evt-wait-pr",
+            source="headhunter",
+            service="BlackBoard",
+            status=EventStatus.WAITING_APPROVAL,
+            event=EventInput(
+                reason="wait",
+                evidence=EventEvidence(
+                    display_text="PR 88",
+                    source_type="headhunter",
+                    domain="complicated",
+                    severity="info",
+                    github_context={
+                        "owner": "The-Darwin-Project",
+                        "repo": "BlackBoard",
+                        "pr_number": 88,
+                        "pr_title": "Waiting PR",
+                        "author": "octocat",
+                        "pr_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/88",
+                        "created_at": "2026-09-01T00:00:00Z",
+                    },
+                ),
+            ),
+        )
+        active_pr = _make_headhunter_event(
+            "evt-act-pr",
+            github_context={
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "pr_number": 89,
+                "pr_title": "Active PR",
+                "author": "octocat",
+                "pr_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/89",
+                "created_at": "2026-09-01T00:01:00Z",
+            },
+        )
+        events = {"evt-wait-pr": waiting_pr, "evt-act-pr": active_pr}
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(return_value=None)
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-act-pr": "active"})
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=["evt-wait-pr"])
+        mock_bb.get_event = AsyncMock(side_effect=lambda eid: events.get(eid))
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        pending_resp = await driver.request("GET", "/queue/headhunter/pending")
+        assert pending_resp.status_code == 200
+        pending = pending_resp.json()
+        assert {r.get("pr_number") for r in pending} == {88, 89}
+
+        status_resp = await driver.request("GET", "/queue/headhunter/status")
+        assert status_resp.status_code == 200
+        status_body = status_resp.json()
+        assert status_body["platforms"]["gitlab"]["last_poll_at"] is None
+        assert status_body["platforms"]["github"]["last_poll_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_t13c_status_redacts_secrets_and_caps_error_strings(self):
+        """Given snapshots with token/PEM secrets and >200-char errors
+        When GET /queue/headhunter/status is called
+        Then secrets are redacted via redact_pii and errors are capped <= 200 chars."""
+        long_gl_err = "HTTP 500 PRIVATE-TOKEN: glpat-secret1234567890abcd " + ("x" * 300)
+        long_gh_err = "Bearer ghp_secretToken9876543210xyz -----BEGIN RSA PRIVATE KEY----- MIIB " + ("y" * 300)
+        gl_snap = _make_snapshot(
+            "gitlab",
+            enabled=True,
+            partial_error=long_gl_err,
+            breaker_state="open",
+            consecutive_failures=3,
+            next_retry_at=1_700_000_300.0,
+            last_error=long_gl_err,
+        )
+        gh_snap = _make_snapshot(
+            "github",
+            enabled=True,
+            partial_error=long_gh_err,
+            breaker_state="half_open",
+            consecutive_failures=3,
+            next_retry_at=1_700_000_900.0,
+            last_error=long_gh_err,
+        )
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: {"gitlab": gl_snap, "github": gh_snap}.get(p)
+        )
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        resp = await driver.request("GET", "/queue/headhunter/status")
+        assert resp.status_code == 200
+        raw_text = resp.text
+        assert "glpat-secret1234567890abcd" not in raw_text
+        assert "ghp_secretToken9876543210xyz" not in raw_text
+        assert "BEGIN RSA PRIVATE KEY" not in raw_text
+
+        body = resp.json()
+        for plat in ("gitlab", "github"):
+            pdata = body["platforms"][plat]
+            for key in ("enabled", "pending_count", "queued_count", "last_poll_at", "partial_error", "breaker"):
+                assert key in pdata
+            assert len(pdata["partial_error"] or "") <= 200
+            brk = pdata["breaker"]
+            for bkey in ("state", "consecutive_failures", "next_retry_at", "last_error"):
+                assert bkey in brk
+            assert len(brk["last_error"] or "") <= 200
+
+    @pytest.mark.asyncio
+    async def test_t13d_queue_active_includes_approval_requested_sha(self):
+        """Given active events with and without approval_requested_sha
+        When GET /queue/active is called
+        Then each row includes approval_requested_sha (SHA string or None)."""
+        evt_sha = _make_event_document("evt-sha-01")
+        evt_sha.approval_requested_sha = "deadbeef1234567890abcdef1234567890abcdef"
+        evt_none = _make_event_document("evt-sha-02")
+
+        mock_bb = AsyncMock()
+        mock_bb.get_active_events = AsyncMock(return_value=["evt-sha-01", "evt-sha-02"])
+        mock_bb.get_event = AsyncMock(
+            side_effect=lambda eid: {"evt-sha-01": evt_sha, "evt-sha-02": evt_none}.get(eid)
+        )
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        resp = await driver.request("GET", "/queue/active")
+        assert resp.status_code == 200
+        by_id = {row["id"]: row for row in resp.json()}
+        assert by_id["evt-sha-01"]["approval_requested_sha"] == "deadbeef1234567890abcdef1234567890abcdef"
+        assert "approval_requested_sha" in by_id["evt-sha-02"]
+        assert by_id["evt-sha-02"]["approval_requested_sha"] is None
+
+    @pytest.mark.asyncio
+    async def test_t13e_waiting_approval_includes_approval_requested_sha_and_pending_filters_closed_events(self):
+        """Given waiting_approval events with/without approval_requested_sha and a CLOSED headhunter event
+        When GET /queue/waiting_approval and GET /queue/headhunter/pending are called
+        Then /waiting_approval exposes approval_requested_sha and /pending excludes CLOSED events."""
+        from src.models import EventStatus
+
+        evt_wait = _make_headhunter_event(
+            "evt-wait-sha-1",
+            github_context={
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "pr_number": 501,
+                "pr_title": "Waiting PR",
+                "author": "octocat",
+                "pr_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/501",
+            },
+        )
+        evt_wait.status = EventStatus.WAITING_APPROVAL
+        evt_wait.approval_requested_sha = "cafebabe1234567890abcdef1234567890abcdef"
+
+        evt_wait_none = _make_event_document("evt-wait-sha-2")
+        evt_wait_none.status = EventStatus.WAITING_APPROVAL
+
+        evt_closed = _make_headhunter_event(
+            "evt-closed-hh",
+            github_context={
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "pr_number": 502,
+                "pr_title": "Closed PR",
+                "author": "octocat",
+                "pr_url": "https://github.com/The-Darwin-Project/BlackBoard/pull/502",
+            },
+        )
+        evt_closed.status = EventStatus.CLOSED
+
+        by_id_map = {
+            "evt-wait-sha-1": evt_wait,
+            "evt-wait-sha-2": evt_wait_none,
+            "evt-closed-hh": evt_closed,
+        }
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(return_value=None)
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=["evt-wait-sha-1", "evt-wait-sha-2"])
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={"evt-closed-hh": "active"})
+        mock_bb.get_event = AsyncMock(side_effect=lambda eid: by_id_map.get(eid))
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        wait_resp = await driver.request("GET", "/queue/waiting_approval")
+        assert wait_resp.status_code == 200
+        wait_by_id = {row["id"]: row for row in wait_resp.json()}
+        assert wait_by_id["evt-wait-sha-1"]["approval_requested_sha"] == "cafebabe1234567890abcdef1234567890abcdef"
+        assert "approval_requested_sha" in wait_by_id["evt-wait-sha-2"]
+        assert wait_by_id["evt-wait-sha-2"]["approval_requested_sha"] is None
+
+        pend_resp = await driver.request("GET", "/queue/headhunter/pending")
+        assert pend_resp.status_code == 200
+        pr_nums = {r.get("pr_number") for r in pend_resp.json()}
+        assert 501 in pr_nums
+        assert 502 not in pr_nums
+
+
+# =========================================================================
+# Slice 2C ATDD (Step 8 / T-14): Operator Controls & Dynamic Case-Insensitive RBAC
+# =========================================================================
+
+
+def _make_fake_headhunter(mock_bb=None):
+    """Construct a real Headhunter instance with mocked VCS network/LLM calls so tests
+    exercise real trigger_poll, reset_breaker, operate_item, _with_poll_lock,
+    _persist_platform_snapshot, and request_promote boundaries."""
+    from src.agents.headhunter import Headhunter
+
+    bb = mock_bb if mock_bb is not None else AsyncMock()
+    hh = Headhunter(bb, gitlab_enabled=False)
+    hh.analyze_and_plan = AsyncMock(side_effect=AssertionError("analyze_and_plan forbidden on HTTP route"))
+    hh._gitlab.dismiss_todo = AsyncMock(return_value=True)
+    hh._gitlab.mark_todo_done = AsyncMock(return_value=True)
+    hh._gitlab._dismiss_todos_best_effort = AsyncMock(return_value=None)
+    hh._github._manager = MagicMock()
+    hh._github._manager.get_installation_for_repo = MagicMock(return_value="12345")
+    hh._github._add_labels = AsyncMock(return_value=True)
+    hh._github._remove_label = AsyncMock(return_value=True)
+    hh.request_promote = MagicMock(wraps=hh.request_promote)
+    return hh
+
+
+class TestATDDT14OperatorControlsAndRBAC:
+    """Layer 1-4 ATDD scenarios for T-14 (operator controls + RBAC + non-blocking lock)."""
+
+    @pytest.fixture(autouse=True)
+    def _advance_clock_between_tests(self, monkeypatch):
+        import time as _time
+
+        orig_monotonic = _time.monotonic
+        orig_time = _time.time
+        if not hasattr(self, "_clock_offset"):
+            type(self)._clock_offset = [0.0]
+        type(self)._clock_offset[0] += 15.0
+        offset = type(self)._clock_offset
+        monkeypatch.setattr(_time, "monotonic", lambda: orig_monotonic() + offset[0])
+        monkeypatch.setattr(_time, "time", lambda: orig_time() + offset[0])
+        self._bump_clock = lambda secs=15.0: offset.__setitem__(0, offset[0] + secs)
+
+    @pytest.mark.asyncio
+    async def test_t14a_operator_endpoints_permitted_when_auth_disabled(self, monkeypatch):
+        """Given DEX_ENABLED=false and TRUSTED_PROXY_ENABLED=false
+        When operator POSTs to /queue/headhunter/poll
+        Then dev/local mode permits the call (not 401/403)."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        hh = _make_fake_headhunter()
+        mock_bb = AsyncMock()
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+        resp = await driver.request("POST", "/queue/headhunter/poll")
+        assert resp.status_code in (200, 202)
+        assert hh._poll_wake_signal.is_set()
+
+    @pytest.mark.asyncio
+    async def test_t14b_operator_rbac_enforces_401_403_mixed_case_and_audit_logs(self, monkeypatch, caplog):
+        """Given DEX_ENABLED=true
+        When unauthenticated, unauthorized, empty-union, and mixed-case OBS_ADMIN_GROUPS/APPROVER_GROUPS callers hit operator controls
+        Then 401/403 fail closed, mixed-case groups match case-insensitively, and BOTH allowed/denied are audit-logged."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        hh = _make_fake_headhunter()
+        mock_bb = AsyncMock()
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        with caplog.at_level("INFO"):
+            # 1. Unauthenticated -> 401
+            r401 = await driver.request("POST", "/queue/headhunter/poll")
+            assert r401.status_code == 401
+
+            # 2. Empty union -> 403 fail-closed
+            monkeypatch.setattr("src.auth.OBS_ADMIN_GROUPS", frozenset())
+            monkeypatch.setattr("src.auth.APPROVER_GROUPS", frozenset())
+            monkeypatch.setattr(
+                "src.auth._validate_jwt",
+                lambda _t: {"sub": "u1", "email": "alice@example.com", "name": "Alice", "groups": ["admins"]},
+            )
+            r403_empty = await driver.request(
+                "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-1"}
+            )
+            assert r403_empty.status_code == 403
+
+            # 3. Non-matching group -> 403
+            monkeypatch.setattr("src.auth.OBS_ADMIN_GROUPS", frozenset({"Darwin-Admins"}))
+            monkeypatch.setattr("src.auth.APPROVER_GROUPS", frozenset({"Maintainers"}))
+            monkeypatch.setattr(
+                "src.auth._validate_jwt",
+                lambda _t: {"sub": "u2", "email": "bob@example.com", "name": "Bob", "groups": ["viewers"]},
+            )
+            r403_role = await driver.request(
+                "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-2"}
+            )
+            assert r403_role.status_code == 403
+
+            # 4. Mixed-case match on OBS_ADMIN_GROUPS -> allowed
+            self._bump_clock(15.0)
+            monkeypatch.setattr(
+                "src.auth._validate_jwt",
+                lambda _t: {"sub": "u3", "email": "admin@example.com", "name": "Admin", "groups": ["darwin-admins"]},
+            )
+            r_admin = await driver.request(
+                "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-3"}
+            )
+            assert r_admin.status_code in (200, 202)
+
+            # 5. Mixed-case match on APPROVER_GROUPS -> allowed
+            self._bump_clock(15.0)
+            monkeypatch.setattr(
+                "src.auth._validate_jwt",
+                lambda _t: {"sub": "u4", "email": "approver@example.com", "name": "Appr", "groups": ["MAINTAINERS"]},
+            )
+            r_appr = await driver.request(
+                "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-4"}
+            )
+            assert r_appr.status_code in (200, 202)
+
+        logs_joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "bob@example.com" in logs_joined
+        assert "admin@example.com" in logs_joined
+        assert "approver@example.com" in logs_joined
+
+    @pytest.mark.asyncio
+    async def test_t14c_poll_busy_lock_409_wake_and_10s_debounce(self, monkeypatch):
+        """Given Headhunter with _poll_lock and _poll_wake_signal
+        When _poll_lock is busy -> 409 Retry-After: 5;
+        When unlocked -> initial POST sets _poll_wake_signal;
+        When repeated within 10s -> debounced without re-setting _poll_wake_signal."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        hh = _make_fake_headhunter()
+        mock_bb = AsyncMock()
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        # 1. Busy _poll_lock -> 409 Conflict with Retry-After: 5 (short-circuit wait_for so test is instant)
+        await hh._poll_lock.acquire()
+        orig_wait_for = asyncio.wait_for
+
+        async def _fast_wait_for(aw, timeout=None):
+            return await orig_wait_for(aw, timeout=0.01)
+
+        try:
+            with patch("src.routes.queue.asyncio.wait_for", side_effect=_fast_wait_for):
+                r_busy = await driver.request("POST", "/queue/headhunter/poll")
+        finally:
+            hh._poll_lock.release()
+        assert r_busy.status_code == 409
+        assert r_busy.headers.get("Retry-After") == "5"
+        assert not hh._poll_wake_signal.is_set()
+
+        # 2. Initial unblocked poll -> wakes signal
+        r_ok = await driver.request("POST", "/queue/headhunter/poll")
+        assert r_ok.status_code in (200, 202)
+        assert hh._poll_wake_signal.is_set()
+
+        # 3. Immediate repeat within 10s -> debounced (wake signal stays clear)
+        hh._poll_wake_signal.clear()
+        r_debounced = await driver.request("POST", "/queue/headhunter/poll")
+        assert r_debounced.status_code in (200, 202, 409, 429)
+        if r_debounced.status_code in (200, 202):
+            body = r_debounced.json()
+            assert body.get("debounced") is True or body.get("triggered") is False
+        assert not hh._poll_wake_signal.is_set()
+
+    @pytest.mark.asyncio
+    async def test_t14d_breaker_reset_validates_platform_resets_wakes_and_per_platform_cooldown(self, monkeypatch):
+        """Given open GitLab and GitHub breakers
+        When POST /queue/headhunter/breaker/{platform}/reset is called
+        Then invalid platform -> 422, valid resets to closed + wakes poll, and repeat hits per-platform 10s cooldown."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        hh = _make_fake_headhunter()
+        hh._breakers["gitlab"].state = "open"
+        hh._breakers["gitlab"].consecutive_failures = 3
+        hh._breakers["github"].state = "open"
+        hh._breakers["github"].consecutive_failures = 3
+
+        mock_bb = AsyncMock()
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        r_bad = await driver.request("POST", "/queue/headhunter/breaker/bitbucket/reset")
+        assert r_bad.status_code == 422
+
+        r_gl = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
+        assert r_gl.status_code in (200, 202)
+        assert hh._breakers["gitlab"].state == "closed"
+        assert hh._breakers["gitlab"].consecutive_failures == 0
+        assert hh._poll_wake_signal.is_set()
+
+        # Immediate repeat for gitlab -> debounced; github remains unaffected and succeeds
+        hh._poll_wake_signal.clear()
+        r_gl_rep = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
+        assert r_gl_rep.status_code in (200, 202, 409, 429)
+        assert not hh._poll_wake_signal.is_set()
+
+        r_gh = await driver.request("POST", "/queue/headhunter/breaker/github/reset")
+        assert r_gh.status_code in (200, 202)
+        assert hh._breakers["github"].state == "closed"
+        assert hh._poll_wake_signal.is_set()
+
+    @pytest.mark.asyncio
+    async def test_t14e_items_action_rejects_ssrf_url_fields_non_queued_and_busy_lock(self, monkeypatch):
+        """Given POST /queue/headhunter/items/{action}
+        When dot-segments / SSRF characters, non-queued PR on installed repo, or busy _poll_lock are sent
+        Then 422, 404/409 membership rejection, zero arbitrary URL fields, and 409 Retry-After: 5 are enforced."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        hh = _make_fake_headhunter()
+        gh_snap = _make_snapshot(
+            "github",
+            items=[
+                {
+                    "platform": "github",
+                    "item_kind": "pr",
+                    "item_id": 77,
+                    "project_ref": "The-Darwin-Project/BlackBoard",
+                    "status": "queued",
+                    "queue_position": 1,
+                }
+            ],
+        )
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: gh_snap if p == "github" else None
+        )
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        # 1. SSRF / dot-segment / disallowed char inputs -> 422
+        bad_payloads = [
+            {"platform": "github", "owner": "..", "repo": "BlackBoard", "item_number": 77},
+            {"platform": "github", "owner": ".", "repo": "BlackBoard", "item_number": 77},
+            {"platform": "github", "owner": "org", "repo": "repo?x=1", "item_number": 77},
+            {"platform": "github", "owner": "org", "repo": "repo#frag", "item_number": 77},
+            {"platform": "github", "owner": "org@evil", "repo": "repo", "item_number": 77},
+            {"platform": "github", "owner": "org", "repo": "bad repo", "item_number": 77},
+            {"platform": "gitlab", "project_id": "../secret", "item_number": 42},
+        ]
+        for payload in bad_payloads:
+            r_bad = await driver.request("POST", "/queue/headhunter/items/promote", json_body=payload)
+            assert r_bad.status_code == 422, f"Expected 422 for {payload}, got {r_bad.status_code}"
+
+        # 2. Arbitrary URL fields absent from request schema (and rejected if extra=forbid)
+        from src.routes import queue as queue_routes
+
+        req_models = [
+            obj for obj in vars(queue_routes).values()
+            if isinstance(obj, type) and hasattr(obj, "model_fields") and "item_number" in obj.model_fields
+        ]
+        assert req_models, "Expected Pydantic request model for /queue/headhunter/items/{action}"
+        for m in req_models:
+            assert not ({"url", "target_url", "html_url", "api_url"} & set(m.model_fields.keys()))
+
+        # 3. Non-queued PR on an installed repo -> 404 or 409 (exact queue/pending membership)
+        r_non_q = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 999,
+            },
+        )
+        assert r_non_q.status_code in (404, 409)
+
+        # 4. Busy _poll_lock -> 409 Conflict with Retry-After: 5
+        await hh._poll_lock.acquire()
+        orig_wait_for = asyncio.wait_for
+
+        async def _fast_wait_for(aw, timeout=None):
+            return await orig_wait_for(aw, timeout=0.01)
+
+        try:
+            with patch("src.routes.queue.asyncio.wait_for", side_effect=_fast_wait_for):
+                r_busy = await driver.request(
+                    "POST",
+                    "/queue/headhunter/items/promote",
+                    json_body={
+                        "platform": "github",
+                        "owner": "The-Darwin-Project",
+                        "repo": "BlackBoard",
+                        "item_number": 77,
+                    },
+                )
+        finally:
+            hh._poll_lock.release()
+        assert r_busy.status_code == 409
+        assert r_busy.headers.get("Retry-After") == "5"
+
+    @pytest.mark.asyncio
+    async def test_t14f_promote_202_async_no_llm_and_dismiss_requeue_platform_mutations(self, monkeypatch):
+        """Given queued GitLab MR, GitHub PR, and GitHub Issue in snapshots
+        When promote, dismiss, and requeue are called
+        Then promote returns 202 async without analyze_and_plan, and dismiss/requeue execute exact
+        ordered mutations across all 7 platform/item branches."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "raw": {"todo_id": 420, "_sibling_todo_ids": [420, 425], "project_id": 100},
+                }
+            ],
+        )
+        gh_snap = _make_snapshot(
+            "github",
+            items=[
+                {
+                    "platform": "github",
+                    "item_kind": "pr",
+                    "item_id": 77,
+                    "project_ref": "The-Darwin-Project/BlackBoard",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "raw": {"installation_id": "12345"},
+                },
+                {
+                    "platform": "github",
+                    "item_kind": "issue",
+                    "item_id": 88,
+                    "project_ref": "The-Darwin-Project/BlackBoard",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "raw": {"installation_id": "12345"},
+                },
+            ],
+        )
+
+        gl_dismiss_order: list[str] = []
+        gh_requeue_order: list[tuple[str, object]] = []
+
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: {"gitlab": gl_snap, "github": gh_snap}.get(p)
+        )
+        mock_bb.get_gitlab_queue_entry = AsyncMock(return_value={"project_id": 100, "mr_iid": 42})
+
+        async def _remove_gl_queue(pid, iid):
+            gl_dismiss_order.append(f"remove_gitlab_queue:{pid}:{iid}")
+            return True
+
+        mock_bb.remove_gitlab_queue = AsyncMock(side_effect=_remove_gl_queue)
+        mock_bb.enqueue_gitlab_mr = AsyncMock(return_value=True)
+        mock_bb.promote_gitlab_queue = AsyncMock(return_value=True)
+        mock_bb.delete_gitlab_mr_sha = AsyncMock(return_value=True)
+        mock_bb.delete_github_pr_sha = AsyncMock(return_value=True)
+        mock_bb.clear_github_issue_processed = AsyncMock(return_value=True)
+
+        hh = _make_fake_headhunter(mock_bb)
+
+        async def _dismiss_todo(tids):
+            gl_dismiss_order.append(f"dismiss_todo:{tids}")
+            return True
+
+        hh._gitlab.dismiss_todo = AsyncMock(side_effect=_dismiss_todo)
+
+        async def _gh_add_labels(inst_id, owner, repo, num, labels):
+            gh_requeue_order.append(("add_labels", list(labels)))
+            return True
+
+        async def _gh_remove_label(inst_id, owner, repo, num, label):
+            gh_requeue_order.append(("remove_label", label))
+            return True
+
+        hh._github._add_labels = AsyncMock(side_effect=_gh_add_labels)
+        hh._github._remove_label = AsyncMock(side_effect=_gh_remove_label)
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        # 1a. promote GitLab MR -> 202 async, promote_gitlab_queue + request_promote + wake
+        self._bump_clock(15.0)
+        r_gl_prom = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_gl_prom.status_code == 202
+        mock_bb.promote_gitlab_queue.assert_awaited_once_with(100, 42)
+        hh.request_promote.assert_called_with("gitlab", project_id=100, item_number=42)
+        assert ("gitlab", "mr", 100, 42) in hh._promoted_keys
+        hh.analyze_and_plan.assert_not_awaited()
+        assert hh._poll_wake_signal.is_set()
+
+        # 1b. promote GitHub PR -> 202 async, NEVER calls analyze_and_plan, wakes poll
+        self._bump_clock(15.0)
+        hh._poll_wake_signal.clear()
+        hh.request_promote.reset_mock()
+        r_prom = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 77,
+                "is_issue": False,
+            },
+        )
+        assert r_prom.status_code == 202
+        hh.request_promote.assert_called_once_with(
+            "github", owner="The-Darwin-Project", repo="BlackBoard", item_number=77, is_issue=False
+        )
+        assert ("github", "pr", "the-darwin-project/blackboard", 77) in hh._promoted_keys
+        hh.analyze_and_plan.assert_not_awaited()
+        assert hh._poll_wake_signal.is_set()
+
+        # 2. dismiss GitLab MR -> dismiss_todo BEFORE remove_gitlab_queue (covers _sibling_todo_ids)
+        self._bump_clock(15.0)
+        r_gl_dis = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_gl_dis.status_code in (200, 202)
+        assert gl_dismiss_order == [
+            "dismiss_todo:[420, 425]",
+            "remove_gitlab_queue:100:42",
+        ]
+
+        # 3. dismiss GitHub PR -> removes darwin-queued and darwin-review without touching darwin-active
+        self._bump_clock(15.0)
+        hh._github._remove_label.reset_mock()
+        r_gh_dis = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 77,
+                "is_issue": False,
+            },
+        )
+        assert r_gh_dis.status_code in (200, 202)
+        removed_pr_labels = [c.args[-1] for c in hh._github._remove_label.await_args_list]
+        assert removed_pr_labels == ["darwin-queued", "darwin-review"]
+        assert "darwin-active" not in removed_pr_labels
+
+        # 4. dismiss GitHub Issue -> removes darwin-queued and darwin-work
+        self._bump_clock(15.0)
+        hh._github._remove_label.reset_mock()
+        r_ghi_dis = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 88,
+                "is_issue": True,
+            },
+        )
+        assert r_ghi_dis.status_code in (200, 202)
+        removed_issue_labels = [c.args[-1] for c in hh._github._remove_label.await_args_list]
+        assert removed_issue_labels == ["darwin-queued", "darwin-work"]
+
+        # 5. requeue GitLab MR -> enqueue_gitlab_mr + delete_gitlab_mr_sha + wakes poll
+        self._bump_clock(15.0)
+        hh._poll_wake_signal.clear()
+        r_gl_req = await driver.request(
+            "POST",
+            "/queue/headhunter/items/requeue",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_gl_req.status_code in (200, 202)
+        mock_bb.enqueue_gitlab_mr.assert_awaited_once()
+        enq_args = mock_bb.enqueue_gitlab_mr.await_args.args
+        assert enq_args[0] == 100 and enq_args[1] == 42 and isinstance(enq_args[2], dict)
+        mock_bb.delete_gitlab_mr_sha.assert_awaited_once_with(100, 42)
+        assert hh._poll_wake_signal.is_set()
+
+        # 6. requeue GitHub PR -> add darwin-queued BEFORE remove darwin-done & darwin-review + delete_github_pr_sha
+        self._bump_clock(15.0)
+        hh._poll_wake_signal.clear()
+        gh_requeue_order.clear()
+        r_gh_req = await driver.request(
+            "POST",
+            "/queue/headhunter/items/requeue",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 77,
+                "is_issue": False,
+            },
+        )
+        assert r_gh_req.status_code in (200, 202)
+        assert gh_requeue_order == [
+            ("add_labels", ["darwin-queued"]),
+            ("remove_label", "darwin-done"),
+            ("remove_label", "darwin-review"),
+        ]
+        mock_bb.delete_github_pr_sha.assert_awaited_once_with("The-Darwin-Project", "BlackBoard", 77)
+        assert hh._poll_wake_signal.is_set()
+
+        # 7. requeue GitHub Issue -> _add_labels([work, queued]) + clear_github_issue_processed + wakes poll
+        self._bump_clock(15.0)
+        hh._poll_wake_signal.clear()
+        gh_requeue_order.clear()
+        r_ghi_req = await driver.request(
+            "POST",
+            "/queue/headhunter/items/requeue",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 88,
+                "is_issue": True,
+            },
+        )
+        assert r_ghi_req.status_code in (200, 202)
+        assert ("add_labels", ["darwin-work", "darwin-queued"]) in gh_requeue_order
+        mock_bb.clear_github_issue_processed.assert_awaited_once_with("The-Darwin-Project", "BlackBoard", 88)
+        assert hh._poll_wake_signal.is_set()
+
+    @pytest.mark.asyncio
+    async def test_t14g_trusted_proxy_spoofed_email_rejected_401_and_rbac_on_reset_and_items(self, monkeypatch):
+        """Given TRUSTED_PROXY_ENABLED=true & DEX_ENABLED=false with spoofed X-Forwarded-Email
+        When caller hits /poll, /breaker/{platform}/reset, or /items/{action}
+        Then REST fails closed with 401; and under DEX_ENABLED=true 401/403 enforce on reset & items."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", True)
+
+        mock_bb = AsyncMock()
+        hh = _make_fake_headhunter(mock_bb)
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        spoof_headers = {"X-Forwarded-Email": "admin@example.com"}
+        for method, path, body in (
+            ("POST", "/queue/headhunter/poll", None),
+            ("POST", "/queue/headhunter/breaker/gitlab/reset", None),
+            ("POST", "/queue/headhunter/items/promote", {"platform": "gitlab", "project_id": 100, "item_number": 42}),
+        ):
+            r = await driver.request(method, path, json_body=body, headers=spoof_headers)
+            assert r.status_code == 401, f"Expected 401 for {path} with spoofed proxy header, got {r.status_code}"
+
+        # DEX_ENABLED=true enforces 401/403 on breaker reset and items/{action}
+        monkeypatch.setattr("src.auth.DEX_ENABLED", True)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+        monkeypatch.setattr("src.auth.OBS_ADMIN_GROUPS", frozenset({"ops-admins"}))
+        monkeypatch.setattr("src.auth.APPROVER_GROUPS", frozenset({"maintainers"}))
+
+        assert (await driver.request("POST", "/queue/headhunter/breaker/github/reset")).status_code == 401
+        assert (
+            await driver.request(
+                "POST",
+                "/queue/headhunter/items/dismiss",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+            )
+        ).status_code == 401
+
+        monkeypatch.setattr(
+            "src.auth._validate_jwt",
+            lambda _t: {"sub": "u1", "email": "unpriv@example.com", "name": "U", "groups": ["guest"]},
+        )
+        assert (
+            await driver.request(
+                "POST",
+                "/queue/headhunter/breaker/github/reset",
+                headers={"Authorization": "Bearer jwt-unpriv"},
+            )
+        ).status_code == 403
+        assert (
+            await driver.request(
+                "POST",
+                "/queue/headhunter/items/dismiss",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+                headers={"Authorization": "Bearer jwt-unpriv"},
+            )
+        ).status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_t14h_items_action_extra_forbid_numeric_pid_closed_404_and_error_mappings(self, monkeypatch):
+        """Verify extra='forbid' rejects project_path with 422, numeric string project_id works,
+        merged/closed snapshot items 404, RedisError -> 503, upstream label/todo failures -> 502,
+        and enqueue_gitlab_mr=False -> 409."""
+        from redis.exceptions import RedisError
+
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "status": "pending",
+                    "raw": {"todo_id": 420, "project_id": 100},
+                },
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 43,
+                    "project_ref": "group/repo",
+                    "status": "merged",
+                    "raw": {"todo_id": 421, "project_id": 100, "mr_state": "merged"},
+                },
+            ],
+        )
+        gh_snap = _make_snapshot(
+            "github",
+            items=[
+                {
+                    "platform": "github",
+                    "item_kind": "pr",
+                    "item_id": 77,
+                    "project_ref": "The-Darwin-Project/BlackBoard",
+                    "status": "queued",
+                    "queue_position": 1,
+                },
+            ],
+        )
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: {"gitlab": gl_snap, "github": gh_snap}.get(p)
+        )
+        mock_bb.promote_gitlab_queue = AsyncMock(return_value=True)
+        mock_bb.enqueue_gitlab_mr = AsyncMock(return_value=False)
+
+        hh = _make_fake_headhunter(mock_bb)
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        # 1. extra='forbid' rejects unknown field `project_path` with 422
+        r_extra = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={
+                "platform": "gitlab",
+                "project_id": 100,
+                "item_number": 42,
+                "project_path": "group/repo",
+            },
+        )
+        assert r_extra.status_code == 422
+
+        # 2. numeric string project_id="100" accepted
+        self._bump_clock(15.0)
+        r_str_pid = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={"platform": "gitlab", "project_id": "100", "item_number": 42},
+        )
+        assert r_str_pid.status_code == 202
+
+        # 3. merged/closed snapshot item rejected with 404
+        r_merged = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 43},
+        )
+        assert r_merged.status_code == 404
+
+        # 4. GitLab requeue when enqueue_gitlab_mr returns False (and not already queued) -> 409
+        mock_bb.get_gitlab_queue_entry = AsyncMock(return_value=None)
+        r_cap = await driver.request(
+            "POST",
+            "/queue/headhunter/items/requeue",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_cap.status_code == 409
+
+        # 5. GitLab dismiss_todo returns False -> 502
+        self._bump_clock(15.0)
+        hh._gitlab.dismiss_todo = AsyncMock(return_value=False)
+        r_gl_502 = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_gl_502.status_code == 502
+
+        # 6. GitHub label fail on dismiss -> 502
+        self._bump_clock(15.0)
+        hh._github._remove_label = AsyncMock(return_value=False)
+        r_gh_502 = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={
+                "platform": "github",
+                "owner": "The-Darwin-Project",
+                "repo": "BlackBoard",
+                "item_number": 77,
+            },
+        )
+        assert r_gh_502.status_code == 502
+
+        # 7. RedisError on snapshot lookup -> 503 (never 404)
+        mock_bb.get_headhunter_snapshot = AsyncMock(side_effect=RedisError("redis down"))
+        r_503 = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_503.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_t14i_immediate_state_consistency_after_breaker_reset_and_item_dismiss(self, monkeypatch):
+        """Verify POST /breaker/{platform}/reset immediately shows state=='closed' in GET /status,
+        and POST /items/dismiss immediately removes the item from GET /pending."""
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        from src.agents.headhunter_models import PlatformQueueItem
+
+        persisted_snaps: dict[str, dict] = {}
+
+        mock_bb = AsyncMock()
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=[])
+        mock_bb.remove_gitlab_queue = AsyncMock(return_value=True)
+
+        async def _save_snap(plat, payload, ttl_seconds=900):
+            persisted_snaps[plat] = payload
+
+        async def _get_snap(plat):
+            return persisted_snaps.get(plat)
+
+        mock_bb.save_headhunter_snapshot = AsyncMock(side_effect=_save_snap)
+        mock_bb.get_headhunter_snapshot = AsyncMock(side_effect=_get_snap)
+
+        hh = _make_fake_headhunter(mock_bb)
+        hh._breakers["gitlab"].state = "open"
+        hh._breakers["gitlab"].consecutive_failures = 3
+        hh._gitlab._last_snapshot_items = [
+            PlatformQueueItem(
+                platform="gitlab",
+                item_kind="mr",
+                item_id=42,
+                project_ref="group/repo",
+                title="Dismissable MR",
+                author="alice",
+                url="https://gitlab.example.com/group/repo/-/merge_requests/42",
+                status="queued",
+                queue_position=1,
+                enqueued_at="2026-09-01T00:00:00Z",
+                raw={"todo_id": 420, "project_id": 100, "action": "assigned"},
+            )
+        ]
+        await hh._persist_platform_snapshot("gitlab")
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        # 1. Breaker reset -> immediate GET /status shows closed
+        r_reset = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
+        assert r_reset.status_code in (200, 202)
+        r_status = await driver.request("GET", "/queue/headhunter/status")
+        assert r_status.status_code == 200
+        assert r_status.json()["platforms"]["gitlab"]["breaker"]["state"] == "closed"
+
+        # 2. Item dismiss -> immediate GET /pending omits MR 42
+        r_pend_before = await driver.request("GET", "/queue/headhunter/pending")
+        assert any(row.get("mr_iid") == 42 for row in r_pend_before.json())
+
+        r_dis = await driver.request(
+            "POST",
+            "/queue/headhunter/items/dismiss",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+        )
+        assert r_dis.status_code in (200, 202)
+
+        r_pend_after = await driver.request("GET", "/queue/headhunter/pending")
+        assert r_pend_after.status_code == 200
+        assert not any(row.get("mr_iid") == 42 for row in r_pend_after.json())
 

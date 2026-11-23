@@ -37,6 +37,16 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(Bearer\s+)\S{1,2048}"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(\bBasic[ \t]+)[A-Za-z0-9+/=_-]{4,2048}(?![A-Za-z0-9+/=_-])"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(PRIVATE-TOKEN\s*[:=]\s*)\S{1,2048}"), r"\1[REDACTED]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED_GCP_KEY]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{1,256}"), "[REDACTED_SLACK_TOKEN]"),
+    (
+        re.compile(
+            r'(?i)(?<![A-Za-z0-9-])((?:password|passwd|secret|api_key|apikey)["\']?\s*[:=]\s*)'
+            r'(?:"[^"]{1,512}"|\'[^\']{1,512}\'|[^\s&,;"\'}\]]{1,512})'
+        ),
+        r"\1[REDACTED]",
+    ),
     (
         re.compile(
             r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,255}\.[A-Za-z0-9.-]{1,255}"
@@ -83,7 +93,7 @@ def _get_canonical_or_alias(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-def _redact_error_text(raw: str, max_len: int = 200) -> str:
+def redact_error_text(raw: str, max_len: int = 200) -> str:
     """Redact common tokens/credentials/emails, flatten control whitespace, and cap length."""
     bounded = str(raw or "")[: max(max_len * 4, 2048)]
     text = _CTRL_WS_RE.sub(" ", bounded).strip()
@@ -92,6 +102,18 @@ def _redact_error_text(raw: str, max_len: int = 200) -> str:
     if len(text) > max_len:
         text = text[:max_len]
     return text
+
+
+_redact_error_text = redact_error_text
+
+
+class HeadhunterOperationError(RuntimeError):
+    """Domain error raised by Headhunter operator actions with an HTTP status mapping."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 @dataclass

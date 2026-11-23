@@ -1,13 +1,13 @@
 ---
 name: darwin-pipeline-debug
-description: Pipeline failure investigation -- enumerate ALL failed jobs/tasks, follow external CI links, classify errors. Extends darwin-gitlab-ops.
-requires: [darwin-gitlab-ops, darwin-pipelines-as-code]
+description: Pipeline and check failure investigation -- enumerate ALL failed jobs/checks/tasks, follow external CI links, classify errors. Uses darwin-gitlab-ops or darwin-github-ops based on context.
+requires: [darwin-pipelines-as-code]
 roles: [developer]
 ---
 
 # Pipeline Debug
 
-Investigate failed pipelines by enumerating ALL failing jobs or tasks, drilling into external CI systems for detail, classifying each error, and retrying if transient.
+Investigate failed pipelines and check runs by enumerating ALL failing jobs, checks, or tasks, drilling into external CI systems for detail, classifying each error, and retrying if transient.
 
 ## Determine Pipeline Source
 
@@ -15,24 +15,30 @@ Pipeline failures can originate from different trigger sources. Identify where t
 
 | Source | Where to find jobs/tasks | How to drill into failures |
 |--------|-------------------------|---------------------------|
-| **GitLab MR/PR pipeline** | GitLab pipeline jobs list (MR/PR → Pipelines tab) | Job trace for native jobs; external CI link for Konflux jobs |
-| **GitLab push/tag pipeline** | GitLab pipeline jobs list (project → CI/CD → Pipelines) | Same as MR/PR pipeline |
+| **GitLab MR/PR pipeline** (`gitlab_context`) | GitLab pipeline jobs list (MR → Pipelines tab) | Job trace for native jobs; external CI link for Konflux jobs |
+| **GitLab push/tag pipeline** (`gitlab_context`) | GitLab pipeline jobs list (project → CI/CD → Pipelines) | Same as MR pipeline |
+| **GitHub PR checks / Actions** (`github_context`) | `/repos/{owner}/{repo}/commits/{sha}/check-runs` AND `/commits/{sha}/status` | Actions workflow job logs; `details_url` / `target_url` for PaC/Konflux/Prow external CI |
 | **Kargo promotion** | Kargo stage steps (promotion status in Kargo UI/CLI) + linked MR/PR pipeline | Kargo step error message; then follow linked MR/PR pipeline if failure is CI-related |
 | **Tekton PipelineRun (direct)** | K8s MCP or KubeArchive — list TaskRuns in the PipelineRun | TaskRun → step container logs |
-| **Konflux build (no GitLab)** | K8s MCP or KubeArchive — find PipelineRun by component + commit | TaskRun → step container logs |
+| **Konflux build (direct)** | K8s MCP or KubeArchive — find PipelineRun by component + commit | TaskRun → step container logs |
 
-Use the event document to determine the source: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion ID, MR/PR URL), Aligner events may reference either.
+Use the event document to determine the source: Headhunter events carry `gitlab_context` (see `darwin-gitlab-ops`) or `github_context` (see `darwin-github-ops`), Kargo events carry Kargo context (project, stage, promotion ID, MR/PR URL), Aligner events may reference either.
 
 ## Step 1: Enumerate ALL Failed Jobs/Tasks (CRITICAL)
 
-A pipeline can contain multiple jobs or tasks. Each may map to a separate execution environment (e.g., distinct Konflux PipelineRuns). The aggregation point (GitLab, Kargo, or the PipelineRun itself) reports failure if ANY job/task fails.
+A pipeline or commit check suite can contain multiple jobs, check-runs, or tasks. Each may map to a separate execution environment (e.g., distinct Konflux PipelineRuns). The aggregation point (GitLab, GitHub, Kargo, or the PipelineRun itself) reports failure if ANY job/check/task fails.
 
-**You MUST enumerate all jobs or tasks before investigating any single failure.**
+**You MUST enumerate all jobs, check-runs/statuses, or tasks before investigating any single failure.**
 
-### For GitLab pipelines (MR, push, tag, scheduled)
+### For GitLab pipelines (`gitlab_context`)
 1. Retrieve the pipeline and list ALL jobs (not just the first failed one).
 2. Identify every job with a `failed` status.
 3. For each failed job, note whether it has a log (GitLab-native) or only shows "external" status (Konflux/external CI).
+
+### For GitHub PRs (`github_context`)
+1. Query BOTH `/repos/{owner}/{repo}/commits/{head_sha}/check-runs` and `/repos/{owner}/{repo}/commits/{head_sha}/status` (see `darwin-github-ops`).
+2. Identify every check-run with conclusion `failure`/`timed_out`/`cancelled`/`action_required` and every commit status with state `failure`/`error`.
+3. For each failure, note whether logs live in GitHub Actions or behind an external `details_url` / `target_url` (Tekton PaC, Konflux, Prow).
 
 ### For Kargo promotions
 1. Check the Kargo promotion status to identify which step failed (e.g., `wait-for-merge`, `auto-merge`, `wait-for-update`).
@@ -61,13 +67,14 @@ Include queue state in the report to FRIDAY so she can calibrate her deferral.
 
 ## Step 2: Drill Into Each Failure
 
-### GitLab-native jobs
-Read the job trace (last 50 lines) to extract the error message.
+### GitLab-native and GitHub Actions jobs
+- **GitLab-native (`gitlab_context`)**: Read the job trace (last 50 lines) to extract the error message.
+- **GitHub Actions (`github_context`)**: Inspect the failed workflow run/job logs (`gh run view <run_id> --log-failed`) to extract the error message.
 
-### External CI jobs (Konflux, Tekton)
-GitLab external jobs link to an external CI system. Follow that link to find the corresponding PipelineRun:
+### External CI jobs (Konflux, Tekton, Prow)
+External jobs in GitLab or GitHub (`details_url` / `target_url`) link to an external CI system. Follow that link to find the corresponding PipelineRun:
 
-1. Get the external CI URL from the GitLab job, or locate the PipelineRun by component name + commit SHA on the cluster.
+1. Get the external CI URL from the GitLab job or GitHub check-run/status, or locate the PipelineRun by component name + commit SHA on the cluster.
 2. Use K8s MCP, KubeArchive MCP, or CLI tools to find the PipelineRun.
 3. List ALL TaskRuns in that PipelineRun and check each status.
 4. For failed TaskRuns, read the step container logs.
@@ -135,12 +142,12 @@ Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do
 ## Reporting Results
 
 Always end your response with a clear recommendation for FRIDAY.
-Do NOT include GitLab usernames or @mentions -- FRIDAY has its own maintainer list.
+Do NOT include VCS usernames (GitLab/GitHub) or @mentions -- FRIDAY has its own maintainer list.
 
 Report format when multiple jobs/tasks failed:
 
 ```
-Pipeline source: {GitLab MR/PR | GitLab push | Kargo promotion | Tekton direct}
+Pipeline source: {GitLab MR | GitLab push | GitHub PR checks | Kargo promotion | Tekton direct}
 Failed jobs/tasks (N total):
 1. [job-name] — {error classification}: {specific error}
 2. [job-name] — {error classification}: {specific error}

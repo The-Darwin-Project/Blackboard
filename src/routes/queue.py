@@ -4,34 +4,27 @@
 # 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() to set the 14-day archival-retention TTL on the Slack thread mapping (Brain path uses _close_and_broadcast instead). delete_slack_mapping() no longer deletes the key.
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 # 4. [Pattern]: GET /{event_id}/report uses event_to_markdown from src/utils/event_markdown.
-# 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
+# 5. [Policy]: GET /headhunter/pending reads Redis snapshots (darwin:headhunter:snapshot:{platform}) +
+#    active/waiting Blackboard events (zero HTTP calls), dropping snapshot items whose status or raw.mr_state is merged/closed.
 # 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
 # 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to external/0.
 # 8. [Pattern]: /active response includes unread_notes for sidebar badge display.
 # 9. [Pattern]: Knowledge CRUD routes mirror lesson pattern. KnowledgeUpdateRequest uses extra="forbid" to enforce immutability of identity fields (topic, scope) -- Pydantic returns 422 on unknown fields.
 # 10. [Pattern]: PATCH /admin/knowledge/{id} does read-modify-reembed-upsert. Only mutable fields (fact, source, confidence, valid_until) can be updated.
-# 11. [Pattern]: GET /aligner/pending reads from darwin:aligner:pending ZSET + meta HASH. Pure Redis read (unlike HH which re-fetches from GitLab). response_model=list[PendingAnomaly].
+# 11. [Pattern]: GET /aligner/pending reads from darwin:aligner:pending ZSET + meta HASH. Pure Redis read (matching HH snapshot architecture). response_model=list[PendingAnomaly].
 # 12. [Pattern]: GET /jenkins/pending mirrors aligner pattern — darwin:jenkins:pending ZSET + meta HASH. Key format: {job_name} or view-outage:{view}. response_model=list[JenkinsPendingItem]. Meta-last: target from meta.get("job_name"), not key-derived.
-# 11. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
+# 13. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
 #     deliberately omits it -- service is immutable once a fact is created.
-# 12. [Pattern]: GET /admin/{knowledge,lessons,memories} are cursor-paginated scroll endpoints:
+# 14. [Pattern]: GET /admin/{knowledge,lessons,memories} are cursor-paginated scroll endpoints:
 #     {items, next_cursor, has_more} (no `total`, matching /reports/search). limit default 50,
 #     le=200 on all three -- never raise this to unbounded. q/scope/channel/service filters are
 #     partly Qdrant-indexed (scope/service) and partly post-fetch on the current page only
 #     (channel has no payload index; q is a page-local substring match everywhere).
-# 13. [Pattern]: GET /headhunter/pending appends GitHub queued Issues (hh._github.queued_issues)
-#     after the queued PR block, mirroring the PR shape with issue-specific field names
-#     (issue_number/issue_title in place of pr_number/pr_title). It then merges
-#     Blackboard-active GitHub PR/Issue events (action=new/active/deferred, mirroring
-#     get_active_events_with_status()) after the queued_prs cache items (action="queued")
-#     -- Blackboard is the source of truth for "still being worked on" since
-#     queued_prs/queued_issues only hold WIP-cap-blocked items and drop the entry the
-#     instant an event is created (#233). Per-item fetch via
-#     asyncio.gather(return_exceptions=True) -- one malformed/legacy event record must not
-#     drop every other active GitHub item for the poll. _github_active_item() is the shared
-#     PR/Issue row builder (field names differ: pr_number/pr_title/pr_url vs issue_number/
-#     title/html_url).
-# 14. [Pattern]: GET /waiting_approval and GET /active both defensively drop (and SREM)
+# 15. [Pattern]: GET /headhunter/pending merges Redis PlatformSnapshots (via get_headhunter_snapshot)
+#     with Blackboard-active and waiting_approval Headhunter events (new/active/deferred/waiting_approval).
+#     Per-item fetch via asyncio.gather(return_exceptions=True) -- one malformed/legacy event record
+#     must not drop every other active GitHub item for the poll. _github_active_item() builds PR/Issue rows.
+# 16. [Pattern]: GET /waiting_approval and GET /active both defensively drop (and SREM)
 #     event ids whose event doc is missing or already CLOSED -- a zombie in EVENT_WAITING_APPROVAL
 #     or EVENT_ACTIVE desynced from the event's real status. Both are symmetric halves of the
 #     same partial close_event() failure mode; fixing only one set leaves the other unguarded.
@@ -53,14 +46,17 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import re
 import time
 
 
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from redis.exceptions import RedisError, WatchError
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
 from ..auth import (
@@ -74,13 +70,13 @@ from ..auth import (
 )
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
 from ..state.blackboard import BlackboardState
+from ..agents.headhunter_models import HeadhunterOperationError, redact_error_text
+from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import sanitize_title
 from ..utils import vcs_approval as _vcs_approval
 from ..utils.vcs_approval import (
     check_approval_sha_drift,
     extract_context_head_sha,
-    normalize_gitlab_host,
-    resolve_ca_bundle,
     resolve_live_head_sha,
 )
 _ORIG_RESOLVE_LIVE_HEAD_SHA = resolve_live_head_sha
@@ -217,6 +213,7 @@ async def list_active_events(
             "unread_notes": getattr(event, "unread_notes", 0) or 0,
             "subscription_active": _has_active_subscription(eid),
             "token_total": event.token_usage.get("total_tokens") if event.token_usage else None,
+            "approval_requested_sha": getattr(event, "approval_requested_sha", None),
         }
         if event.status == EventStatus.DEFERRED:
             row.update(await _defer_timeline_fields(blackboard, eid, event))
@@ -252,6 +249,7 @@ async def list_waiting_approval_events(
             "turns": len(event.conversation),
             "created": event.event.timeDate,
             "created_by_email": event.created_by_email,
+            "approval_requested_sha": getattr(event, "approval_requested_sha", None),
         })
     return events
 
@@ -1386,184 +1384,587 @@ async def jenkins_pending_items(
     return result
 
 
-@router.get("/headhunter/pending")
-async def headhunter_pending_todos():
-    """Return pending GitLab todos and GitHub queued/active items for Headhunter UI observability.
+_HH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_HH_GITLAB_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
+_HH_OPERATOR_DEBOUNCE_S = 10.0
+_hh_last_poll_ts: float | None = None
+_hh_last_breaker_reset_ts: dict[str, float] = {}
+_hh_last_item_action_ts: dict[tuple[str, str, int], float] = {}
+_ACTIVE_HH_EVENT_STATUSES = frozenset({
+    EventStatus.NEW.value,
+    EventStatus.ACTIVE.value,
+    EventStatus.DEFERRED.value,
+    EventStatus.WAITING_APPROVAL.value,
+})
 
-    Lightweight read-only endpoint. No events created.
-    GitLab and GitHub blocks are isolated so failures or disabled flags on one platform
-    never hide items from the other.
-    """
-    import os
-    import httpx
 
-    result: list[dict] = []
-    gitlab_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
-    # GitHub block shows whenever GitHub Headhunter is enabled OR general Headhunter is enabled
-    # (preserving back-compat with deployments that set HEADHUNTER_ENABLED=true without explicit GitHub flag).
-    show_github_block = gitlab_enabled or os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
-    gitlab_host = normalize_gitlab_host(os.getenv("GITLAB_HOST", ""))
+class HeadhunterItemActionRequest(BaseModel):
+    """Strict request model for operator queue item actions (no arbitrary URLs)."""
 
-    # Isolated GitLab pending todos block (all failures skip GitLab without hiding GitHub)
-    if gitlab_enabled and gitlab_host:
-        from ..agents.headhunter import V1_ACTIONABLE, ACTION_PRIORITY
-        token: str | None = None
-        try:
-            from ..utils.gitlab_token import get_gitlab_auth
-            auth = get_gitlab_auth()
-            if not auth:
-                logger.warning("GitLab pending todos skipped: GitLab auth not configured")
-            else:
-                token = auth.get_token()
-        except Exception as e:
-            logger.warning("GitLab pending todos skipped (token error: %s)", type(e).__name__)
+    model_config = ConfigDict(extra="forbid")
 
-        if token:
-            todos: list[dict] = []
-            try:
-                ca_bundle = resolve_ca_bundle(gitlab_host)
-                async with httpx.AsyncClient(verify=ca_bundle, timeout=15) as client:
-                    resp = await client.get(
-                        f"https://{gitlab_host}/api/v4/todos",
-                        headers={"PRIVATE-TOKEN": token},
-                        params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
-                    )
-                    if not resp.is_success:
-                        logger.warning(f"GitLab pending todos skipped: HTTP {resp.status_code}")
-                    else:
-                        parsed_todos = resp.json()
-                        if isinstance(parsed_todos, list):
-                            todos = parsed_todos
-                        else:
-                            logger.warning(
-                                "GitLab pending todos skipped: unexpected payload type %s",
-                                type(parsed_todos).__name__,
-                            )
-            except ValueError as e:
-                logger.error("GitLab pending todos blocked by TLS policy: %s", e)
-            except Exception as e:
-                logger.warning("GitLab pending todos skipped (request error: %s)", type(e).__name__)
+    platform: Literal["gitlab", "github"]
+    project_id: Optional[int | str] = None
+    owner: Optional[str] = Field(None, max_length=200)
+    repo: Optional[str] = Field(None, max_length=200)
+    item_number: int = Field(..., ge=1)
+    is_issue: bool = False
 
-            for todo in todos:
-                if not isinstance(todo, dict):
-                    continue
-                try:
-                    action = todo.get("action_name") or ""
-                    if action not in V1_ACTIONABLE:
-                        continue
-                    target = todo.get("target") or {}
-                    if not isinstance(target, dict):
-                        target = {}
-                    mr_state = target.get("state")
-                    if mr_state in ("merged", "closed"):
-                        continue
-                    project = todo.get("project") or {}
-                    if not isinstance(project, dict):
-                        project = {}
-                    author_obj = target.get("author") or {}
-                    pipeline_obj = target.get("pipeline") or {}
-                    result.append({
-                        "platform": "gitlab",
-                        "queue_position": None,
-                        "todo_id": todo.get("id"),
-                        "action": action,
-                        "priority": ACTION_PRIORITY.get(action, 99),
-                        "mr_iid": target.get("iid"),
-                        "mr_title": target.get("title") or "",
-                        "project_path": project.get("path_with_namespace") or "",
-                        "author": author_obj.get("username", "") if isinstance(author_obj, dict) else "",
-                        "pipeline_status": pipeline_obj.get("status", "unknown") if isinstance(pipeline_obj, dict) and pipeline_obj else "unknown",
-                        "created_at": todo.get("created_at") or "",
-                        "target_url": todo.get("target_url") or "",
-                    })
-                except Exception as e:
-                    logger.warning("Skipping malformed GitLab todo item (%s)", type(e).__name__)
+    @field_validator("owner", "repo")
+    @classmethod
+    def _validate_gh_segment(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if v in (".", "..") or not _HH_SEGMENT_RE.fullmatch(v):
+            raise ValueError("Invalid repository/owner segment")
+        return v
 
-    if not show_github_block:
-        result.sort(key=lambda t: t.get("created_at") or "")
-        return result
+    @field_validator("project_id")
+    @classmethod
+    def _validate_project_id(cls, v: Optional[int | str]) -> Optional[int | str]:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            raise ValueError("project_id cannot be bool")
+        if isinstance(v, int):
+            if v < 1:
+                raise ValueError("project_id must be >= 1")
+            return v
+        raw = str(v).strip()
+        if (
+            not raw
+            or ".." in raw
+            or any(ch in raw for ch in ("?", "#", "@"))
+            or any(ch.isspace() for ch in raw)
+            or any(seg in (".", "..") for seg in raw.split("/"))
+            or not _HH_GITLAB_PATH_RE.fullmatch(raw)
+        ):
+            raise ValueError("Invalid GitLab project_id")
+        return raw
 
-    # Append GitHub queued PRs from agent cached state (single event loop, no lock needed)
+    @model_validator(mode="after")
+    def _validate_platform_target(self) -> "HeadhunterItemActionRequest":
+        if self.platform == "github":
+            if not self.owner or not self.repo:
+                raise ValueError("owner and repo are required for GitHub actions")
+        elif self.project_id is None and not (self.owner and self.repo):
+            raise ValueError("project_id (or owner/repo) is required for GitLab actions")
+        return self
+
+
+def _redact_hh_error(raw: object) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    return redact_error_text(redact_pii(s), max_len=200)
+
+
+def _safe_int_val(val: Any) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _snap_attr(obj: object, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _extract_snapshot_items(snap: object) -> list[Any]:
+    if snap is None:
+        return []
+    raw_items = _snap_attr(snap, "items", None)
+    return list(raw_items) if isinstance(raw_items, list) else []
+
+
+def _snapshot_item_to_pending_row(item: Any, platform: str, action_priority: dict[str, int]) -> dict | None:
+    status = str(_snap_attr(item, "status", None) or ("pending" if platform == "gitlab" else "queued"))
+    raw = _snap_attr(item, "raw", None)
+    raw_dict = raw if isinstance(raw, dict) else {}
+    mr_state = str(raw_dict.get("mr_state") or "")
+    if status in ("merged", "closed") or mr_state in ("merged", "closed"):
+        return None
+
+    item_id = _snap_attr(item, "item_id", None)
+    project_ref = str(_snap_attr(item, "project_ref", "") or "")
+    title = str(_snap_attr(item, "title", "") or "")
+    author = str(_snap_attr(item, "author", "") or "")
+    url = str(_snap_attr(item, "url", "") or "")
+    ci_status = str(_snap_attr(item, "ci_status", "") or "") or "unknown"
+    queue_position = _snap_attr(item, "queue_position", None)
+    enqueued_at = str(_snap_attr(item, "enqueued_at", "") or "")
+
+    if platform == "gitlab":
+        action = str(raw_dict.get("action") or ("queued" if status == "queued" else "review_requested"))
+        return {
+            "platform": "gitlab",
+            "queue_position": queue_position,
+            "todo_id": raw_dict.get("todo_id"),
+            "action": action,
+            "status": status,
+            "priority": action_priority.get(action, 99),
+            "mr_iid": item_id,
+            "mr_title": title,
+            "project_path": project_ref,
+            "project_id": raw_dict.get("project_id"),
+            "author": author,
+            "pipeline_status": ci_status,
+            "created_at": enqueued_at,
+            "target_url": url,
+        }
+
+    kind = str(_snap_attr(item, "item_kind", "pr") or "pr")
+    is_issue = kind == "issue"
+    action = str(raw_dict.get("action") or ("queued" if status == "queued" else "pending"))
+    row = {
+        "platform": "github",
+        "issue_number" if is_issue else "pr_number": item_id,
+        "issue_title" if is_issue else "pr_title": title,
+        "project_path": project_ref,
+        "author": author,
+        "created_at": enqueued_at,
+        "target_url": url,
+        "queue_position": queue_position,
+        "action": action,
+        "status": status,
+        "priority": 0,
+    }
+    if not is_issue:
+        row["check_status"] = ci_status
+    return row
+
+
+def _pending_row_keys(row: dict) -> list[tuple]:
+    plat = row.get("platform")
+    if plat == "gitlab":
+        iid = _safe_int_val(row.get("mr_iid"))
+        if iid is None:
+            return []
+        keys: list[tuple] = []
+        pid = row.get("project_id")
+        if pid is not None and str(pid):
+            keys.append(("gitlab", "mr", f"pid:{pid}", iid))
+        ppath = str(row.get("project_path") or "").strip().lower()
+        if ppath:
+            keys.append(("gitlab", "mr", f"path:{ppath}", iid))
+        return keys or [("gitlab", "mr", "", iid)]
+    ppath = str(row.get("project_path") or "").strip().lower()
+    issue_num = _safe_int_val(row.get("issue_number"))
+    if issue_num is not None:
+        return [("github", "issue", ppath, issue_num)]
+    pr_num = _safe_int_val(row.get("pr_number"))
+    if pr_num is not None:
+        return [("github", "pr", ppath, pr_num)]
+    return []
+
+
+async def _read_headhunter_snapshot_safe(blackboard: BlackboardState | None, platform: str) -> object:
+    if blackboard is None or not hasattr(blackboard, "get_headhunter_snapshot"):
+        return None
+    try:
+        return await blackboard.get_headhunter_snapshot(platform)
+    except Exception as exc:
+        logger.warning("Headhunter %s snapshot read skipped (%s)", platform, type(exc).__name__)
+        return None
+
+
+def _require_headhunter_operator(request: Request, action: str) -> None:
+    from .. import auth
+
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if not auth_enabled:
+        return
+    user = auth.get_user_from_request(request)
+    if not user or not getattr(user, "email", None):
+        logger.warning("[Audit] Denied Headhunter operator %s: unauthenticated", action)
+        raise HTTPException(status_code=401, detail="Authentication required")
+    allowed_groups = {
+        str(g).strip().lower() for g in (auth.OBS_ADMIN_GROUPS or ()) if str(g).strip()
+    } | {
+        str(g).strip().lower() for g in (auth.APPROVER_GROUPS or ()) if str(g).strip()
+    }
+    user_roles = {str(r).strip().lower() for r in (user.roles or ()) if str(r).strip()}
+    if not allowed_groups or not (user_roles & allowed_groups):
+        logger.warning(
+            "[Audit] Denied Headhunter operator %s for %s (roles=%s)",
+            action, user.email, user.roles,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden: Headhunter operator group membership required")
+    logger.info("[Audit] Allowed Headhunter operator %s for %s", action, user.email)
+
+
+async def _get_headhunter_or_503():
     try:
         brain = await get_brain()
-        hh = brain.agents.get("_headhunter") if brain else None
-        if hh and getattr(hh, "_github", None):
-            for idx, pr in enumerate(hh._github.queued_prs, start=1):
-                result.append({
-                    "platform": "github",
-                    "pr_number": pr.get("number"),
-                    "pr_title": pr.get("title", ""),
-                    "project_path": f"{pr.get('owner', '')}/{pr.get('repo', '')}",
-                    "author": pr.get("user", ""),
-                    "created_at": pr.get("created_at", ""),
-                    "target_url": pr.get("html_url", ""),
-                    "queue_position": idx,
-                    "action": "queued",
-                    "priority": 0,
-                })
-            for idx, issue in enumerate(hh._github.queued_issues, start=1):
-                result.append({
-                    "platform": "github",
-                    "issue_number": issue.get("issue_number"),
-                    "issue_title": issue.get("issue_title", ""),
-                    "project_path": f"{issue.get('owner', '')}/{issue.get('repo', '')}",
-                    "author": issue.get("author", ""),
-                    "created_at": issue.get("created_at", ""),
-                    "target_url": issue.get("html_url", ""),
-                    "queue_position": idx,
-                    "action": "queued",
-                    "priority": 0,
-                })
-    except Exception as e:
-        logger.warning(f"GitHub queued PR/Issue lookup skipped: {e}")
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Brain not initialized")
+    hh = brain.agents.get("_headhunter") if brain else None
+    if hh is None:
+        raise HTTPException(status_code=503, detail="Headhunter not initialized")
+    return hh
 
-    # Append active GitHub PR/Issue events from the Blackboard (source of truth for
-    # "Darwin is working on this" -- these items are no longer in the queued_prs/
-    # queued_issues caches once an event exists, so they'd otherwise vanish from the
-    # widget for the entire active-processing lifecycle; see issue #233).
+
+async def _acquire_hh_poll_lock(hh: Any) -> tuple[bool, asyncio.Lock | None]:
+    lock = getattr(hh, "_poll_lock", None)
+    if lock is None:
+        return True, None
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        return False, None
+    return True, lock
+
+
+def _busy_lock_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "Headhunter poll cycle is currently busy; retry shortly."},
+        headers={"Retry-After": "5"},
+    )
+
+
+def _match_snapshot_item(snap: object, req: HeadhunterItemActionRequest) -> tuple[Any, dict] | None:
+    for item in _extract_snapshot_items(snap):
+        status = str(_snap_attr(item, "status", "") or "")
+        if status in ("merged", "closed"):
+            continue
+        item_id = _safe_int_val(_snap_attr(item, "item_id", None))
+        if item_id is None or item_id != req.item_number:
+            continue
+        kind = str(_snap_attr(item, "item_kind", "") or "")
+        proj_ref = str(_snap_attr(item, "project_ref", "") or "")
+        raw = _snap_attr(item, "raw", None)
+        raw_dict = raw if isinstance(raw, dict) else {}
+        if req.platform == "github":
+            expected_kind = "issue" if req.is_issue else "pr"
+            if kind != expected_kind:
+                continue
+            if proj_ref.lower() == f"{req.owner}/{req.repo}".lower():
+                return item, raw_dict
+        else:
+            if kind and kind != "mr":
+                continue
+            raw_pid = raw_dict.get("project_id")
+            if req.project_id is not None:
+                if raw_pid is not None and str(raw_pid) == str(req.project_id):
+                    return item, raw_dict
+                if proj_ref.lower() == str(req.project_id).lower():
+                    return item, raw_dict
+            elif req.owner and req.repo and proj_ref.lower() == f"{req.owner}/{req.repo}".lower():
+                return item, raw_dict
+    return None
+
+
+@router.get("/headhunter/pending")
+async def headhunter_pending_todos():
+    """Return pending/queued/active Headhunter items via pure Redis reads (zero HTTP calls)."""
+    from ..agents.headhunter import ACTION_PRIORITY
+
+    gitlab_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
+    show_github_block = gitlab_enabled or os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
+    if not gitlab_enabled and not show_github_block:
+        return []
+
     try:
         blackboard = await get_blackboard()
-        status_map = await blackboard.get_active_events_with_status()
-    except Exception as e:
-        logger.warning(f"GitHub active-event lookup skipped: {e}")
-        status_map = {}
+    except RuntimeError:
+        return []
 
-    if status_map:
-        eids = list(status_map)
-        # Concurrent fetch, not N sequential round-trips -- status_map spans every
-        # active event system-wide (aligner/jarvis/etc., not just headhunter's) and
-        # this endpoint is polled every 30s. return_exceptions isolates one malformed
-        # record (e.g. a pydantic.ValidationError inside get_event()) so it can't
-        # silently drop every other active GitHub item for the poll (#233 review, HIGH).
+    enabled_platforms: list[str] = []
+    if gitlab_enabled:
+        enabled_platforms.append("gitlab")
+    if show_github_block:
+        enabled_platforms.append("github")
+
+    snapshot_rows: list[dict] = []
+    for plat in enabled_platforms:
+        snap = await _read_headhunter_snapshot_safe(blackboard, plat)
+        for item in _extract_snapshot_items(snap):
+            try:
+                row = _snapshot_item_to_pending_row(item, plat, ACTION_PRIORITY)
+                if row is not None:
+                    snapshot_rows.append(row)
+            except Exception as exc:
+                logger.warning("Skipping malformed %s snapshot item (%s)", plat, type(exc).__name__)
+
+    status_map: dict[str, str] = {}
+    waiting_ids: list[str] = []
+    try:
+        raw_status = await blackboard.get_active_events_with_status()
+        if isinstance(raw_status, dict):
+            status_map = dict(raw_status)
+    except Exception as exc:
+        logger.warning("Headhunter active-event lookup skipped: %s", exc)
+    if hasattr(blackboard, "get_waiting_approval_events"):
+        try:
+            raw_wait = await blackboard.get_waiting_approval_events()
+            if isinstance(raw_wait, (list, tuple, set)):
+                waiting_ids = list(raw_wait)
+        except Exception as exc:
+            logger.warning("Headhunter waiting_approval lookup skipped: %s", exc)
+
+    event_status_by_id: dict[str, str] = dict(status_map)
+    for wid in waiting_ids:
+        event_status_by_id[wid] = EventStatus.WAITING_APPROVAL.value
+
+    bb_rows: list[dict] = []
+    bb_keys: set[tuple] = set()
+    if event_status_by_id:
+        eids = list(event_status_by_id)
         fetched = await asyncio.gather(
             *(blackboard.get_event(eid) for eid in eids),
             return_exceptions=True,
         )
         for eid, fetched_event in zip(eids, fetched):
             if isinstance(fetched_event, Exception):
-                logger.warning(f"Skipping active event {eid} (fetch/parse failed): {fetched_event}")
+                logger.warning("Skipping active event %s (fetch/parse failed): %s", eid, fetched_event)
                 continue
             event = fetched_event
             if not event or event.source != "headhunter":
                 continue
+            actual_status = event.status.value if hasattr(event.status, "value") else str(event.status)
+            if actual_status == EventStatus.CLOSED.value or actual_status not in _ACTIVE_HH_EVENT_STATUSES:
+                continue
+            ev_status = event_status_by_id.get(eid, actual_status)
+            if ev_status not in _ACTIVE_HH_EVENT_STATUSES:
+                continue
             evidence = event.event.evidence if event.event else None
+            gl_ctx = getattr(evidence, "gitlab_context", None) if evidence else None
             gh_ctx = getattr(evidence, "github_context", None) if evidence else None
             gh_issue_ctx = getattr(evidence, "github_issue_context", None) if evidence else None
-            # Map the actual status (new/active/deferred) to the action field instead
-            # of hardcoding "active" -- a queued-but-unpicked or paused event shouldn't
-            # render identically to one actually being worked (#233 review, MEDIUM).
-            action = status_map.get(eid, "active")
-            if gh_ctx:
-                result.append(_github_active_item(
-                    gh_ctx, number_key="pr_number", title_key="pr_title", url_key="pr_url",
-                    action=action, fallback_created_at=event.event.timeDate, is_issue=False,
-                ))
-            elif gh_issue_ctx:
-                result.append(_github_active_item(
-                    gh_issue_ctx, number_key="issue_number", title_key="title", url_key="html_url",
-                    action=action, fallback_created_at=event.event.timeDate, is_issue=True,
-                ))
 
-    # Sort after GitHub items are appended so FIFO ordering spans both platforms
+            row: dict | None = None
+            if gl_ctx and gitlab_enabled and isinstance(gl_ctx, dict):
+                row = {
+                    "platform": "gitlab",
+                    "queue_position": None,
+                    "todo_id": gl_ctx.get("todo_id"),
+                    "action": ev_status,
+                    "status": ev_status,
+                    "priority": 0,
+                    "mr_iid": gl_ctx.get("mr_iid"),
+                    "mr_title": gl_ctx.get("mr_title") or "",
+                    "project_path": gl_ctx.get("project_path") or "",
+                    "project_id": gl_ctx.get("project_id"),
+                    "author": gl_ctx.get("author") or "",
+                    "pipeline_status": gl_ctx.get("pipeline_status") or "unknown",
+                    "created_at": gl_ctx.get("todo_created_at") or gl_ctx.get("created_at") or event.event.timeDate,
+                    "target_url": gl_ctx.get("target_url") or "",
+                }
+            elif gh_ctx and show_github_block and isinstance(gh_ctx, dict):
+                row = _github_active_item(
+                    gh_ctx, number_key="pr_number", title_key="pr_title", url_key="pr_url",
+                    action=ev_status, fallback_created_at=event.event.timeDate, is_issue=False,
+                )
+                row["status"] = ev_status
+                row["check_status"] = gh_ctx.get("check_status") or "unknown"
+            elif gh_issue_ctx and show_github_block and isinstance(gh_issue_ctx, dict):
+                row = _github_active_item(
+                    gh_issue_ctx, number_key="issue_number", title_key="title", url_key="html_url",
+                    action=ev_status, fallback_created_at=event.event.timeDate, is_issue=True,
+                )
+                row["status"] = ev_status
+
+            if row is not None:
+                bb_rows.append(row)
+                bb_keys.update(_pending_row_keys(row))
+
+    result = list(bb_rows)
+    seen_snap_keys: set[tuple] = set(bb_keys)
+    for row in snapshot_rows:
+        rkeys = _pending_row_keys(row)
+        if any(k in seen_snap_keys for k in rkeys):
+            continue
+        result.append(row)
+        seen_snap_keys.update(rkeys)
+
     result.sort(key=lambda t: t.get("created_at") or "")
+    return result
+
+
+@router.get("/headhunter/status")
+async def headhunter_platform_status():
+    """Return per-platform Headhunter poll & circuit-breaker telemetry from Redis snapshots."""
+    try:
+        blackboard = await get_blackboard()
+    except RuntimeError:
+        blackboard = None
+
+    hh = None
+    try:
+        brain = await get_brain()
+        hh = brain.agents.get("_headhunter") if brain else None
+    except RuntimeError:
+        pass
+
+    env_enabled = {
+        "gitlab": os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true",
+        "github": os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true",
+    }
+
+    platforms: dict[str, dict[str, Any]] = {}
+    for plat in ("gitlab", "github"):
+        snap = await _read_headhunter_snapshot_safe(blackboard, plat)
+        live_cb = getattr(hh, "_breakers", {}).get(plat) if hh is not None else None
+        if snap is not None:
+            enabled = bool(_snap_attr(snap, "enabled", env_enabled[plat]))
+            pending_count = _safe_int_val(_snap_attr(snap, "pending_count", 0)) or 0
+            queued_count = _safe_int_val(_snap_attr(snap, "queued_count", 0)) or 0
+            last_poll_at = _snap_attr(snap, "last_poll_at", None)
+            partial_error = _redact_hh_error(_snap_attr(snap, "partial_error", None))
+            raw_brk = _snap_attr(snap, "breaker", None)
+            breaker = {
+                "state": str(_snap_attr(raw_brk, "state", "closed") or "closed") if raw_brk is not None else "closed",
+                "consecutive_failures": (
+                    _safe_int_val(_snap_attr(raw_brk, "consecutive_failures", 0)) or 0
+                ) if raw_brk is not None else 0,
+                "next_retry_at": _snap_attr(raw_brk, "next_retry_at", None) if raw_brk is not None else None,
+                "last_error": _redact_hh_error(_snap_attr(raw_brk, "last_error", None)) if raw_brk is not None else None,
+            }
+        else:
+            enabled = env_enabled[plat]
+            pending_count = 0
+            queued_count = 0
+            last_poll_at = None
+            partial_error = None
+            breaker = {
+                "state": "closed",
+                "consecutive_failures": 0,
+                "next_retry_at": None,
+                "last_error": None,
+            }
+        if live_cb is not None:
+            breaker = {
+                "state": str(getattr(live_cb, "state", "closed") or "closed"),
+                "consecutive_failures": _safe_int_val(getattr(live_cb, "consecutive_failures", 0)) or 0,
+                "next_retry_at": getattr(live_cb, "next_retry_at", None),
+                "last_error": _redact_hh_error(getattr(live_cb, "last_error", None)),
+            }
+        platforms[plat] = {
+            "enabled": enabled,
+            "pending_count": pending_count,
+            "queued_count": queued_count,
+            "last_poll_at": last_poll_at,
+            "partial_error": partial_error,
+            "breaker": breaker,
+        }
+    return {"platforms": platforms}
+
+
+@router.post("/headhunter/poll")
+async def trigger_headhunter_poll(request: Request):
+    """Trigger an immediate non-blocking Headhunter poll cycle (10s debounced, RBAC gated)."""
+    global _hh_last_poll_ts
+    _require_headhunter_operator(request, "poll")
+    hh = await _get_headhunter_or_503()
+    acquired, lock = await _acquire_hh_poll_lock(hh)
+    if not acquired:
+        return _busy_lock_response()
+    try:
+        now = time.monotonic()
+        if _hh_last_poll_ts is not None and (now - _hh_last_poll_ts) < _HH_OPERATOR_DEBOUNCE_S:
+            return JSONResponse(status_code=202, content={"triggered": False, "debounced": True})
+        hh.trigger_poll()
+        _hh_last_poll_ts = time.monotonic()
+        return JSONResponse(status_code=202, content={"triggered": True, "debounced": False})
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+@router.post("/headhunter/breaker/{platform}/reset")
+async def reset_headhunter_breaker(
+    platform: Literal["gitlab", "github"],
+    request: Request,
+):
+    """Manually reset a platform circuit breaker to closed and wake the poll loop."""
+    _require_headhunter_operator(request, f"breaker_reset:{platform}")
+    hh = await _get_headhunter_or_503()
+    acquired, lock = await _acquire_hh_poll_lock(hh)
+    if not acquired:
+        return _busy_lock_response()
+    try:
+        now = time.monotonic()
+        last_ts = _hh_last_breaker_reset_ts.get(platform)
+        if last_ts is not None and (now - last_ts) < _HH_OPERATOR_DEBOUNCE_S:
+            return JSONResponse(
+                status_code=202,
+                content={"reset": False, "debounced": True, "platform": platform},
+            )
+    finally:
+        if lock is not None:
+            lock.release()
+
+    await hh.reset_breaker(platform)
+    _hh_last_breaker_reset_ts[platform] = time.monotonic()
+    return {"reset": True, "debounced": False, "platform": platform, "state": "closed"}
+
+
+@router.post("/headhunter/items/{action}")
+async def headhunter_item_action(
+    action: Literal["promote", "dismiss", "requeue"],
+    req: HeadhunterItemActionRequest,
+    request: Request,
+):
+    """Operator control for a queued/pending Headhunter item (exact snapshot membership required)."""
+    _require_headhunter_operator(request, f"item_{action}:{req.platform}:{req.item_number}")
+    try:
+        blackboard = await get_blackboard()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Blackboard not initialized")
+
+    try:
+        snap = (
+            await blackboard.get_headhunter_snapshot(req.platform)
+            if hasattr(blackboard, "get_headhunter_snapshot")
+            else None
+        )
+    except RedisError as exc:
+        logger.warning("Headhunter %s snapshot lookup failed (%s)", req.platform, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Blackboard state temporarily unavailable")
+
+    matched = _match_snapshot_item(snap, req)
+    if matched is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Item {req.platform}#{req.item_number} not found in active Headhunter queue/pending snapshot",
+        )
+    matched_item, matched_raw = matched
+
+    hh = await _get_headhunter_or_503()
+    acquired, lock = await _acquire_hh_poll_lock(hh)
+    if not acquired:
+        return _busy_lock_response()
+    debounce_key = (action, req.platform, req.item_number)
+    try:
+        now = time.monotonic()
+        last_ts = _hh_last_item_action_ts.get(debounce_key)
+        if last_ts is not None and (now - last_ts) < _HH_OPERATOR_DEBOUNCE_S:
+            return JSONResponse(
+                status_code=202 if action == "promote" else 200,
+                content={"ok": False, "debounced": True, "action": action, "platform": req.platform},
+            )
+    finally:
+        if lock is not None:
+            lock.release()
+
+    try:
+        result = await hh.operate_item(action, req, matched_item, matched_raw, blackboard)
+    except HeadhunterOperationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except WatchError:
+        raise HTTPException(status_code=409, detail="Concurrent queue modification; retry")
+    except RedisError as exc:
+        logger.warning("Headhunter %s Redis mutation failed (%s)", action, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Blackboard state temporarily unavailable")
+
+    _hh_last_item_action_ts[debounce_key] = time.monotonic()
+    if action == "promote":
+        return JSONResponse(status_code=202, content=result)
     return result

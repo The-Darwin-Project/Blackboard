@@ -56,4 +56,14 @@ describe('safeOpen', () => {
     safeOpen('');
     expect(window.open).not.toHaveBeenCalled();
   });
+
+  it('blocks protocol-relative URLs (C9)', () => {
+    safeOpen('//evil.com/phish');
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it('blocks relative URLs (C9)', () => {
+    safeOpen('/api/events');
+    expect(window.open).not.toHaveBeenCalled();
+  });
 });

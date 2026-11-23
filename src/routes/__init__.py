@@ -3,6 +3,7 @@
 from .chat import router as chat_router
 from .events import router as events_router
 from .feedback import router as feedback_router
+from .flow import router as flow_router
 from .journal import router as journal_router
 from .kargo import router as kargo_router
 from .queue import router as queue_router
@@ -26,6 +27,7 @@ __all__ = [
     "dex_proxy_router",
     "events_router",
     "feedback_router",
+    "flow_router",
     "incidents_router",
     "journal_router",
     "kargo_router",

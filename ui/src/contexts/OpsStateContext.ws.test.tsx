@@ -42,6 +42,14 @@ const baseEvent = {
   evidence: { display_text: 'x', source_type: 't', domain: 'disorder', severity: 'info' },
 } as unknown as ActiveEvent;
 
+beforeEach(() => {
+  sessionStorage.clear();
+});
+
+afterEach(() => {
+  sessionStorage.clear();
+});
+
 describe('OpsControlProvider domain_updated / severity_updated', () => {
   let qc: QueryClient;
 
@@ -174,5 +182,37 @@ describe('OpsControlProvider approval error banner', () => {
     expect(screen.queryByRole('button', { name: 'Confirm New SHA' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('OpsControlProvider headhunter query invalidation (T-16)', () => {
+  let qc: QueryClient;
+  let invalidateSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    qc = new QueryClient();
+    invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+    renderHook(() => null, { wrapper });
+  });
+
+  afterEach(() => {
+    invalidateSpy.mockRestore();
+    cleanup();
+  });
+
+  it('Given OpsControlProvider mounted, When WS event_created arrives, Then invalidates headhunterPending and headhunterStatus queries', () => {
+    invalidateSpy.mockClear();
+    act(() => wsHandler!({ type: 'event_created', event_id: 'evt-hh-new' }));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterPending'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterStatus'] });
+  });
+
+  it('Given OpsControlProvider mounted, When WS event_status_changed arrives, Then invalidates headhunterPending and headhunterStatus queries', () => {
+    invalidateSpy.mockClear();
+    act(() => wsHandler!({ type: 'event_status_changed', event_id: 'evt-hh-park', status: 'waiting_approval' }));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterPending'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterStatus'] });
   });
 });

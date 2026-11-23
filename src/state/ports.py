@@ -339,7 +339,7 @@ class CortexRepository(Protocol):
 class EventRepository(Protocol):
     """Port for the core event lifecycle: creation, conversation, queue, and closure.
 
-    43 methods. The largest domain — all WATCH/MULTI operations on EventDocument stay here.
+    77 methods. The largest domain — all WATCH/MULTI operations on EventDocument stay here.
     Cross-domain: close_event interacts with Topology (get_service),
     Observations (cleanup), and Reports (persist_report) — resolved
     at BlackboardState facade level.
@@ -514,6 +514,8 @@ class EventRepository(Protocol):
 
     async def list_gitlab_queue(self) -> list[dict]: ...
 
+    async def promote_gitlab_queue(self, project_id: int, mr_iid: int) -> bool: ...
+
     async def remove_gitlab_queue(self, project_id: int, mr_iid: int) -> None: ...
 
     async def get_gitlab_mr_sha(self, project_id: int, mr_iid: int) -> str | None: ...
@@ -548,9 +550,21 @@ class EventRepository(Protocol):
 
     async def set_github_pr_sha(self, owner: str, repo: str, pr_number: int, sha: str) -> None: ...
 
+    async def delete_github_pr_sha(self, owner: str, repo: str, pr_number: int) -> None: ...
+
     async def get_github_issue_processed(self, owner: str, repo: str, number: int) -> bool: ...
 
     async def set_github_issue_processed(self, owner: str, repo: str, number: int) -> None: ...
+
+    async def clear_github_issue_processed(self, owner: str, repo: str, number: int) -> None: ...
+
+    # --- Headhunter queue snapshots ---
+
+    async def save_headhunter_snapshot(
+        self, platform: str, snapshot: object, ttl_seconds: int = 900,
+    ) -> None: ...
+
+    async def get_headhunter_snapshot(self, platform: str) -> dict | None: ...
 
     # --- GitHub PR review-feedback tracking (cursor, per-item NX dedup, round cap) ---
 

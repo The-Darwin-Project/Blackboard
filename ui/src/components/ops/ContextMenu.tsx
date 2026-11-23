@@ -27,6 +27,13 @@ interface ContextMenuProps {
 export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const focusIdx = useRef(0);
+  const onCloseRef = useRef(onClose);
+  const itemsRef = useRef(items);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    itemsRef.current = items;
+  }, [onClose, items]);
 
   const clampPosition = useCallback(() => {
     if (!menuRef.current) return { left: x, top: y };
@@ -38,11 +45,12 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { onClose(); return; }
-      const actionItems = items.filter(i => !i.separator && !i.disabled);
+      if (e.key === 'Escape') { onCloseRef.current(); return; }
+      const actionItems = itemsRef.current.filter(i => !i.separator && !i.disabled);
+      if (actionItems.length === 0) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         focusIdx.current = (focusIdx.current + 1) % actionItems.length;
@@ -60,7 +68,7 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
       document.removeEventListener('mousedown', onClick);
       document.removeEventListener('keydown', onKey);
     };
-  }, [items, onClose]);
+  }, []);
 
   useEffect(() => {
     const first = menuRef.current?.querySelector('[role="menuitem"]') as HTMLElement;
@@ -81,8 +89,8 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
         return (
           <button key={item.id} role="menuitem" tabIndex={0}
             disabled={item.disabled}
-            onClick={() => { item.onClick(); onClose(); }}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); item.onClick(); onClose(); } }}
+            onClick={() => { if (item.disabled) return; item.onClick(); onCloseRef.current(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (item.disabled) return; item.onClick(); onCloseRef.current(); } }}
             className={`w-full flex items-center gap-3 px-3 py-2 text-left text-xs transition-colors outline-none
               ${item.disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-bg-tertiary focus:bg-bg-tertiary'}
               ${textColor}`}

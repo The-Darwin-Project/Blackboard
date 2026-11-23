@@ -39,6 +39,12 @@ export default function FlowHealthWidget() {
   const roles = Object.entries(data.agents_by_role);
   const wipPct = data.wip_utilization_pct ?? 0;
   const activeProcessing = data.active_events - (data.deferred_events ?? 0);
+  const hhBreakers = [
+    { key: 'gl', label: 'GL CB', name: 'GitLab', state: data.headhunter_gitlab_breaker },
+    { key: 'gh', label: 'GH CB', name: 'GitHub', state: data.headhunter_github_breaker },
+  ].filter((b): b is { key: string; label: string; name: string; state: 'open' | 'half_open' } =>
+    b.state === 'open' || b.state === 'half_open',
+  );
 
   return (
     <div className="p-2 space-y-1.5">
@@ -72,7 +78,7 @@ export default function FlowHealthWidget() {
       </div>
 
       {/* WIP breakdown: processing vs deferred */}
-      <div className="flex items-center gap-3 text-[10px] text-text-muted">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-muted">
         <span>{activeProcessing} processing</span>
         {(data.deferred_events ?? 0) > 0 && (
           <span>{data.deferred_events} deferred</span>
@@ -95,6 +101,19 @@ export default function FlowHealthWidget() {
             <span className="text-red-400 font-semibold">CB</span>
           </span>
         )}
+        {hhBreakers.map((b) => {
+          const isOpen = b.state === 'open';
+          return (
+            <span
+              key={b.key}
+              className="flex items-center gap-1"
+              title={`${b.name} Headhunter circuit breaker: ${b.state}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${isOpen ? 'bg-red-500' : 'bg-amber-400'}`} />
+              <span className={`font-semibold ${isOpen ? 'text-red-400' : 'text-amber-400'}`}>{b.label}</span>
+            </span>
+          );
+        })}
         {data.jenkins_view_unhealthy === true && (
           <span className="flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-orange-400 inline-block" />

@@ -69,11 +69,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 import dataclasses
+import inspect
 import json
 import logging
 import os
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -87,13 +90,18 @@ from .headhunter_gitlab import (
     GitLabPlatform,
     MAX_FAILED_LOG_CHARS,
     V1_ACTIONABLE,
+    _valid_positive_int,
 )
 from .headhunter_jira import HeadhunterJira
 from .headhunter_models import (
     HeadhunterCircuitBreaker,
+    HeadhunterOperationError,
+    PlatformBreakerStatus,
+    PlatformQueueItem,
+    PlatformSnapshot,
     VcsContext,
     VcsWorkItem,
-    _redact_error_text,
+    redact_error_text,
 )
 from .headhunter_port import VcsPlatformPort
 from ..utils.pii_redaction import redact_pii
@@ -106,6 +114,8 @@ from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int  # noq
 
 _SYSTEMIC_FAILURE_MIN_BATCH = 2
 _PLAN_MAX_CHARS = 65_536
+_DISMISSED_KEY_TTL_S = 300.0
+_PROMOTED_KEY_MAX_ENTRIES = 100
 _OPEN_FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*$")
 _RECOGNIZED_PLAN_KEYS = frozenset({"plan", "steps", "action", "summary", "verdict", "reply"})
 
@@ -249,7 +259,7 @@ def on_headhunter_done(task: asyncio.Task) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        safe_msg = _redact_error_text(redact_pii(str(exc)), max_len=400)
+        safe_msg = redact_error_text(redact_pii(str(exc)), max_len=400)
         logger.error(
             "Headhunter background task exited unexpectedly (%s): %s",
             type(exc).__name__,
@@ -295,6 +305,9 @@ class Headhunter:
         self._adapter = None
         self._close_signal = close_signal
         self._poll_wake_signal = asyncio.Event()
+        self._poll_lock = asyncio.Lock()
+        self._promoted_keys: dict[tuple, float] = {}
+        self._dismissed_keys: dict[tuple, float] = {}
         self._feedback_task: asyncio.Task | None = None
         self._feedback_inflight: set[str] = set()
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
@@ -323,6 +336,16 @@ class Headhunter:
             "gitlab": HeadhunterCircuitBreaker("gitlab"),
             "github": HeadhunterCircuitBreaker("github"),
         }
+
+    @asynccontextmanager
+    async def _with_poll_lock(self):
+        """Acquire _poll_lock around fast in-memory state/snapshot updates only."""
+        lock = getattr(self, "_poll_lock", None)
+        if lock is not None:
+            async with lock:
+                yield
+        else:
+            yield
 
     # =========================================================================
     # LLM Adapter (lazy-loaded, same pattern as Aligner._get_adapter)
@@ -647,16 +670,207 @@ class Headhunter:
     # =========================================================================
 
     @property
-    def pending_count(self) -> int:
-        """Pending items from last poll cycle (not yet converted to events)."""
+    def gitlab_pending_count(self) -> int:
+        """Pending + queued GitLab items from last poll cycle."""
+        return self._gitlab_pending + self._gitlab_queued
+
+    @property
+    def github_pending_count(self) -> int:
+        """Pending + queued GitHub PR, Issue, and review-feedback items from last poll cycle."""
         return (
-            self._gitlab_pending
-            + self._gitlab_queued
-            + self._github_pending
+            self._github_pending
             + self._github_issue_pending
             + self._github_queued
             + self._github_issue_queued
             + self._github_feedback_pending
+        )
+
+    @property
+    def gitlab_breaker_state(self) -> str:
+        """Current circuit breaker state ('closed'|'open'|'half_open') for GitLab."""
+        cb = self._breakers.get("gitlab")
+        return cb.state if cb is not None else "closed"
+
+    @property
+    def github_breaker_state(self) -> str:
+        """Current circuit breaker state ('closed'|'open'|'half_open') for GitHub."""
+        cb = self._breakers.get("github")
+        return cb.state if cb is not None else "closed"
+
+    @property
+    def pending_count(self) -> int:
+        """Pending items from last poll cycle (not yet converted to events)."""
+        return self.gitlab_pending_count + self.github_pending_count
+
+    @staticmethod
+    def _item_key(platform: str, item: Any) -> tuple | None:
+        """Normalize VcsWorkItem, PlatformQueueItem, or dict to canonical dedup/promote/dismiss tuple."""
+        if isinstance(item, VcsWorkItem):
+            if platform == "gitlab" or item.platform == "gitlab":
+                pid, iid = GitLabPlatform._extract_work_item_key(item)
+                if pid and iid:
+                    return ("gitlab", "mr", int(pid), int(iid))
+                raw_ref = str(item.project_ref or "").strip()
+                if raw_ref.isdigit() and item.item_id:
+                    return ("gitlab", "mr", int(raw_ref), int(item.item_id))
+                return None
+            ref = str(item.project_ref or "").strip().lower()
+            kind = str(item.item_kind or "pr")
+            return ("github", kind, ref, int(item.item_id)) if ref and item.item_id else None
+        if isinstance(item, PlatformQueueItem):
+            if platform == "gitlab" or item.platform == "gitlab":
+                pid = _valid_positive_int(item.raw.get("project_id") if isinstance(item.raw, dict) else None)
+                if pid and item.item_id:
+                    return ("gitlab", "mr", int(pid), int(item.item_id))
+                return None
+            ref = str(item.project_ref or "").strip().lower()
+            kind = str(item.item_kind or "pr")
+            return ("github", kind, ref, int(item.item_id)) if ref and item.item_id else None
+        if isinstance(item, dict):
+            if platform == "gitlab":
+                pid, iid = GitLabPlatform._extract_work_item_key(item)
+                return ("gitlab", "mr", int(pid), int(iid)) if pid and iid else None
+            owner = str(item.get("owner") or "").strip()
+            repo = str(item.get("repo") or "").strip()
+            ref = f"{owner}/{repo}".lower() if owner and repo else str(item.get("project_ref") or "").strip().lower()
+            if not ref:
+                return None
+            if item.get("issue_number") is not None:
+                return ("github", "issue", ref, int(item["issue_number"]))
+            if item.get("number") is not None:
+                return ("github", "pr", ref, int(item["number"]))
+            if item.get("item_id") is not None:
+                kind = str(item.get("item_kind") or "pr")
+                return ("github", kind, ref, int(item["item_id"]))
+        return None
+
+    def _prune_dismissed_keys(self, now: float | None = None) -> dict[tuple, float]:
+        dismissed = getattr(self, "_dismissed_keys", None)
+        if not isinstance(dismissed, dict):
+            dismissed = {}
+            self._dismissed_keys = dismissed
+        cur = time.monotonic() if now is None else now
+        for k in [key for key, exp in dismissed.items() if exp <= cur]:
+            dismissed.pop(k, None)
+        return dismissed
+
+    def _record_dismissed_key(self, key: tuple | None, ttl_s: float = _DISMISSED_KEY_TTL_S) -> None:
+        if key is None:
+            return
+        now = time.monotonic()
+        dismissed = self._prune_dismissed_keys(now)
+        dismissed[key] = now + ttl_s
+
+    def _is_dismissed(self, platform: str, item: Any) -> bool:
+        dismissed = self._prune_dismissed_keys()
+        if not dismissed:
+            return False
+        key = self._item_key(platform, item)
+        return key is not None and key in dismissed
+
+    def _consume_promoted_key(self, platform: str, item: Any) -> None:
+        promoted = getattr(self, "_promoted_keys", None)
+        if not isinstance(promoted, dict) or not promoted:
+            return
+        key = self._item_key(platform, item)
+        if key is not None:
+            promoted.pop(key, None)
+
+    def request_promote(
+        self,
+        platform: str,
+        *,
+        project_id: int | None = None,
+        owner: str | None = None,
+        repo: str | None = None,
+        item_number: int,
+        is_issue: bool = False,
+    ) -> None:
+        """Register an operator promotion priority override for the next poll cycle."""
+        promoted = getattr(self, "_promoted_keys", None)
+        if not isinstance(promoted, dict):
+            promoted = {}
+            self._promoted_keys = promoted
+        key: tuple | None = None
+        if platform == "gitlab" and project_id is not None:
+            key = ("gitlab", "mr", int(project_id), int(item_number))
+        elif platform == "github" and owner and repo:
+            kind = "issue" if is_issue else "pr"
+            key = ("github", kind, f"{owner}/{repo}".lower(), int(item_number))
+        if key is None:
+            return
+        if key not in promoted and len(promoted) >= _PROMOTED_KEY_MAX_ENTRIES:
+            promoted.pop(next(iter(promoted)), None)
+        promoted.pop(key, None)
+        promoted[key] = time.monotonic()
+
+    def _prioritize_promoted_items(self, platform: str, items: list[Any]) -> list[Any]:
+        """Reorder items so operator-promoted keys run first (still gated by safety/WIP checks)."""
+        promoted_keys = getattr(self, "_promoted_keys", None)
+        if not promoted_keys or not items:
+            return items
+        front: list[Any] = []
+        rest: list[Any] = []
+        for it in items:
+            key = self._item_key(platform, it)
+            if key is not None and key in promoted_keys:
+                front.append(it)
+            else:
+                rest.append(it)
+        return front + rest
+
+    @staticmethod
+    def _redact_snapshot_err(raw_err: str | None) -> str | None:
+        if not raw_err:
+            return None
+        return redact_error_text(redact_pii(str(raw_err)), max_len=200)
+
+    async def _persist_platform_snapshot(
+        self,
+        platform: str,
+        *,
+        partial_error: str | None = None,
+    ) -> None:
+        """Persist redacted per-platform pending/queued snapshot & breaker telemetry to Redis."""
+        if not hasattr(self.blackboard, "save_headhunter_snapshot"):
+            return
+        async with self._with_poll_lock():
+            adapter = self._gitlab if platform == "gitlab" else self._github
+            raw_snap = adapter.get_platform_snapshot()
+            if not isinstance(getattr(raw_snap, "platform", None), str):
+                return
+            breaker_obj = self._breakers.get(platform)
+            breaker_status = breaker_obj.to_status() if breaker_obj is not None else raw_snap.breaker
+
+            err_source = partial_error if partial_error is not None else raw_snap.partial_error
+            redacted_partial = self._redact_snapshot_err(err_source)
+            redacted_breaker_err = self._redact_snapshot_err(breaker_status.last_error)
+
+            redacted_breaker = PlatformBreakerStatus(
+                state=breaker_status.state,
+                consecutive_failures=breaker_status.consecutive_failures,
+                next_retry_at=breaker_status.next_retry_at,
+                last_error=redacted_breaker_err,
+            )
+            filtered_items = [
+                it for it in raw_snap.items if not self._is_dismissed(platform, it)
+            ]
+            queued_count = sum(1 for it in filtered_items if getattr(it, "status", None) == "queued")
+            snapshot = PlatformSnapshot(
+                platform=raw_snap.platform,
+                enabled=raw_snap.enabled,
+                pending_count=len(filtered_items),
+                queued_count=queued_count,
+                last_poll_at=raw_snap.last_poll_at,
+                partial_error=redacted_partial,
+                breaker=redacted_breaker,
+                items=filtered_items,
+            )
+            ttl_seconds = max(60, 3 * int(self._poll_interval))
+        await self.blackboard.save_headhunter_snapshot(
+            platform,
+            dataclasses.asdict(snapshot),
+            ttl_seconds=ttl_seconds,
         )
 
     def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
@@ -718,32 +932,45 @@ class Headhunter:
         cb = self._breakers[key]
         if not enabled:
             return
+        cycle_err: str | None = None
         if not cb.should_attempt():
             if on_breaker_open is not None:
                 await on_breaker_open()
-            return
-        try:
-            await poll_fn()
-            cb.record_success()
-        except Exception as e:
-            if cb.is_auth_exempt(e):
-                status_code = self._extract_auth_status(e)
-                logger.error(
-                    f"Headhunter {label} auth error ({status_code}) — "
-                    "not counting toward circuit breaker"
-                )
-            else:
-                safe_err = _redact_error_text(redact_pii(str(e)), max_len=400)
-                opened = cb.record_failure(safe_err)
-                logger.error(
-                    f"Headhunter {label} poll failed "
-                    f"({cb.consecutive_failures}/{cb.max_failures}): {safe_err}"
-                )
-                if opened:
-                    logger.critical(
-                        f"Headhunter {label} circuit breaker OPEN "
-                        f"(next_retry_at={cb.next_retry_at})"
+            cycle_err = cb.last_error
+        else:
+            try:
+                await poll_fn()
+                cb.record_success()
+            except Exception as e:
+                if cb.is_auth_exempt(e):
+                    status_code = self._extract_auth_status(e)
+                    cycle_err = f"HTTP {status_code} auth error"
+                    logger.error(
+                        f"Headhunter {label} auth error ({status_code}) — "
+                        "not counting toward circuit breaker"
                     )
+                else:
+                    safe_err = redact_error_text(redact_pii(str(e)), max_len=400)
+                    cycle_err = safe_err
+                    opened = cb.record_failure(safe_err)
+                    logger.error(
+                        f"Headhunter {label} poll failed "
+                        f"({cb.consecutive_failures}/{cb.max_failures}): {safe_err}"
+                    )
+                    if opened:
+                        logger.critical(
+                            f"Headhunter {label} circuit breaker OPEN "
+                            f"(next_retry_at={cb.next_retry_at})"
+                        )
+        try:
+            await self._persist_platform_snapshot(key, partial_error=cycle_err)
+        except Exception as snap_err:
+            logger.debug(
+                "Headhunter %s snapshot persistence failed (non-fatal) (%s): %s",
+                label,
+                type(snap_err).__name__,
+                self._redact_snapshot_err(str(snap_err)) or type(snap_err).__name__,
+            )
 
     async def run(self) -> None:
         """Main loop: poll -> analyze -> create events. Per-head circuit breaker."""
@@ -858,6 +1085,7 @@ class Headhunter:
         phase_prefix: str = "",
         queue_fn: Callable[[Any, int], Awaitable[Any]] | None = None,
         on_queue_update: Callable[[list[Any]], None] | None = None,
+        on_phase_b_created: Callable[[Any], Any] | None = None,
         gate_closed_initial: bool = False,
     ) -> tuple[list[Any], int]:
         """Unified Phase A (promote queued FIFO) + Phase B (process new / queue on gate close).
@@ -866,6 +1094,8 @@ class Headhunter:
         via _raise_if_systemic_failure(). Invokes on_queue_update BEFORE raising so pending/queue
         observability reflects reality even across systemic outages.
         """
+        plat_attr = getattr(platform, "platform_name", None)
+        plat_key = plat_attr if isinstance(plat_attr, str) else platform_label.lower()
         si = "" if gate_closed_initial else platform.load_triage_instruction()
         remaining_queued = list(queued_items)
 
@@ -875,6 +1105,9 @@ class Headhunter:
         errors_a: list[BaseException] = []
         if not gate_closed_initial:
             for item in queued_items:
+                if self._is_dismissed(plat_key, item):
+                    remaining_queued = [q for q in remaining_queued if q is not item]
+                    continue
                 if not await self.check_flow_gate():
                     break
                 attempted_a += 1
@@ -886,7 +1119,11 @@ class Headhunter:
                         remaining_queued = [q for q in remaining_queued if q is not item]
                         continue
                     plan_text = await self.analyze_and_plan(context, si)
+                    if self._is_dismissed(plat_key, item):
+                        remaining_queued = [q for q in remaining_queued if q is not item]
+                        continue
                     await platform.create_platform_event(item, plan_text, context)
+                    self._consume_promoted_key(plat_key, item)
                     # Remove by identity, not position -- a prior item may have failed and been skipped.
                     remaining_queued = [q for q in remaining_queued if q is not item]
                 except Exception as e:
@@ -913,11 +1150,15 @@ class Headhunter:
         failed_b = 0
         errors_b: list[BaseException] = []
         for item in new_items:
+            if self._is_dismissed(plat_key, item):
+                continue
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 if queue_fn is None:
                     logger.info(f"Headhunter flow gate closed mid-cycle ({platform_label}) -- stopping")
                     break
+                if self._is_dismissed(plat_key, item):
+                    continue
                 position = len(remaining_queued) + 1
                 try:
                     queued_ok = await queue_fn(item, position)
@@ -950,7 +1191,14 @@ class Headhunter:
                 if context is None:
                     continue
                 plan_text = await self.analyze_and_plan(context, si)
+                if self._is_dismissed(plat_key, item):
+                    continue
                 await platform.create_platform_event(item, plan_text, context)
+                self._consume_promoted_key(plat_key, item)
+                if on_phase_b_created is not None:
+                    cb_res = on_phase_b_created(item)
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
             except Exception as e:
                 failed_b += 1
                 errors_b.append(e)
@@ -974,18 +1222,27 @@ class Headhunter:
         await self._run_gitlab_wakeup()
 
         # Always poll regardless of gate state so items queue in Redis FIFO behind closed gate
-        todos = await self._gitlab.poll_work_items()
+        raw_todos = await self._gitlab.poll_work_items()
+        todos = [t for t in raw_todos if not self._is_dismissed("gitlab", t)]
         is_q = lambda t: (isinstance(t, dict) and (t.get("_queued") or t.get("queued"))) or getattr(t, "queued", False)
-        queued_items = [t for t in todos if is_q(t)]
-        new_items = [t for t in todos if not is_q(t)]
-        self._gitlab_pending = len(new_items)
+        queued_items = self._prioritize_promoted_items("gitlab", [t for t in todos if is_q(t)])
+        new_items = self._prioritize_promoted_items("gitlab", [t for t in todos if not is_q(t)])
+
+        async with self._with_poll_lock():
+            self._gitlab_pending = len(new_items)
+            self._gitlab_queued = len(queued_items)
 
         def _sync_gitlab_queued(remaining: list[Any]) -> None:
             self._gitlab_queued = len(remaining)
 
+        async def _on_gl_phase_b_created(_item: Any) -> None:
+            async with self._with_poll_lock():
+                self._gitlab_pending = max(0, self._gitlab_pending - 1)
+
         gate_open = await self.check_flow_gate()
         if not todos:
-            self._gitlab_queued = 0
+            async with self._with_poll_lock():
+                self._gitlab_queued = 0
             logger.debug("Headhunter GitLab: no actionable items")
             return
 
@@ -1000,17 +1257,18 @@ class Headhunter:
             platform_label="GitLab",
             queue_fn=self._gitlab.queue_item,
             on_queue_update=_sync_gitlab_queued,
+            on_phase_b_created=_on_gl_phase_b_created,
             gate_closed_initial=not gate_open,
         )
-        self._gitlab_pending = max(0, self._gitlab_pending - newly_queued)
+        async with self._with_poll_lock():
+            self._gitlab_pending = max(0, self._gitlab_pending - newly_queued)
 
     async def _github_poll_and_process(self) -> None:
         """Poll GitHub PRs (Phase A/B), active HEAD drift, Issues (Phase C), and review feedback (Phase D)."""
-        # Reset queued cache at top of cycle
-        self._github._last_queued_prs = []
-
-        # Always poll regardless of gate state — UI needs queued count even when gate is closed
-        prs = await self._github.poll_work_items()
+        # Always poll regardless of gate state — UI needs queued count even when gate is closed.
+        # Do NOT clear _last_queued_prs until poll_work_items() succeeds cleanly.
+        raw_prs = await self._github.poll_work_items()
+        prs = [p for p in raw_prs if not self._is_dismissed("github", p)]
 
         # Unconditional active PR HEAD drift clearing (independent of flow gate & Phase D)
         if hasattr(self._github, "check_active_pr_head_drift"):
@@ -1018,16 +1276,27 @@ class Headhunter:
                 await self._github.check_active_pr_head_drift()
             except Exception as e:
                 logger.warning(f"GitHub active PR HEAD drift check failed (non-fatal): {e}")
-        queued_items = sorted(
-            [p for p in prs if p.get("queued")],
-            key=lambda x: x.get("created_at", ""),
+        queued_items = self._prioritize_promoted_items(
+            "github",
+            sorted(
+                [p for p in prs if p.get("queued")],
+                key=lambda x: x.get("created_at", ""),
+            ),
         )
-        new_items = [p for p in prs if not p.get("queued")]
-        self._github_pending = len(new_items)
+        new_items = self._prioritize_promoted_items("github", [p for p in prs if not p.get("queued")])
+        async with self._with_poll_lock():
+            self._github._last_queued_prs = list(queued_items)
+            self._github_queued = len(queued_items)
+            self._github_pending = len(new_items)
+            self._github._last_pending_prs = list(new_items)
 
         def _sync_github_queued(remaining: list[Any]) -> None:
             self._github._last_queued_prs = remaining
             self._github_queued = len(remaining)
+
+        async def _on_gh_phase_b_created(_item: Any) -> None:
+            async with self._with_poll_lock():
+                self._github_pending = max(0, self._github_pending - 1)
 
         gate_open = await self.check_flow_gate()
         if not gate_open:
@@ -1042,11 +1311,13 @@ class Headhunter:
             phase_prefix="PR ",
             queue_fn=self._github.queue_item,
             on_queue_update=_sync_github_queued,
+            on_phase_b_created=_on_gh_phase_b_created,
             gate_closed_initial=not gate_open,
         )
 
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
-        self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
+        async with self._with_poll_lock():
+            self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
 
         if gate_open and not queued_items and not new_items:
             logger.debug("Headhunter GitHub: no actionable PRs")
@@ -1101,21 +1372,35 @@ class Headhunter:
 
     async def _github_poll_issues(self) -> None:
         """Poll GitHub Issues (darwin-work), queue/promote FIFO, and expose queued cache."""
-        self._github._last_queued_issues = []
-
         prev_pending = self._github_issue_pending
         try:
-            issues = await self._github.poll_issues_all_installations()
+            raw_issues = await self._github.poll_issues_all_installations()
         except Exception as e:
-            logger.warning(f"GitHub issue poll failed (preserving last count={prev_pending}): {e}")
+            logger.warning(
+                "GitHub issue poll failed (preserving last count=%s, %s): %s",
+                prev_pending,
+                type(e).__name__,
+                self._redact_snapshot_err(str(e)) or type(e).__name__,
+            )
             return
 
-        queued_items = sorted(
-            [i for i in issues if self._github._queued_label in i.get("labels", [])],
-            key=lambda x: x.get("created_at", ""),
+        issues = [i for i in raw_issues if not self._is_dismissed("github", i)]
+        queued_items = self._prioritize_promoted_items(
+            "github",
+            sorted(
+                [i for i in issues if self._github._queued_label in i.get("labels", [])],
+                key=lambda x: x.get("created_at", ""),
+            ),
         )
-        new_items = [i for i in issues if self._github._queued_label not in i.get("labels", [])]
-        self._github_issue_pending = len(new_items)
+        new_items = self._prioritize_promoted_items(
+            "github",
+            [i for i in issues if self._github._queued_label not in i.get("labels", [])],
+        )
+        async with self._with_poll_lock():
+            self._github._last_queued_issues = list(queued_items)
+            self._github_issue_queued = len(queued_items)
+            self._github_issue_pending = len(new_items)
+            self._github._last_pending_issues = list(new_items)
 
         def _iref(issue: dict) -> str:
             return f"{issue.get('owner')}/{issue.get('repo')}#{issue.get('issue_number')}"
@@ -1135,26 +1420,36 @@ class Headhunter:
             logger.debug("Headhunter flow gate closed -- queuing new issues, observing queued state")
             newly_queued: list[dict] = []
             for issue in new_items:
+                if self._is_dismissed("github", issue):
+                    continue
                 if await _try_queue_issue(issue, len(queued_items) + len(newly_queued) + 1) == "ok":
                     newly_queued.append({**issue, "queued": True})
-            self._github._last_queued_issues = queued_items + newly_queued
-            self._github_issue_queued = len(self._github._last_queued_issues)
-            self._github_issue_pending = max(0, self._github_issue_pending - len(newly_queued))
+            async with self._with_poll_lock():
+                self._github._last_queued_issues = queued_items + newly_queued
+                self._github_issue_queued = len(self._github._last_queued_issues)
+                self._github_issue_pending = max(0, self._github_issue_pending - len(newly_queued))
             return
 
         if issues:
             logger.info(f"Headhunter GitHub Issues: {len(issues)} actionable issue(s)")
 
-        async def _process_issue(issue: dict) -> None:
+        async def _process_issue(issue: dict) -> bool:
             si, warn = await self._github._load_issue_triage_instruction(issue.get("labels", []))
             plan = await self.analyze_and_plan(issue, si)
+            if self._is_dismissed("github", issue):
+                return False
             await self._github.create_issue_event({**issue, "_skill_size_warning": warn} if warn else issue, plan)
+            self._consume_promoted_key("github", issue)
+            return True
 
         # Phase A: Promote oldest queued Issues first (FIFO)
         remaining_queued = list(queued_items)
         attempted_a = 0
         failed_a = 0
         for issue in queued_items:
+            if self._is_dismissed("github", issue):
+                remaining_queued = [q for q in remaining_queued if q is not issue]
+                continue
             if not await self.check_flow_gate():
                 break
             attempted_a += 1
@@ -1164,8 +1459,9 @@ class Headhunter:
             except Exception as e:
                 failed_a += 1
                 logger.warning(f"GitHub queued issue failed for {_iref(issue)}: {e}")
-        self._github._last_queued_issues = remaining_queued
-        self._github_issue_queued = len(remaining_queued)
+        async with self._with_poll_lock():
+            self._github._last_queued_issues = remaining_queued
+            self._github_issue_queued = len(remaining_queued)
         _raise_if_systemic_failure("Issue Phase A (queued promote)", attempted_a, failed_a)
 
         # Phase B: Process new issues (darwin-work label, not yet queued).
@@ -1174,8 +1470,12 @@ class Headhunter:
         attempted_b = 0
         failed_b = 0
         for issue in new_items:
+            if self._is_dismissed("github", issue):
+                continue
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
+                if self._is_dismissed("github", issue):
+                    continue
                 res = await _try_queue_issue(issue, len(remaining_queued) + 1)
                 if res == "ok":
                     attempted_b += 1
@@ -1191,12 +1491,344 @@ class Headhunter:
             except Exception as e:
                 failed_b += 1
                 logger.warning(f"GitHub issue failed for {_iref(issue)}: {e}")
-        self._github._last_queued_issues = remaining_queued
-        self._github_issue_queued = len(remaining_queued)
+        async with self._with_poll_lock():
+            self._github._last_queued_issues = remaining_queued
+            self._github_issue_queued = len(remaining_queued)
         _raise_if_systemic_failure("Issue Phase B (new items)", attempted_b, failed_b)
 
         # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
-        self._github_issue_pending = max(0, self._github_issue_pending - newly_queued_in_phase_b)
+        async with self._with_poll_lock():
+            self._github_issue_pending = max(0, self._github_issue_pending - newly_queued_in_phase_b)
+
+    # =========================================================================
+    # Operator Controls (called from REST routes; never hold _poll_lock on I/O)
+    # =========================================================================
+
+    def trigger_poll(self) -> None:
+        """Wake the poll loop immediately (pure in-memory signal)."""
+        self._poll_wake_signal.set()
+
+    async def reset_breaker(self, platform: str) -> None:
+        """Manually close a platform circuit breaker, wake poll loop, and persist snapshot."""
+        async with self._with_poll_lock():
+            breaker = getattr(self, "_breakers", {}).get(platform)
+            if breaker is not None and hasattr(breaker, "reset"):
+                breaker.reset()
+            self._poll_wake_signal.set()
+        try:
+            await self._persist_platform_snapshot(platform)
+        except Exception as exc:
+            logger.warning(
+                "Headhunter %s snapshot persistence after breaker reset failed (non-fatal): %s",
+                platform,
+                type(exc).__name__,
+            )
+
+    def _sync_counters_from_adapter(self, platform: str) -> None:
+        """Sync Headhunter pending/queued gauges from adapter cache (call under _with_poll_lock)."""
+        if platform == "gitlab":
+            snap = self._gitlab.get_platform_snapshot()
+            q_cnt = getattr(snap, "queued_count", None)
+            p_cnt = getattr(snap, "pending_count", None)
+            if isinstance(q_cnt, int) and isinstance(p_cnt, int):
+                self._gitlab_queued = q_cnt
+                self._gitlab_pending = max(0, p_cnt - q_cnt)
+        else:
+            self._github_queued = len(getattr(self._github, "_last_queued_prs", []) or [])
+            self._github_pending = len(getattr(self._github, "_last_pending_prs", []) or [])
+            self._github_issue_queued = len(getattr(self._github, "_last_queued_issues", []) or [])
+            self._github_issue_pending = len(getattr(self._github, "_last_pending_issues", []) or [])
+
+    @staticmethod
+    def _resolve_gitlab_pid(req: Any, matched_raw: dict[str, Any]) -> int | None:
+        for candidate in (
+            matched_raw.get("project_id") if isinstance(matched_raw, dict) else None,
+            getattr(req, "project_id", None),
+        ):
+            pid = _valid_positive_int(candidate)
+            if pid is not None:
+                return pid
+        return None
+
+    @staticmethod
+    def _extract_github_owner_repo(req: Any, matched_item: Any) -> tuple[str, str]:
+        proj_ref = str(
+            (matched_item.get("project_ref") if isinstance(matched_item, dict) else getattr(matched_item, "project_ref", ""))
+            or ""
+        )
+        if "/" in proj_ref:
+            owner, repo = proj_ref.split("/", 1)
+            if owner and repo:
+                return owner, repo
+        return str(getattr(req, "owner", "") or ""), str(getattr(req, "repo", "") or "")
+
+    async def operate_item(
+        self,
+        action: str,
+        req: Any,
+        matched_item: Any,
+        matched_raw: dict[str, Any],
+        blackboard: Any,
+    ) -> dict[str, Any]:
+        """Execute promote/dismiss/requeue on a matched snapshot item without holding _poll_lock on I/O."""
+        platform = str(req.platform)
+        item_number = int(req.item_number)
+
+        if platform == "gitlab":
+            gl_pid = self._resolve_gitlab_pid(req, matched_raw)
+            if gl_pid is None:
+                raise HeadhunterOperationError(
+                    422,
+                    f"Unable to resolve numeric GitLab project_id for MR !{item_number}",
+                )
+            key: tuple = ("gitlab", "mr", int(gl_pid), item_number)
+
+            if action == "promote":
+                if hasattr(blackboard, "promote_gitlab_queue"):
+                    await blackboard.promote_gitlab_queue(gl_pid, item_number)
+                async with self._with_poll_lock():
+                    self.request_promote("gitlab", project_id=gl_pid, item_number=item_number)
+                    self._poll_wake_signal.set()
+                return {
+                    "status": "accepted",
+                    "action": "promote",
+                    "platform": "gitlab",
+                    "item_number": item_number,
+                }
+
+            if action == "dismiss":
+                todo_ids: list[int] = []
+                raw_sibs = matched_raw.get("_sibling_todo_ids") if isinstance(matched_raw, dict) else None
+                if isinstance(raw_sibs, list):
+                    for raw_tid in raw_sibs:
+                        tid = _valid_positive_int(raw_tid)
+                        if tid is not None and tid not in todo_ids:
+                            todo_ids.append(tid)
+                primary_tid = _valid_positive_int(
+                    matched_raw.get("todo_id") if isinstance(matched_raw, dict) else None
+                )
+                if primary_tid is not None and primary_tid not in todo_ids:
+                    todo_ids.append(primary_tid)
+
+                gl = getattr(self, "_gitlab", None)
+                if todo_ids and gl is not None and hasattr(gl, "dismiss_todo"):
+                    dismiss_arg: int | list[int] = todo_ids[0] if len(todo_ids) == 1 else todo_ids
+                    ok = await gl.dismiss_todo(dismiss_arg)
+                    if not ok:
+                        raise HeadhunterOperationError(
+                            502,
+                            f"Failed to dismiss GitLab todo(s) for MR !{item_number}",
+                        )
+                if hasattr(blackboard, "remove_gitlab_queue"):
+                    await blackboard.remove_gitlab_queue(gl_pid, item_number)
+                async with self._with_poll_lock():
+                    self._record_dismissed_key(key)
+                    if isinstance(getattr(self, "_promoted_keys", None), dict):
+                        self._promoted_keys.pop(key, None)
+                    if gl is not None and hasattr(gl, "remove_from_snapshot_cache"):
+                        gl.remove_from_snapshot_cache(gl_pid, item_number)
+                    self._sync_counters_from_adapter("gitlab")
+                await self._persist_platform_snapshot("gitlab")
+                return {
+                    "status": "dismissed",
+                    "action": "dismiss",
+                    "platform": "gitlab",
+                    "item_number": item_number,
+                }
+
+            # action == "requeue" (GitLab)
+            head_sha = str(
+                (matched_item.get("head_sha") if isinstance(matched_item, dict) else getattr(matched_item, "head_sha", ""))
+                or ""
+            )
+            proj_ref = str(
+                (matched_item.get("project_ref") if isinstance(matched_item, dict) else getattr(matched_item, "project_ref", ""))
+                or str(gl_pid)
+            )
+            title = str(
+                (matched_item.get("title") if isinstance(matched_item, dict) else getattr(matched_item, "title", ""))
+                or f"MR !{item_number}"
+            )
+            author = str(
+                (matched_item.get("author") if isinstance(matched_item, dict) else getattr(matched_item, "author", ""))
+                or ""
+            )
+            url = str(
+                (matched_item.get("url") if isinstance(matched_item, dict) else getattr(matched_item, "url", ""))
+                or ""
+            )
+            ci_status = str(
+                (matched_item.get("ci_status") if isinstance(matched_item, dict) else getattr(matched_item, "ci_status", ""))
+                or ""
+            )
+            created_at = str(
+                (matched_item.get("enqueued_at") if isinstance(matched_item, dict) else getattr(matched_item, "enqueued_at", ""))
+                or ""
+            )
+            raw_sibs = matched_raw.get("_sibling_todo_ids") if isinstance(matched_raw, dict) else None
+            sib_ids: list[int] = []
+            if isinstance(raw_sibs, list):
+                for raw_tid in raw_sibs:
+                    tid = _valid_positive_int(raw_tid)
+                    if tid is not None and tid not in sib_ids:
+                        sib_ids.append(tid)
+            primary_tid = _valid_positive_int(
+                matched_raw.get("todo_id") if isinstance(matched_raw, dict) else None
+            )
+            if primary_tid is not None and primary_tid not in sib_ids:
+                sib_ids.append(primary_tid)
+            action_name = str(
+                (matched_raw.get("action") if isinstance(matched_raw, dict) else None)
+                or "assigned"
+            )
+            mr_state = str(
+                (matched_raw.get("mr_state") if isinstance(matched_raw, dict) else None)
+                or "opened"
+            )
+            work_item_meta = {
+                "id": primary_tid,
+                "action_name": action_name,
+                "created_at": created_at,
+                "target_type": "MergeRequest",
+                "target_url": url,
+                "project": {"id": gl_pid, "path_with_namespace": proj_ref},
+                "target": {
+                    "iid": item_number,
+                    "title": title,
+                    "state": mr_state,
+                    "sha": head_sha,
+                    "diff_refs": {"head_sha": head_sha} if head_sha else {},
+                    "author": {"username": author} if author else {},
+                    "pipeline": {"status": ci_status} if ci_status else {},
+                },
+                "_sibling_todo_ids": sib_ids,
+            }
+            meta = {
+                "project_id": gl_pid,
+                "mr_iid": item_number,
+                "action_name": action_name,
+                "head_sha": head_sha,
+                "_sibling_todo_ids": sib_ids,
+                "work_item": work_item_meta,
+            }
+            already_queued = False
+            if hasattr(blackboard, "get_gitlab_queue_entry"):
+                existing_entry = await blackboard.get_gitlab_queue_entry(gl_pid, item_number)
+                already_queued = isinstance(existing_entry, dict)
+            else:
+                cur_status = (
+                    matched_item.get("status")
+                    if isinstance(matched_item, dict)
+                    else getattr(matched_item, "status", "")
+                )
+                already_queued = str(cur_status or "") == "queued"
+
+            if hasattr(blackboard, "enqueue_gitlab_mr"):
+                enqueued = await blackboard.enqueue_gitlab_mr(gl_pid, item_number, meta)
+                if enqueued is False and not already_queued:
+                    raise HeadhunterOperationError(
+                        409,
+                        f"GitLab queue is at capacity; cannot requeue MR !{item_number}",
+                    )
+            if hasattr(blackboard, "delete_gitlab_mr_sha"):
+                await blackboard.delete_gitlab_mr_sha(gl_pid, item_number)
+
+            gl = getattr(self, "_gitlab", None)
+            async with self._with_poll_lock():
+                self._prune_dismissed_keys().pop(key, None)
+                if gl is not None and hasattr(gl, "mark_snapshot_item_queued"):
+                    gl.mark_snapshot_item_queued(gl_pid, item_number)
+                self._sync_counters_from_adapter("gitlab")
+                self._poll_wake_signal.set()
+            await self._persist_platform_snapshot("gitlab")
+            return {
+                "status": "requeued",
+                "action": "requeue",
+                "platform": "gitlab",
+                "item_number": item_number,
+            }
+
+        # GitHub actions
+        gh_owner, gh_repo = self._extract_github_owner_repo(req, matched_item)
+        inst_id = str(matched_raw.get("installation_id") or "") if isinstance(matched_raw, dict) else ""
+        kind = "issue" if req.is_issue else "pr"
+        key = ("github", kind, f"{gh_owner}/{gh_repo}".lower(), item_number)
+
+        if action == "promote":
+            async with self._with_poll_lock():
+                self.request_promote(
+                    "github",
+                    owner=gh_owner,
+                    repo=gh_repo,
+                    item_number=item_number,
+                    is_issue=req.is_issue,
+                )
+                self._poll_wake_signal.set()
+            return {
+                "status": "accepted",
+                "action": "promote",
+                "platform": "github",
+                "item_number": item_number,
+            }
+
+        gh = getattr(self, "_github", None)
+        if action == "dismiss":
+            if gh is not None and hasattr(gh, "dismiss_item"):
+                ok, err_detail = await gh.dismiss_item(
+                    inst_id, gh_owner, gh_repo, item_number, is_issue=req.is_issue,
+                )
+                if not ok:
+                    raise HeadhunterOperationError(
+                        502,
+                        err_detail or f"Failed to dismiss GitHub {kind} #{item_number}",
+                    )
+            async with self._with_poll_lock():
+                self._record_dismissed_key(key)
+                if isinstance(getattr(self, "_promoted_keys", None), dict):
+                    self._promoted_keys.pop(key, None)
+                if gh is not None and hasattr(gh, "remove_cached_item"):
+                    gh.remove_cached_item(gh_owner, gh_repo, item_number, is_issue=req.is_issue)
+                self._sync_counters_from_adapter("github")
+            await self._persist_platform_snapshot("github")
+            return {
+                "status": "dismissed",
+                "action": "dismiss",
+                "platform": "github",
+                "item_number": item_number,
+            }
+
+        # action == "requeue" (GitHub)
+        if gh is not None and hasattr(gh, "requeue_item"):
+            ok, err_detail = await gh.requeue_item(
+                inst_id, gh_owner, gh_repo, item_number, is_issue=req.is_issue,
+            )
+            if not ok:
+                raise HeadhunterOperationError(
+                    502,
+                    err_detail or f"Failed to requeue GitHub {kind} #{item_number}",
+                )
+        if req.is_issue:
+            if hasattr(blackboard, "clear_github_issue_processed"):
+                await blackboard.clear_github_issue_processed(gh_owner, gh_repo, item_number)
+        else:
+            if hasattr(blackboard, "delete_github_pr_sha"):
+                await blackboard.delete_github_pr_sha(gh_owner, gh_repo, item_number)
+
+        async with self._with_poll_lock():
+            self._prune_dismissed_keys().pop(key, None)
+            if gh is not None and hasattr(gh, "mark_cached_item_queued"):
+                gh.mark_cached_item_queued(
+                    gh_owner, gh_repo, item_number, matched_item, is_issue=req.is_issue,
+                )
+            self._sync_counters_from_adapter("github")
+            self._poll_wake_signal.set()
+        await self._persist_platform_snapshot("github")
+        return {
+            "status": "requeued",
+            "action": "requeue",
+            "platform": "github",
+            "item_number": item_number,
+        }
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)

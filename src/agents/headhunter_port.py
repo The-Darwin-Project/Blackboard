@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .headhunter_models import VcsContext, VcsWorkItem
+from .headhunter_models import PlatformSnapshot, VcsContext, VcsWorkItem
 
 if TYPE_CHECKING:
     from ..models import EventDocument
@@ -114,6 +114,10 @@ class VcsPlatformPort(Protocol):
 
     async def get_queued_items(self) -> Sequence[VcsWorkItem | dict[str, Any]]:
         """Return currently queued work items in FIFO order."""
+        ...
+
+    def get_platform_snapshot(self) -> PlatformSnapshot:
+        """Return an immutable-style point-in-time snapshot for Redis persistence."""
         ...
 
     async def close(self) -> None:

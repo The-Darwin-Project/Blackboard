@@ -140,16 +140,22 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | Variable | Description | Default |
 | --- | --- | --- |
 | `HEADHUNTER_ENABLED` | Enable GitLab MR lifecycle agent | `false` |
-| `HEADHUNTER_POLL_INTERVAL` | Todo poll interval (seconds) | (see code) |
+| `HEADHUNTER_POLL_INTERVAL` | Poll interval in seconds (shared by GitLab and GitHub) | `300` |
 | `GITLAB_HOST` | GitLab instance hostname | (required if enabled) |
+| `GITLAB_BOT_USERNAME` | Bot username matched in GitLab `@mention` scanning | `darwin-bot` |
+| `GITLAB_SSL_VERIFY` | Optional path to custom CA bundle file (setting `false`/`0`/`no` fails Helm render and runtime startup) | (empty) |
+| `HEADHUNTER_ALLOWED_AUTHORS` | Comma-separated additional GitLab usernames allowed for `@mention` instructions | (empty) |
+| `HEADHUNTER_DESCRIPTION_CAP` | Max characters for MR/PR descriptions before truncation | `100000` |
+| `HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES` | Max entries retained in Redis FIFO `darwin:gitlab:queue` | `500` |
+| `HEADHUNTER_GITLAB_SHA_MAX_ENTRIES` | Max tracked MRs in `darwin:gitlab:mr_sha` sweep | `500` |
+| `DARWIN_CORTEX_URL` | Shared Darwin UI base URL for MR/PR tracking links (`headhunter.cortexUrl`, fallback `headhunter.github.cortexUrl`) | (empty) |
 | `LLM_MODEL_HEADHUNTER` | Headhunter model | `gemini-4-argon` |
 
 ### Headhunter (GitHub)
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `HEADHUNTER_GITHUB_ENABLED` | Enable GitHub PR polling | `false` |
-| `HEADHUNTER_GITHUB_POLL_INTERVAL` | PR poll interval (seconds) | (see code) |
+| `HEADHUNTER_GITHUB_ENABLED` | Enable GitHub PR/Issue polling | `false` |
 | `HEADHUNTER_GITHUB_REPOS` | Comma-separated `owner/repo` list (empty = auto-discover from installation) | (empty) |
 | `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Phase D review-response action allowlist: `review_feedback`, `mention` | `review_feedback,mention` |
 | `HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED` | Respond to PR reviews / `@darwin-project-ai` mentions from trusted humans | `false` |
@@ -157,15 +163,15 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS` | CI/robot logins that never trigger (even if COLLABORATOR) | `openshift-ci-robot,openshift-merge-robot` |
 | `HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC` | Quiet period before a feedback batch becomes an event | `120` |
 | `HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS` | Auto-response rounds per PR before asking for human direction | `5` |
-| `HEADHUNTER_GITHUB_LABEL` | Label-based trigger (alternative to review requests) | `darwin-review` |
+| `HEADHUNTER_GITHUB_LABEL` | Label-based trigger on PRs | `darwin-review` |
 | `GITHUB_APP_ID` | GitHub App ID (via K8s Secret) | (required if enabled) |
 | `GITHUB_INSTALLATION_ID` | GitHub App Installation ID (via K8s Secret) | (required if enabled) |
 | `GITHUB_APP_SLUG` | GitHub App slug for bot detection | `darwin-project-ai` |
-| `HEADHUNTER_MAINTAINERS` | Comma-separated maintainer usernames for notifications | (empty) |
+| `HEADHUNTER_MAINTAINERS` | Comma-separated maintainer emails for notifications | (empty) |
 
-**Notes:** if you override `headhunter.github.triggerReasons`, it must include `review_feedback,mention` whenever `headhunter.github.reviewResponse.enabled=true`, otherwise the corresponding triggers stay off (`review_requested` label flow is never gated). The same trust filter (`TRUSTED_ASSOCIATIONS`, bot/`IGNORE_LOGINS` exclusion) is applied to the PR `recent_comments` that `fetch_context` passes to triage, for every PR event, not only review-response events. Reviews and inline comments are fetched unfiltered each cycle (a submitted pending review can carry an older id), with at-least-once delivery deduped by per-item Redis keys (7d TTL); items older than 6 days are never considered. Each candidate author is additionally verified via `GET /repos/{owner}/{repo}/collaborators/{login}/permission` (must be `write`/`maintain`/`admin`; results cached in-memory for 10 min, so the API cost is at most one call per distinct author per repo per 10 min on top of the ≤3 list GETs per PR per cycle). Only a definitive answer decides: HTTP 200 with a non-write permission, or HTTP 404 (not a collaborator), drops the item (marked seen). Any other outcome (401/403 incl. GitHub rate limits or a missing App permission, 429, 5xx, timeouts, connection errors) leaves the feedback unseen and it is retried next cycle -- grant the GitHub App `Metadata: read` + repository permission read access so the lookup can succeed. Helm: `headhunter.github.reviewResponse.*` keys that are unset/`null` are not rendered at all (the Python defaults, including the CI-robot `IGNORE_LOGINS`, apply); numeric `0` is rendered as `"0"` and an explicit `""` is respected.
+**Notes:** if you override `headhunter.github.triggerReasons`, it must include `review_feedback,mention` whenever `headhunter.github.reviewResponse.enabled=true`, otherwise the corresponding triggers stay off (label-based `darwin-review` PR polling is always active when GitHub polling is enabled). The same trust filter (`TRUSTED_ASSOCIATIONS`, bot/`IGNORE_LOGINS` exclusion) is applied to the PR `recent_comments` that `fetch_context` passes to triage, for every PR event, not only review-response events. Reviews and inline comments are fetched unfiltered each cycle (a submitted pending review can carry an older id), with at-least-once delivery deduped by per-item Redis keys (7d TTL); items older than 6 days are never considered. Each candidate author is additionally verified via `GET /repos/{owner}/{repo}/collaborators/{login}/permission` (must be `write`/`maintain`/`admin`; results cached in-memory for 10 min, so the API cost is at most one call per distinct author per repo per 10 min on top of the ≤3 list GETs per PR per cycle). Only a definitive answer decides: HTTP 200 with a non-write permission, or HTTP 404 (not a collaborator), drops the item (marked seen). Any other outcome (401/403 incl. GitHub rate limits or a missing App permission, 429, 5xx, timeouts, connection errors) leaves the feedback unseen and it is retried next cycle -- grant the GitHub App `Metadata: read` + repository permission read access so the lookup can succeed. Helm: `headhunter.github.reviewResponse.*` keys that are unset/`null` are not rendered at all (the Python defaults, including the CI-robot `IGNORE_LOGINS`, apply); numeric `0` is rendered as `"0"` and an explicit `""` is respected.
 
-Helm block: `headhunter.github.enabled`, `headhunter.github.pollInterval`, `headhunter.github.repos`, `headhunter.github.triggerReasons`, `headhunter.github.reviewResponse.{enabled,trustedAssociations,ignoreLogins,debounceSec,maxRounds}`. GitHub App credentials via `github.existingSecret`.
+Helm block: `headhunter.github.enabled`, `headhunter.github.repos`, `headhunter.github.triggerReasons`, `headhunter.github.appSlug`, `headhunter.github.reviewResponse.{enabled,trustedAssociations,ignoreLogins,debounceSec,maxRounds}`. GitHub App credentials via `github.existingSecret`.
 
 ### Headhunter Jira (Jira Missions)
 

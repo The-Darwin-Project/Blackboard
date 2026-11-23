@@ -232,8 +232,18 @@ export interface EventEvidence {
   argocd_app?: string | null;
   ci_context?: CiContext;
   project?: string | null;
-  gitlab_context?: { project?: string | null };
+  gitlab_context?: { project?: string | null; project_path?: string | null };
   github_context?: { repo?: string | null };
+  github_issue_context?: {
+    owner?: string;
+    repo?: string;
+    issue_number?: number;
+    title?: string;
+    author?: string;
+    html_url?: string;
+    created_at?: string;
+    [key: string]: unknown;
+  };
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
@@ -262,6 +272,7 @@ export interface ActiveEvent {
   token_total?: number;
   created_by_email?: string | null;
   current_agent?: string | null;
+  approval_requested_sha?: string | null;
 }
 
 // =============================================================================
@@ -376,6 +387,10 @@ export interface FlowMetrics {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  headhunter_gitlab_pending?: number;
+  headhunter_github_pending?: number;
+  headhunter_gitlab_breaker?: 'closed' | 'open' | 'half_open' | string;
+  headhunter_github_breaker?: 'closed' | 'open' | 'half_open' | string;
   aligner_pending: number;
   jenkins_pending: number;
   jenkins_breaker_open: boolean;
@@ -399,6 +414,10 @@ export interface FlowSnapshot {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  headhunter_gitlab_pending?: number;
+  headhunter_github_pending?: number;
+  headhunter_gitlab_breaker?: 'closed' | 'open' | 'half_open' | string;
+  headhunter_github_breaker?: 'closed' | 'open' | 'half_open' | string;
   aligner_pending: number;
   jenkins_pending: number;
   jenkins_breaker_open: boolean;

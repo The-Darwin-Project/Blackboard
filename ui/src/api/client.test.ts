@@ -1,6 +1,6 @@
 // BlackBoard/ui/src/api/client.test.ts
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, approveEvent } from './client';
+import { ApiError, approveEvent, headhunterItemAction } from './client';
 
 describe('api/client fetchApi & approveEvent (H9)', () => {
   afterEach(() => {
@@ -81,5 +81,114 @@ describe('api/client fetchApi & approveEvent (H9)', () => {
       detail: undefined,
       body: { detail: [{ msg: 'Field required' }] },
     });
+  });
+});
+
+describe('api/client headhunterItemAction (C1-1, C2-T1)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const mockJsonOk = (body: Record<string, unknown> = { ok: true, debounced: false }) =>
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+  it('sends project_id and strips project_path for GitLab MR', async () => {
+    const fetchSpy = mockJsonOk();
+
+    await headhunterItemAction('promote', {
+      platform: 'gitlab',
+      project_path: 'cnv/release-app',
+      project_id: 99,
+      item_number: 42,
+      is_issue: false,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/queue/headhunter/items/promote',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const sentBody = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(sentBody).toEqual({
+      platform: 'gitlab',
+      project_id: 99,
+      item_number: 42,
+      is_issue: false,
+    });
+    expect(sentBody).not.toHaveProperty('project_path');
+  });
+
+  it('falls back to project_path as project_id when project_id is omitted for GitLab MR and strips project_path', async () => {
+    const fetchSpy = mockJsonOk();
+
+    await headhunterItemAction('dismiss', {
+      platform: 'gitlab',
+      project_path: 'cnv/release-app',
+      item_number: 42,
+      is_issue: false,
+    });
+
+    const sentBody = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(sentBody).toEqual({
+      platform: 'gitlab',
+      project_id: 'cnv/release-app',
+      item_number: 42,
+      is_issue: false,
+    });
+    expect(sentBody).not.toHaveProperty('project_path');
+  });
+
+  it('derives owner and repo from project_path and strips project_path for GitHub PR', async () => {
+    const fetchSpy = mockJsonOk();
+
+    await headhunterItemAction('dismiss', {
+      platform: 'github',
+      project_path: 'org/app',
+      item_number: 45,
+      is_issue: false,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/queue/headhunter/items/dismiss',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const sentBody = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(sentBody).toEqual({
+      platform: 'github',
+      owner: 'org',
+      repo: 'app',
+      item_number: 45,
+      is_issue: false,
+    });
+    expect(sentBody).not.toHaveProperty('project_path');
+  });
+
+  it('derives owner and repo, preserves is_issue: true, and strips project_path for GitHub Issue', async () => {
+    const fetchSpy = mockJsonOk();
+
+    await headhunterItemAction('requeue', {
+      platform: 'github',
+      project_path: 'org/issue-repo',
+      item_number: 88,
+      is_issue: true,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/queue/headhunter/items/requeue',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const sentBody = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(sentBody).toEqual({
+      platform: 'github',
+      owner: 'org',
+      repo: 'issue-repo',
+      item_number: 88,
+      is_issue: true,
+    });
+    expect(sentBody).not.toHaveProperty('project_path');
   });
 });

@@ -3811,7 +3811,10 @@ class Brain:
             _inject_evidence_paths(self._skill_loader.find_paths_by_tag("kargo"), "kargo")
         if evidence and getattr(evidence, "gitlab_context", None):
             _inject_evidence_paths(self._skill_loader.find_paths_by_tag("gitlab"), "gitlab")
-        if evidence and getattr(evidence, "github_context", None):
+        if evidence and (
+            getattr(evidence, "github_context", None)
+            or getattr(evidence, "github_issue_context", None)
+        ):
             _inject_evidence_paths(self._skill_loader.find_paths_by_tag("github"), "github")
         if evidence and getattr(evidence, "ci_context", None):
             _inject_evidence_paths(self._skill_loader.find_paths_by_tag("ci_gating"), "ci_gating")
