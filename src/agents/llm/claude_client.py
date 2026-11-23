@@ -8,6 +8,7 @@
 # 6. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 7. [Pattern]: Structured contents map: model->assistant, functionCall->tool_use, functionResponse->tool_result.
 # 8. [Pattern]: tool_choice flows through _build_kwargs -> API kwargs. Only sent when tools are present.
+#    [Gotcha]: Claude 5.x rejects tool_choice type "tool"/"any" (400); _build_kwargs downgrades to {"type": "auto"}.
 # 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
 #    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
 #    cached_tokens = cache_read + cache_creation. total = all_input + output.
@@ -129,15 +130,25 @@ class ClaudeAdapter:
             "max_tokens": clamped_tokens,
             "messages": messages,
         }
+        is_claude_5 = any(pat in model_lower for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5"))
         # Claude 5.x models (Sonnet 5, Sonnet 5.5, Opus 5, Opus 5.5, etc.) deprecate temperature (returns 400)
-        if not any(pat in model_lower for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5")):
+        if not is_claude_5:
             kwargs["temperature"] = temperature
         if system_prompt:
             kwargs["system"] = system_prompt
         if tools is not None:
             kwargs["tools"] = self._convert_tools(tools)
             if tool_choice:
-                kwargs["tool_choice"] = tool_choice
+                # Claude 5.x rejects forced tool_choice ("tool"/"any") with 400 invalid_request_error
+                if is_claude_5 and isinstance(tool_choice, dict) and tool_choice.get("type") in ("tool", "any"):
+                    logger.warning(
+                        "Downgrading unsupported tool_choice=%s to {'type': 'auto'} for %s",
+                        tool_choice,
+                        self._model_name,
+                    )
+                    kwargs["tool_choice"] = {"type": "auto"}
+                else:
+                    kwargs["tool_choice"] = tool_choice
 
         return kwargs
 

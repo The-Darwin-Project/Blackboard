@@ -25,8 +25,8 @@
 #     [Gotcha]: has_reeval_signal() is wrapped in try/except for per-issue failure isolation -- one
 #     Jira API error must not abort the rest of the Phase 1 loop. Assumes single in-process daemon
 #     loop invocation -- no concurrent poll_and_process() calls for the same instance.
-# 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool), not text parsing.
-#     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
+# 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool) with tool_choice={"type": "auto"}
+#     (Claude 5.x rejects "tool"/"any"). _plan_args_to_yaml() converts structured args to YAML; _extract_yaml() kept as fallback.
 # 14. [Constraint]: Skill URL 10KB cap -- len(content) > 10240 → cache BUSINESS_ANALYST_SYSTEM_PROMPT
 #     + return None (caller falls back to BUSINESS_ANALYST_SYSTEM_PROMPT, symmetric with GitHub adapter).
 # 15. [Pattern]: Jira ADF descriptions/comments render via shared utils.adf.adf_to_markdown()
@@ -546,12 +546,13 @@ class HeadhunterJira:
         async for chunk in adapter.generate_stream(
             system_prompt=BRAIN_PLAN_SYSTEM_PROMPT,
             contents=(
-                f"Produce a Brain execution plan for this approved analysis.\n\n"
+                f"Produce a Brain execution plan for this approved analysis by calling the "
+                f"produce_execution_plan tool.\n\n"
                 f"Jira issue context:\n{jira_content}\n\n"
                 f"Approved validation plan:\n{analysis}"
             ),
             tools=[PLAN_TOOL_SCHEMA],
-            tool_choice={"type": "tool", "name": "produce_execution_plan"},
+            tool_choice={"type": "auto"},
         ):
             if chunk.text:
                 text_chunks.append(chunk.text)
@@ -764,6 +765,17 @@ class HeadhunterJira:
                 return comment.get("id", "")
         return None
 
+    def _find_bot_comment_text(self, issue: dict) -> str:
+        """Return rendered markdown body of the latest bot comment, or empty string."""
+        comments = issue.get("fields", {}).get("comment", {}).get("comments", [])
+        for comment in reversed(comments):
+            if comment.get("author", {}).get("accountId") == self._bot_account_id:
+                body = comment.get("body", "")
+                if isinstance(body, dict):
+                    return adf_to_markdown(body).strip()
+                return str(body).strip()
+        return ""
+
     # =========================================================================
     # Main Poll Cycle
     # =========================================================================
@@ -784,6 +796,9 @@ class HeadhunterJira:
                     cold_start_checks += 1
                     if bot_comment_id:
                         state = {"phase": "analyzed", "last_comment_id": bot_comment_id}
+                        bot_text = self._find_bot_comment_text(issue)
+                        if bot_text:
+                            state["analysis"] = bot_text
                         await self._set_issue_state(key, state)
                         logger.info(f"Jira cold-start: anchoring {key} to comment {bot_comment_id}")
                     else:
@@ -792,8 +807,11 @@ class HeadhunterJira:
                     # No bot comment found -- run fresh analysis
                     result = await self.analyze_and_comment(issue)
                     if result:
-                        comment_id, _analysis = result
-                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+                        comment_id, analysis = result
+                        await self._set_issue_state(
+                            key,
+                            {"phase": "analyzed", "last_comment_id": comment_id, "analysis": analysis},
+                        )
                     continue
 
             # Deliberately not `elif` off the `if state is None:` block above: cold-start
@@ -813,8 +831,11 @@ class HeadhunterJira:
                         logger.info(f"Jira reeval signal detected for {key} after comment {last_cid}")
                         result = await self.analyze_and_comment(issue)
                         if result:
-                            comment_id, _analysis = result
-                            await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+                            comment_id, analysis = result
+                            await self._set_issue_state(
+                                key,
+                                {"phase": "analyzed", "last_comment_id": comment_id, "analysis": analysis},
+                            )
                     else:
                         logger.debug(f"Jira reeval check for {key}: no signal (anchor={last_cid})")
 
@@ -839,7 +860,10 @@ class HeadhunterJira:
                 jira_content = format_jira_for_llm(issue)
                 analysis_text = state.get("analysis", "") if state else ""
                 if not analysis_text:
-                    analysis_text = await self._run_claude_analysis(jira_content)
+                    analysis_text = self._find_bot_comment_text(issue)
+                if not analysis_text:
+                    system_prompt = await self._resolve_system_prompt(issue)
+                    analysis_text = await self._run_claude_analysis(jira_content, system_prompt)
                 plan_yaml = await self._run_brain_plan(jira_content, analysis_text)
                 mission_label = self._resolve_mission_label(issue)
                 event_id = await self.create_jira_event(issue, plan_yaml, mission_label=mission_label)
