@@ -1,5 +1,7 @@
 // BlackBoard/ui/src/__tests__/sidebarMenus.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   agentMenuItems,
   eventMenuItems,
@@ -10,7 +12,7 @@ import {
   isGitHubTodo,
   isGitHubIssue,
 } from '../components/ops/sidebarMenus';
-import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
+import type { ActiveEvent, AgentRegistryEntry, KargoStageStatus } from '../api/types';
 import type { HeadhunterTodo } from '../api/client';
 
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
@@ -516,5 +518,251 @@ describe('kargoStageMenuItems', () => {
     const items = kargoStageMenuItems(stage, vi.fn(), true);
     const mrItem = items.find(i => i.id === 'open-mr');
     expect(mrItem).toBeDefined();
+  });
+});
+
+describe('eventMenuItems ActiveEvent approval_requested_sha parity (T-16)', () => {
+  it('Given an ActiveEvent with approval_requested_sha populated, When Approve Plan is clicked, Then WS approve includes expected_sha', () => {
+    const send = vi.fn();
+    const evt = {
+      id: 'evt-active-pin',
+      service: 'release-app',
+      status: 'waiting_approval',
+      source: 'headhunter',
+      reason: 'Approve fix',
+      turns: 3,
+      created: '2026-11-22T10:00:00Z',
+      evidence: { display_text: 'MR !12', source_type: 'headhunter', domain: 'complicated', severity: 'info' },
+      approval_requested_sha: 'cafebabe9876',
+    } as ActiveEvent & { approval_requested_sha: string };
+
+    const approveItem = eventMenuItems(evt, vi.fn(), send, true).find(i => i.id === 'approve');
+    expect(approveItem).toBeDefined();
+    approveItem?.onClick();
+    expect(send).toHaveBeenCalledWith({
+      type: 'approve',
+      event_id: 'evt-active-pin',
+      expected_sha: 'cafebabe9876',
+    });
+  });
+});
+
+describe('hhMenuItems operator controls (T-16)', () => {
+  it('Given a GitLab MR todo and operator handlers, When hhMenuItems builds context items, Then Promote/Dismiss/Requeue call corresponding handlers with platform, project_path/repo, item_number, is_issue', () => {
+    const handlers = {
+      promote: vi.fn(),
+      dismiss: vi.fn(),
+      requeue: vi.fn(),
+    };
+    const glTodo = {
+      todo_id: 10,
+      platform: 'gitlab',
+      action: 'queued',
+      priority: 1,
+      mr_iid: 42,
+      mr_title: 'Fix TLS',
+      project_path: 'cnv/release-app',
+      author: 'dev',
+      created_at: '2026-11-22T10:00:00Z',
+      target_url: 'https://gitlab.com/cnv/release-app/-/merge_requests/42',
+    } as HeadhunterTodo;
+
+    const items = (hhMenuItems as unknown as (t: HeadhunterTodo, h: typeof handlers) => ReturnType<typeof hhMenuItems>)(glTodo, handlers);
+    const promote = items.find(i => /promote/i.test(i.label) || i.id === 'promote');
+    const dismiss = items.find(i => /dismiss/i.test(i.label) || i.id === 'dismiss');
+    const requeue = items.find(i => /requeue/i.test(i.label) || i.id === 'requeue');
+
+    expect(promote).toBeDefined();
+    expect(dismiss).toBeDefined();
+    expect(requeue).toBeDefined();
+
+    promote?.onClick();
+    expect(handlers.promote).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'gitlab',
+      item_number: 42,
+      is_issue: false,
+    }));
+    const promoteArg = handlers.promote.mock.calls[0][0] as Record<string, unknown>;
+    expect(promoteArg.project_path ?? promoteArg.repo).toBe('cnv/release-app');
+
+    dismiss?.onClick();
+    expect(handlers.dismiss).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'gitlab',
+      item_number: 42,
+      is_issue: false,
+    }));
+
+    requeue?.onClick();
+    expect(handlers.requeue).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'gitlab',
+      item_number: 42,
+      is_issue: false,
+    }));
+  });
+
+  it('Given a GitHub Issue todo and operator handlers, When Promote/Dismiss/Requeue are clicked, Then is_issue is true and platform is github', () => {
+    const handlers = {
+      promote: vi.fn(),
+      dismiss: vi.fn(),
+      requeue: vi.fn(),
+    };
+    const ghIssueTodo = {
+      platform: 'github',
+      action: 'queued',
+      priority: 1,
+      issue_number: 88,
+      issue_title: 'Investigate flake',
+      project_path: 'org/repo',
+      author: 'reporter',
+      created_at: '2026-11-22T10:00:00Z',
+      target_url: 'https://github.com/org/repo/issues/88',
+    } as HeadhunterTodo;
+
+    const items = (hhMenuItems as unknown as (t: HeadhunterTodo, h: typeof handlers) => ReturnType<typeof hhMenuItems>)(ghIssueTodo, handlers);
+    const promote = items.find(i => /promote/i.test(i.label) || i.id === 'promote');
+    const dismiss = items.find(i => /dismiss/i.test(i.label) || i.id === 'dismiss');
+    const requeue = items.find(i => /requeue/i.test(i.label) || i.id === 'requeue');
+
+    expect(promote).toBeDefined();
+    expect(dismiss).toBeDefined();
+    expect(requeue).toBeDefined();
+
+    promote?.onClick();
+    expect(handlers.promote).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'github',
+      item_number: 88,
+      is_issue: true,
+    }));
+    const promoteArg = handlers.promote.mock.calls[0][0] as Record<string, unknown>;
+    expect(promoteArg.project_path ?? promoteArg.repo).toBe('org/repo');
+
+    dismiss?.onClick();
+    expect(handlers.dismiss).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'github',
+      item_number: 88,
+      is_issue: true,
+    }));
+
+    requeue?.onClick();
+    expect(handlers.requeue).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'github',
+      item_number: 88,
+      is_issue: true,
+    }));
+  });
+
+  it('includes project_id in target when todo.project_id is populated', () => {
+    const handlers = { promote: vi.fn(), dismiss: vi.fn(), requeue: vi.fn() };
+    const glTodo = {
+      todo_id: 11,
+      platform: 'gitlab',
+      action: 'queued',
+      priority: 1,
+      mr_iid: 7,
+      project_path: 'cnv/release-app',
+      project_id: 1234,
+      author: 'dev',
+      created_at: '2026-11-22T10:00:00Z',
+      target_url: 'https://gitlab.com/cnv/release-app/-/merge_requests/7',
+    } as HeadhunterTodo;
+
+    const items = hhMenuItems(glTodo, handlers);
+    items.find(i => i.id === 'promote')?.onClick();
+    expect(handlers.promote).toHaveBeenCalledWith({
+      platform: 'gitlab',
+      project_path: 'cnv/release-app',
+      project_id: 1234,
+      item_number: 7,
+      is_issue: false,
+    });
+  });
+
+  it.each(['new', 'active', 'deferred', 'waiting_approval'])(
+    'hides Promote, Requeue, and Dismiss when todo.status is %s',
+    (status) => {
+      const handlers = { promote: vi.fn(), dismiss: vi.fn(), requeue: vi.fn() };
+      const activeTodo = {
+        todo_id: 12,
+        platform: 'gitlab',
+        action: status,
+        status,
+        priority: 1,
+        mr_iid: 19,
+        project_path: 'cnv/release-app',
+        author: 'dev',
+        created_at: '2026-11-22T10:00:00Z',
+        target_url: 'https://gitlab.com/cnv/release-app/-/merge_requests/19',
+      } as HeadhunterTodo;
+
+      const items = hhMenuItems(activeTodo, handlers);
+      expect(items.find(i => i.id === 'promote')).toBeUndefined();
+      expect(items.find(i => i.id === 'requeue')).toBeUndefined();
+      expect(items.find(i => i.id === 'dismiss')).toBeUndefined();
+    },
+  );
+
+  it('sets disabled: true on Promote, Requeue, and Dismiss when handlers.disabled is true', () => {
+    const handlers = { promote: vi.fn(), dismiss: vi.fn(), requeue: vi.fn(), disabled: true };
+    const queuedTodo = {
+      platform: 'github',
+      action: 'queued',
+      status: 'queued',
+      priority: 1,
+      pr_number: 5,
+      project_path: 'org/repo',
+      author: 'dev',
+      created_at: '2026-11-22T10:00:00Z',
+      target_url: 'https://github.com/org/repo/pull/5',
+    } as HeadhunterTodo;
+
+    const items = hhMenuItems(queuedTodo, handlers);
+    expect(items.find(i => i.id === 'promote')?.disabled).toBe(true);
+    expect(items.find(i => i.id === 'requeue')?.disabled).toBe(true);
+    expect(items.find(i => i.id === 'dismiss')?.disabled).toBe(true);
+  });
+
+  it.each(['', 'javascript:alert(1)', '//evil.com/phish', '/relative/path'])(
+    'omits open item when target_url is non-http(s) (%j)',
+    (target_url) => {
+      const todo = {
+        platform: 'github',
+        action: 'queued',
+        priority: 1,
+        pr_number: 5,
+        project_path: 'org/repo',
+        author: 'dev',
+        created_at: '2026-11-22T10:00:00Z',
+        target_url,
+      } as HeadhunterTodo;
+
+      const items = hhMenuItems(todo);
+      expect(items.find(i => i.id === 'open')).toBeUndefined();
+      expect(items.find(i => i.id === 'copy')).toBeDefined();
+    },
+  );
+});
+
+describe('HeadhunterQueuePanel removal guard (T-16)', () => {
+  it('Given orphaned HeadhunterQueuePanel is removed in Slice 2C, When scanning ui/src, Then HeadhunterQueuePanel.tsx/test.tsx do not exist and zero references remain', () => {
+    const uiSrcDir = path.resolve(__dirname, '..');
+    expect(fs.existsSync(path.join(uiSrcDir, 'components', 'HeadhunterQueuePanel.tsx'))).toBe(false);
+    expect(fs.existsSync(path.join(uiSrcDir, '__tests__', 'HeadhunterQueuePanel.test.tsx'))).toBe(false);
+
+    const matches: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (/\.(ts|tsx)$/.test(entry.name) && full !== path.join(uiSrcDir, '__tests__', 'sidebarMenus.test.ts')) {
+          const text = fs.readFileSync(full, 'utf8');
+          if (/\bHeadhunterQueuePanel\b/.test(text)) {
+            matches.push(path.relative(uiSrcDir, full));
+          }
+        }
+      }
+    };
+    walk(uiSrcDir);
+    expect(matches).toEqual([]);
   });
 });

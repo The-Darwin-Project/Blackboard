@@ -70,6 +70,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
+- **darwin-github-ops**: GitHub repository resolution, multi-org `gh` wrapper, MCP tools, GraphQL auto-merge guard, and check-runs API
 
 ## Jenkins CI Retrigger
 

@@ -9,7 +9,7 @@
 //    'mine' matches the OIDC email or preferred_username against created_by_email / evidence.triggered_by.
 //    Scope preference is persisted to localStorage ('darwin:workspaceScope').
 //    The project filter exists ONLY in Global mode (scope === 'all') and is reset to 'all' when toggling to My Tasks.
-//    Project is derived from evidence.project, then gitlab_context.project, github_context.repo, kargo_context.project (trimmed).
+//    Project is derived from evidence.project, then gitlab_context.project_path, gitlab_context.project, github_context.repo, github_issue_context.repo, kargo_context.project (trimmed).
 //    A selected project that leaves availableProjects falls back to 'all' (effectiveProject).
 // 5. [Pattern]: Accordion folders: Waiting for Approval (shown in Global, or in My Tasks only when non-empty), Active, Deferred, and
 //    Closed & Failed (defaults collapsed). An event renders in exactly one folder: waiting rows are dropped when the id is in closed or is
@@ -47,8 +47,10 @@ function deriveProject(evt: ActiveEvent): string {
   const ev = evt.evidence;
   return (
     asTrimmed(ev?.project)
+    || asTrimmed(ev?.gitlab_context?.project_path)
     || asTrimmed(ev?.gitlab_context?.project)
     || asTrimmed(ev?.github_context?.repo)
+    || asTrimmed(ev?.github_issue_context?.repo)
     || asTrimmed(ev?.kargo_context?.project)
   );
 }

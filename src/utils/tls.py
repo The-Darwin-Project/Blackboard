@@ -3,7 +3,7 @@
 # 1. [Constraint]: Leaf stdlib-only TLS/host helper module. NEVER import src.agents, src.state,
 #    src.routes, or src.auth (breaks the vcs_approval <-> github_app circular dependency).
 # 2. [Security]: TLS verification is NEVER disabled -- resolve_ca_bundle() raises ValueError on
-#    GITLAB_SSL_VERIFY=0/false/no and only accepts non-empty regular files as CA bundles.
+#    GITLAB_SSL_VERIFY=0/false/no/off and only accepts non-empty regular files as CA bundles.
 # 3. [Pattern]: Single source of truth for resolve_ca_bundle(), _usable_ca_file(), and
 #    normalize_gitlab_host() shared across vcs_approval.py, github_app.py, headhunter_gitlab.py,
 #    headhunter_github.py, and routes/queue.py.
@@ -44,7 +44,7 @@ def resolve_ca_bundle(host: str = "") -> str | bool:
     verify_env = os.getenv("GITLAB_SSL_VERIFY")
     if verify_env is not None:
         cleaned = verify_env.strip().lower()
-        if cleaned in ("0", "false", "no"):
+        if cleaned in ("0", "false", "no", "off"):
             raise ValueError(
                 f"Insecure TLS verification (GITLAB_SSL_VERIFY={verify_env}) is forbidden for VCS API calls"
             )

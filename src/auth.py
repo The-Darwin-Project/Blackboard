@@ -49,7 +49,7 @@ TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET", "")
 # Dex groups (JWT "groups" claim, see _claims_to_user) allowed to perform irreversible,
 # global-scope observation-series mutations (delete/rename/bulk-delete). Comma-separated.
 OBS_ADMIN_GROUPS = frozenset(
-    g.strip() for g in os.getenv("OBS_ADMIN_GROUPS", "").split(",") if g.strip()
+    g.strip().lower() for g in os.getenv("OBS_ADMIN_GROUPS", "").split(",") if g.strip()
 )
 
 # Dex groups allowed to approve unowned automation events when DEX is enabled. Comma-separated.
@@ -248,7 +248,9 @@ async def require_obs_admin(request: Request) -> UserContext:
     from fastapi import HTTPException
 
     user = await require_auth(request)
-    if not OBS_ADMIN_GROUPS or OBS_ADMIN_GROUPS.isdisjoint(user.roles):
+    user_roles_lower = {str(r).strip().lower() for r in (user.roles or ()) if str(r).strip()}
+    obs_admin_groups_lower = {str(g).strip().lower() for g in (OBS_ADMIN_GROUPS or ()) if str(g).strip()}
+    if not obs_admin_groups_lower or obs_admin_groups_lower.isdisjoint(user_roles_lower):
         logger.warning(
             "Denied observation-admin action for %s: roles=%s do not intersect configured "
             "OBS_ADMIN_GROUPS=%s",
@@ -348,13 +350,10 @@ def can_approve_event(
     if not norm_user:
         return False
 
-    user_roles = set(user.roles or [])
-    user_roles_lower = {r.strip().lower() for r in user_roles}
-    approver_groups_lower = {g.strip().lower() for g in APPROVER_GROUPS}
-    has_approver_role = bool(
-        user_roles_lower & approver_groups_lower
-        or (OBS_ADMIN_GROUPS and not OBS_ADMIN_GROUPS.isdisjoint(user_roles))
-    )
+    user_roles_lower = {str(r).strip().lower() for r in (user.roles or ()) if str(r).strip()}
+    approver_groups_lower = {str(g).strip().lower() for g in (APPROVER_GROUPS or ()) if str(g).strip()}
+    obs_admin_groups_lower = {str(g).strip().lower() for g in (OBS_ADMIN_GROUPS or ()) if str(g).strip()}
+    has_approver_role = bool(user_roles_lower & (approver_groups_lower | obs_admin_groups_lower))
 
     norm_created = _normalize_email(getattr(event, "created_by_email", None))
     if norm_created is not None:

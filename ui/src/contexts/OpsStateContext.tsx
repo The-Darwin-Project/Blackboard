@@ -5,7 +5,7 @@
 // 3. [Pattern]: Agent registry 10s poll with cleanup. ephemeralAgents derived via useMemo.
 // 4. [Pattern]: WS: event_created (auto-select), event_closed (deselect + optimistic), event_status_changed, subscription_changed, domain_updated, severity_updated, kargo_*.
 // 5. [Pattern]: useWSReconnect invalidates all queries + kargo + headhunter + aligner.
-// 7. [Pattern]: invalidateAligner on event_created + event_closed + reconnect (diverges from HH which skips event_created).
+// 7. [Pattern]: invalidateHeadhunter + invalidateAligner on event_created + event_closed + event_status_changed + reconnect.
 // 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
 // 7. [Pattern]: Inline ref assignment for selectedEventIdRef (render phase sync for WS handlers).
 // 8. [Gotcha]: waitingApprovalEvents is invalidated on BOTH event_closed (event closed while
@@ -185,6 +185,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         selectEvent(msg.event_id as string);
       }
       invalidateActive();
+      invalidateHeadhunter();
       invalidateAligner();
       invalidateJenkins();
     } else if (msg.type === 'event_closed') {
@@ -232,6 +233,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       // because other status_changed events (e.g. deferred) invalidating an unrelated
       // query is a harmless no-op refetch (#240).
       invalidateWaitingApproval();
+      invalidateHeadhunter();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();

@@ -902,4 +902,61 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       expect(handle!.classList.contains('right-0')).toBe(true);
     });
   });
+
+  describe('deriveProject VCS context parity (T-16)', () => {
+    it('Given events with gitlab_context.project_path (no evidence.project) and github_issue_context.repo, When switched to Global mode, Then project filter lists and filters both repositories', () => {
+      vi.spyOn(queueHook, 'useActiveEvents').mockReturnValue({
+        data: [
+          {
+            id: 'evt-gl-path',
+            service: 'gl-mr-svc',
+            status: 'active',
+            source: 'headhunter',
+            created_by_email: 'bot@redhat.com',
+            evidence: {
+              domain: 'complicated',
+              display_text: 'GitLab MR via project_path',
+              gitlab_context: { project_path: 'cnv/gitlab-repo' },
+            },
+            reason: 'MR review',
+            turns: 1,
+            created: '2026-11-22T10:00:00Z',
+          },
+          {
+            id: 'evt-gh-issue',
+            service: 'gh-issue-svc',
+            status: 'active',
+            source: 'headhunter',
+            created_by_email: 'bot@redhat.com',
+            evidence: {
+              domain: 'complicated',
+              display_text: 'GitHub Issue via github_issue_context.repo',
+              github_issue_context: { repo: 'org/issue-repo' },
+            },
+            reason: 'Issue triage',
+            turns: 1,
+            created: '2026-11-22T10:05:00Z',
+          },
+        ],
+        isLoading: false,
+        isFetching: false,
+      } as never);
+
+      render(<WorkspaceSessionsHub isOpen={true} onNewTask={vi.fn()} />);
+      fireEvent.click(screen.getByRole('button', { name: /Global/i }));
+
+      const select = screen.getByLabelText(/filter by project/i) as HTMLSelectElement;
+      const optionValues = Array.from(select.options).map(o => o.value);
+      expect(optionValues).toContain('cnv/gitlab-repo');
+      expect(optionValues).toContain('org/issue-repo');
+
+      fireEvent.change(select, { target: { value: 'cnv/gitlab-repo' } });
+      expect(screen.getByText(/gl-mr-svc/i)).toBeInTheDocument();
+      expect(screen.queryByText(/gh-issue-svc/i)).not.toBeInTheDocument();
+
+      fireEvent.change(select, { target: { value: 'org/issue-repo' } });
+      expect(screen.getByText(/gh-issue-svc/i)).toBeInTheDocument();
+      expect(screen.queryByText(/gl-mr-svc/i)).not.toBeInTheDocument();
+    });
+  });
 });

@@ -2,15 +2,30 @@
 // @ai-rules:
 // 1. [Pattern]: Hybrid hydration -- REST on mount, WS for incremental, polling as safety net.
 // 2. [Gotcha]: refetchInterval on activeEvents catches missed WS event_closed messages (ghost events).
-// 3. [Pattern]: useHeadhunterPending, useAlignerPending, and useJenkinsPending use react-query (30s poll + WS invalidation).
+// 3. [Pattern]: useHeadhunterPending, useHeadhunterStatus, useAlignerPending, and useJenkinsPending use react-query (30s poll + WS invalidation).
+// 4. [Pattern]: invalidateHeadhunter() uses leading-edge + 1500ms trailing coalescing to prevent WS event storms from fanning out O(N) Redis reads.
 /**
  * Queue hooks with hybrid hydration:
  * - Initial state from REST GET (on mount / reconnect)
  * - Incremental updates from WebSocket push
  * - Polling safety net (10s) to catch missed WS messages
  */
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getWaitingApprovalEvents, getClosedEvents, getEventDocument, getHeadhunterPending, getAlignerPending, getJenkinsPending } from '../api/client';
+import { useCallback, useEffect, useRef } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  getActiveEvents,
+  getWaitingApprovalEvents,
+  getClosedEvents,
+  getEventDocument,
+  getHeadhunterPending,
+  getHeadhunterStatus,
+  triggerHeadhunterPoll,
+  resetHeadhunterBreaker,
+  headhunterItemAction,
+  getAlignerPending,
+  getJenkinsPending,
+  type HeadhunterItemActionPayload,
+} from '../api/client';
 import type { ActiveEvent, EventDocument, EventEvidence, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
@@ -65,6 +80,55 @@ export function useHeadhunterPending() {
   });
 }
 
+export function useHeadhunterStatus() {
+  return useQuery({
+    queryKey: ['headhunterStatus'],
+    queryFn: getHeadhunterStatus,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useTriggerHeadhunterPoll() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => triggerHeadhunterPoll(),
+    onSuccess: (data) => {
+      if (data?.debounced) return;
+      queryClient.invalidateQueries({ queryKey: ['headhunterPending'] });
+      queryClient.invalidateQueries({ queryKey: ['headhunterStatus'] });
+    },
+  });
+}
+
+export function useResetHeadhunterBreaker() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (platform: 'gitlab' | 'github') => resetHeadhunterBreaker(platform),
+    onSuccess: (data) => {
+      if (data?.debounced) return;
+      queryClient.invalidateQueries({ queryKey: ['headhunterPending'] });
+      queryClient.invalidateQueries({ queryKey: ['headhunterStatus'] });
+    },
+  });
+}
+
+export function useHeadhunterItemAction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ action, payload }: { action: 'promote' | 'dismiss' | 'requeue'; payload: HeadhunterItemActionPayload }) =>
+      headhunterItemAction(action, payload),
+    onSuccess: (data, variables) => {
+      if (data?.debounced) return;
+      queryClient.invalidateQueries({ queryKey: ['headhunterPending'] });
+      queryClient.invalidateQueries({ queryKey: ['headhunterStatus'] });
+      if (variables.action === 'promote') {
+        queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
+      }
+    },
+  });
+}
+
 export function useAlignerPending() {
   return useQuery({
     queryKey: ['alignerPending'],
@@ -83,11 +147,47 @@ export function useJenkinsPending() {
   });
 }
 
+const HH_INVALIDATE_COOLDOWN_MS = 1500;
+
 /**
  * Hook to invalidate queue queries (called by WebSocket message handler).
  */
 export function useQueueInvalidation() {
   const queryClient = useQueryClient();
+  const hhCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hhPendingTrailingRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (hhCooldownTimerRef.current !== null) {
+        clearTimeout(hhCooldownTimerRef.current);
+        hhCooldownTimerRef.current = null;
+      }
+      hhPendingTrailingRef.current = false;
+    };
+  }, []);
+
+  const invalidateHeadhunter = useCallback(() => {
+    const runInvalidation = () => {
+      queryClient.invalidateQueries({ queryKey: ['headhunterPending'] });
+      queryClient.invalidateQueries({ queryKey: ['headhunterStatus'] });
+    };
+
+    if (hhCooldownTimerRef.current !== null) {
+      hhPendingTrailingRef.current = true;
+      return;
+    }
+
+    runInvalidation();
+    hhCooldownTimerRef.current = setTimeout(() => {
+      hhCooldownTimerRef.current = null;
+      if (hhPendingTrailingRef.current) {
+        hhPendingTrailingRef.current = false;
+        runInvalidation();
+      }
+    }, HH_INVALIDATE_COOLDOWN_MS);
+  }, [queryClient]);
+
   return {
     invalidateActive: () => queryClient.invalidateQueries({ queryKey: ['activeEvents'] }),
     invalidateEvent: (eventId: string) => queryClient.invalidateQueries({ queryKey: ['eventDocument', eventId] }),
@@ -97,7 +197,7 @@ export function useQueueInvalidation() {
     },
     invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
     invalidateWaitingApproval: () => queryClient.invalidateQueries({ queryKey: ['waitingApprovalEvents'] }),
-    invalidateHeadhunter: () => queryClient.invalidateQueries({ queryKey: ['headhunterPending'] }),
+    invalidateHeadhunter,
     invalidateAligner: () => queryClient.invalidateQueries({ queryKey: ['alignerPending'] }),
     invalidateJenkins: () => queryClient.invalidateQueries({ queryKey: ['jenkinsPending'] }),
     optimisticRemoveEvent: (eventId: string) => {

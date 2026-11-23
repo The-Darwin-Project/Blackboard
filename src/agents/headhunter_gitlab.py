@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 from ..utils import vcs_approval as _vcs_approval
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
+from .headhunter_models import PlatformBreakerStatus, PlatformQueueItem, PlatformSnapshot
 from .headhunter_utils import BoolOutcome as _QueueResult, _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,9 @@ class GitLabPlatform:
         self._client: httpx.AsyncClient | None = None
         self._wakeup_seen_notes_mem: dict[str, set[int]] = {}
         self._wakeup_seen_sha_mem: dict[str, str] = {}
+        self._last_snapshot_items: list[PlatformQueueItem] = []
+        self._last_poll_at: float | None = None
+        self._last_partial_error: str | None = None
         # Fail fast: GITLAB_SSL_VERIFY=false/0/no raises ValueError here, at startup.
         _vcs_approval.resolve_ca_bundle(self._gitlab_host)
 
@@ -335,6 +339,253 @@ class GitLabPlatform:
     @property
     def platform_name(self) -> str:
         return "gitlab"
+
+    @staticmethod
+    def _work_item_to_snapshot_item(
+        item: Any,
+        *,
+        status: str,
+        queue_position: int | None = None,
+    ) -> PlatformQueueItem | None:
+        wi = GitLabPlatform._unwrap_work_item(item)
+        pid, iid = GitLabPlatform._extract_work_item_key(wi)
+        if not pid or not iid:
+            return None
+        project = wi.get("project") if isinstance(wi.get("project"), dict) else {}
+        target = wi.get("target") if isinstance(wi.get("target"), dict) else {}
+        pipeline = target.get("pipeline") if isinstance(target.get("pipeline"), dict) else {}
+        author_obj = target.get("author") if isinstance(target.get("author"), dict) else {}
+        project_ref = str(
+            project.get("path_with_namespace")
+            or wi.get("project_path")
+            or getattr(item, "project_ref", "")
+            or pid
+        )
+        title = str(target.get("title") or wi.get("title") or getattr(item, "title", "") or "")
+        author = str(
+            (author_obj.get("username") if isinstance(author_obj, dict) else "")
+            or wi.get("author")
+            or getattr(item, "author", "")
+            or ""
+        )
+        url = str(wi.get("target_url") or wi.get("url") or getattr(item, "url", "") or "")
+        head_sha = GitLabPlatform._extract_work_item_sha(wi)
+        ci_status = str(
+            (pipeline.get("status") if isinstance(pipeline, dict) else "")
+            or wi.get("ci_status")
+            or getattr(item, "ci_status", "")
+            or ""
+        )
+        enqueued_at = str(wi.get("created_at") or wi.get("enqueued_at") or getattr(item, "created_at", "") or "")
+        raw: dict[str, Any] = {
+            "todo_id": wi.get("id"),
+            "_sibling_todo_ids": list(
+                wi.get("_sibling_todo_ids") or ([wi.get("id")] if wi.get("id") else [])
+            ),
+            "action": wi.get("action_name") or getattr(item, "action", None) or "assigned",
+            "project_id": pid,
+        }
+        if target.get("state"):
+            raw["mr_state"] = target["state"]
+        return PlatformQueueItem(
+            platform="gitlab",
+            item_kind="mr",
+            item_id=iid,
+            project_ref=project_ref,
+            title=title,
+            author=author,
+            url=url,
+            head_sha=head_sha,
+            ci_status=ci_status,
+            status=status,
+            queue_position=queue_position,
+            enqueued_at=enqueued_at,
+            raw=raw,
+        )
+
+    def get_platform_snapshot(self) -> PlatformSnapshot:
+        """Return an immutable-style point-in-time snapshot of GitLab pending/queued items."""
+        items = list(getattr(self, "_last_snapshot_items", []))
+        queued_count = sum(1 for item in items if item.status == "queued")
+        return PlatformSnapshot(
+            platform="gitlab",
+            enabled=bool(self.enabled()),
+            pending_count=len(items),
+            queued_count=queued_count,
+            last_poll_at=getattr(self, "_last_poll_at", None),
+            partial_error=getattr(self, "_last_partial_error", None),
+            breaker=PlatformBreakerStatus(),
+            items=items,
+        )
+
+    async def dismiss_todo(self, todo_id: int | list[int]) -> bool:
+        """Dismiss pending GitLab todo(s). Returns True only on HTTP 2xx/304/404; False on 4xx/5xx/error."""
+        raw_ids = todo_id if isinstance(todo_id, (list, tuple, set)) else [todo_id]
+        tids = list(dict.fromkeys(
+            tid for raw_id in raw_ids if (tid := _valid_positive_int(raw_id)) is not None
+        ))
+        if not tids:
+            return False
+        try:
+            client = self._get_client()
+            headers = self._headers()
+        except Exception as exc:
+            logger.warning("GitLabPlatform: dismiss_todo client/auth init failed (%s)", type(exc).__name__)
+            return False
+
+        all_ok = True
+        for tid in tids:
+            try:
+                resp = await client.post(
+                    self._api_url(f"/todos/{tid}/mark_as_done"),
+                    headers=headers,
+                    timeout=10.0,
+                )
+            except Exception as exc:
+                logger.warning("GitLabPlatform: dismiss_todo %s failed (%s)", tid, type(exc).__name__)
+                return False
+            status = getattr(resp, "status_code", None)
+            if status == 401:
+                self._invalidate_token()
+                logger.warning("GitLabPlatform: dismiss_todo %s returned HTTP 401", tid)
+                return False
+            if getattr(resp, "is_success", False) or status in (304, 404):
+                continue
+            logger.warning("GitLabPlatform: dismiss_todo %s returned HTTP %s", tid, status)
+            all_ok = False
+            if status in (403, 429):
+                return False
+        return all_ok
+
+    async def dismiss_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator dismiss: dismiss sibling/primary GitLab todo(s)."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        todo_ids: list[int] = []
+        raw_sibs = raw_dict.get("_sibling_todo_ids")
+        if isinstance(raw_sibs, list):
+            for raw_tid in raw_sibs:
+                tid = _valid_positive_int(raw_tid)
+                if tid is not None and tid not in todo_ids:
+                    todo_ids.append(tid)
+        primary_tid = _valid_positive_int(raw_dict.get("todo_id"))
+        if primary_tid is not None and primary_tid not in todo_ids:
+            todo_ids.append(primary_tid)
+        if not todo_ids:
+            return True, ""
+        dismiss_arg: int | list[int] = todo_ids[0] if len(todo_ids) == 1 else todo_ids
+        ok = await self.dismiss_todo(dismiss_arg)
+        if not ok:
+            return False, f"Failed to dismiss GitLab todo(s) for MR !{item_number}"
+        return True, ""
+
+    async def requeue_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_item: object = None,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator requeue (GitLab queue/SHA state lives in Blackboard Redis)."""
+        return True, ""
+
+    def remove_from_snapshot_cache(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+    ) -> None:
+        """Remove (pid, iid) from _last_snapshot_items if present."""
+        pid = _valid_positive_int(project_key)
+        iid = _valid_positive_int(item_number)
+        if not pid or not iid or not hasattr(self, "_last_snapshot_items"):
+            return
+        self._last_snapshot_items = [
+            cur
+            for cur in self._last_snapshot_items
+            if not (_valid_positive_int(cur.raw.get("project_id")) == pid and cur.item_id == iid)
+        ]
+
+    def mark_snapshot_item_queued(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        matched_item: object = None,
+        is_issue: bool = False,
+    ) -> None:
+        """Mark (pid, iid) as queued in _last_snapshot_items (or keep position if already queued)."""
+        pid = _valid_positive_int(project_key)
+        iid = _valid_positive_int(item_number)
+        if not pid or not iid or not hasattr(self, "_last_snapshot_items"):
+            return
+        max_pos = max(
+            (cur.queue_position or 0 for cur in self._last_snapshot_items if cur.status == "queued"),
+            default=0,
+        )
+        updated: list[PlatformQueueItem] = []
+        found = False
+        for cur in self._last_snapshot_items:
+            if _valid_positive_int(cur.raw.get("project_id")) == pid and cur.item_id == iid:
+                found = True
+                pos = cur.queue_position if cur.status == "queued" and cur.queue_position is not None else max_pos + 1
+                raw = dict(cur.raw)
+                raw.setdefault("action", "queued")
+                updated.append(PlatformQueueItem(
+                    platform=cur.platform,
+                    item_kind=cur.item_kind,
+                    item_id=cur.item_id,
+                    project_ref=cur.project_ref,
+                    title=cur.title,
+                    author=cur.author,
+                    url=cur.url,
+                    head_sha=cur.head_sha,
+                    ci_status=cur.ci_status,
+                    status="queued",
+                    queue_position=pos,
+                    enqueued_at=cur.enqueued_at,
+                    raw=raw,
+                ))
+            else:
+                updated.append(cur)
+        if not found and isinstance(matched_item, PlatformQueueItem):
+            raw = dict(matched_item.raw)
+            raw.setdefault("action", "queued")
+            updated.append(PlatformQueueItem(
+                platform=matched_item.platform,
+                item_kind=matched_item.item_kind,
+                item_id=matched_item.item_id,
+                project_ref=matched_item.project_ref,
+                title=matched_item.title,
+                author=matched_item.author,
+                url=matched_item.url,
+                head_sha=matched_item.head_sha,
+                ci_status=matched_item.ci_status,
+                status="queued",
+                queue_position=max_pos + 1,
+                enqueued_at=matched_item.enqueued_at,
+                raw=raw,
+            ))
+        self._last_snapshot_items = updated
 
     def enabled(self) -> bool:
         return self._enabled_flag and bool(self._gitlab_host)
@@ -539,16 +790,32 @@ class GitLabPlatform:
                     await self._enqueue_gitlab_mr(pid, iid, meta)
                 except Exception:
                     pass
+        snap_item = self._work_item_to_snapshot_item(wi, status="queued", queue_position=position)
+        if snap_item is not None:
+            existing = list(getattr(self, "_last_snapshot_items", []))
+            replaced = False
+            updated: list[PlatformQueueItem] = []
+            for cur in existing:
+                if cur.raw.get("project_id") == pid and cur.item_id == iid:
+                    updated.append(snap_item)
+                    replaced = True
+                else:
+                    updated.append(cur)
+            if not replaced:
+                updated.append(snap_item)
+            self._last_snapshot_items = updated
         return True
 
     async def remove_queued_item(self, work_item: Any) -> None:
-        """Remove a GitLab MR work item from the Redis FIFO queue (e.g. when fetch_context drops it)."""
+        """Remove a GitLab MR work item from the Redis FIFO queue and snapshot cache."""
         pid, iid = self._extract_work_item_key(work_item)
         if pid and iid and hasattr(self.blackboard, "remove_gitlab_queue"):
             try:
                 await self.blackboard.remove_gitlab_queue(pid, iid)
             except Exception:
                 pass
+        if pid and iid:
+            self.remove_from_snapshot_cache(pid, iid)
 
     async def get_queued_items(self) -> list[dict]:
         """Return queued GitLab work items in FIFO order from Redis."""
@@ -693,34 +960,7 @@ class GitLabPlatform:
                     pass
 
                 live_pid = _valid_positive_int(mr_data.get("project_id")) or pid
-                project_path = self._extract_project_path_from_mr(mr_data, live_pid)
-                return {
-                    "id": None,
-                    "action_name": "new_commits",
-                    "created_at": mr_data.get("updated_at") or "",
-                    "target_type": "MergeRequest",
-                    "target_url": mr_data.get("web_url") or "",
-                    "project": {
-                        "id": live_pid,
-                        "path_with_namespace": project_path,
-                    },
-                    "target": {
-                        "iid": iid,
-                        "title": mr_data.get("title") or f"MR !{iid}",
-                        "state": mr_state or "opened",
-                        "sha": live_sha,
-                        "diff_refs": {"head_sha": live_sha},
-                        "merge_status": mr_data.get("detailed_merge_status") or mr_data.get("merge_status") or "",
-                        "source_branch": mr_data.get("source_branch") or "",
-                        "target_branch": mr_data.get("target_branch") or "",
-                        "description": (mr_data.get("description") or "")[:_DESC_SAFETY_CAP],
-                        "author": mr_data.get("author") or {},
-                        "labels": mr_data.get("labels") or [],
-                        "milestone": mr_data.get("milestone"),
-                    },
-                    "_sibling_todo_ids": [],
-                    "_synthetic_sha_sweep": True,
-                }
+                return self._build_synthetic_work_item(mr_data, live_pid, iid, live_sha)
 
         results = await asyncio.gather(
             *(_check_one(p, i, s) for p, i, s in candidates),
@@ -733,6 +973,48 @@ class GitLabPlatform:
             elif r is not None:
                 items.append(r)
         return items
+
+    @classmethod
+    def _build_synthetic_work_item(
+        cls,
+        mr_data: dict,
+        pid: int,
+        iid: int,
+        live_sha: str,
+        *,
+        action_name: str = "new_commits",
+    ) -> dict:
+        """Construct a synthetic todo-shaped work_item dict from a GitLab MR payload."""
+        live_pid = _valid_positive_int(mr_data.get("project_id")) or pid
+        project_path = cls._extract_project_path_from_mr(mr_data, live_pid)
+        mr_state = mr_data.get("state") or "opened"
+        return {
+            "id": None,
+            "action_name": action_name,
+            "created_at": mr_data.get("updated_at") or "",
+            "target_type": "MergeRequest",
+            "target_url": mr_data.get("web_url") or "",
+            "project": {
+                "id": live_pid,
+                "path_with_namespace": project_path,
+            },
+            "target": {
+                "iid": iid,
+                "title": mr_data.get("title") or f"MR !{iid}",
+                "state": mr_state,
+                "sha": live_sha,
+                "diff_refs": {"head_sha": live_sha},
+                "merge_status": mr_data.get("detailed_merge_status") or mr_data.get("merge_status") or "",
+                "source_branch": mr_data.get("source_branch") or "",
+                "target_branch": mr_data.get("target_branch") or "",
+                "description": (mr_data.get("description") or "")[:_DESC_SAFETY_CAP],
+                "author": mr_data.get("author") or {},
+                "labels": mr_data.get("labels") or [],
+                "milestone": mr_data.get("milestone"),
+            },
+            "_sibling_todo_ids": [],
+            "_synthetic_sha_sweep": True,
+        }
 
     async def poll_work_items(self) -> list[dict]:
         """Fetch pending GitLab todos, reconcile FIFO queue, and run bounded SHA sweep."""
@@ -862,13 +1144,15 @@ class GitLabPlatform:
                         enc_pid = self._enc_project_id(pid)
                         still_open = True
                         refreshed_sha = ""
+                        mr_data: dict | None = None
                         try:
                             mr_resp = await self._get(self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}"))
                             if mr_resp.status_code == 404:
                                 still_open = False
                             elif mr_resp.is_success:
-                                mr_data = mr_resp.json()
-                                if isinstance(mr_data, dict):
+                                parsed = mr_resp.json()
+                                if isinstance(parsed, dict):
+                                    mr_data = parsed
                                     if mr_data.get("state") in ("merged", "closed"):
                                         still_open = False
                                     else:
@@ -879,19 +1163,44 @@ class GitLabPlatform:
                                         )
                         except Exception:
                             still_open = True
-                        if still_open and isinstance(qentry.get("work_item"), dict):
-                            wi = dict(qentry["work_item"])
-                            if refreshed_sha:
-                                target = dict(wi.get("target") or {})
-                                target["sha"] = refreshed_sha
-                                target["diff_refs"] = {"head_sha": refreshed_sha}
-                                wi["target"] = target
-                                wi["head_sha"] = refreshed_sha
-                            wi["queued"] = True
-                            ordered_slots[slot_idx] = wi
-                            reconciled_keys.add((pid, iid))
-                        else:
-                            await self.blackboard.remove_gitlab_queue(pid, iid)
+                        if still_open:
+                            wi = dict(qentry["work_item"]) if isinstance(qentry.get("work_item"), dict) else None
+                            if wi is None and qentry.get("action_name") == "new_commits":
+                                live_sha = refreshed_sha or str(qentry.get("head_sha") or "")
+                                if isinstance(mr_data, dict):
+                                    wi = self._build_synthetic_work_item(
+                                        mr_data, pid, iid, live_sha, action_name="new_commits",
+                                    )
+                                else:
+                                    wi = {
+                                        "id": None,
+                                        "action_name": "new_commits",
+                                        "created_at": "",
+                                        "target_type": "MergeRequest",
+                                        "target_url": "",
+                                        "project": {"id": pid, "path_with_namespace": str(pid)},
+                                        "target": {
+                                            "iid": iid,
+                                            "title": f"MR !{iid}",
+                                            "state": "opened",
+                                            "sha": live_sha,
+                                            "diff_refs": {"head_sha": live_sha} if live_sha else {},
+                                        },
+                                        "_sibling_todo_ids": [],
+                                        "_synthetic_sha_sweep": True,
+                                    }
+                            if wi is not None:
+                                if refreshed_sha:
+                                    target = dict(wi.get("target") or {})
+                                    target["sha"] = refreshed_sha
+                                    target["diff_refs"] = {"head_sha": refreshed_sha}
+                                    wi["target"] = target
+                                    wi["head_sha"] = refreshed_sha
+                                wi["queued"] = True
+                                ordered_slots[slot_idx] = wi
+                                reconciled_keys.add((pid, iid))
+                                return
+                        await self.blackboard.remove_gitlab_queue(pid, iid)
 
                 synth_results = await asyncio.gather(
                     *(_reconcile_synthetic(i, p, m, qe) for i, p, m, qe in synthetic_tasks),
@@ -910,6 +1219,18 @@ class GitLabPlatform:
         sweep_items = await self._sweep_gitlab_mr_shas(active_mr_keys, seen_keys)
 
         result = reconciled_queued + new_items + sweep_items
+        snapshot_items: list[PlatformQueueItem] = []
+        for idx, q_item in enumerate(reconciled_queued, start=1):
+            snap_q = self._work_item_to_snapshot_item(q_item, status="queued", queue_position=idx)
+            if snap_q is not None:
+                snapshot_items.append(snap_q)
+        for p_item in new_items + sweep_items:
+            snap_p = self._work_item_to_snapshot_item(p_item, status="pending", queue_position=None)
+            if snap_p is not None:
+                snapshot_items.append(snap_p)
+        self._last_snapshot_items = snapshot_items
+        self._last_poll_at = time.time()
+        self._last_partial_error = None
         logger.info(
             f"GitLab poll: {len(all_todos)} total, {len(actionable)} actionable, "
             f"{len(active_mr_keys)} active, {skipped_terminal} terminal, "
@@ -1596,6 +1917,10 @@ class GitLabPlatform:
                 await self.blackboard.remove_gitlab_queue(project["id"], target["iid"])
             except Exception:
                 pass
+        pid_val = _valid_positive_int(project.get("id"))
+        iid_val = _valid_positive_int(target.get("iid"))
+        if pid_val and iid_val:
+            self.remove_from_snapshot_cache(pid_val, iid_val)
         logger.info(f"GitLab event created: {event_id} for {todo['action_name']} on !{target['iid']}")
         return event_id
 

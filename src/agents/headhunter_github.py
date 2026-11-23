@@ -21,7 +21,7 @@
 # 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
 # 10. [Pattern]: Re-trigger via darwin-done + SHA comparison (Redis HASH darwin:github:pr_sha).
 # 11. [Pattern]: _queue_pr() ADD new label BEFORE removing old (prevents orphan on partial failure).
-# 12. [Pattern]: queued_prs @property exposes _last_queued_prs for /headhunter/pending REST endpoint.
+# 12. [Pattern]: get_platform_snapshot() exposes normalized pending/queued PRs and Issues for Redis snapshots & /headhunter/pending.
 # 13. [Gotcha]: Issue dedup uses separate Redis namespace darwin:github:issue:{owner}:{repo}:{number}.
 # 14. [Constraint]: Skill URL 10KB cap -- >10240 bytes falls back to _EMERGENCY_ISSUE_SI + returns warning.
 # 15. [Pattern]: close_reason sanitized via re.sub([<>@`])[:200] before posting to GitHub.
@@ -30,8 +30,8 @@
 # 18. [Pattern]: domain is always "disorder" -- FRIDAY classifies during triage, not headhunter.
 # 19. [Pattern]: _queue_issue() is additive-only -- unlike _queue_pr it does NOT remove
 #     darwin-work, since _poll_issues filters server-side on labels=darwin-work and removing
-#     it would make queued issues invisible to future polls. queued_issues @property exposes
-#     _last_queued_issues for /headhunter/pending REST endpoint.
+#     it would make queued issues invisible to future polls. get_platform_snapshot() includes
+#     _last_queued_issues alongside _last_queued_prs for Redis snapshot persistence.
 # 20. [Pattern]: create_issue_event removes both darwin-work AND darwin-queued on promote --
 #     the queued removal is a no-op (silenced 404) for issues that were never queued.
 # 21. [Pattern]: Review-response (HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED, default off) polls
@@ -70,13 +70,14 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from .headhunter_models import PlatformBreakerStatus, PlatformQueueItem, PlatformSnapshot
 from .headhunter_utils import BoolOutcome as _LabelResult, _COMMENT_LIMIT, _DESC_SAFETY_CAP, _safe_int
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 from ..utils.vcs_approval import HEX_SHA_RE
@@ -234,6 +235,10 @@ class GitHubPlatform:
         self._work_label = os.getenv("HEADHUNTER_GITHUB_LABEL_WORK", "darwin-work")
         self._last_queued_prs: list[dict] = []
         self._last_queued_issues: list[dict] = []
+        self._last_pending_prs: list[dict] = []
+        self._last_pending_issues: list[dict] = []
+        self._last_poll_at: float | None = None
+        self._last_partial_error: str | None = None
         # Skill URL map: populated from HEADHUNTER_GITHUB_SKILL_<LABEL> env vars at runtime.
         # Both env-var key (underscores) and label lookup (hyphens→underscores) normalize identically.
         self._issue_skill_urls: dict[str, str] = {
@@ -282,15 +287,312 @@ class GitHubPlatform:
     def platform_name(self) -> str:
         return "github"
 
-    @property
-    def queued_prs(self) -> list[dict]:
-        """Snapshot of queued PRs from the last poll cycle (for /headhunter/pending)."""
-        return list(self._last_queued_prs)
+    @staticmethod
+    def _append_snapshot_items(
+        items: list[PlatformQueueItem],
+        seen_keys: set[tuple[str, str, int]],
+        entries: list[dict] | None,
+        *,
+        item_kind: Literal["pr", "issue"],
+        status: str,
+        queued: bool,
+    ) -> None:
+        num_key = "issue_number" if item_kind == "issue" else "number"
+        title_key = "issue_title" if item_kind == "issue" else "title"
+        author_key = "author" if item_kind == "issue" else "user"
+        for idx, entry in enumerate(entries or [], start=1):
+            owner = str(entry.get("owner") or "")
+            repo = str(entry.get("repo") or "")
+            num = entry.get(num_key)
+            if not owner or not repo or not isinstance(num, int):
+                continue
+            ref = f"{owner}/{repo}"
+            dedup_key = (item_kind, ref.lower(), num)
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            default_action = (
+                "queued"
+                if queued
+                else (entry.get("action") or "pending" if item_kind == "pr" else "pending")
+            )
+            items.append(PlatformQueueItem(
+                platform="github",
+                item_kind=item_kind,
+                item_id=num,
+                project_ref=ref,
+                title=str(entry.get(title_key) or ""),
+                author=str(entry.get(author_key) or ""),
+                url=str(entry.get("html_url") or ""),
+                head_sha="" if item_kind == "issue" else str(entry.get("head_sha") or ""),
+                ci_status="" if item_kind == "issue" else str(entry.get("check_status") or ""),
+                status=status,
+                queue_position=idx if queued else None,
+                enqueued_at=str(entry.get("created_at") or ""),
+                raw={"installation_id": entry.get("installation_id", ""), "action": default_action},
+            ))
 
-    @property
-    def queued_issues(self) -> list[dict]:
-        """Snapshot of queued Issues from the last poll cycle (for /headhunter/pending)."""
-        return list(self._last_queued_issues)
+    def get_platform_snapshot(self) -> PlatformSnapshot:
+        """Return an immutable-style point-in-time snapshot of GitHub pending/queued items."""
+        items: list[PlatformQueueItem] = []
+        seen_keys: set[tuple[str, str, int]] = set()
+        self._append_snapshot_items(
+            items, seen_keys, getattr(self, "_last_queued_prs", None),
+            item_kind="pr", status="queued", queued=True,
+        )
+        self._append_snapshot_items(
+            items, seen_keys, getattr(self, "_last_queued_issues", None),
+            item_kind="issue", status="queued", queued=True,
+        )
+        self._append_snapshot_items(
+            items, seen_keys, getattr(self, "_last_pending_prs", None),
+            item_kind="pr", status="pending", queued=False,
+        )
+        self._append_snapshot_items(
+            items, seen_keys, getattr(self, "_last_pending_issues", None),
+            item_kind="issue", status="pending", queued=False,
+        )
+
+        queued_count = sum(1 for item in items if item.status == "queued")
+        return PlatformSnapshot(
+            platform="github",
+            enabled=bool(self.enabled()),
+            pending_count=len(items),
+            queued_count=queued_count,
+            last_poll_at=getattr(self, "_last_poll_at", None),
+            partial_error=getattr(self, "_last_partial_error", None),
+            breaker=PlatformBreakerStatus(),
+            items=items,
+        )
+
+    async def dismiss_item(
+        self,
+        installation_id: str,
+        owner: str,
+        repo: str,
+        item_number: int,
+        *,
+        is_issue: bool = False,
+    ) -> tuple[bool, str | None]:
+        """Remove queue/trigger labels for operator dismiss; never removes darwin-active."""
+        labels = (
+            (self._queued_label, self._work_label)
+            if is_issue
+            else (self._queued_label, self._trigger_label)
+        )
+        for lbl in labels:
+            res = await self._remove_label(installation_id, owner, repo, item_number, lbl)
+            if not res:
+                return False, f"Failed to remove GitHub label {lbl!r} from {owner}/{repo}#{item_number}"
+        return True, None
+
+    async def requeue_item(
+        self,
+        installation_id: str,
+        owner: str,
+        repo: str,
+        item_number: int,
+        *,
+        is_issue: bool = False,
+    ) -> tuple[bool, str | None]:
+        """Re-apply queue/work labels for operator requeue (add-before-remove for PRs)."""
+        if is_issue:
+            labels = [self._work_label, self._queued_label]
+            added = await self._add_labels(installation_id, owner, repo, item_number, labels)
+            if not added:
+                return False, f"Failed to add GitHub labels {labels!r} to {owner}/{repo}#{item_number}"
+            return True, None
+
+        added = await self._add_labels(installation_id, owner, repo, item_number, [self._queued_label])
+        if not added:
+            return False, f"Failed to add GitHub label {self._queued_label!r} to {owner}/{repo}#{item_number}"
+        for lbl in (self._done_label, self._trigger_label):
+            rem = await self._remove_label(installation_id, owner, repo, item_number, lbl)
+            if not rem:
+                return False, f"Failed to remove GitHub label {lbl!r} from {owner}/{repo}#{item_number}"
+        return True, None
+
+    def remove_cached_item(
+        self,
+        owner: str,
+        repo: str,
+        item_number: int,
+        *,
+        is_issue: bool = False,
+    ) -> None:
+        """Remove a PR or Issue from in-memory pending/queued snapshot caches."""
+        owner_l = owner.lower()
+        repo_l = repo.lower()
+        num_key = "issue_number" if is_issue else "number"
+        attrs = (
+            ("_last_pending_issues", "_last_queued_issues")
+            if is_issue
+            else ("_last_pending_prs", "_last_queued_prs")
+        )
+        for attr in attrs:
+            cur = getattr(self, attr, None)
+            if isinstance(cur, list):
+                setattr(self, attr, [
+                    entry for entry in cur
+                    if not (
+                        str(entry.get("owner") or "").lower() == owner_l
+                        and str(entry.get("repo") or "").lower() == repo_l
+                        and entry.get(num_key) == item_number
+                    )
+                ])
+
+    def mark_cached_item_queued(
+        self,
+        owner: str,
+        repo: str,
+        item_number: int,
+        matched_item: Any = None,
+        *,
+        is_issue: bool = False,
+    ) -> None:
+        """Move or insert an item into _last_queued_{prs,issues} after operator requeue."""
+        owner_l = owner.lower()
+        repo_l = repo.lower()
+        num_key = "issue_number" if is_issue else "number"
+        pending_attr = "_last_pending_issues" if is_issue else "_last_pending_prs"
+        queued_attr = "_last_queued_issues" if is_issue else "_last_queued_prs"
+
+        def _matches(entry: dict) -> bool:
+            return (
+                str(entry.get("owner") or "").lower() == owner_l
+                and str(entry.get("repo") or "").lower() == repo_l
+                and entry.get(num_key) == item_number
+            )
+
+        moved: dict | None = None
+        pending_list = getattr(self, pending_attr, None)
+        if isinstance(pending_list, list):
+            kept: list[dict] = []
+            for entry in pending_list:
+                if moved is None and _matches(entry):
+                    moved = dict(entry)
+                else:
+                    kept.append(entry)
+            setattr(self, pending_attr, kept)
+
+        queued_list = getattr(self, queued_attr, None)
+        if not isinstance(queued_list, list):
+            queued_list = []
+            setattr(self, queued_attr, queued_list)
+        if any(_matches(entry) for entry in queued_list):
+            return
+        if moved is None and matched_item is not None:
+            raw = getattr(matched_item, "raw", None)
+            raw_dict = raw if isinstance(raw, dict) else {}
+            if is_issue:
+                moved = {
+                    "owner": owner,
+                    "repo": repo,
+                    "issue_number": item_number,
+                    "issue_title": str(getattr(matched_item, "title", "") or ""),
+                    "author": str(getattr(matched_item, "author", "") or ""),
+                    "html_url": str(getattr(matched_item, "url", "") or ""),
+                    "created_at": str(getattr(matched_item, "enqueued_at", "") or ""),
+                    "installation_id": raw_dict.get("installation_id", ""),
+                    "queued": True,
+                }
+            else:
+                moved = {
+                    "owner": owner,
+                    "repo": repo,
+                    "number": item_number,
+                    "title": str(getattr(matched_item, "title", "") or ""),
+                    "user": str(getattr(matched_item, "author", "") or ""),
+                    "html_url": str(getattr(matched_item, "url", "") or ""),
+                    "head_sha": str(getattr(matched_item, "head_sha", "") or ""),
+                    "check_status": str(getattr(matched_item, "ci_status", "") or ""),
+                    "created_at": str(getattr(matched_item, "enqueued_at", "") or ""),
+                    "installation_id": raw_dict.get("installation_id", ""),
+                    "queued": True,
+                }
+        if moved is not None:
+            moved["queued"] = True
+            queued_list.append(moved)
+
+    @staticmethod
+    def _resolve_owner_repo(project_key: int | str, owner: str, repo: str) -> tuple[str, str]:
+        if owner and repo:
+            return owner, repo
+        ref = str(project_key or "")
+        if "/" in ref:
+            o, r = ref.split("/", 1)
+            return o, r
+        return owner, repo
+
+    async def dismiss_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator dismiss: remove queue/trigger labels."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        eff_inst = installation_id or str(raw_dict.get("installation_id") or "")
+        ok, err_detail = await self.dismiss_item(
+            eff_inst, eff_owner, eff_repo, item_number, is_issue=is_issue,
+        )
+        return ok, err_detail or ""
+
+    async def requeue_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_item: object = None,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator requeue: add queue label and remove done/trigger labels."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        eff_inst = installation_id or str(raw_dict.get("installation_id") or "")
+        ok, err_detail = await self.requeue_item(
+            eff_inst, eff_owner, eff_repo, item_number, is_issue=is_issue,
+        )
+        return ok, err_detail or ""
+
+    def remove_from_snapshot_cache(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+    ) -> None:
+        """VcsPlatformPort cache removal after operator dismiss."""
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        self.remove_cached_item(eff_owner, eff_repo, item_number, is_issue=is_issue)
+
+    def mark_snapshot_item_queued(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        matched_item: object = None,
+        is_issue: bool = False,
+    ) -> None:
+        """VcsPlatformPort cache queue transition after operator requeue."""
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        self.mark_cached_item_queued(
+            eff_owner, eff_repo, item_number, matched_item, is_issue=is_issue,
+        )
 
     def enabled(self) -> bool:
         return (
@@ -536,6 +838,8 @@ class GitHubPlatform:
             else:
                 skipped_no_label += 1
 
+        self._last_poll_at = time.time()
+        self._last_partial_error = None
         logger.info(
             f"GitHub poll: {len(prs)} discovered, {len(active_keys)} active, "
             f"{skipped_terminal} terminal, {skipped_no_label} no-label, "
@@ -1318,6 +1622,16 @@ class GitHubPlatform:
             reason=clean_plan,
             evidence=evidence,
         )
+        if hasattr(self, "_last_pending_prs"):
+            self._last_pending_prs = [
+                p for p in self._last_pending_prs
+                if not (p.get("owner") == owner and p.get("repo") == repo and p.get("number") == pr_number)
+            ]
+        if hasattr(self, "_last_queued_prs"):
+            self._last_queued_prs = [
+                p for p in self._last_queued_prs
+                if not (p.get("owner") == owner and p.get("repo") == repo and p.get("number") == pr_number)
+            ]
         logger.info(f"GitHub event created: {event_id} for {action} on #{pr_number} in {owner}/{repo}")
 
         # Label swap: ADD active BEFORE removing trigger/done/queued (prevents orphan on partial failure)
@@ -1411,6 +1725,16 @@ class GitHubPlatform:
             evidence=evidence,
             subject_type="github_issue",
         )
+        if hasattr(self, "_last_pending_issues"):
+            self._last_pending_issues = [
+                i for i in self._last_pending_issues
+                if not (i.get("owner") == owner and i.get("repo") == repo and i.get("issue_number") == number)
+            ]
+        if hasattr(self, "_last_queued_issues"):
+            self._last_queued_issues = [
+                i for i in self._last_queued_issues
+                if not (i.get("owner") == owner and i.get("repo") == repo and i.get("issue_number") == number)
+            ]
         logger.info(f"GitHub issue event created: {event_id} for #{number} in {owner}/{repo}")
 
         # Mark processed BEFORE label swap — dedup survives a label API failure on next cycle

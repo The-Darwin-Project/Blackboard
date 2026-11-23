@@ -42,6 +42,16 @@ const baseEvent = {
   evidence: { display_text: 'x', source_type: 't', domain: 'disorder', severity: 'info' },
 } as unknown as ActiveEvent;
 
+beforeEach(() => {
+  sessionStorage.clear();
+  localStorage.clear();
+});
+
+afterEach(() => {
+  sessionStorage.clear();
+  localStorage.clear();
+});
+
 describe('OpsControlProvider domain_updated / severity_updated', () => {
   let qc: QueryClient;
 
@@ -174,5 +184,84 @@ describe('OpsControlProvider approval error banner', () => {
     expect(screen.queryByRole('button', { name: 'Confirm New SHA' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('OpsControlProvider headhunter query invalidation (T-16)', () => {
+  let qc: QueryClient;
+  let invalidateSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    qc = new QueryClient();
+    invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+    renderHook(() => null, { wrapper });
+  });
+
+  afterEach(() => {
+    invalidateSpy.mockRestore();
+    cleanup();
+  });
+
+  it('Given OpsControlProvider mounted, When WS event_created arrives, Then invalidates headhunterPending and headhunterStatus queries', () => {
+    invalidateSpy.mockClear();
+    act(() => wsHandler!({ type: 'event_created', event_id: 'evt-hh-new' }));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterPending'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterStatus'] });
+  });
+
+  it('Given OpsControlProvider mounted, When WS event_status_changed arrives, Then invalidates headhunterPending and headhunterStatus queries', () => {
+    invalidateSpy.mockClear();
+    act(() => wsHandler!({ type: 'event_status_changed', event_id: 'evt-hh-park', status: 'waiting_approval' }));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterPending'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['headhunterStatus'] });
+  });
+});
+
+describe('OpsControlProvider headhunter invalidation coalescing (M10)', () => {
+  it('Given a 5-message WS event burst, When processed within 1500ms, Then fires 1 leading invalidation and 1 coalesced trailing invalidation after 1500ms', () => {
+    vi.useFakeTimers();
+    const qc = new QueryClient();
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    try {
+      const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+      renderHook(() => null, { wrapper });
+
+      invalidateSpy.mockClear();
+
+      act(() => {
+        wsHandler!({ type: 'event_created', event_id: 'evt-burst-1' });
+        wsHandler!({ type: 'event_status_changed', event_id: 'evt-burst-1', status: 'active' });
+        wsHandler!({ type: 'event_created', event_id: 'evt-burst-2' });
+        wsHandler!({ type: 'event_status_changed', event_id: 'evt-burst-2', status: 'waiting_approval' });
+        wsHandler!({ type: 'event_closed', event_id: 'evt-burst-1' });
+      });
+
+      const pendingCallsBefore = () =>
+        invalidateSpy.mock.calls.filter(([arg]) => (arg as { queryKey?: unknown[] })?.queryKey?.[0] === 'headhunterPending').length;
+      const statusCallsBefore = () =>
+        invalidateSpy.mock.calls.filter(([arg]) => (arg as { queryKey?: unknown[] })?.queryKey?.[0] === 'headhunterStatus').length;
+
+      expect(pendingCallsBefore()).toBe(1);
+      expect(statusCallsBefore()).toBe(1);
+
+      act(() => {
+        vi.advanceTimersByTime(1499);
+      });
+      expect(pendingCallsBefore()).toBe(1);
+      expect(statusCallsBefore()).toBe(1);
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(pendingCallsBefore()).toBe(2);
+      expect(statusCallsBefore()).toBe(2);
+    } finally {
+      invalidateSpy.mockRestore();
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 });

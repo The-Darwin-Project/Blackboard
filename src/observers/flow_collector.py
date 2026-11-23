@@ -165,9 +165,17 @@ class FlowCollector:
             pass
 
         hh_pending = 0
+        hh_gitlab_pending = 0
+        hh_github_pending = 0
+        hh_gitlab_breaker = "closed"
+        hh_github_breaker = "closed"
         try:
             if self._headhunter:
                 hh_pending = self._headhunter.pending_count
+                hh_gitlab_pending = self._headhunter.gitlab_pending_count
+                hh_github_pending = self._headhunter.github_pending_count
+                hh_gitlab_breaker = self._headhunter.gitlab_breaker_state
+                hh_github_breaker = self._headhunter.github_breaker_state
         except Exception:
             pass
 
@@ -247,6 +255,10 @@ class FlowCollector:
             deferred_events=deferred_count,
             waiting_approval_events=flow.get("waiting_approval_events", 0),
             headhunter_pending=hh_pending,
+            headhunter_gitlab_pending=hh_gitlab_pending,
+            headhunter_github_pending=hh_github_pending,
+            headhunter_gitlab_breaker=hh_gitlab_breaker,
+            headhunter_github_breaker=hh_github_breaker,
             aligner_pending=aligner_pending,
             jenkins_pending=jenkins_pending,
             jenkins_breaker_open=jenkins_breaker_open,

@@ -31,6 +31,7 @@ Redis Schema (Flat Keys - PoC Simple):
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -1676,6 +1677,19 @@ return 1
             bucket_key = int(s.timestamp // bucket_seconds) * bucket_seconds
             buckets.setdefault(bucket_key, []).append(s)
         result: list[FlowSnapshot] = []
+        breaker_rank = {"closed": 0, "half_open": 1, "open": 2}
+
+        def _worst_breaker(values) -> str:
+            worst = "closed"
+            worst_score = 0
+            for raw_val in values:
+                state = str(raw_val or "closed")
+                score = breaker_rank.get(state, 0)
+                if score > worst_score:
+                    worst = state
+                    worst_score = score
+            return worst
+
         for ts, group in sorted(buckets.items()):
             n = len(group)
             valid_cycles = [
@@ -1690,6 +1704,10 @@ return 1
                 deferred_events=round(sum(s.deferred_events for s in group) / n),
                 waiting_approval_events=round(sum(s.waiting_approval_events for s in group) / n),
                 headhunter_pending=round(sum(s.headhunter_pending for s in group) / n),
+                headhunter_gitlab_pending=round(sum(getattr(s, "headhunter_gitlab_pending", 0) for s in group) / n),
+                headhunter_github_pending=round(sum(getattr(s, "headhunter_github_pending", 0) for s in group) / n),
+                headhunter_gitlab_breaker=_worst_breaker(getattr(s, "headhunter_gitlab_breaker", "closed") for s in group),
+                headhunter_github_breaker=_worst_breaker(getattr(s, "headhunter_github_breaker", "closed") for s in group),
                 aligner_pending=round(sum(s.aligner_pending for s in group) / n),
                 jenkins_pending=round(sum(s.jenkins_pending for s in group) / n),
                 jenkins_breaker_open=any(s.jenkins_breaker_open for s in group),
@@ -2043,6 +2061,10 @@ return 1
         """Look up stored head SHA for re-trigger comparison (O(1) HGET)."""
         return await self.redis.hget(self._PR_SHA_KEY, f"{owner}:{repo}:{pr_number}")
 
+    async def delete_github_pr_sha(self, owner: str, repo: str, pr_number: int) -> None:
+        """Remove stored head SHA for a GitHub PR (operator requeue)."""
+        await self.redis.hdel(self._PR_SHA_KEY, f"{owner}:{repo}:{pr_number}")
+
     async def set_github_issue_processed(self, owner: str, repo: str, number: int) -> None:
         """Mark a GitHub Issue as processed (7d TTL for dedup)."""
         key = f"darwin:github:issue:{owner}:{repo}:{number}"
@@ -2052,6 +2074,11 @@ return 1
         """Check if a GitHub Issue has already been processed."""
         key = f"darwin:github:issue:{owner}:{repo}:{number}"
         return await self.redis.exists(key) > 0
+
+    async def clear_github_issue_processed(self, owner: str, repo: str, number: int) -> None:
+        """Clear processed dedup marker for a GitHub Issue (operator requeue)."""
+        key = f"darwin:github:issue:{owner}:{repo}:{number}"
+        await self.redis.delete(key)
 
     # --- GitLab hybrid FIFO queue & bounded MR SHA tracking ---
 
@@ -2224,6 +2251,51 @@ return 1
             pipe.zrem(self._GITLAB_QUEUE_KEY, member)
             pipe.hdel(self._GITLAB_QUEUE_META_KEY, member)
             await pipe.execute()
+
+    async def promote_gitlab_queue(
+        self,
+        project_id: int,
+        mr_iid: int,
+        *,
+        max_retries: int = _WATCH_MAX_RETRIES,
+    ) -> bool:
+        """Move a GitLab MR to the head of the FIFO ZSET atomically (WATCH/MULTI/EXEC)."""
+        pid, iid = self._validate_gitlab_ids(project_id, mr_iid)
+        member = f"{pid}:{iid}"
+        retries = max(1, max_retries)
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for attempt in range(retries):
+                try:
+                    await pipe.watch(self._GITLAB_QUEUE_KEY, self._GITLAB_QUEUE_META_KEY)
+                    score = await pipe.zscore(self._GITLAB_QUEUE_KEY, member)
+                    raw_meta = await pipe.hget(self._GITLAB_QUEUE_META_KEY, member)
+                    if score is None or not raw_meta:
+                        await pipe.unwatch()
+                        return False
+                    try:
+                        text = raw_meta.decode("utf-8", errors="replace") if isinstance(raw_meta, bytes) else str(raw_meta)
+                        parsed = json.loads(text)
+                    except (TypeError, ValueError):
+                        await pipe.unwatch()
+                        return False
+                    if not isinstance(parsed, dict):
+                        await pipe.unwatch()
+                        return False
+                    meta = dict(parsed)
+                    head = await pipe.zrange(self._GITLAB_QUEUE_KEY, 0, 0, withscores=True)
+                    head_score = float(head[0][1]) if head else 0.0
+                    promoted_score = min(0.0, head_score - 1.0)
+                    meta["promoted"] = True
+                    pipe.multi()
+                    pipe.zadd(self._GITLAB_QUEUE_KEY, {member: promoted_score})
+                    pipe.hset(self._GITLAB_QUEUE_META_KEY, member, json.dumps(meta))
+                    await pipe.execute()
+                    return True
+                except WatchError:
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
+        return False
 
     async def get_gitlab_mr_sha(self, project_id: int, mr_iid: int) -> str | None:
         """Return the stored head SHA for a tracked GitLab MR, or None."""
@@ -4192,3 +4264,45 @@ return 1
     async def clear_jira_mission_state(self, issue_key: str) -> None:
         """Clear cached mission analysis state for a Jira issue."""
         await self.redis.delete(f"{self.JIRA_MISSION_PREFIX}{issue_key}")
+
+    # =========================================================================
+    # Headhunter Queue Snapshots (pure-Redis read path for /pending & /status)
+    # =========================================================================
+
+    _HEADHUNTER_SNAPSHOT_PREFIX = "darwin:headhunter:snapshot:"
+
+    async def save_headhunter_snapshot(
+        self, platform: str, snapshot: object, ttl_seconds: int = 900,
+    ) -> None:
+        """Persist a redacted Headhunter platform snapshot to Redis with TTL."""
+        plat = str(platform).strip().lower()
+        if plat not in ("gitlab", "github"):
+            raise ValueError(f"Unsupported Headhunter snapshot platform: {platform!r}")
+        if dataclasses.is_dataclass(snapshot):
+            payload = dataclasses.asdict(snapshot)
+        elif isinstance(snapshot, dict):
+            payload = dict(snapshot)
+        elif hasattr(snapshot, "model_dump"):
+            payload = snapshot.model_dump()
+        else:
+            raise TypeError(f"Unsupported Headhunter snapshot payload type: {type(snapshot).__name__}")
+        await self.redis.set(
+            f"{self._HEADHUNTER_SNAPSHOT_PREFIX}{plat}",
+            json.dumps(payload),
+            ex=max(1, int(ttl_seconds)),
+        )
+
+    async def get_headhunter_snapshot(self, platform: str) -> dict | None:
+        """Load the latest Headhunter platform snapshot from Redis, or None if missing/invalid."""
+        plat = str(platform).strip().lower()
+        if plat not in ("gitlab", "github"):
+            return None
+        raw = await self.redis.get(f"{self._HEADHUNTER_SNAPSHOT_PREFIX}{plat}")
+        if not raw:
+            return None
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            return None

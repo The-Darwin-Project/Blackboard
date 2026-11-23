@@ -15,14 +15,20 @@
 //    Never selectEvent a non-event id. An agent with no resolvable role (label falls back to 'oncall') is a click no-op: 'oncall' is not a tile id.
 // 9. [Gotcha]: Squads are shown for every bound_event_id in the registry, even if the event is not in active/recently-closed lists (stale or beyond the 20-item closed window): label falls back to 'Squad • <shortId>'.
 //    Registry is authoritative; OpsStateContext.ephemeralAgents does the active-event filtering for other consumers.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield, Users, Radar } from 'lucide-react';
 import type { AgentRegistryEntry } from '../../api/types';
 import { useOpsControl } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending, useJenkinsPending } from '../../hooks/useQueue';
+import {
+  useActiveEvents,
+  useWaitingApprovalEvents,
+  useHeadhunterPending,
+  useAlignerPending,
+  useJenkinsPending,
+} from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
@@ -30,11 +36,10 @@ import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon, { JenkinsIcon } from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
 import {
-  agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems,
+  agentMenuItems, eventMenuItems, alignerPendingMenuItems,
   jenkinsQueueMenuItems, kargoStageMenuItems, jiraMissionMenuItems,
-  formatHeadhunterLabel, getHeadhunterItemKey, isGitHubTodo,
 } from './sidebarMenus';
-import { safeOpen } from '../../utils/safeOpen';
+import HeadhunterQueueGroup from './HeadhunterQueueGroup';
 import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
 const DEV_MODE = import.meta.env.DEV;
@@ -162,7 +167,16 @@ export default function EventSidebar() {
     storageKey: 'darwin:sidebarWidth', enabled: !collapsed,
   });
 
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    items: ContextMenuItem[];
+    hhTargetKey?: string | number;
+  } | null>(null);
+  const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
+  const clearHhCtxMenu = useCallback(() => {
+    setCtxMenu(prev => (prev?.hhTargetKey != null ? null : prev));
+  }, []);
 
   // Data sources
   const { data: activeEvents } = useActiveEvents();
@@ -480,29 +494,14 @@ export default function EventSidebar() {
             </TreeGroup>
 
             {/* HH Queue Group */}
-            <TreeGroup icon={<GitMerge size={16} />} label="Headhunter Queue" count={demoHH.length}
-              countColor={demoHH.length > 0 ? '#f59e0b' : '#64748b'}
-              forceCollapsed={!!selectedEventId}>
-              {hhError && <EmptyLabel>Failed to load queue</EmptyLabel>}
-              {!hhError && demoHH.length === 0 && <EmptyLabel>No pending todos</EmptyLabel>}
-              {demoHH.map((todo, idx) => {
-                const isGitHub = isGitHubTodo(todo);
-                return (
-                  <TreeNode
-                    key={getHeadhunterItemKey(todo, idx)}
-                    icon={<SourceIcon source={isGitHub ? 'github' : 'headhunter'} size={18} />}
-                    label={formatHeadhunterLabel(todo)}
-                    sublabel={todo.action?.replace(/_/g, ' ') || ''}
-                    sublabelColor={todo.pipeline_status === 'failed' ? '#ef4444' : '#64748b'}
-                    onClick={() => safeOpen(todo.target_url)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setCtxMenu({ x: e.clientX, y: e.clientY, items: hhMenuItems(todo) });
-                    }}
-                  />
-                );
-              })}
-            </TreeGroup>
+            <HeadhunterQueueGroup
+              todos={demoHH}
+              isError={hhError}
+              forceCollapsed={!!selectedEventId}
+              activeCtxKey={ctxMenu?.hhTargetKey ?? null}
+              onOpenContextMenu={setCtxMenu}
+              onClearContextMenu={clearHhCtxMenu}
+            />
 
             {/* Schedules Group */}
             <TreeGroup icon={<Clock size={16} />} label="Schedules" count={schedules.length}
@@ -540,7 +539,7 @@ export default function EventSidebar() {
       </div>
 
       {/* Context menu */}
-      {ctxMenu && <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />}
+      {ctxMenu && <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={closeCtxMenu} />}
     </div>
   );
 }

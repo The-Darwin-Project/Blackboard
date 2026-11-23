@@ -22,6 +22,7 @@ spec:
       labels:
         {{- include "darwin.selectorLabels" . | nindent 8 }}
     spec:
+      {{- $ghSecret := trim (toString ((.Values.github | default dict).existingSecret | default "")) }}
       {{- if or .Values.observer.enabled .Values.slackAccess.enabled .Values.ephemeralAgents.enabled }}
       serviceAccountName: {{ .Release.Name }}-brain
       {{- end }}
@@ -215,17 +216,17 @@ spec:
             - name: KG_POSTGRES_URL
               value: "postgresql://darwin:$(KG_POSTGRES_PASSWORD)@{{ .Release.Name }}-kg-postgres:5432/{{ .Values.knowledgeGraph.database }}"
             {{- end }}
-            {{- if .Values.github.existingSecret }}
+            {{- if $ghSecret }}
             # GitHub App configuration
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.github.existingSecret }}
+                  name: {{ $ghSecret }}
                   key: app-id
             - name: GITHUB_INSTALLATION_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.github.existingSecret }}
+                  name: {{ $ghSecret }}
                   key: installation-id
                   optional: true
             - name: GITHUB_PRIVATE_KEY_PATH
@@ -242,6 +243,17 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.gitlab.existingSecret }}
                   key: host
+            {{- end }}
+            {{- if and .Values.gitlab (hasKey .Values.gitlab "sslVerify") (not (kindIs "invalid" .Values.gitlab.sslVerify)) }}
+            {{- $sslVerify := trim (toString .Values.gitlab.sslVerify) }}
+            {{- if ne $sslVerify "" }}
+            {{- $sslLower := lower $sslVerify }}
+            {{- if or (eq $sslLower "false") (eq $sslLower "0") (eq $sslLower "no") (eq $sslLower "off") }}
+            {{- fail (printf "gitlab.sslVerify=%q is forbidden: disabling TLS verification (GITLAB_SSL_VERIFY=false/0/no/off) is insecure; provide a CA bundle path or leave empty" $sslVerify) }}
+            {{- end }}
+            - name: GITLAB_SSL_VERIFY
+              value: {{ $sslVerify | quote }}
+            {{- end }}
             {{- end }}
             # Debug mode
             - name: DEBUG
@@ -265,43 +277,65 @@ spec:
               value: "true"
             {{- end }}
             {{- if .Values.headhunter }}
-            # Headhunter (GitLab todo poller)
+            # Headhunter (GitLab & GitHub VCS poller)
             - name: HEADHUNTER_ENABLED
               value: "{{ .Values.headhunter.enabled }}"
             - name: HEADHUNTER_POLL_INTERVAL
               value: "{{ .Values.headhunter.pollInterval }}"
             - name: HEADHUNTER_STARTUP_DELAY
               value: "{{ .Values.headhunter.startupDelay }}"
-            - name: HEADHUNTER_MAINTAINER_SOURCE
-              value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
             - name: HEADHUNTER_COMMENT_LIMIT
               value: "{{ .Values.headhunter.commentLimit }}"
-            {{- if .Values.headhunter.github.enabled }}
+            - name: GITLAB_BOT_USERNAME
+              value: {{ .Values.headhunter.gitlabBotUsername | default "darwin-bot" | quote }}
+            - name: HEADHUNTER_ALLOWED_AUTHORS
+              value: {{ .Values.headhunter.allowedAuthors | default "" | quote }}
+            {{- $descCap := "100000" }}
+            {{- if and (hasKey .Values.headhunter "descriptionCap") (not (kindIs "invalid" .Values.headhunter.descriptionCap)) (ne (trim (toString .Values.headhunter.descriptionCap)) "") }}
+            {{- $descCap = trim (toString .Values.headhunter.descriptionCap) }}
+            {{- end }}
+            - name: HEADHUNTER_DESCRIPTION_CAP
+              value: {{ $descCap | quote }}
+            {{- $glQueueMax := "500" }}
+            {{- if and (hasKey .Values.headhunter "gitlabQueueMaxEntries") (not (kindIs "invalid" .Values.headhunter.gitlabQueueMaxEntries)) (ne (trim (toString .Values.headhunter.gitlabQueueMaxEntries)) "") }}
+            {{- $glQueueMax = trim (toString .Values.headhunter.gitlabQueueMaxEntries) }}
+            {{- end }}
+            - name: HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES
+              value: {{ $glQueueMax | quote }}
+            {{- $glShaMax := "500" }}
+            {{- if and (hasKey .Values.headhunter "gitlabShaMaxEntries") (not (kindIs "invalid" .Values.headhunter.gitlabShaMaxEntries)) (ne (trim (toString .Values.headhunter.gitlabShaMaxEntries)) "") }}
+            {{- $glShaMax = trim (toString .Values.headhunter.gitlabShaMaxEntries) }}
+            {{- end }}
+            - name: HEADHUNTER_GITLAB_SHA_MAX_ENTRIES
+              value: {{ $glShaMax | quote }}
+            {{- $ghCfg := .Values.headhunter.github | default dict }}
+            - name: GITHUB_APP_SLUG
+              value: {{ $ghCfg.appSlug | default "darwin-project-ai" | quote }}
+            {{- $cortexUrl := trim (toString (.Values.headhunter.cortexUrl | default "")) | default (trim (toString ($ghCfg.cortexUrl | default ""))) -}}
+            {{- if $cortexUrl }}
+            - name: DARWIN_CORTEX_URL
+              value: {{ $cortexUrl | quote }}
+            {{- end }}
+            {{- if eq (lower (trim (toString ($ghCfg.enabled | default false)))) "true" }}
             - name: HEADHUNTER_GITHUB_ENABLED
               value: "true"
-            - name: HEADHUNTER_GITHUB_POLL_INTERVAL
-              value: "{{ .Values.headhunter.github.pollInterval }}"
             - name: HEADHUNTER_GITHUB_REPOS
-              value: "{{ .Values.headhunter.github.repos }}"
+              value: "{{ $ghCfg.repos }}"
             - name: HEADHUNTER_GITHUB_TRIGGER_REASONS
-              value: "{{ .Values.headhunter.github.triggerReasons }}"
-            {{- if .Values.headhunter.github.cortexUrl }}
-            - name: DARWIN_CORTEX_URL
-              value: "{{ .Values.headhunter.github.cortexUrl }}"
-            {{- end }}
+              value: "{{ $ghCfg.triggerReasons }}"
             - name: HEADHUNTER_GITHUB_LABEL
-              value: "{{ .Values.headhunter.github.labelReview }}"
+              value: "{{ $ghCfg.labelReview }}"
             - name: HEADHUNTER_GITHUB_LABEL_ACTIVE
-              value: "{{ .Values.headhunter.github.labelActive }}"
+              value: "{{ $ghCfg.labelActive }}"
             - name: HEADHUNTER_GITHUB_LABEL_DONE
-              value: "{{ .Values.headhunter.github.labelDone }}"
+              value: "{{ $ghCfg.labelDone }}"
             - name: HEADHUNTER_GITHUB_LABEL_QUEUED
-              value: "{{ .Values.headhunter.github.labelQueued }}"
+              value: "{{ $ghCfg.labelQueued }}"
             - name: HEADHUNTER_GITHUB_LABEL_WORK
-              value: "{{ .Values.headhunter.github.labelWork }}"
-            {{- $rr := .Values.headhunter.github.reviewResponse | default dict }}
+              value: "{{ $ghCfg.labelWork }}"
+            {{- $rr := $ghCfg.reviewResponse | default dict }}
             - name: HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED
               value: "{{ $rr.enabled | default false }}"
             {{- /* Optional overrides: emit an env var ONLY when its key is present and non-null, so an
@@ -314,7 +348,7 @@ spec:
               value: {{ get $rr $key | toString | quote }}
             {{- end }}
             {{- end }}
-            {{- range $label, $url := .Values.headhunter.github.skills }}
+            {{- range $label, $url := $ghCfg.skills }}
             - name: "HEADHUNTER_GITHUB_SKILL_{{ $label | upper }}"
               value: {{ $url | quote }}
             {{- end }}
@@ -428,9 +462,9 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_TIMEKEEPER
-            {{- if .Values.timekeeper.chatStaleTtl }}
+            {{- if and (hasKey .Values.timekeeper "chatStaleTtl") (not (kindIs "invalid" .Values.timekeeper.chatStaleTtl)) (ne (trim (toString .Values.timekeeper.chatStaleTtl)) "") }}
             - name: CHAT_STALE_TTL
-              value: "{{ .Values.timekeeper.chatStaleTtl }}"
+              value: {{ .Values.timekeeper.chatStaleTtl | toString | trim | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.idleTimeout }}
@@ -513,7 +547,7 @@ spec:
             - name: NIGHTWATCHER_BATCH_COOLDOWN_SECONDS
               value: "{{ .Values.nightwatcher.batchCooldownSeconds }}"
             - name: NIGHTWATCHER_BATCH_TIMEOUT_SECONDS
-              value: '{{ .Values.nightwatcher.batchTimeoutSeconds | default "1800" }}'
+              value: {{ if and (hasKey .Values.nightwatcher "batchTimeoutSeconds") (not (kindIs "invalid" .Values.nightwatcher.batchTimeoutSeconds)) (ne (trim (toString .Values.nightwatcher.batchTimeoutSeconds)) "") }}{{ .Values.nightwatcher.batchTimeoutSeconds | toString | trim | quote }}{{ else }}"1800"{{ end }}
             - name: LLM_MODEL_NIGHTWATCHER
               valueFrom:
                 configMapKeyRef:
@@ -665,7 +699,7 @@ spec:
             - name: SLACK_ACCESS_EMAIL_DOMAIN
               value: {{ .Values.slackAccess.emailDomain | quote }}
             - name: SLACK_ACCESS_SYNC_INTERVAL
-              value: {{ .Values.slackAccess.syncIntervalSeconds | default 300 | quote }}
+              value: {{ if and (hasKey .Values.slackAccess "syncIntervalSeconds") (not (kindIs "invalid" .Values.slackAccess.syncIntervalSeconds)) (ne (trim (toString .Values.slackAccess.syncIntervalSeconds)) "") }}{{ .Values.slackAccess.syncIntervalSeconds | toString | trim | quote }}{{ else }}"300"{{ end }}
             {{- if .Values.slackAccess.existingSecret }}
             - name: SLACK_ACCESS_MAINTAINER_EMAILS
               valueFrom:
@@ -760,7 +794,7 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            {{- if .Values.github.existingSecret }}
+            {{- if $ghSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
               readOnly: true
@@ -829,16 +863,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-redis
                   key: password
-            {{- if .Values.github.existingSecret }}
+            {{- if $ghSecret }}
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.github.existingSecret }}
+                  name: {{ $ghSecret }}
                   key: app-id
             - name: GITHUB_INSTALLATION_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.github.existingSecret }}
+                  name: {{ $ghSecret }}
                   key: installation-id
                   optional: true
             - name: GITHUB_PRIVATE_KEY_PATH
@@ -866,7 +900,7 @@ spec:
               subPath: ca-bundle.crt
               readOnly: true
             {{- end }}
-            {{- if .Values.github.existingSecret }}
+            {{- if $ghSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
               readOnly: true
@@ -896,10 +930,10 @@ spec:
           secret:
             secretName: {{ .Values.gcp.existingSecret }}
         {{- end }}
-        {{- if .Values.github.existingSecret }}
+        {{- if $ghSecret }}
         - name: github-app-secret
           secret:
-            secretName: {{ .Values.github.existingSecret }}
+            secretName: {{ $ghSecret }}
         - name: git-credentials
           emptyDir: {}
         {{- end }}
