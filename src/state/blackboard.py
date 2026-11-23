@@ -2267,19 +2267,24 @@ return 1
             for attempt in range(retries):
                 try:
                     await pipe.watch(self._GITLAB_QUEUE_KEY, self._GITLAB_QUEUE_META_KEY)
+                    score = await pipe.zscore(self._GITLAB_QUEUE_KEY, member)
+                    raw_meta = await pipe.hget(self._GITLAB_QUEUE_META_KEY, member)
+                    if score is None or not raw_meta:
+                        await pipe.unwatch()
+                        return False
+                    try:
+                        text = raw_meta.decode("utf-8", errors="replace") if isinstance(raw_meta, bytes) else str(raw_meta)
+                        parsed = json.loads(text)
+                    except (TypeError, ValueError):
+                        await pipe.unwatch()
+                        return False
+                    if not isinstance(parsed, dict):
+                        await pipe.unwatch()
+                        return False
+                    meta = dict(parsed)
                     head = await pipe.zrange(self._GITLAB_QUEUE_KEY, 0, 0, withscores=True)
                     head_score = float(head[0][1]) if head else 0.0
                     promoted_score = min(0.0, head_score - 1.0)
-                    raw_meta = await pipe.hget(self._GITLAB_QUEUE_META_KEY, member)
-                    meta: dict = {"project_id": pid, "mr_iid": iid}
-                    if raw_meta:
-                        try:
-                            text = raw_meta.decode("utf-8", errors="replace") if isinstance(raw_meta, bytes) else str(raw_meta)
-                            parsed = json.loads(text)
-                            if isinstance(parsed, dict):
-                                meta = parsed
-                        except (TypeError, ValueError):
-                            pass
                     meta["promoted"] = True
                     pipe.multi()
                     pipe.zadd(self._GITLAB_QUEUE_KEY, {member: promoted_score})

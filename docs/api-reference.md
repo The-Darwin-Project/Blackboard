@@ -55,26 +55,26 @@ GET  /queue/closed/list               # Recently closed events
 GET  /queue/headhunter/pending        # Pure-Redis pending/active/waiting_approval Headhunter items (list[dict])
 GET  /queue/headhunter/status         # Per-platform enabled, counts, last_poll_at, redacted errors, circuit breakers
 POST /queue/headhunter/poll           # Operator-gated global 10s-debounced poll wake-up (5s lock -> 409 if busy)
-POST /queue/headhunter/breaker/{platform}/reset  # Operator-gated per-platform circuit breaker reset (gitlab|github) + poll wake
-POST /queue/headhunter/items/{action} # Operator-gated item action (promote -> 202, dismiss/requeue -> 200)
+POST /queue/headhunter/breaker/{platform}/reset  # Operator-gated per-platform breaker reset (gitlab|github; 5s lock -> 409)
+POST /queue/headhunter/items/{action} # Operator-gated item action (promote -> 202, dismiss/requeue -> 200; 5s lock -> 409)
 ```
 
 ### Headhunter Queue & Operator Controls
 
 * `GET /queue/headhunter/pending` reads exclusively from Redis (`darwin:headhunter:snapshot:{platform}` plus active/`waiting_approval` Blackboard Headhunter events) with zero live VCS HTTP calls per UI poll, preserving `list[dict]` rows with additive `check_status`, `pipeline_status`, `queue_position`, and `status` fields.
 * `GET /queue/headhunter/status` returns `{platforms: {gitlab: {...}, github: {...}}}` with per-platform `enabled`, `pending_count`, `queued_count`, `last_poll_at`, PII-redacted `partial_error` (`<= 200` chars), and `breaker: {state, consecutive_failures, next_retry_at, last_error}`.
-* Operator endpoints (`POST /queue/headhunter/poll`, `POST /queue/headhunter/breaker/{platform}/reset`, `POST /queue/headhunter/items/{promote,dismiss,requeue}`) require RBAC authorization (`OBS_ADMIN_GROUPS` ∪ `APPROVER_GROUPS`, fail-closed `401`/`403`) and acquire `hh._poll_lock` with a 5s timeout (`409 Conflict` with `Retry-After: 5` if busy).
-* **Debounce & Error Semantics:** `/poll` uses a **global** 10s debounce; `/breaker/{platform}/reset` and `/items/{action}` use **per-platform** 10s cooldowns. Common errors: `404` (item missing from active snapshot on `/items/{action}`), `422` (invalid `platform`/`action` or request payload), `502` (upstream VCS/gateway error), `503` (Brain or Headhunter uninitialized).
+* Operator endpoints (`POST /queue/headhunter/poll`, `POST /queue/headhunter/breaker/{platform}/reset`, `POST /queue/headhunter/items/{promote,dismiss,requeue}`) require RBAC authorization (`OBS_ADMIN_GROUPS` ∪ `APPROVER_GROUPS`, fail-closed `401`/`403`) and acquire `hh._poll_lock` with a 5s timeout (all three return `409 Conflict` with `Retry-After: 5` if busy; `/items/{action}` also returns `409` on concurrent Redis `WatchError`).
+* **Debounce & Error Semantics:** `/poll` uses a **global** 10s debounce; `/breaker/{platform}/reset` uses a **per-platform** 10s cooldown; `/items/{action}` uses a **per-`(action, platform, item_number)`** 10s cooldown. Common errors: `404` (item missing from active snapshot on `/items/{action}`), `409` (`_poll_lock` busy with `Retry-After: 5` on `/poll`, `/breaker/{platform}/reset`, and `/items/{action}`, or concurrent queue mutation on `/items/{action}`), `422` (invalid `platform`/`action` or request payload), `502` (upstream VCS/gateway error), `503` (Brain/Headhunter/Blackboard unavailable).
 
 ```json
 POST /queue/headhunter/poll
-// Response (202 Accepted):
+// Response (202 Accepted; 409 Conflict Retry-After: 5 if poll lock busy):
 {"triggered": true, "debounced": false}
 // Debounced within 10s global window (202 Accepted):
 {"triggered": false, "debounced": true}
 
 POST /queue/headhunter/breaker/gitlab/reset
-// Response (200 OK):
+// Response (200 OK; 409 Conflict Retry-After: 5 if poll lock busy):
 {"reset": true, "debounced": false, "platform": "gitlab", "state": "closed"}
 // Debounced within 10s per-platform cooldown (202 Accepted):
 {"reset": false, "debounced": true, "platform": "gitlab"}
@@ -91,10 +91,10 @@ POST /queue/headhunter/items/promote
 POST /queue/headhunter/items/requeue
 {"platform": "github", "owner": "org", "repo": "repo", "item_number": 77, "is_issue": false}
 
-// Response (202 Accepted for promote; 200 OK for dismiss -> "dismissed" / requeue -> "requeued"):
+// Response (202 Accepted for promote; 200 OK for dismiss -> "dismissed" / requeue -> "requeued"; 409 Conflict Retry-After: 5 if poll lock busy):
 {"status": "accepted", "action": "promote", "platform": "gitlab", "item_number": 17}
 
-// Debounced within 10s per-platform cooldown (202 for promote; 200 for dismiss/requeue):
+// Debounced within 10s per-(action, platform, item_number) cooldown (202 for promote; 200 for dismiss/requeue):
 {"ok": false, "debounced": true, "action": "promote", "platform": "gitlab"}
 ```
 

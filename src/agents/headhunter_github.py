@@ -514,6 +514,86 @@ class GitHubPlatform:
             moved["queued"] = True
             queued_list.append(moved)
 
+    @staticmethod
+    def _resolve_owner_repo(project_key: int | str, owner: str, repo: str) -> tuple[str, str]:
+        if owner and repo:
+            return owner, repo
+        ref = str(project_key or "")
+        if "/" in ref:
+            o, r = ref.split("/", 1)
+            return o, r
+        return owner, repo
+
+    async def dismiss_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator dismiss: remove queue/trigger labels."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        eff_inst = installation_id or str(raw_dict.get("installation_id") or "")
+        ok, err_detail = await self.dismiss_item(
+            eff_inst, eff_owner, eff_repo, item_number, is_issue=is_issue,
+        )
+        return ok, err_detail or ""
+
+    async def requeue_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_item: object = None,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator requeue: add queue label and remove done/trigger labels."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        eff_inst = installation_id or str(raw_dict.get("installation_id") or "")
+        ok, err_detail = await self.requeue_item(
+            eff_inst, eff_owner, eff_repo, item_number, is_issue=is_issue,
+        )
+        return ok, err_detail or ""
+
+    def remove_from_snapshot_cache(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+    ) -> None:
+        """VcsPlatformPort cache removal after operator dismiss."""
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        self.remove_cached_item(eff_owner, eff_repo, item_number, is_issue=is_issue)
+
+    def mark_snapshot_item_queued(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        matched_item: object = None,
+        is_issue: bool = False,
+    ) -> None:
+        """VcsPlatformPort cache queue transition after operator requeue."""
+        eff_owner, eff_repo = self._resolve_owner_repo(project_key, owner, repo)
+        self.mark_cached_item_queued(
+            eff_owner, eff_repo, item_number, matched_item, is_issue=is_issue,
+        )
+
     def enabled(self) -> bool:
         return (
             os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"

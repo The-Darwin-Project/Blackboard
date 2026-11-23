@@ -873,6 +873,23 @@ class Headhunter:
             ttl_seconds=ttl_seconds,
         )
 
+    async def _persist_snapshot_nonfatal(
+        self,
+        platform: str,
+        *,
+        partial_error: str | None = None,
+    ) -> None:
+        """Persist platform snapshot to Redis; log redacted error and swallow failures."""
+        try:
+            await self._persist_platform_snapshot(platform, partial_error=partial_error)
+        except Exception as snap_err:
+            logger.debug(
+                "Headhunter %s snapshot persistence failed (non-fatal) (%s): %s",
+                platform,
+                type(snap_err).__name__,
+                self._redact_snapshot_err(str(snap_err)) or type(snap_err).__name__,
+            )
+
     def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
         """Inject global WIP counter (e.g. Brain.count_global_wip)."""
         self._wip_counter = counter
@@ -1098,6 +1115,15 @@ class Headhunter:
         plat_key = plat_attr if isinstance(plat_attr, str) else platform_label.lower()
         si = "" if gate_closed_initial else platform.load_triage_instruction()
         remaining_queued = list(queued_items)
+        last_snap_ts = time.monotonic()
+        refresh_interval = max(30.0, float(getattr(self, "_poll_interval", 300)))
+
+        async def _maybe_refresh_snapshot() -> None:
+            nonlocal last_snap_ts
+            if (time.monotonic() - last_snap_ts) >= refresh_interval:
+                if plat_key in ("gitlab", "github"):
+                    await self._persist_snapshot_nonfatal(plat_key)
+                last_snap_ts = time.monotonic()
 
         # Phase A: Promote oldest queued items first (FIFO)
         attempted_a = 0
@@ -1133,6 +1159,8 @@ class Headhunter:
                         f"{platform_label} queued item processing failed for {self._item_label(item)}: {e}"
                     )
                     continue
+                finally:
+                    await _maybe_refresh_snapshot()
         if on_queue_update is not None:
             on_queue_update(remaining_queued)
         _raise_if_systemic_failure(
@@ -1184,6 +1212,8 @@ class Headhunter:
                     logger.warning(
                         f"{platform_label} queue item failed for {self._item_label(item)}: {e}"
                     )
+                finally:
+                    await _maybe_refresh_snapshot()
                 continue
             attempted_b += 1
             try:
@@ -1206,6 +1236,8 @@ class Headhunter:
                     f"{platform_label} item processing failed for {self._item_label(item)}: {e}"
                 )
                 continue
+            finally:
+                await _maybe_refresh_snapshot()
         if on_queue_update is not None:
             on_queue_update(remaining_queued)
         _raise_if_systemic_failure(
@@ -1250,6 +1282,7 @@ class Headhunter:
             f"Headhunter GitLab: {len(queued_items)} queued, {len(new_items)} new item(s) "
             f"(gate={'open' if gate_open else 'closed'})"
         )
+        await self._persist_snapshot_nonfatal("gitlab")
         _, newly_queued = await self._drain_platform_phase_ab(
             self._gitlab,
             queued_items,
@@ -1289,6 +1322,8 @@ class Headhunter:
             self._github_queued = len(queued_items)
             self._github_pending = len(new_items)
             self._github._last_pending_prs = list(new_items)
+        if prs:
+            await self._persist_snapshot_nonfatal("github")
 
         def _sync_github_queued(remaining: list[Any]) -> None:
             self._github._last_queued_prs = remaining
@@ -1515,14 +1550,7 @@ class Headhunter:
             if breaker is not None and hasattr(breaker, "reset"):
                 breaker.reset()
             self._poll_wake_signal.set()
-        try:
-            await self._persist_platform_snapshot(platform)
-        except Exception as exc:
-            logger.warning(
-                "Headhunter %s snapshot persistence after breaker reset failed (non-fatal): %s",
-                platform,
-                type(exc).__name__,
-            )
+        await self._persist_snapshot_nonfatal(platform)
 
     def _sync_counters_from_adapter(self, platform: str) -> None:
         """Sync Headhunter pending/queued gauges from adapter cache (call under _with_poll_lock)."""
@@ -1562,7 +1590,72 @@ class Headhunter:
                 return owner, repo
         return str(getattr(req, "owner", "") or ""), str(getattr(req, "repo", "") or "")
 
-    async def operate_item(
+    @staticmethod
+    def _build_gitlab_work_item_meta(
+        gl_pid: int,
+        item_number: int,
+        matched_item: Any,
+        matched_raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build complete enqueue_gitlab_mr metadata (including work_item) from a snapshot item."""
+        is_dict = isinstance(matched_item, dict)
+        head_sha = str((matched_item.get("head_sha") if is_dict else getattr(matched_item, "head_sha", "")) or "")
+        proj_ref = str(
+            (matched_item.get("project_ref") if is_dict else getattr(matched_item, "project_ref", ""))
+            or str(gl_pid)
+        )
+        title = str(
+            (matched_item.get("title") if is_dict else getattr(matched_item, "title", ""))
+            or f"MR !{item_number}"
+        )
+        author = str((matched_item.get("author") if is_dict else getattr(matched_item, "author", "")) or "")
+        url = str((matched_item.get("url") if is_dict else getattr(matched_item, "url", "")) or "")
+        ci_status = str((matched_item.get("ci_status") if is_dict else getattr(matched_item, "ci_status", "")) or "")
+        created_at = str(
+            (matched_item.get("enqueued_at") if is_dict else getattr(matched_item, "enqueued_at", ""))
+            or ""
+        )
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        raw_sibs = raw_dict.get("_sibling_todo_ids")
+        sib_ids: list[int] = []
+        if isinstance(raw_sibs, list):
+            for raw_tid in raw_sibs:
+                tid = _valid_positive_int(raw_tid)
+                if tid is not None and tid not in sib_ids:
+                    sib_ids.append(tid)
+        primary_tid = _valid_positive_int(raw_dict.get("todo_id"))
+        if primary_tid is not None and primary_tid not in sib_ids:
+            sib_ids.append(primary_tid)
+        action_name = str(raw_dict.get("action") or "assigned")
+        mr_state = str(raw_dict.get("mr_state") or "opened")
+        work_item_meta = {
+            "id": primary_tid,
+            "action_name": action_name,
+            "created_at": created_at,
+            "target_type": "MergeRequest",
+            "target_url": url,
+            "project": {"id": gl_pid, "path_with_namespace": proj_ref},
+            "target": {
+                "iid": item_number,
+                "title": title,
+                "state": mr_state,
+                "sha": head_sha,
+                "diff_refs": {"head_sha": head_sha} if head_sha else {},
+                "author": {"username": author} if author else {},
+                "pipeline": {"status": ci_status} if ci_status else {},
+            },
+            "_sibling_todo_ids": sib_ids,
+        }
+        return {
+            "project_id": gl_pid,
+            "mr_iid": item_number,
+            "action_name": action_name,
+            "head_sha": head_sha,
+            "_sibling_todo_ids": sib_ids,
+            "work_item": work_item_meta,
+        }
+
+    async def _operate_gitlab_item(
         self,
         action: str,
         req: Any,
@@ -1570,189 +1663,158 @@ class Headhunter:
         matched_raw: dict[str, Any],
         blackboard: Any,
     ) -> dict[str, Any]:
-        """Execute promote/dismiss/requeue on a matched snapshot item without holding _poll_lock on I/O."""
-        platform = str(req.platform)
+        adapter: VcsPlatformPort = self._gitlab
         item_number = int(req.item_number)
+        gl_pid = self._resolve_gitlab_pid(req, matched_raw)
+        if gl_pid is None:
+            raise HeadhunterOperationError(
+                422,
+                f"Unable to resolve numeric GitLab project_id for MR !{item_number}",
+            )
+        key: tuple = ("gitlab", "mr", int(gl_pid), item_number)
 
-        if platform == "gitlab":
-            gl_pid = self._resolve_gitlab_pid(req, matched_raw)
-            if gl_pid is None:
-                raise HeadhunterOperationError(
-                    422,
-                    f"Unable to resolve numeric GitLab project_id for MR !{item_number}",
-                )
-            key: tuple = ("gitlab", "mr", int(gl_pid), item_number)
-
-            if action == "promote":
-                if hasattr(blackboard, "promote_gitlab_queue"):
-                    await blackboard.promote_gitlab_queue(gl_pid, item_number)
-                async with self._with_poll_lock():
-                    self.request_promote("gitlab", project_id=gl_pid, item_number=item_number)
-                    self._poll_wake_signal.set()
-                return {
-                    "status": "accepted",
-                    "action": "promote",
-                    "platform": "gitlab",
-                    "item_number": item_number,
-                }
-
-            if action == "dismiss":
-                todo_ids: list[int] = []
-                raw_sibs = matched_raw.get("_sibling_todo_ids") if isinstance(matched_raw, dict) else None
-                if isinstance(raw_sibs, list):
-                    for raw_tid in raw_sibs:
-                        tid = _valid_positive_int(raw_tid)
-                        if tid is not None and tid not in todo_ids:
-                            todo_ids.append(tid)
-                primary_tid = _valid_positive_int(
-                    matched_raw.get("todo_id") if isinstance(matched_raw, dict) else None
-                )
-                if primary_tid is not None and primary_tid not in todo_ids:
-                    todo_ids.append(primary_tid)
-
-                gl = getattr(self, "_gitlab", None)
-                if todo_ids and gl is not None and hasattr(gl, "dismiss_todo"):
-                    dismiss_arg: int | list[int] = todo_ids[0] if len(todo_ids) == 1 else todo_ids
-                    ok = await gl.dismiss_todo(dismiss_arg)
-                    if not ok:
-                        raise HeadhunterOperationError(
-                            502,
-                            f"Failed to dismiss GitLab todo(s) for MR !{item_number}",
-                        )
-                if hasattr(blackboard, "remove_gitlab_queue"):
-                    await blackboard.remove_gitlab_queue(gl_pid, item_number)
-                async with self._with_poll_lock():
-                    self._record_dismissed_key(key)
-                    if isinstance(getattr(self, "_promoted_keys", None), dict):
-                        self._promoted_keys.pop(key, None)
-                    if gl is not None and hasattr(gl, "remove_from_snapshot_cache"):
-                        gl.remove_from_snapshot_cache(gl_pid, item_number)
-                    self._sync_counters_from_adapter("gitlab")
-                await self._persist_platform_snapshot("gitlab")
-                return {
-                    "status": "dismissed",
-                    "action": "dismiss",
-                    "platform": "gitlab",
-                    "item_number": item_number,
-                }
-
-            # action == "requeue" (GitLab)
-            head_sha = str(
-                (matched_item.get("head_sha") if isinstance(matched_item, dict) else getattr(matched_item, "head_sha", ""))
-                or ""
-            )
-            proj_ref = str(
-                (matched_item.get("project_ref") if isinstance(matched_item, dict) else getattr(matched_item, "project_ref", ""))
-                or str(gl_pid)
-            )
-            title = str(
-                (matched_item.get("title") if isinstance(matched_item, dict) else getattr(matched_item, "title", ""))
-                or f"MR !{item_number}"
-            )
-            author = str(
-                (matched_item.get("author") if isinstance(matched_item, dict) else getattr(matched_item, "author", ""))
-                or ""
-            )
-            url = str(
-                (matched_item.get("url") if isinstance(matched_item, dict) else getattr(matched_item, "url", ""))
-                or ""
-            )
-            ci_status = str(
-                (matched_item.get("ci_status") if isinstance(matched_item, dict) else getattr(matched_item, "ci_status", ""))
-                or ""
-            )
-            created_at = str(
-                (matched_item.get("enqueued_at") if isinstance(matched_item, dict) else getattr(matched_item, "enqueued_at", ""))
-                or ""
-            )
-            raw_sibs = matched_raw.get("_sibling_todo_ids") if isinstance(matched_raw, dict) else None
-            sib_ids: list[int] = []
-            if isinstance(raw_sibs, list):
-                for raw_tid in raw_sibs:
-                    tid = _valid_positive_int(raw_tid)
-                    if tid is not None and tid not in sib_ids:
-                        sib_ids.append(tid)
-            primary_tid = _valid_positive_int(
-                matched_raw.get("todo_id") if isinstance(matched_raw, dict) else None
-            )
-            if primary_tid is not None and primary_tid not in sib_ids:
-                sib_ids.append(primary_tid)
-            action_name = str(
-                (matched_raw.get("action") if isinstance(matched_raw, dict) else None)
-                or "assigned"
-            )
-            mr_state = str(
-                (matched_raw.get("mr_state") if isinstance(matched_raw, dict) else None)
-                or "opened"
-            )
-            work_item_meta = {
-                "id": primary_tid,
-                "action_name": action_name,
-                "created_at": created_at,
-                "target_type": "MergeRequest",
-                "target_url": url,
-                "project": {"id": gl_pid, "path_with_namespace": proj_ref},
-                "target": {
-                    "iid": item_number,
-                    "title": title,
-                    "state": mr_state,
-                    "sha": head_sha,
-                    "diff_refs": {"head_sha": head_sha} if head_sha else {},
-                    "author": {"username": author} if author else {},
-                    "pipeline": {"status": ci_status} if ci_status else {},
-                },
-                "_sibling_todo_ids": sib_ids,
-            }
-            meta = {
-                "project_id": gl_pid,
-                "mr_iid": item_number,
-                "action_name": action_name,
-                "head_sha": head_sha,
-                "_sibling_todo_ids": sib_ids,
-                "work_item": work_item_meta,
-            }
-            already_queued = False
-            if hasattr(blackboard, "get_gitlab_queue_entry"):
-                existing_entry = await blackboard.get_gitlab_queue_entry(gl_pid, item_number)
-                already_queued = isinstance(existing_entry, dict)
-            else:
-                cur_status = (
+        if action == "promote":
+            cur_status = str(
+                (
                     matched_item.get("status")
                     if isinstance(matched_item, dict)
                     else getattr(matched_item, "status", "")
                 )
-                already_queued = str(cur_status or "") == "queued"
-
-            if hasattr(blackboard, "enqueue_gitlab_mr"):
-                enqueued = await blackboard.enqueue_gitlab_mr(gl_pid, item_number, meta)
-                if enqueued is False and not already_queued:
+                or ""
+            )
+            promoted = await blackboard.promote_gitlab_queue(gl_pid, item_number)
+            promoted_from_pending = False
+            if not promoted:
+                if cur_status == "pending":
+                    meta = self._build_gitlab_work_item_meta(gl_pid, item_number, matched_item, matched_raw)
+                    enqueued = await blackboard.enqueue_gitlab_mr(gl_pid, item_number, meta)
+                    if not enqueued:
+                        raise HeadhunterOperationError(
+                            409,
+                            f"GitLab queue is at capacity; cannot promote pending MR !{item_number}",
+                        )
+                    if not await blackboard.promote_gitlab_queue(gl_pid, item_number):
+                        raise HeadhunterOperationError(
+                            404,
+                            f"GitLab MR !{item_number} is no longer queued for promotion",
+                        )
+                    promoted_from_pending = True
+                else:
                     raise HeadhunterOperationError(
-                        409,
-                        f"GitLab queue is at capacity; cannot requeue MR !{item_number}",
+                        404,
+                        f"GitLab MR !{item_number} is no longer queued for promotion",
                     )
-            if hasattr(blackboard, "delete_gitlab_mr_sha"):
-                await blackboard.delete_gitlab_mr_sha(gl_pid, item_number)
-
-            gl = getattr(self, "_gitlab", None)
             async with self._with_poll_lock():
-                self._prune_dismissed_keys().pop(key, None)
-                if gl is not None and hasattr(gl, "mark_snapshot_item_queued"):
-                    gl.mark_snapshot_item_queued(gl_pid, item_number)
-                self._sync_counters_from_adapter("gitlab")
+                self.request_promote("gitlab", project_id=gl_pid, item_number=item_number)
+                if promoted_from_pending:
+                    adapter.mark_snapshot_item_queued(
+                        gl_pid, item_number, matched_item=matched_item,
+                    )
+                    self._sync_counters_from_adapter("gitlab")
                 self._poll_wake_signal.set()
-            await self._persist_platform_snapshot("gitlab")
+            if promoted_from_pending:
+                await self._persist_snapshot_nonfatal("gitlab")
             return {
-                "status": "requeued",
-                "action": "requeue",
+                "status": "accepted",
+                "action": "promote",
                 "platform": "gitlab",
                 "item_number": item_number,
             }
 
-        # GitHub actions
+        if action == "dismiss":
+            ok, err_detail = await adapter.dismiss_work_item(
+                gl_pid, item_number, matched_raw=matched_raw,
+            )
+            if not ok:
+                raise HeadhunterOperationError(
+                    502,
+                    err_detail or f"Failed to dismiss GitLab todo(s) for MR !{item_number}",
+                )
+            try:
+                await blackboard.remove_gitlab_queue(gl_pid, item_number)
+            except Exception as exc:
+                logger.warning(
+                    "GitLab dismiss partial state: remote todo(s) dismissed for %s!%s "
+                    "but Redis queue removal failed (%s)",
+                    gl_pid,
+                    item_number,
+                    type(exc).__name__,
+                )
+                raise
+            async with self._with_poll_lock():
+                self._record_dismissed_key(key)
+                if isinstance(getattr(self, "_promoted_keys", None), dict):
+                    self._promoted_keys.pop(key, None)
+                adapter.remove_from_snapshot_cache(gl_pid, item_number)
+                self._sync_counters_from_adapter("gitlab")
+            await self._persist_snapshot_nonfatal("gitlab")
+            return {
+                "status": "dismissed",
+                "action": "dismiss",
+                "platform": "gitlab",
+                "item_number": item_number,
+            }
+
+        # action == "requeue" (GitLab)
+        ok, err_detail = await adapter.requeue_work_item(
+            gl_pid,
+            item_number,
+            matched_item=matched_item,
+            matched_raw=matched_raw,
+        )
+        if not ok:
+            raise HeadhunterOperationError(
+                502,
+                err_detail or f"Failed to requeue GitLab MR !{item_number}",
+            )
+        meta = self._build_gitlab_work_item_meta(gl_pid, item_number, matched_item, matched_raw)
+        existing_entry = await blackboard.get_gitlab_queue_entry(gl_pid, item_number)
+        already_queued = isinstance(existing_entry, dict)
+        enqueued = await blackboard.enqueue_gitlab_mr(gl_pid, item_number, meta)
+        if enqueued is False and not already_queued:
+            raise HeadhunterOperationError(
+                409,
+                f"GitLab queue is at capacity; cannot requeue MR !{item_number}",
+            )
+        try:
+            await blackboard.delete_gitlab_mr_sha(gl_pid, item_number)
+        except Exception as exc:
+            logger.warning(
+                "GitLab requeue partial state: MR %s!%s enqueued in FIFO queue "
+                "but delete_gitlab_mr_sha failed (%s)",
+                gl_pid,
+                item_number,
+                type(exc).__name__,
+            )
+            raise
+        async with self._with_poll_lock():
+            self._prune_dismissed_keys().pop(key, None)
+            adapter.mark_snapshot_item_queued(gl_pid, item_number, matched_item=matched_item)
+            self._sync_counters_from_adapter("gitlab")
+            self._poll_wake_signal.set()
+        await self._persist_snapshot_nonfatal("gitlab")
+        return {
+            "status": "requeued",
+            "action": "requeue",
+            "platform": "gitlab",
+            "item_number": item_number,
+        }
+
+    async def _operate_github_item(
+        self,
+        action: str,
+        req: Any,
+        matched_item: Any,
+        matched_raw: dict[str, Any],
+        blackboard: Any,
+    ) -> dict[str, Any]:
+        adapter: VcsPlatformPort = self._github
+        item_number = int(req.item_number)
         gh_owner, gh_repo = self._extract_github_owner_repo(req, matched_item)
+        proj_ref = f"{gh_owner}/{gh_repo}"
         inst_id = str(matched_raw.get("installation_id") or "") if isinstance(matched_raw, dict) else ""
         kind = "issue" if req.is_issue else "pr"
-        key = ("github", kind, f"{gh_owner}/{gh_repo}".lower(), item_number)
+        key: tuple = ("github", kind, proj_ref.lower(), item_number)
 
         if action == "promote":
             async with self._with_poll_lock():
@@ -1771,25 +1833,34 @@ class Headhunter:
                 "item_number": item_number,
             }
 
-        gh = getattr(self, "_github", None)
         if action == "dismiss":
-            if gh is not None and hasattr(gh, "dismiss_item"):
-                ok, err_detail = await gh.dismiss_item(
-                    inst_id, gh_owner, gh_repo, item_number, is_issue=req.is_issue,
+            ok, err_detail = await adapter.dismiss_work_item(
+                proj_ref,
+                item_number,
+                owner=gh_owner,
+                repo=gh_repo,
+                is_issue=req.is_issue,
+                matched_raw=matched_raw,
+                installation_id=inst_id,
+            )
+            if not ok:
+                raise HeadhunterOperationError(
+                    502,
+                    err_detail or f"Failed to dismiss GitHub {kind} #{item_number}",
                 )
-                if not ok:
-                    raise HeadhunterOperationError(
-                        502,
-                        err_detail or f"Failed to dismiss GitHub {kind} #{item_number}",
-                    )
             async with self._with_poll_lock():
                 self._record_dismissed_key(key)
                 if isinstance(getattr(self, "_promoted_keys", None), dict):
                     self._promoted_keys.pop(key, None)
-                if gh is not None and hasattr(gh, "remove_cached_item"):
-                    gh.remove_cached_item(gh_owner, gh_repo, item_number, is_issue=req.is_issue)
+                adapter.remove_from_snapshot_cache(
+                    proj_ref,
+                    item_number,
+                    owner=gh_owner,
+                    repo=gh_repo,
+                    is_issue=req.is_issue,
+                )
                 self._sync_counters_from_adapter("github")
-            await self._persist_platform_snapshot("github")
+            await self._persist_snapshot_nonfatal("github")
             return {
                 "status": "dismissed",
                 "action": "dismiss",
@@ -1798,37 +1869,68 @@ class Headhunter:
             }
 
         # action == "requeue" (GitHub)
-        if gh is not None and hasattr(gh, "requeue_item"):
-            ok, err_detail = await gh.requeue_item(
-                inst_id, gh_owner, gh_repo, item_number, is_issue=req.is_issue,
+        ok, err_detail = await adapter.requeue_work_item(
+            proj_ref,
+            item_number,
+            owner=gh_owner,
+            repo=gh_repo,
+            is_issue=req.is_issue,
+            matched_item=matched_item,
+            matched_raw=matched_raw,
+            installation_id=inst_id,
+        )
+        if not ok:
+            raise HeadhunterOperationError(
+                502,
+                err_detail or f"Failed to requeue GitHub {kind} #{item_number}",
             )
-            if not ok:
-                raise HeadhunterOperationError(
-                    502,
-                    err_detail or f"Failed to requeue GitHub {kind} #{item_number}",
-                )
-        if req.is_issue:
-            if hasattr(blackboard, "clear_github_issue_processed"):
+        try:
+            if req.is_issue:
                 await blackboard.clear_github_issue_processed(gh_owner, gh_repo, item_number)
-        else:
-            if hasattr(blackboard, "delete_github_pr_sha"):
+            else:
                 await blackboard.delete_github_pr_sha(gh_owner, gh_repo, item_number)
+        except Exception as exc:
+            logger.warning(
+                "GitHub requeue partial state: remote labels updated for %s#%s "
+                "but Redis dedup key delete failed (%s)",
+                proj_ref,
+                item_number,
+                type(exc).__name__,
+            )
+            raise
 
         async with self._with_poll_lock():
             self._prune_dismissed_keys().pop(key, None)
-            if gh is not None and hasattr(gh, "mark_cached_item_queued"):
-                gh.mark_cached_item_queued(
-                    gh_owner, gh_repo, item_number, matched_item, is_issue=req.is_issue,
-                )
+            adapter.mark_snapshot_item_queued(
+                proj_ref,
+                item_number,
+                owner=gh_owner,
+                repo=gh_repo,
+                matched_item=matched_item,
+                is_issue=req.is_issue,
+            )
             self._sync_counters_from_adapter("github")
             self._poll_wake_signal.set()
-        await self._persist_platform_snapshot("github")
+        await self._persist_snapshot_nonfatal("github")
         return {
             "status": "requeued",
             "action": "requeue",
             "platform": "github",
             "item_number": item_number,
         }
+
+    async def operate_item(
+        self,
+        action: str,
+        req: Any,
+        matched_item: Any,
+        matched_raw: dict[str, Any],
+        blackboard: Any,
+    ) -> dict[str, Any]:
+        """Dispatch promote/dismiss/requeue on a matched snapshot item without holding _poll_lock on I/O."""
+        if str(req.platform) == "gitlab":
+            return await self._operate_gitlab_item(action, req, matched_item, matched_raw, blackboard)
+        return await self._operate_github_item(action, req, matched_item, matched_raw, blackboard)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)

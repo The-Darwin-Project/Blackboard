@@ -1632,15 +1632,16 @@ def _busy_lock_response() -> JSONResponse:
 def _match_snapshot_item(snap: object, req: HeadhunterItemActionRequest) -> tuple[Any, dict] | None:
     for item in _extract_snapshot_items(snap):
         status = str(_snap_attr(item, "status", "") or "")
-        if status in ("merged", "closed"):
+        raw = _snap_attr(item, "raw", None)
+        raw_dict = raw if isinstance(raw, dict) else {}
+        mr_state = str(raw_dict.get("mr_state") or "")
+        if status in ("merged", "closed") or mr_state in ("merged", "closed"):
             continue
         item_id = _safe_int_val(_snap_attr(item, "item_id", None))
         if item_id is None or item_id != req.item_number:
             continue
         kind = str(_snap_attr(item, "item_kind", "") or "")
         proj_ref = str(_snap_attr(item, "project_ref", "") or "")
-        raw = _snap_attr(item, "raw", None)
-        raw_dict = raw if isinstance(raw, dict) else {}
         if req.platform == "github":
             expected_kind = "issue" if req.is_issue else "pr"
             if kind != expected_kind:
@@ -1714,7 +1715,6 @@ async def headhunter_pending_todos():
         event_status_by_id[wid] = EventStatus.WAITING_APPROVAL.value
 
     bb_rows: list[dict] = []
-    bb_keys: set[tuple] = set()
     if event_status_by_id:
         eids = list(event_status_by_id)
         fetched = await asyncio.gather(
@@ -1773,12 +1773,36 @@ async def headhunter_pending_todos():
 
             if row is not None:
                 bb_rows.append(row)
-                bb_keys.update(_pending_row_keys(row))
+
+    pid_to_path: dict[int, str] = {}
+    path_to_pid: dict[str, int] = {}
+    for row in bb_rows + snapshot_rows:
+        if row.get("platform") != "gitlab":
+            continue
+        pid_val = _safe_int_val(row.get("project_id"))
+        ppath_val = str(row.get("project_path") or "").strip().lower()
+        if pid_val is not None and pid_val > 0 and ppath_val and ppath_val != str(pid_val):
+            pid_to_path.setdefault(pid_val, ppath_val)
+            path_to_pid.setdefault(ppath_val, pid_val)
+
+    def _normalized_row_keys(row: dict) -> list[tuple]:
+        if row.get("platform") == "gitlab":
+            pid_val = _safe_int_val(row.get("project_id"))
+            ppath_val = str(row.get("project_path") or "").strip().lower()
+            patched = row
+            if (pid_val is None or pid_val <= 0) and ppath_val in path_to_pid:
+                patched = {**patched, "project_id": path_to_pid[ppath_val]}
+            if (not ppath_val or (pid_val is not None and ppath_val == str(pid_val))) and pid_val in pid_to_path:
+                patched = {**patched, "project_path": pid_to_path[pid_val]}
+            return _pending_row_keys(patched)
+        return _pending_row_keys(row)
 
     result = list(bb_rows)
-    seen_snap_keys: set[tuple] = set(bb_keys)
+    seen_snap_keys: set[tuple] = set()
+    for row in bb_rows:
+        seen_snap_keys.update(_normalized_row_keys(row))
     for row in snapshot_rows:
-        rkeys = _pending_row_keys(row)
+        rkeys = _normalized_row_keys(row)
         if any(k in seen_snap_keys for k in rkeys):
             continue
         result.append(row)

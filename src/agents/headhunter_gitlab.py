@@ -457,9 +457,65 @@ class GitLabPlatform:
                 return False
         return all_ok
 
-    def remove_from_snapshot_cache(self, pid: int, iid: int) -> None:
+    async def dismiss_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator dismiss: dismiss sibling/primary GitLab todo(s)."""
+        raw_dict = matched_raw if isinstance(matched_raw, dict) else {}
+        todo_ids: list[int] = []
+        raw_sibs = raw_dict.get("_sibling_todo_ids")
+        if isinstance(raw_sibs, list):
+            for raw_tid in raw_sibs:
+                tid = _valid_positive_int(raw_tid)
+                if tid is not None and tid not in todo_ids:
+                    todo_ids.append(tid)
+        primary_tid = _valid_positive_int(raw_dict.get("todo_id"))
+        if primary_tid is not None and primary_tid not in todo_ids:
+            todo_ids.append(primary_tid)
+        if not todo_ids:
+            return True, ""
+        dismiss_arg: int | list[int] = todo_ids[0] if len(todo_ids) == 1 else todo_ids
+        ok = await self.dismiss_todo(dismiss_arg)
+        if not ok:
+            return False, f"Failed to dismiss GitLab todo(s) for MR !{item_number}"
+        return True, ""
+
+    async def requeue_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_item: object = None,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """VcsPlatformPort operator requeue (GitLab queue/SHA state lives in Blackboard Redis)."""
+        return True, ""
+
+    def remove_from_snapshot_cache(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+    ) -> None:
         """Remove (pid, iid) from _last_snapshot_items if present."""
-        if not hasattr(self, "_last_snapshot_items"):
+        pid = _valid_positive_int(project_key)
+        iid = _valid_positive_int(item_number)
+        if not pid or not iid or not hasattr(self, "_last_snapshot_items"):
             return
         self._last_snapshot_items = [
             cur
@@ -467,17 +523,30 @@ class GitLabPlatform:
             if not (_valid_positive_int(cur.raw.get("project_id")) == pid and cur.item_id == iid)
         ]
 
-    def mark_snapshot_item_queued(self, pid: int, iid: int) -> None:
+    def mark_snapshot_item_queued(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        matched_item: object = None,
+        is_issue: bool = False,
+    ) -> None:
         """Mark (pid, iid) as queued in _last_snapshot_items (or keep position if already queued)."""
-        if not hasattr(self, "_last_snapshot_items"):
+        pid = _valid_positive_int(project_key)
+        iid = _valid_positive_int(item_number)
+        if not pid or not iid or not hasattr(self, "_last_snapshot_items"):
             return
         max_pos = max(
             (cur.queue_position or 0 for cur in self._last_snapshot_items if cur.status == "queued"),
             default=0,
         )
         updated: list[PlatformQueueItem] = []
+        found = False
         for cur in self._last_snapshot_items:
             if _valid_positive_int(cur.raw.get("project_id")) == pid and cur.item_id == iid:
+                found = True
                 pos = cur.queue_position if cur.status == "queued" and cur.queue_position is not None else max_pos + 1
                 raw = dict(cur.raw)
                 raw.setdefault("action", "queued")
@@ -498,6 +567,24 @@ class GitLabPlatform:
                 ))
             else:
                 updated.append(cur)
+        if not found and isinstance(matched_item, PlatformQueueItem):
+            raw = dict(matched_item.raw)
+            raw.setdefault("action", "queued")
+            updated.append(PlatformQueueItem(
+                platform=matched_item.platform,
+                item_kind=matched_item.item_kind,
+                item_id=matched_item.item_id,
+                project_ref=matched_item.project_ref,
+                title=matched_item.title,
+                author=matched_item.author,
+                url=matched_item.url,
+                head_sha=matched_item.head_sha,
+                ci_status=matched_item.ci_status,
+                status="queued",
+                queue_position=max_pos + 1,
+                enqueued_at=matched_item.enqueued_at,
+                raw=raw,
+            ))
         self._last_snapshot_items = updated
 
     def enabled(self) -> bool:

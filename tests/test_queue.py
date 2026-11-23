@@ -1825,6 +1825,88 @@ class TestATDDT13PureRedisPendingAndStatus:
         assert 501 in pr_nums
         assert 502 not in pr_nums
 
+    @pytest.mark.asyncio
+    async def test_t13f_pending_dedups_waiting_approval_project_id_only_via_snapshot_link(self):
+        """M7: Given a waiting_approval GitLab event with project_id=100 (no project_path),
+        a GitLab snapshot row linking 100 <-> 'group/repo', and a duplicate project_path-only
+        snapshot row for MR !42
+        When GET /queue/headhunter/pending is called
+        Then parked MR !42 appears ONCE without duplication."""
+        from src.models import EventDocument, EventEvidence, EventInput, EventStatus
+
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "title": "Linked MR 42",
+                    "author": "alice",
+                    "url": "https://gitlab.example.com/group/repo/-/merge_requests/42",
+                    "status": "pending",
+                    "enqueued_at": "2026-09-01T00:00:00Z",
+                    "raw": {"todo_id": 420, "action": "review_requested", "project_id": 100},
+                },
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "title": "Path-only duplicate MR 42",
+                    "author": "alice",
+                    "url": "https://gitlab.example.com/group/repo/-/merge_requests/42",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "enqueued_at": "2026-09-01T00:01:00Z",
+                    "raw": {"todo_id": 421, "action": "assigned"},
+                },
+            ],
+        )
+
+        parked_pid_only = EventDocument(
+            id="evt-gl-pidonly-42",
+            source="headhunter",
+            service="repo",
+            status=EventStatus.WAITING_APPROVAL,
+            event=EventInput(
+                reason="parked",
+                evidence=EventEvidence(
+                    display_text="GitLab MR !42",
+                    source_type="headhunter",
+                    domain="complicated",
+                    severity="info",
+                    gitlab_context={
+                        "todo_id": 420,
+                        "project_id": 100,
+                        "project_path": "",
+                        "mr_iid": 42,
+                        "mr_title": "Linked MR 42",
+                        "author": "alice",
+                        "pipeline_status": "success",
+                        "target_url": "https://gitlab.example.com/group/repo/-/merge_requests/42",
+                        "created_at": "2026-09-01T00:00:00Z",
+                    },
+                ),
+            ),
+        )
+
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: gl_snap if p == "gitlab" else None
+        )
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.get_waiting_approval_events = AsyncMock(return_value=["evt-gl-pidonly-42"])
+        mock_bb.get_event = AsyncMock(return_value=parked_pid_only)
+
+        driver = HeadhunterQueueProtocolDriver(mock_bb)
+        resp = await driver.request("GET", "/queue/headhunter/pending")
+        assert resp.status_code == 200
+        mr42_rows = [r for r in resp.json() if r.get("platform") == "gitlab" and r.get("mr_iid") == 42]
+        assert len(mr42_rows) == 1, f"Expected single deduplicated row for MR !42, got {mr42_rows}"
+        assert mr42_rows[0]["status"] == "waiting_approval"
+
 
 # =========================================================================
 # Slice 2C ATDD (Step 8 / T-14): Operator Controls & Dynamic Case-Insensitive RBAC
@@ -1851,28 +1933,29 @@ def _make_fake_headhunter(mock_bb=None):
     return hh
 
 
+def _reset_operator_debounces() -> None:
+    """Explicitly clear route-level Headhunter operator debounce timestamps (M6)."""
+    from src.routes import queue as queue_routes
+
+    queue_routes._hh_last_poll_ts = None
+    queue_routes._hh_last_breaker_reset_ts.clear()
+    queue_routes._hh_last_item_action_ts.clear()
+
+
 class TestATDDT14OperatorControlsAndRBAC:
     """Layer 1-4 ATDD scenarios for T-14 (operator controls + RBAC + non-blocking lock)."""
 
     @pytest.fixture(autouse=True)
-    def _advance_clock_between_tests(self, monkeypatch):
-        import time as _time
-
-        orig_monotonic = _time.monotonic
-        orig_time = _time.time
-        if not hasattr(self, "_clock_offset"):
-            type(self)._clock_offset = [0.0]
-        type(self)._clock_offset[0] += 15.0
-        offset = type(self)._clock_offset
-        monkeypatch.setattr(_time, "monotonic", lambda: orig_monotonic() + offset[0])
-        monkeypatch.setattr(_time, "time", lambda: orig_time() + offset[0])
-        self._bump_clock = lambda secs=15.0: offset.__setitem__(0, offset[0] + secs)
+    def _clear_debounces(self):
+        _reset_operator_debounces()
+        yield
+        _reset_operator_debounces()
 
     @pytest.mark.asyncio
     async def test_t14a_operator_endpoints_permitted_when_auth_disabled(self, monkeypatch):
         """Given DEX_ENABLED=false and TRUSTED_PROXY_ENABLED=false
         When operator POSTs to /queue/headhunter/poll
-        Then dev/local mode permits the call (not 401/403)."""
+        Then dev/local mode permits the call with HTTP 202."""
         monkeypatch.setattr("src.auth.DEX_ENABLED", False)
         monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
 
@@ -1880,7 +1963,8 @@ class TestATDDT14OperatorControlsAndRBAC:
         mock_bb = AsyncMock()
         driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
         resp = await driver.request("POST", "/queue/headhunter/poll")
-        assert resp.status_code in (200, 202)
+        assert resp.status_code == 202
+        assert resp.json() == {"triggered": True, "debounced": False}
         assert hh._poll_wake_signal.is_set()
 
     @pytest.mark.asyncio
@@ -1896,7 +1980,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
 
         with caplog.at_level("INFO"):
-            # 1. Unauthenticated -> 401
+            # 1. Unauthenticated -> 401 + audit log
             r401 = await driver.request("POST", "/queue/headhunter/poll")
             assert r401.status_code == 401
 
@@ -1924,8 +2008,8 @@ class TestATDDT14OperatorControlsAndRBAC:
             )
             assert r403_role.status_code == 403
 
-            # 4. Mixed-case match on OBS_ADMIN_GROUPS -> allowed
-            self._bump_clock(15.0)
+            # 4. Mixed-case match on OBS_ADMIN_GROUPS -> 202 allowed
+            _reset_operator_debounces()
             monkeypatch.setattr(
                 "src.auth._validate_jwt",
                 lambda _t: {"sub": "u3", "email": "admin@example.com", "name": "Admin", "groups": ["darwin-admins"]},
@@ -1933,10 +2017,11 @@ class TestATDDT14OperatorControlsAndRBAC:
             r_admin = await driver.request(
                 "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-3"}
             )
-            assert r_admin.status_code in (200, 202)
+            assert r_admin.status_code == 202
+            assert r_admin.json() == {"triggered": True, "debounced": False}
 
-            # 5. Mixed-case match on APPROVER_GROUPS -> allowed
-            self._bump_clock(15.0)
+            # 5. Mixed-case match on APPROVER_GROUPS -> 202 allowed
+            _reset_operator_debounces()
             monkeypatch.setattr(
                 "src.auth._validate_jwt",
                 lambda _t: {"sub": "u4", "email": "approver@example.com", "name": "Appr", "groups": ["MAINTAINERS"]},
@@ -1944,19 +2029,25 @@ class TestATDDT14OperatorControlsAndRBAC:
             r_appr = await driver.request(
                 "POST", "/queue/headhunter/poll", headers={"Authorization": "Bearer jwt-4"}
             )
-            assert r_appr.status_code in (200, 202)
+            assert r_appr.status_code == 202
+            assert r_appr.json() == {"triggered": True, "debounced": False}
 
         logs_joined = "\n".join(rec.getMessage() for rec in caplog.records)
-        assert "bob@example.com" in logs_joined
-        assert "admin@example.com" in logs_joined
-        assert "approver@example.com" in logs_joined
+        assert "Denied Headhunter operator poll: unauthenticated" in logs_joined
+        assert "Denied Headhunter operator poll for alice@example.com" in logs_joined
+        assert "Denied Headhunter operator poll for bob@example.com" in logs_joined
+        assert "Allowed Headhunter operator poll for admin@example.com" in logs_joined
+        assert "Allowed Headhunter operator poll for approver@example.com" in logs_joined
 
     @pytest.mark.asyncio
-    async def test_t14c_poll_busy_lock_409_wake_and_10s_debounce(self, monkeypatch):
+    async def test_t14c_poll_busy_lock_409_wake_and_10s_debounce_with_cooldown_expiry(self, monkeypatch):
         """Given Headhunter with _poll_lock and _poll_wake_signal
         When _poll_lock is busy -> 409 Retry-After: 5;
-        When unlocked -> initial POST sets _poll_wake_signal;
-        When repeated within 10s -> debounced without re-setting _poll_wake_signal."""
+        When unlocked -> initial POST returns 202 and sets _poll_wake_signal;
+        When repeated within 10s -> 202 debounced=True without re-setting _poll_wake_signal;
+        When >10s elapses -> 202 triggered=True again."""
+        import time as _time
+
         monkeypatch.setattr("src.auth.DEX_ENABLED", False)
         monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
 
@@ -1964,7 +2055,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         mock_bb = AsyncMock()
         driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
 
-        # 1. Busy _poll_lock -> 409 Conflict with Retry-After: 5 (short-circuit wait_for so test is instant)
+        # 1. Busy _poll_lock -> 409 Conflict with Retry-After: 5
         await hh._poll_lock.acquire()
         orig_wait_for = asyncio.wait_for
 
@@ -1980,25 +2071,35 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert r_busy.headers.get("Retry-After") == "5"
         assert not hh._poll_wake_signal.is_set()
 
-        # 2. Initial unblocked poll -> wakes signal
+        # 2. Local isolated monotonic clock for cooldown hit & expiry
+        orig_monotonic = _time.monotonic
+        offset = [0.0]
+        monkeypatch.setattr(_time, "monotonic", lambda: orig_monotonic() + offset[0])
+
         r_ok = await driver.request("POST", "/queue/headhunter/poll")
-        assert r_ok.status_code in (200, 202)
+        assert r_ok.status_code == 202
+        assert r_ok.json() == {"triggered": True, "debounced": False}
         assert hh._poll_wake_signal.is_set()
 
         # 3. Immediate repeat within 10s -> debounced (wake signal stays clear)
         hh._poll_wake_signal.clear()
         r_debounced = await driver.request("POST", "/queue/headhunter/poll")
-        assert r_debounced.status_code in (200, 202, 409, 429)
-        if r_debounced.status_code in (200, 202):
-            body = r_debounced.json()
-            assert body.get("debounced") is True or body.get("triggered") is False
+        assert r_debounced.status_code == 202
+        assert r_debounced.json() == {"triggered": False, "debounced": True}
         assert not hh._poll_wake_signal.is_set()
+
+        # 4. After 10.5s cooldown expiry -> wakes again
+        offset[0] += 10.5
+        r_after = await driver.request("POST", "/queue/headhunter/poll")
+        assert r_after.status_code == 202
+        assert r_after.json() == {"triggered": True, "debounced": False}
+        assert hh._poll_wake_signal.is_set()
 
     @pytest.mark.asyncio
     async def test_t14d_breaker_reset_validates_platform_resets_wakes_and_per_platform_cooldown(self, monkeypatch):
         """Given open GitLab and GitHub breakers
         When POST /queue/headhunter/breaker/{platform}/reset is called
-        Then invalid platform -> 422, valid resets to closed + wakes poll, and repeat hits per-platform 10s cooldown."""
+        Then invalid platform -> 422, valid -> 200 closed + wakes poll, and repeat -> 202 debounced=True."""
         monkeypatch.setattr("src.auth.DEX_ENABLED", False)
         monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
 
@@ -2015,19 +2116,22 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert r_bad.status_code == 422
 
         r_gl = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
-        assert r_gl.status_code in (200, 202)
+        assert r_gl.status_code == 200
+        assert r_gl.json() == {"reset": True, "debounced": False, "platform": "gitlab", "state": "closed"}
         assert hh._breakers["gitlab"].state == "closed"
         assert hh._breakers["gitlab"].consecutive_failures == 0
         assert hh._poll_wake_signal.is_set()
 
-        # Immediate repeat for gitlab -> debounced; github remains unaffected and succeeds
+        # Immediate repeat for gitlab -> 202 debounced; github remains unaffected and succeeds with 200
         hh._poll_wake_signal.clear()
         r_gl_rep = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
-        assert r_gl_rep.status_code in (200, 202, 409, 429)
+        assert r_gl_rep.status_code == 202
+        assert r_gl_rep.json() == {"reset": False, "debounced": True, "platform": "gitlab"}
         assert not hh._poll_wake_signal.is_set()
 
         r_gh = await driver.request("POST", "/queue/headhunter/breaker/github/reset")
-        assert r_gh.status_code in (200, 202)
+        assert r_gh.status_code == 200
+        assert r_gh.json() == {"reset": True, "debounced": False, "platform": "github", "state": "closed"}
         assert hh._breakers["github"].state == "closed"
         assert hh._poll_wake_signal.is_set()
 
@@ -2210,7 +2314,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
 
         # 1a. promote GitLab MR -> 202 async, promote_gitlab_queue + request_promote + wake
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         r_gl_prom = await driver.request(
             "POST",
             "/queue/headhunter/items/promote",
@@ -2224,7 +2328,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert hh._poll_wake_signal.is_set()
 
         # 1b. promote GitHub PR -> 202 async, NEVER calls analyze_and_plan, wakes poll
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         hh._poll_wake_signal.clear()
         hh.request_promote.reset_mock()
         r_prom = await driver.request(
@@ -2246,21 +2350,22 @@ class TestATDDT14OperatorControlsAndRBAC:
         hh.analyze_and_plan.assert_not_awaited()
         assert hh._poll_wake_signal.is_set()
 
-        # 2. dismiss GitLab MR -> dismiss_todo BEFORE remove_gitlab_queue (covers _sibling_todo_ids)
-        self._bump_clock(15.0)
+        # 2. dismiss GitLab MR -> real dismiss_work_item -> dismiss_todo BEFORE remove_gitlab_queue
+        _reset_operator_debounces()
         r_gl_dis = await driver.request(
             "POST",
             "/queue/headhunter/items/dismiss",
             json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
         )
-        assert r_gl_dis.status_code in (200, 202)
+        assert r_gl_dis.status_code == 200
+        assert r_gl_dis.json()["status"] == "dismissed"
         assert gl_dismiss_order == [
             "dismiss_todo:[420, 425]",
             "remove_gitlab_queue:100:42",
         ]
 
-        # 3. dismiss GitHub PR -> removes darwin-queued and darwin-review without touching darwin-active
-        self._bump_clock(15.0)
+        # 3. dismiss GitHub PR -> real dismiss_work_item -> removes darwin-queued and darwin-review without darwin-active
+        _reset_operator_debounces()
         hh._github._remove_label.reset_mock()
         r_gh_dis = await driver.request(
             "POST",
@@ -2273,13 +2378,14 @@ class TestATDDT14OperatorControlsAndRBAC:
                 "is_issue": False,
             },
         )
-        assert r_gh_dis.status_code in (200, 202)
+        assert r_gh_dis.status_code == 200
+        assert r_gh_dis.json()["status"] == "dismissed"
         removed_pr_labels = [c.args[-1] for c in hh._github._remove_label.await_args_list]
         assert removed_pr_labels == ["darwin-queued", "darwin-review"]
         assert "darwin-active" not in removed_pr_labels
 
-        # 4. dismiss GitHub Issue -> removes darwin-queued and darwin-work
-        self._bump_clock(15.0)
+        # 4. dismiss GitHub Issue -> real dismiss_work_item -> removes darwin-queued and darwin-work
+        _reset_operator_debounces()
         hh._github._remove_label.reset_mock()
         r_ghi_dis = await driver.request(
             "POST",
@@ -2292,19 +2398,21 @@ class TestATDDT14OperatorControlsAndRBAC:
                 "is_issue": True,
             },
         )
-        assert r_ghi_dis.status_code in (200, 202)
+        assert r_ghi_dis.status_code == 200
+        assert r_ghi_dis.json()["status"] == "dismissed"
         removed_issue_labels = [c.args[-1] for c in hh._github._remove_label.await_args_list]
         assert removed_issue_labels == ["darwin-queued", "darwin-work"]
 
-        # 5. requeue GitLab MR -> enqueue_gitlab_mr + delete_gitlab_mr_sha + wakes poll
-        self._bump_clock(15.0)
+        # 5. requeue GitLab MR -> real requeue_work_item + enqueue_gitlab_mr + delete_gitlab_mr_sha + wakes poll
+        _reset_operator_debounces()
         hh._poll_wake_signal.clear()
         r_gl_req = await driver.request(
             "POST",
             "/queue/headhunter/items/requeue",
             json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
         )
-        assert r_gl_req.status_code in (200, 202)
+        assert r_gl_req.status_code == 200
+        assert r_gl_req.json()["status"] == "requeued"
         mock_bb.enqueue_gitlab_mr.assert_awaited_once()
         enq_args = mock_bb.enqueue_gitlab_mr.await_args.args
         assert enq_args[0] == 100 and enq_args[1] == 42 and isinstance(enq_args[2], dict)
@@ -2312,7 +2420,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert hh._poll_wake_signal.is_set()
 
         # 6. requeue GitHub PR -> add darwin-queued BEFORE remove darwin-done & darwin-review + delete_github_pr_sha
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         hh._poll_wake_signal.clear()
         gh_requeue_order.clear()
         r_gh_req = await driver.request(
@@ -2326,7 +2434,8 @@ class TestATDDT14OperatorControlsAndRBAC:
                 "is_issue": False,
             },
         )
-        assert r_gh_req.status_code in (200, 202)
+        assert r_gh_req.status_code == 200
+        assert r_gh_req.json()["status"] == "requeued"
         assert gh_requeue_order == [
             ("add_labels", ["darwin-queued"]),
             ("remove_label", "darwin-done"),
@@ -2336,7 +2445,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert hh._poll_wake_signal.is_set()
 
         # 7. requeue GitHub Issue -> _add_labels([work, queued]) + clear_github_issue_processed + wakes poll
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         hh._poll_wake_signal.clear()
         gh_requeue_order.clear()
         r_ghi_req = await driver.request(
@@ -2350,16 +2459,17 @@ class TestATDDT14OperatorControlsAndRBAC:
                 "is_issue": True,
             },
         )
-        assert r_ghi_req.status_code in (200, 202)
+        assert r_ghi_req.status_code == 200
+        assert r_ghi_req.json()["status"] == "requeued"
         assert ("add_labels", ["darwin-work", "darwin-queued"]) in gh_requeue_order
         mock_bb.clear_github_issue_processed.assert_awaited_once_with("The-Darwin-Project", "BlackBoard", 88)
         assert hh._poll_wake_signal.is_set()
 
     @pytest.mark.asyncio
-    async def test_t14g_trusted_proxy_spoofed_email_rejected_401_and_rbac_on_reset_and_items(self, monkeypatch):
+    async def test_t14g_trusted_proxy_spoofed_email_rejected_401_and_rbac_on_reset_and_items(self, monkeypatch, caplog):
         """Given TRUSTED_PROXY_ENABLED=true & DEX_ENABLED=false with spoofed X-Forwarded-Email
         When caller hits /poll, /breaker/{platform}/reset, or /items/{action}
-        Then REST fails closed with 401; and under DEX_ENABLED=true 401/403 enforce on reset & items."""
+        Then REST fails closed with 401; and under DEX_ENABLED=true 401/403 audit-log across reset & items."""
         monkeypatch.setattr("src.auth.DEX_ENABLED", False)
         monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", True)
 
@@ -2376,46 +2486,53 @@ class TestATDDT14OperatorControlsAndRBAC:
             r = await driver.request(method, path, json_body=body, headers=spoof_headers)
             assert r.status_code == 401, f"Expected 401 for {path} with spoofed proxy header, got {r.status_code}"
 
-        # DEX_ENABLED=true enforces 401/403 on breaker reset and items/{action}
+        # DEX_ENABLED=true enforces 401/403 and emits audit logs on breaker reset and items/{action}
         monkeypatch.setattr("src.auth.DEX_ENABLED", True)
         monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
         monkeypatch.setattr("src.auth.OBS_ADMIN_GROUPS", frozenset({"ops-admins"}))
         monkeypatch.setattr("src.auth.APPROVER_GROUPS", frozenset({"maintainers"}))
 
-        assert (await driver.request("POST", "/queue/headhunter/breaker/github/reset")).status_code == 401
-        assert (
-            await driver.request(
-                "POST",
-                "/queue/headhunter/items/dismiss",
-                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
-            )
-        ).status_code == 401
+        with caplog.at_level("INFO"):
+            assert (await driver.request("POST", "/queue/headhunter/breaker/github/reset")).status_code == 401
+            assert (
+                await driver.request(
+                    "POST",
+                    "/queue/headhunter/items/dismiss",
+                    json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+                )
+            ).status_code == 401
 
-        monkeypatch.setattr(
-            "src.auth._validate_jwt",
-            lambda _t: {"sub": "u1", "email": "unpriv@example.com", "name": "U", "groups": ["guest"]},
-        )
-        assert (
-            await driver.request(
-                "POST",
-                "/queue/headhunter/breaker/github/reset",
-                headers={"Authorization": "Bearer jwt-unpriv"},
+            monkeypatch.setattr(
+                "src.auth._validate_jwt",
+                lambda _t: {"sub": "u1", "email": "unpriv@example.com", "name": "U", "groups": ["guest"]},
             )
-        ).status_code == 403
-        assert (
-            await driver.request(
-                "POST",
-                "/queue/headhunter/items/dismiss",
-                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
-                headers={"Authorization": "Bearer jwt-unpriv"},
-            )
-        ).status_code == 403
+            assert (
+                await driver.request(
+                    "POST",
+                    "/queue/headhunter/breaker/github/reset",
+                    headers={"Authorization": "Bearer jwt-unpriv"},
+                )
+            ).status_code == 403
+            assert (
+                await driver.request(
+                    "POST",
+                    "/queue/headhunter/items/dismiss",
+                    json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+                    headers={"Authorization": "Bearer jwt-unpriv"},
+                )
+            ).status_code == 403
+
+        logs_joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "Denied Headhunter operator breaker_reset:github: unauthenticated" in logs_joined
+        assert "Denied Headhunter operator item_dismiss:gitlab:42: unauthenticated" in logs_joined
+        assert "Denied Headhunter operator breaker_reset:github for unpriv@example.com" in logs_joined
+        assert "Denied Headhunter operator item_dismiss:gitlab:42 for unpriv@example.com" in logs_joined
 
     @pytest.mark.asyncio
     async def test_t14h_items_action_extra_forbid_numeric_pid_closed_404_and_error_mappings(self, monkeypatch):
         """Verify extra='forbid' rejects project_path with 422, numeric string project_id works,
-        merged/closed snapshot items 404, RedisError -> 503, upstream label/todo failures -> 502,
-        and enqueue_gitlab_mr=False -> 409."""
+        merged/closed snapshot items (status='merged' OR status='pending' with raw.mr_state='merged') 404,
+        RedisError -> 503, upstream label/todo failures -> 502, and enqueue_gitlab_mr=False -> 409."""
         from redis.exceptions import RedisError
 
         monkeypatch.setattr("src.auth.DEX_ENABLED", False)
@@ -2439,6 +2556,14 @@ class TestATDDT14OperatorControlsAndRBAC:
                     "project_ref": "group/repo",
                     "status": "merged",
                     "raw": {"todo_id": 421, "project_id": 100, "mr_state": "merged"},
+                },
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 44,
+                    "project_ref": "group/repo",
+                    "status": "pending",
+                    "raw": {"todo_id": 422, "project_id": 100, "mr_state": "merged"},
                 },
             ],
         )
@@ -2479,7 +2604,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert r_extra.status_code == 422
 
         # 2. numeric string project_id="100" accepted
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         r_str_pid = await driver.request(
             "POST",
             "/queue/headhunter/items/promote",
@@ -2487,13 +2612,20 @@ class TestATDDT14OperatorControlsAndRBAC:
         )
         assert r_str_pid.status_code == 202
 
-        # 3. merged/closed snapshot item rejected with 404
+        # 3. merged/closed snapshot item rejected with 404 (both status='merged' AND status='pending' with mr_state='merged')
         r_merged = await driver.request(
             "POST",
             "/queue/headhunter/items/promote",
             json_body={"platform": "gitlab", "project_id": 100, "item_number": 43},
         )
         assert r_merged.status_code == 404
+
+        r_mr_merged_pending = await driver.request(
+            "POST",
+            "/queue/headhunter/items/promote",
+            json_body={"platform": "gitlab", "project_id": 100, "item_number": 44},
+        )
+        assert r_mr_merged_pending.status_code == 404
 
         # 4. GitLab requeue when enqueue_gitlab_mr returns False (and not already queued) -> 409
         mock_bb.get_gitlab_queue_entry = AsyncMock(return_value=None)
@@ -2505,7 +2637,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert r_cap.status_code == 409
 
         # 5. GitLab dismiss_todo returns False -> 502
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         hh._gitlab.dismiss_todo = AsyncMock(return_value=False)
         r_gl_502 = await driver.request(
             "POST",
@@ -2515,7 +2647,7 @@ class TestATDDT14OperatorControlsAndRBAC:
         assert r_gl_502.status_code == 502
 
         # 6. GitHub label fail on dismiss -> 502
-        self._bump_clock(15.0)
+        _reset_operator_debounces()
         hh._github._remove_label = AsyncMock(return_value=False)
         r_gh_502 = await driver.request(
             "POST",
@@ -2587,7 +2719,8 @@ class TestATDDT14OperatorControlsAndRBAC:
 
         # 1. Breaker reset -> immediate GET /status shows closed
         r_reset = await driver.request("POST", "/queue/headhunter/breaker/gitlab/reset")
-        assert r_reset.status_code in (200, 202)
+        assert r_reset.status_code == 200
+        assert r_reset.json() == {"reset": True, "debounced": False, "platform": "gitlab", "state": "closed"}
         r_status = await driver.request("GET", "/queue/headhunter/status")
         assert r_status.status_code == 200
         assert r_status.json()["platforms"]["gitlab"]["breaker"]["state"] == "closed"
@@ -2601,9 +2734,87 @@ class TestATDDT14OperatorControlsAndRBAC:
             "/queue/headhunter/items/dismiss",
             json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
         )
-        assert r_dis.status_code in (200, 202)
+        assert r_dis.status_code == 200
+        assert r_dis.json()["status"] == "dismissed"
 
         r_pend_after = await driver.request("GET", "/queue/headhunter/pending")
         assert r_pend_after.status_code == 200
         assert not any(row.get("mr_iid") == 42 for row in r_pend_after.json())
+
+    @pytest.mark.asyncio
+    async def test_t14j_m1_snapshot_save_redis_error_on_dismiss_requeue_succeeds_and_records_debounce(
+        self, monkeypatch, caplog
+    ):
+        """M1: When save_headhunter_snapshot raises RedisError during POST /items/dismiss or /requeue,
+        endpoint still succeeds (200), logs non-fatal failure, AND records debounce so immediate
+        repeat returns 200 debounced=True."""
+        from redis.exceptions import RedisError
+
+        monkeypatch.setattr("src.auth.DEX_ENABLED", False)
+        monkeypatch.setattr("src.auth.TRUSTED_PROXY_ENABLED", False)
+
+        gl_snap = _make_snapshot(
+            "gitlab",
+            items=[
+                {
+                    "platform": "gitlab",
+                    "item_kind": "mr",
+                    "item_id": 42,
+                    "project_ref": "group/repo",
+                    "status": "queued",
+                    "queue_position": 1,
+                    "raw": {"todo_id": 420, "project_id": 100},
+                }
+            ],
+        )
+        mock_bb = AsyncMock()
+        mock_bb.get_headhunter_snapshot = AsyncMock(
+            side_effect=lambda p: gl_snap if p == "gitlab" else None
+        )
+        mock_bb.remove_gitlab_queue = AsyncMock(return_value=True)
+        mock_bb.get_gitlab_queue_entry = AsyncMock(return_value={"project_id": 100, "mr_iid": 42})
+        mock_bb.enqueue_gitlab_mr = AsyncMock(return_value=True)
+        mock_bb.delete_gitlab_mr_sha = AsyncMock(return_value=True)
+        mock_bb.save_headhunter_snapshot = AsyncMock(side_effect=RedisError("redis snapshot write timeout"))
+
+        hh = _make_fake_headhunter(mock_bb)
+        driver = HeadhunterQueueProtocolDriver(mock_bb, mock_hh=hh)
+
+        with caplog.at_level("DEBUG"):
+            # 1. dismiss succeeds (200) despite save_headhunter_snapshot RedisError, and records debounce
+            r_dis = await driver.request(
+                "POST",
+                "/queue/headhunter/items/dismiss",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+            )
+            assert r_dis.status_code == 200
+            assert r_dis.json()["status"] == "dismissed"
+
+            r_dis_rep = await driver.request(
+                "POST",
+                "/queue/headhunter/items/dismiss",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+            )
+            assert r_dis_rep.status_code == 200
+            assert r_dis_rep.json()["debounced"] is True
+
+            # 2. requeue succeeds (200) despite save_headhunter_snapshot RedisError, and records debounce
+            r_req = await driver.request(
+                "POST",
+                "/queue/headhunter/items/requeue",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+            )
+            assert r_req.status_code == 200
+            assert r_req.json()["status"] == "requeued"
+
+            r_req_rep = await driver.request(
+                "POST",
+                "/queue/headhunter/items/requeue",
+                json_body={"platform": "gitlab", "project_id": 100, "item_number": 42},
+            )
+            assert r_req_rep.status_code == 200
+            assert r_req_rep.json()["debounced"] is True
+
+        warnings = "\n".join(r.getMessage() for r in caplog.records)
+        assert "non-fatal" in warnings.lower()
 

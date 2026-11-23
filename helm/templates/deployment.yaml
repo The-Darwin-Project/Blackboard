@@ -313,7 +313,7 @@ spec:
             {{- $ghCfg := .Values.headhunter.github | default dict }}
             - name: GITHUB_APP_SLUG
               value: {{ $ghCfg.appSlug | default "darwin-project-ai" | quote }}
-            {{- $cortexUrl := .Values.headhunter.cortexUrl | default $ghCfg.cortexUrl }}
+            {{- $cortexUrl := trim (toString (.Values.headhunter.cortexUrl | default "")) | default (trim (toString ($ghCfg.cortexUrl | default ""))) -}}
             {{- if $cortexUrl }}
             - name: DARWIN_CORTEX_URL
               value: {{ $cortexUrl | quote }}

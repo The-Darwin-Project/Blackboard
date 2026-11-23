@@ -325,6 +325,151 @@ class TestATDDT13SnapshotPersistence:
         assert len(gh_writes) == 1
         assert json.loads(gh_writes[0][1])["breaker"]["state"] == "open"
 
+    @pytest.mark.asyncio
+    async def test_t13_h1_promote_gitlab_queue_absent_capacity_409_and_watch_exhaustion(self):
+        """H1: promote_gitlab_queue returns False with zero phantom entries when absent from ZSET;
+        pending promote at max queue capacity raises HeadhunterOperationError(409);
+        WatchError retry exhaustion raises WatchError cleanly."""
+        from types import SimpleNamespace
+        import fakeredis.aioredis
+        from redis.exceptions import WatchError
+        from src.agents.headhunter import Headhunter, HeadhunterOperationError
+        from src.state.blackboard import BlackboardState
+
+        fake_redis = fakeredis.aioredis.FakeRedis()
+        bb = BlackboardState(redis=fake_redis)
+
+        # 1. Absent from darwin:gitlab:queue -> False, zero phantom entries in queue or meta
+        assert await bb.promote_gitlab_queue(100, 42) is False
+        assert await fake_redis.zcard(bb._GITLAB_QUEUE_KEY) == 0
+        assert await fake_redis.hlen(bb._GITLAB_QUEUE_META_KEY) == 0
+
+        # 2. Pending promote when queue at HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES=1 -> 409
+        with patch.dict(os.environ, {"HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES": "1"}, clear=False):
+            await bb.enqueue_gitlab_mr(100, 10, {"project_id": 100, "mr_iid": 10})
+            hh = Headhunter(bb, gitlab_enabled=False)
+            req = SimpleNamespace(
+                platform="gitlab", project_id=100, item_number=42, owner="", repo="", is_issue=False
+            )
+            matched_item = {"status": "pending", "project_ref": "group/repo", "title": "Pending MR"}
+            matched_raw = {"project_id": 100, "todo_id": 420}
+            with pytest.raises(HeadhunterOperationError) as exc_info:
+                await hh.operate_item("promote", req, matched_item, matched_raw, bb)
+            assert exc_info.value.status_code == 409
+
+        # 3. WatchError exhaustion raises WatchError cleanly
+        bb_watch = BlackboardState.__new__(BlackboardState)
+        pipe = AsyncMock()
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=False)
+        pipe.watch = AsyncMock()
+        pipe.zscore = AsyncMock(return_value=10.0)
+        pipe.hget = AsyncMock(return_value=json.dumps({"project_id": 100, "mr_iid": 42}).encode())
+        pipe.zrange = AsyncMock(return_value=[(b"100:42", 10.0)])
+        pipe.multi = MagicMock()
+        pipe.zadd = MagicMock()
+        pipe.hset = MagicMock()
+        pipe.execute = AsyncMock(side_effect=WatchError("persistent contention"))
+        bb_watch.redis = MagicMock()
+        bb_watch.redis.pipeline = MagicMock(return_value=pipe)
+
+        with pytest.raises(WatchError):
+            await bb_watch.promote_gitlab_queue(100, 42, max_retries=2)
+        assert pipe.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_t13_h2_snapshot_ttl_floor_60s_and_mid_cycle_drain_refresh(self, monkeypatch):
+        """H2: HEADHUNTER_POLL_INTERVAL=10 enforces ex=60 TTL floor; long-cycle _drain_platform_phase_ab()
+        advancing >30s refreshes save_headhunter_snapshot mid-cycle before final cycle persistence."""
+        import time as _time
+        from src.agents.headhunter import Headhunter
+        from src.agents.headhunter_models import PlatformSnapshot
+
+        driver = SnapshotPersistenceDriver()
+        bb = driver.make_blackboard_with_mock_redis()
+
+        # 1. poll_interval=10 -> exact 60s TTL floor
+        with patch.dict(os.environ, {"HEADHUNTER_POLL_INTERVAL": "10"}, clear=False):
+            hh_short = Headhunter(bb, gitlab_enabled=False)
+        hh_short._github.get_platform_snapshot = MagicMock(
+            return_value=PlatformSnapshot(platform="github", enabled=True)
+        )
+        await hh_short._persist_platform_snapshot("github")
+        assert driver.redis_set_calls[-1][0] == "darwin:headhunter:snapshot:github"
+        assert driver.redis_set_calls[-1][2] == 60
+
+        # 2. Long-cycle _drain_platform_phase_ab (poll_interval=30, +35s inside item 1) -> >=2 writes
+        driver.redis_set_calls.clear()
+        orig_monotonic = _time.monotonic
+        offset = [0.0]
+        monkeypatch.setattr(_time, "monotonic", lambda: orig_monotonic() + offset[0])
+
+        with patch.dict(os.environ, {"HEADHUNTER_POLL_INTERVAL": "30"}, clear=False):
+            hh_long = Headhunter(bb, gitlab_enabled=False)
+        hh_long.check_flow_gate = AsyncMock(return_value=True)
+        hh_long._github.get_platform_snapshot = MagicMock(
+            return_value=PlatformSnapshot(platform="github", enabled=True)
+        )
+        hh_long._github.load_triage_instruction = MagicMock(return_value="si")
+        hh_long._github.fetch_context = AsyncMock(return_value={"owner": "o", "repo": "r", "pr_number": 1})
+        hh_long._github.create_platform_event = AsyncMock(return_value="evt-h2-01")
+
+        call_num = [0]
+
+        async def _slow_analyze(_ctx, _si=""):
+            call_num[0] += 1
+            if call_num[0] == 1:
+                offset[0] += 35.0
+            return "---\nplan: ok\nsteps: []\n---"
+
+        hh_long.analyze_and_plan = AsyncMock(side_effect=_slow_analyze)
+
+        async def _poll_fn():
+            items = [
+                {"owner": "o", "repo": "r", "number": 1},
+                {"owner": "o", "repo": "r", "number": 2},
+            ]
+            await hh_long._drain_platform_phase_ab(
+                hh_long._github, [], items, platform_label="GitHub"
+            )
+
+        await hh_long._run_platform_head("github", "GitHub", True, _poll_fn)
+        gh_writes = [c for c in driver.redis_set_calls if c[0] == "darwin:headhunter:snapshot:github"]
+        assert len(gh_writes) >= 2, f"Expected mid-cycle + final snapshot writes, got {len(gh_writes)}"
+
+    @pytest.mark.asyncio
+    async def test_t13_h3_vcs_platform_port_operator_verbs_and_fail_loud_on_incomplete_adapter(self):
+        """H3: VcsPlatformPort declares dismiss_work_item, requeue_work_item, remove_from_snapshot_cache,
+        mark_snapshot_item_queued; Headhunter.operate_item() fails loudly with AttributeError if missing."""
+        from types import SimpleNamespace
+        from src.agents.headhunter import Headhunter
+        from src.agents.headhunter_port import VcsPlatformPort
+
+        for verb in (
+            "dismiss_work_item",
+            "requeue_work_item",
+            "remove_from_snapshot_cache",
+            "mark_snapshot_item_queued",
+        ):
+            assert hasattr(VcsPlatformPort, verb), f"VcsPlatformPort missing {verb}"
+
+        bb = AsyncMock()
+        hh = Headhunter(bb, gitlab_enabled=False)
+
+        # Missing dismiss_work_item -> AttributeError (never silent 200 dismissed)
+        hh._gitlab = SimpleNamespace()
+        req_gl = SimpleNamespace(platform="gitlab", project_id=100, item_number=42, owner="", repo="", is_issue=False)
+        with pytest.raises(AttributeError):
+            await hh.operate_item("dismiss", req_gl, {"status": "queued"}, {"project_id": 100}, bb)
+
+        # Missing remove_from_snapshot_cache -> AttributeError (never silent 200 dismissed)
+        hh._github = SimpleNamespace(dismiss_work_item=AsyncMock(return_value=(True, "")))
+        req_gh = SimpleNamespace(
+            platform="github", project_id=None, item_number=77, owner="o", repo="r", is_issue=False
+        )
+        with pytest.raises(AttributeError):
+            await hh.operate_item("dismiss", req_gh, {"status": "queued", "project_ref": "o/r"}, {}, bb)
+
 
 # =============================================================================
 # Follow-up: NO_GITHUB_CONTEXT Gate & Brain Gated "github" Skill Injection
@@ -545,6 +690,21 @@ class TestATDDT18HelmParity:
         driver = HelmCliDriver(_helm_bin_or_skip())
         proc = driver.template(["--set-string", "headhunter.github.enabled=false"])
         assert proc.returncode == 0, f"Unexpected fail-fast for string 'false': {proc.stderr}"
+
+    def test_t18c_darwin_cortex_url_whitespace_cortex_url_falls_back_to_github_cortex_url(self):
+        """Given headhunter.cortexUrl='   ' and headhunter.github.cortexUrl='https://fallback.example.com'
+        When `helm template` renders
+        Then DARWIN_CORTEX_URL falls back cleanly to https://fallback.example.com."""
+        driver = HelmCliDriver(_helm_bin_or_skip())
+        proc = driver.template([
+            "--set-string", "headhunter.cortexUrl=   ",
+            "--set", "headhunter.github.cortexUrl=https://fallback.example.com",
+        ])
+        assert proc.returncode == 0, proc.stderr
+        docs = [d for d in yaml.safe_load_all(proc.stdout) if d]
+        dep = next(d for d in docs if d.get("kind") == "Deployment")
+        env = {e["name"]: e for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["DARWIN_CORTEX_URL"]["value"] == "https://fallback.example.com"
 
     def test_t18d_gitlab_only_cortex_url_fallback_env_parity_and_dead_vars_removed(self):
         """Given GitLab-only config with headhunter.github.cortexUrl fallback and GitHub-enabled config

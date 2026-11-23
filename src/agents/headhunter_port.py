@@ -120,6 +120,60 @@ class VcsPlatformPort(Protocol):
         """Return an immutable-style point-in-time snapshot for Redis persistence."""
         ...
 
+    async def dismiss_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """Dismiss a queued/pending work item on the platform (returns (ok, error_detail))."""
+        ...
+
+    async def requeue_work_item(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+        matched_item: object = None,
+        matched_raw: dict[str, Any] | None = None,
+        installation_id: str = "",
+    ) -> tuple[bool, str]:
+        """Re-apply platform queue/work state for operator requeue (returns (ok, error_detail))."""
+        ...
+
+    def remove_from_snapshot_cache(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        is_issue: bool = False,
+    ) -> None:
+        """Remove an item from in-memory snapshot cache after dismiss."""
+        ...
+
+    def mark_snapshot_item_queued(
+        self,
+        project_key: int | str,
+        item_number: int,
+        *,
+        owner: str = "",
+        repo: str = "",
+        matched_item: object = None,
+        is_issue: bool = False,
+    ) -> None:
+        """Mark or insert an item as queued in in-memory snapshot cache after requeue."""
+        ...
+
     async def close(self) -> None:
         """Release adapter-owned HTTP resources (never close borrowed shared singletons)."""
         ...
