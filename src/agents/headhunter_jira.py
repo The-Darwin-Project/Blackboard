@@ -1,43 +1,14 @@
 # BlackBoard/src/agents/headhunter_jira.py
 # @ai-rules:
-# 1. [Pattern]: Follows Headhunter pattern -- in-process daemon head, lazy-loaded Claude adapter.
-# 2. [Constraint]: AIR GAP: No kubernetes imports. Jira API via httpx only.
-# 3. [Pattern]: Two-phase poll: Planning issues -> analyze+comment, To Do issues -> create Brain event.
-# 4. [Pattern]: Re-eval gate: watchers who @mention bot trigger re-analysis.
-# 5. [Pattern]: ADF (Atlassian Document Format) mention parsing via recursive tree walk.
-# 6. [Pattern]: Circuit breaker: 3 consecutive Jira poll failures -> disable head.
-# 7. [Gotcha]: Jira Cloud comments use ADF (nested JSON), not plain text.
-# 8. [Constraint]: No hardcoded emails, URLs, or tokens -- all from env vars.
-# 9. [Pattern]: Label-driven skill selection: HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>.
-#    Labels on issue (beyond base "darwin") map to system prompts fetched from git. 5-min cache.
-# 10. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Queries injected
-#     Brain.count_global_wip(include_new=True) (subtracts _waiting_for_user), fallback to local.
-#    Teams self-serve by updating rules in their own repo. Fallback: built-in BA prompt.
-# 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
-#     _get_issue_state/_set_issue_state are the canonical accessors.
-# 11. [Pattern]: _get_active_jira_keys() mirrors GitLab headhunter's _get_active_mr_keys() for dedup.
-# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing
-#     comments via a local scan of the issue's already-fetched comment list -- makes zero Jira API
-#     calls. The 10-per-cycle cap on cold_start_checks bounds ONLY that local scan; it does NOT cap
-#     has_reeval_signal()'s live get_watchers() API call, which the cold-start branch also triggers
-#     in the same poll cycle (does not wait for the next cycle) and which runs UNCAPPED, once per
-#     Planning issue, for every issue already tracked in Redis from a prior cycle ("analyzed" phase).
-#     [Gotcha]: has_reeval_signal() is wrapped in try/except for per-issue failure isolation -- one
-#     Jira API error must not abort the rest of the Phase 1 loop. Assumes single in-process daemon
-#     loop invocation -- no concurrent poll_and_process() calls for the same instance.
-# 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool) with tool_choice={"type": "auto"}
-#     (Claude 5.x rejects "tool"/"any"). _plan_args_to_yaml() converts structured args to YAML; _extract_yaml() kept as fallback.
-# 14. [Constraint]: Skill URL 10KB cap -- len(content) > 10240 → cache BUSINESS_ANALYST_SYSTEM_PROMPT
-#     + return None (caller falls back to BUSINESS_ANALYST_SYSTEM_PROMPT, symmetric with GitHub adapter).
-# 15. [Pattern]: Jira ADF descriptions/comments render via shared utils.adf.adf_to_markdown()
-#     to avoid raw json.dumps() payloads in LLM context.
-"""
-Headhunter Jira: polls Jira issues assigned to bot with a label filter.
-
-Two-phase flow:
-  1. Planning issues -> Claude BA analysis -> post Jira comment
-  2. To Do issues (human-approved) -> Claude plan generation -> Brain event
-"""
+# 1. [Pattern]: Headhunter Jira daemon head; lazy Claude adapter; AIR GAP (httpx only, no k8s).
+# 2. [Pattern]: Two-phase poll: Planning -> analyze+comment (caches analysis in Redis), To Do -> Brain event (reuses Redis/bot-comment analysis or resolves label skill).
+# 3. [Pattern]: Re-eval gate: watchers @mentioning bot trigger re-analysis (ADF recursive walk).
+# 4. [Constraint]: All config from env vars. Label-driven skills (HEADHUNTER_JIRA_SKILL_<LABEL>, 5m cache, 10KB cap -> BA fallback).
+# 5. [Pattern]: Global WIP flow gate (MAX_ACTIVE_EVENTS) and Redis state (darwin:headhunter:jira:{key}, 7d TTL).
+# 6. [Pattern]: Cold-start recovery anchors to latest bot comment (0 Jira calls, 10/cycle cap) and runs reeval check same cycle with per-issue try/except isolation.
+# 7. [Pattern]: Plan generation uses produce_execution_plan tool with tool_choice={"type": "auto"} (Claude 5.x rejects "tool"/"any"); both tool and YAML-fallback paths fail closed via _validate_plan_yaml().
+# 8. [Pattern]: ADF bodies render via utils.adf.adf_to_markdown().
+"""Headhunter Jira: polls Jira issues assigned to bot with a label filter."""
 from __future__ import annotations
 
 import base64
@@ -546,15 +517,15 @@ class HeadhunterJira:
         async for chunk in adapter.generate_stream(
             system_prompt=BRAIN_PLAN_SYSTEM_PROMPT,
             contents=(
-                f"Produce a Brain execution plan for this approved analysis by calling the "
-                f"produce_execution_plan tool.\n\n"
+                f"Produce a Brain execution plan for this approved analysis by calling "
+                f"produce_execution_plan.\n\n"
                 f"Jira issue context:\n{jira_content}\n\n"
                 f"Approved validation plan:\n{analysis}"
             ),
             tools=[PLAN_TOOL_SCHEMA],
             tool_choice={"type": "auto"},
         ):
-            if chunk.text:
+            if chunk.text and not getattr(chunk, "is_thought", False):
                 text_chunks.append(chunk.text)
             if chunk.function_call:
                 function_call = chunk.function_call
@@ -563,10 +534,41 @@ class HeadhunterJira:
                 record_token_usage("headhunter_jira", chunk.usage)
 
         if function_call and function_call.name == "produce_execution_plan":
-            return self._plan_args_to_yaml(function_call.args)
+            return self._validate_plan_yaml(self._plan_args_to_yaml(function_call.args or {}))
 
-        logger.warning("Claude did not use produce_execution_plan tool -- falling back to text parsing")
-        return self._extract_yaml("".join(text_chunks))
+        logger.warning("Claude did not call produce_execution_plan -- falling back to YAML extraction")
+        return self._validate_plan_yaml(self._extract_yaml("".join(text_chunks)))
+
+    @staticmethod
+    def _validate_plan_yaml(raw_yaml: str) -> str:
+        """Fail closed unless raw_yaml parses to a mapping with non-empty plan and valid steps."""
+        import yaml
+
+        candidate = (raw_yaml or "").strip()
+        if not candidate:
+            raise RuntimeError("Brain plan generation returned empty output")
+        try:
+            doc = yaml.safe_load(candidate)
+        except yaml.YAMLError as e:
+            raise RuntimeError(f"Brain plan YAML parse error: {e}") from e
+        if not isinstance(doc, dict):
+            raise RuntimeError("Brain plan output is not a YAML mapping")
+        plan = doc.get("plan")
+        steps = doc.get("steps")
+        if not isinstance(plan, str) or not plan.strip():
+            raise RuntimeError("Brain plan missing non-empty 'plan' field")
+        if not isinstance(steps, list) or not steps:
+            raise RuntimeError("Brain plan missing non-empty 'steps' list")
+        for step in steps:
+            if (
+                not isinstance(step, dict)
+                or not isinstance(step.get("agent"), str)
+                or not step["agent"].strip()
+                or not isinstance(step.get("summary"), str)
+                or not step["summary"].strip()
+            ):
+                raise RuntimeError("Brain plan step missing non-empty 'agent' or 'summary'")
+        return candidate
 
     @staticmethod
     def _plan_args_to_yaml(args: dict) -> str:
@@ -586,12 +588,11 @@ class HeadhunterJira:
                     "status": "pending",
                 }
                 for s in args.get("steps", [])
+                if isinstance(s, dict)
             ],
         }
         return yaml.dump(plan_doc, default_flow_style=False, sort_keys=False).strip()
 
-    # TODO: Remove _extract_yaml() after 7 days of production monitoring confirms
-    # zero "did not use produce_execution_plan tool" warnings in logs.
     @staticmethod
     def _extract_yaml(raw: str) -> str:
         """Strip markdown code fences and prose preamble from LLM YAML output."""
@@ -757,32 +758,53 @@ class HeadhunterJira:
     # Cold-Start Recovery
     # =========================================================================
 
-    def _find_bot_comment(self, issue: dict) -> str | None:
-        """Find the latest comment posted by the bot. Returns comment ID or None."""
-        comments = issue.get("fields", {}).get("comment", {}).get("comments", [])
+    def _latest_bot_comment(self, issue: dict, *, skip_non_analysis: bool = False) -> dict | None:
+        """Find latest bot-authored comment (optionally skipping re-analyze/self-mention comments)."""
+        comment_block = issue.get("fields", {}).get("comment", {})
+        comments = comment_block.get("comments", [])
+        total = comment_block.get("total", 0)
+        if isinstance(total, int) and total > len(comments):
+            logger.warning(
+                "Embedded Jira comments truncated for %s (%d/%d)",
+                issue.get("key", "?"),
+                len(comments),
+                total,
+            )
         for comment in reversed(comments):
-            if comment.get("author", {}).get("accountId") == self._bot_account_id:
-                return comment.get("id", "")
+            if comment.get("author", {}).get("accountId") != self._bot_account_id:
+                continue
+            if skip_non_analysis:
+                body = comment.get("body", "")
+                if isinstance(body, dict) and self._mentions_bot(body):
+                    continue
+                text = adf_to_markdown(body).strip() if isinstance(body, dict) else str(body).strip()
+                if not text or "please re-analyze this issue" in text.lower():
+                    continue
+            return comment
         return None
 
-    def _find_bot_comment_text(self, issue: dict) -> str:
-        """Return rendered markdown body of the latest bot comment, or empty string."""
-        comments = issue.get("fields", {}).get("comment", {}).get("comments", [])
-        for comment in reversed(comments):
-            if comment.get("author", {}).get("accountId") == self._bot_account_id:
-                body = comment.get("body", "")
-                if isinstance(body, dict):
-                    return adf_to_markdown(body).strip()
-                return str(body).strip()
-        return ""
+    def _find_bot_comment(self, issue: dict) -> str | None:
+        """Find latest bot comment ID or None."""
+        comment = self._latest_bot_comment(issue)
+        return comment.get("id", "") if comment else None
 
-    # =========================================================================
-    # Main Poll Cycle
-    # =========================================================================
+    def _find_bot_comment_text(self, issue: dict) -> str:
+        """Return markdown text of latest bot analysis comment, or empty string."""
+        comment = self._latest_bot_comment(issue, skip_non_analysis=True)
+        if not comment:
+            return ""
+        body = comment.get("body", "")
+        return adf_to_markdown(body).strip() if isinstance(body, dict) else str(body).strip()
+
+    async def _record_analysis(self, key: str, comment_id: str, analysis: str) -> None:
+        """Persist analyzed phase, comment anchor, and analysis text to Redis."""
+        state: dict[str, Any] = {"phase": "analyzed", "last_comment_id": comment_id}
+        if analysis:
+            state["analysis"] = analysis
+        await self._set_issue_state(key, state)
 
     async def poll_and_process(self) -> None:
         """Single cycle: handle Planning issues + To Do issues."""
-        # Phase 1: Analyze Planning issues (no flow gate -- analysis doesn't create events)
         planning_issues = await self.poll_planning()
         logger.debug(f"Jira Planning issues: {len(planning_issues)}")
         cold_start_checks = 0
@@ -790,35 +812,22 @@ class HeadhunterJira:
             key = issue["key"]
             state = await self._get_issue_state(key)
             if state is None:
-                # Cold-start: reconstruct from bot comments if they exist
                 if cold_start_checks < 10:
                     bot_comment_id = self._find_bot_comment(issue)
                     cold_start_checks += 1
                     if bot_comment_id:
-                        state = {"phase": "analyzed", "last_comment_id": bot_comment_id}
                         bot_text = self._find_bot_comment_text(issue)
-                        if bot_text:
-                            state["analysis"] = bot_text
-                        await self._set_issue_state(key, state)
+                        await self._record_analysis(key, bot_comment_id, bot_text)
+                        state = await self._get_issue_state(key)
                         logger.info(f"Jira cold-start: anchoring {key} to comment {bot_comment_id}")
                     else:
                         logger.info(f"Jira cold-start: no bot comment found for {key}, running fresh analysis")
                 if state is None:
-                    # No bot comment found -- run fresh analysis
                     result = await self.analyze_and_comment(issue)
                     if result:
-                        comment_id, analysis = result
-                        await self._set_issue_state(
-                            key,
-                            {"phase": "analyzed", "last_comment_id": comment_id, "analysis": analysis},
-                        )
+                        await self._record_analysis(key, result[0], result[1])
                     continue
 
-            # Deliberately not `elif` off the `if state is None:` block above: cold-start
-            # recovery there can populate `state` in this same iteration (anchoring to an
-            # existing bot comment), and we want to fall through to this reeval check in the
-            # same cycle rather than waiting for the next poll. An `elif` here would silently
-            # reintroduce the one-cycle-delay bug this fix resolves.
             if state and state.get("phase") == "analyzed":
                 last_cid = state.get("last_comment_id", "")
                 if last_cid:
@@ -831,15 +840,10 @@ class HeadhunterJira:
                         logger.info(f"Jira reeval signal detected for {key} after comment {last_cid}")
                         result = await self.analyze_and_comment(issue)
                         if result:
-                            comment_id, analysis = result
-                            await self._set_issue_state(
-                                key,
-                                {"phase": "analyzed", "last_comment_id": comment_id, "analysis": analysis},
-                            )
+                            await self._record_analysis(key, result[0], result[1])
                     else:
                         logger.debug(f"Jira reeval check for {key}: no signal (anchor={last_cid})")
 
-        # Phase 2: Create events for To Do issues (gated by global WIP cap)
         if not await self.check_flow_gate():
             logger.debug("Jira flow gate closed -- skipping event creation")
             return

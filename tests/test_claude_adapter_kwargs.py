@@ -351,8 +351,18 @@ class TestClaude5ToolChoiceNormalization:
     """Claude 5.x rejects tool_choice types 'tool' and 'any' with HTTP 400; _build_kwargs downgrades to 'auto'."""
 
     _TOOLS = [{"name": "produce_execution_plan", "description": "Submit plan", "input_schema": {"type": "object"}}]
+    _CLAUDE_5_MODELS = [
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-5-sonnet",
+        "claude-fable-5-2",
+        "claude-mythos-5",
+        "publishers/anthropic/models/claude-sonnet-5-5@20260501",
+        "anthropic.claude-opus-5-5-v1:0",
+    ]
 
-    @pytest.mark.parametrize("model_name", ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-5-sonnet"])
+    @pytest.mark.parametrize("model_name", _CLAUDE_5_MODELS)
     @pytest.mark.parametrize(
         "forced_choice",
         [{"type": "tool", "name": "produce_execution_plan"}, {"type": "any"}],
@@ -368,6 +378,7 @@ class TestClaude5ToolChoiceNormalization:
             tool_choice=forced_choice,
         )
         assert kwargs["tool_choice"] == {"type": "auto"}
+        assert "temperature" not in kwargs
 
     @pytest.mark.parametrize("allowed_choice", [{"type": "auto"}, {"type": "none"}])
     def test_claude_5_preserves_auto_and_none_tool_choice(self, allowed_choice: dict) -> None:
@@ -382,8 +393,11 @@ class TestClaude5ToolChoiceNormalization:
         )
         assert kwargs["tool_choice"] == allowed_choice
 
-    @pytest.mark.parametrize("model_name", ["claude-sonnet-4-5", "claude-opus-4-6", "claude-3-5-sonnet"])
-    def test_legacy_claude_models_preserve_forced_tool_choice(self, model_name: str) -> None:
+    @pytest.mark.parametrize(
+        "model_name",
+        ["claude-sonnet-4-5", "claude-opus-4-6", "claude-3-5-sonnet", "claude-sonnet-50", "", None],
+    )
+    def test_legacy_and_non_5_models_preserve_forced_tool_choice(self, model_name) -> None:
         adapter = _make_adapter(model_name)
         forced = {"type": "tool", "name": "produce_execution_plan"}
         kwargs = adapter._build_kwargs(
@@ -395,5 +409,6 @@ class TestClaude5ToolChoiceNormalization:
             tool_choice=forced,
         )
         assert kwargs["tool_choice"] == forced
+        assert kwargs["temperature"] == 0.5
 
 
