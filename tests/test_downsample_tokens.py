@@ -96,3 +96,43 @@ def test_downsample_covers_all_flow_snapshot_fields():
     result_fields = set(result[0].model_dump().keys())
     model_fields = set(FlowSnapshot.model_fields.keys())
     assert result_fields == model_fields, f"Missing: {model_fields - result_fields}"
+
+
+def test_t5_downsample_sums_brain_token_deltas_across_five_snapshots():
+    """
+    Scenario T-5:
+    Given 5 FlowSnapshots in one bucket with varying brain_token_input_delta and brain_token_cached_delta
+    When _downsample_snapshots() aggregates the bucket
+    Then both brain token delta fields are summed (not averaged or maxed) and all FlowSnapshot fields are covered.
+    """
+    assert "brain_token_input_delta" in FlowSnapshot.model_fields, (
+        "FlowSnapshot missing brain_token_input_delta field"
+    )
+    assert "brain_token_cached_delta" in FlowSnapshot.model_fields, (
+        "FlowSnapshot missing brain_token_cached_delta field"
+    )
+
+    bb = BlackboardState.__new__(BlackboardState)
+    # 5 snapshots within one 300s bucket (t=300..599):
+    # brain_token_input_delta:  [100, 200, 300, 400, 500] -> sum=1500 (avg=300, max=500)
+    # brain_token_cached_delta: [ 80, 150, 270, 350, 450] -> sum=1300 (avg=260, max=450)
+    snapshots = [
+        _snap(300, token_input_delta=150, token_cached_delta=80,
+              brain_token_input_delta=100, brain_token_cached_delta=80),
+        _snap(360, token_input_delta=250, token_cached_delta=150,
+              brain_token_input_delta=200, brain_token_cached_delta=150),
+        _snap(420, token_input_delta=350, token_cached_delta=270,
+              brain_token_input_delta=300, brain_token_cached_delta=270),
+        _snap(480, token_input_delta=450, token_cached_delta=350,
+              brain_token_input_delta=400, brain_token_cached_delta=350),
+        _snap(540, token_input_delta=550, token_cached_delta=450,
+              brain_token_input_delta=500, brain_token_cached_delta=450),
+    ]
+
+    result = bb._downsample_snapshots(snapshots, bucket_seconds=300)
+    assert len(result) == 1
+    assert result[0].brain_token_input_delta == 1500
+    assert result[0].brain_token_cached_delta == 1300
+    assert result[0].token_input_delta == 1750
+    assert result[0].token_cached_delta == 1300
+    assert set(result[0].model_dump().keys()) == set(FlowSnapshot.model_fields.keys())

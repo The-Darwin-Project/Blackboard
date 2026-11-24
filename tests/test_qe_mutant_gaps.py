@@ -210,23 +210,26 @@ def _single_message_contents(n_conv: int) -> list[dict]:
 
 class TestSingleMessageCompression:
     def test_notice_count_equals_pruned_parts_and_newest_part_survives(self):
-        out = compress_contents(_single_message_contents(10), max_tokens=2000, tail_budget=1000)
+        out, newly_pruned = compress_contents(_single_message_contents(10), max_tokens=2000, tail_budget=1000)
         assert len(out) == 1
         texts = [str(p.get("text", "")) for p in out[0]["parts"]]
         kept = [t for t in texts if re.match(r"C\d\d:", t)]
         assert kept, "at least the newest conversation part must survive"
         assert kept[-1].startswith("C09:"), "newest conversation part must never be the one dropped"
+        assert newly_pruned == 10 - len(kept)
         assert _notice_counts(out) == [10 - len(kept)]
         assert texts[0] == "HEADER" and texts[-1] == "ACTION"
 
     def test_second_pass_merges_counts_instead_of_stacking(self):
-        once = compress_contents(_single_message_contents(10), max_tokens=2000, tail_budget=1000)
+        once, pruned1 = compress_contents(_single_message_contents(10), max_tokens=2000, tail_budget=1000)
         n_first = _notice_counts(once)[0]
-        twice = compress_contents(once, max_tokens=100, tail_budget=50)
+        assert pruned1 == n_first
+        twice, pruned2 = compress_contents(once, max_tokens=100, tail_budget=50)
         counts = _notice_counts(twice)
         assert len(counts) == 1
         kept_after = [p for p in twice[0]["parts"] if re.match(r"C\d\d:", str(p.get("text", "")))]
         assert counts[0] == 10 - len(kept_after) >= n_first
+        assert counts[0] == pruned1 + pruned2
 
 
 class TestOrphanFunctionResponseCount:
@@ -243,11 +246,12 @@ class TestOrphanFunctionResponseCount:
             {"role": "user", "parts": [{"text": "ASK"}]},
         ]
         contents = [{"role": "user", "parts": [{"text": "HEADER"}]}] + conv
-        out = compress_contents(contents, max_tokens=1000, tail_budget=600)
+        out, newly_pruned = compress_contents(contents, max_tokens=1000, tail_budget=600)
         flat = "\n".join(str(p) for m in out for p in m["parts"])
         assert "functionResponse" not in flat, "orphan FR must be dropped, not left at the cut boundary"
         assert "OLD" not in flat and "M1" in flat and "U1" in flat and "M2" in flat
         # OLD (budget-pruned) + the FR message dropped at the cut boundary = 2 entries
+        assert newly_pruned == 2
         assert _notice_counts(out) == [2]
         assert [m["role"] for m in out] == ["user", "model", "user", "model", "user"]
 
@@ -260,10 +264,10 @@ from src.utils.prompt_sanitize import strip_xml_fences  # noqa: E402
 
 
 def _nested_context_tag(depth: int) -> str:
-    """``<context>`` split ``depth`` times: each pass removes exactly one inner tag layer."""
+    """``<context>`` split inside the tag name ``depth`` times: each pass removes exactly one inner layer."""
     s = "<context>"
     for _ in range(depth):
-        s = "<context" + s + ">"
+        s = "<con" + s + "text>"
     return s
 
 
@@ -283,6 +287,10 @@ class TestFencePassCap:
         out = strip_xml_fences(_nested_context_tag(depth))
         for tag in ("<context>", "</context>", "<functionCall>", "--- CONVERSATION ---"):
             assert tag not in out
+        # Also verify outer-first optional-'>' stripping on '<context<context>...>' never leaves a tag
+        nested_prefix = "<context" * depth + "<context>" + ">" * depth
+        out_prefix = strip_xml_fences(nested_prefix)
+        assert "<context" not in out_prefix.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -333,29 +341,44 @@ class TestDecayPayloadLen:
 
 class TestConversationHasDecayedTurns:
     @staticmethod
-    def _conv(big_idx: int, size: int, n: int = 12) -> list[ConversationTurn]:
+    def _conv(big_idx: int, size: int, n: int = 21) -> list[ConversationTurn]:
         turns = [_t(actor="user", action="message", thoughts="hi") for _ in range(n)]
         turns[big_idx] = _t(waitingFor="run_bash", evidence="e" * size)
         return turns
 
-    def test_distance_boundary(self):
+    def test_distance_boundary_quantized_k10(self):
+        from src.utils.turn_decay import decay_cutoff_index
+
         assert DEFAULT_TURN_DECAY_DISTANCE == 10
-        assert conversation_has_decayed_turns(self._conv(0, 500)) is True    # distance 11 > 10
-        assert conversation_has_decayed_turns(self._conv(1, 500)) is False   # distance 10 is still raw
+        assert decay_cutoff_index(12) == 0
+        assert decay_cutoff_index(20) == 0
+        assert decay_cutoff_index(21) == 10
+        # Below first K=10 snap: nothing decays even with big turn at idx=0
+        assert conversation_has_decayed_turns(self._conv(0, 500, n=12)) is False
+        assert conversation_has_decayed_turns(self._conv(0, 500, n=20)) is False
+        # At first K=10 snap (n=21 -> cutoff=10): idx 0..9 decay, idx 10 stays raw
+        assert conversation_has_decayed_turns(self._conv(9, 500, n=21)) is True
+        assert conversation_has_decayed_turns(self._conv(10, 500, n=21)) is False
+
+    def test_distance_boundary_sliding_epoch_1(self, monkeypatch):
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "1")
+        assert conversation_has_decayed_turns(self._conv(0, 500, n=12)) is True   # distance 11 > 10
+        assert conversation_has_decayed_turns(self._conv(1, 500, n=12)) is False  # distance 10 is still raw
 
     @pytest.mark.parametrize("size,expected", [(399, False), (400, False), (401, True)])
     def test_size_boundary(self, size, expected):
         assert DECAY_MIN_CHARS == 400
-        assert conversation_has_decayed_turns(self._conv(0, size)) is expected
+        assert conversation_has_decayed_turns(self._conv(0, size, n=21)) is expected
 
     def test_custom_distance_and_empty_inputs(self):
-        assert conversation_has_decayed_turns(self._conv(8, 500), decay_distance=2) is True
+        # Tier-1 decay_distance=2 (< DEFAULT_TURN_DECAY_DISTANCE) bypasses K=10 quantization
+        assert conversation_has_decayed_turns(self._conv(8, 500, n=12), decay_distance=2) is True
         assert conversation_has_decayed_turns([]) is False
         assert conversation_has_decayed_turns(None) is False  # type: ignore[arg-type]
 
     def test_far_big_user_message_is_not_a_decay_signal(self):
         turns = [_t(actor="user", action="message", thoughts="u" * 5000)] + [
-            _t(actor="user", action="message", thoughts="hi") for _ in range(12)
+            _t(actor="user", action="message", thoughts="hi") for _ in range(25)
         ]
         assert conversation_has_decayed_turns(turns) is False
 
@@ -373,16 +396,26 @@ _LENS = [0, 10, 399, 400, 401, 1500]
 
 
 @pytest.mark.asyncio
-async def test_gate_fallback_predicate_matches_what_build_contents_actually_decays():
-    """Seeded property test: conversation_has_decayed_turns() == "the built prompt carries a decay reference"."""
+@pytest.mark.parametrize("epoch_env,lo,hi", [(None, 11, 32), ("1", 11, 22)])
+async def test_gate_fallback_predicate_matches_what_build_contents_actually_decays(
+    monkeypatch, epoch_env, lo, hi,
+):
+    """Seeded property test: conversation_has_decayed_turns() == "the built prompt carries a decay reference"
+    and both agree with decay_cutoff_index() in both K=10 quantized and epoch_size=1 sliding modes."""
     from tests.test_build_contents_structure import _make_brain_mock, _make_event, _make_turn, _all_text
     from src.agents.brain import Brain
+    from src.utils.turn_decay import decay_cutoff_index
+
+    if epoch_env is None:
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", epoch_env)
 
     rng = random.Random(20260113)
     seen = set()
     for _ in range(400):
         conv = []
-        for i in range(rng.randint(11, 22)):
+        for i in range(rng.randint(lo, hi)):
             actor, action, wf, field = rng.choice(_KINDS)
             n = rng.choice(_LENS)
             conv.append(_make_turn(turn=i + 1, actor=actor, action=action, waitingFor=wf, **({field: "z" * n} if n else {})))
@@ -390,7 +423,11 @@ async def test_gate_fallback_predicate_matches_what_build_contents_actually_deca
             built = await Brain._build_contents(_make_brain_mock(), _make_event(conversation=conv))
         actual = "blackboard_evidence_reference" in _all_text(built)
         predicted = conversation_has_decayed_turns(conv)
-        assert predicted == actual, [(t.actor, t.action, t.waitingFor, len(t.evidence or ""), len(t.thoughts or ""), len(t.result or "")) for t in conv]
+        cutoff = decay_cutoff_index(len(conv))
+        expected_from_cutoff = any(_decay_payload_len(t) > DECAY_MIN_CHARS for t in conv[:cutoff])
+        assert predicted == actual == expected_from_cutoff, (
+            f"epoch={epoch_env} len={len(conv)} cutoff={cutoff} predicted={predicted} actual={actual}"
+        )
         seen.add(actual)
     assert seen == {True, False}, "generator must exercise both outcomes"
 

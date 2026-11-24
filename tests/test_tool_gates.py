@@ -44,7 +44,13 @@ ALL_SCHEMAS = _fake_schemas(*ALL_TOOL_NAMES)
 
 
 def _turn(actor: str, action: str, **kw) -> SimpleNamespace:
-    return SimpleNamespace(actor=actor, action=action, waitingFor=kw.get("waitingFor"), thoughts=kw.get("thoughts"))
+    return SimpleNamespace(
+        actor=actor,
+        action=action,
+        waitingFor=kw.get("waitingFor"),
+        thoughts=kw.get("thoughts"),
+        evidence=kw.get("evidence"),
+    )
 
 
 def _ctx(**overrides) -> GateContext:
@@ -1446,94 +1452,90 @@ class TestDynamicRecallPrunedTurns:
       Layer 4 (SUT): src.agents.tool_gates.
     """
 
-    def test_t3_casual_domain_dynamic_ungating_with_over_10_turns(self):
-        """T-3: Given an event with > 10 turns in DOMAIN_CASUAL,
+    def test_t3_casual_domain_dynamic_ungating_with_epoch_quantized_cutoff(self):
+        """T-3 (Step 8 K=10 quantized): Given an event below the K=10 first epoch snap (<= 20 turns)
+        vs at/above the first snap (>= 21 turns) in DOMAIN_CASUAL,
         When evaluate_gates() is called,
-        Then recall_pruned_turns is included in active tools.
-        Conversely, when <= 10 turns, recall_pruned_turns is NOT included.
+        Then recall_pruned_turns is NOT included at <= 20 turns and IS included at >= 21 turns.
         """
-        # Case A: Short conversation (5 turns) -> recall_pruned_turns NOT present
-        ctx_short = _ctx(
-            brain_phase="dispatch",
-            event_source="chat",
-            context_flags={"brain_has_classified": True, "event_domain": "casual"},
-            conversation=[_turn("user", "message")] * 5,
-        )
-        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
-        assert "recall_pruned_turns" not in active_short, (
-            "recall_pruned_turns must not leak into casual chats with <= 10 turns"
-        )
+        # Case A: Below first K=10 epoch snap (5 and 20 turns) -> recall_pruned_turns NOT present
+        for short_len in (5, 15, 20):
+            ctx_short = _ctx(
+                brain_phase="dispatch",
+                event_source="chat",
+                context_flags={"brain_has_classified": True, "event_domain": "casual"},
+                conversation=[_turn("user", "message")] * short_len,
+            )
+            active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+            assert "recall_pruned_turns" not in active_short, (
+                f"recall_pruned_turns must not leak into casual chats at {short_len} turns (K=10 cutoff=0)"
+            )
 
-        # Case B: Long conversation (> 10 turns) -> recall_pruned_turns MUST be present
+        # Case B: At/above first K=10 epoch snap (21 turns) -> recall_pruned_turns MUST be present
         ctx_long = _ctx(
             brain_phase="dispatch",
             event_source="chat",
             context_flags={"brain_has_classified": True, "event_domain": "casual"},
-            conversation=[_turn("user", "message")] * 15,
+            conversation=[_turn("user", "message")] * 21,
         )
         active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
         assert "recall_pruned_turns" in active_long, (
-            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CASUAL when conversation > 10 turns"
+            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CASUAL at >= 21 turns"
         )
 
-    def test_t3_chaotic_domain_dynamic_ungating_with_over_10_turns(self):
-        """T-3: Given an event with > 10 turns in DOMAIN_CHAOTIC,
-        When evaluate_gates() is called,
-        Then recall_pruned_turns is included in active tools.
-        Conversely, when conversation has <= 10 turns, recall_pruned_turns is NOT included.
-        """
-        # Negative assertion: <= 10 turns in chaotic domain
-        ctx_chaotic_short = _ctx(
-            brain_phase="dispatch",
-            event_source="aligner",
-            context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
-            conversation=[_turn("user", "message")] * 10,
-        )
-        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_chaotic_short))
-        assert "recall_pruned_turns" not in active_short, (
-            "recall_pruned_turns must not be active in DOMAIN_CHAOTIC when <= 10 turns"
-        )
+    def test_t3_chaotic_domain_dynamic_ungating_with_epoch_quantized_cutoff(self):
+        """T-3 (Step 8 K=10 quantized): DOMAIN_CHAOTIC un-gates recall_pruned_turns at >= 21 turns
+        (first K=10 snap), keeping it stripped at <= 20 turns."""
+        for short_len in (10, 15, 20):
+            ctx_chaotic_short = _ctx(
+                brain_phase="dispatch",
+                event_source="aligner",
+                context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
+                conversation=[_turn("user", "message")] * short_len,
+            )
+            active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_chaotic_short))
+            assert "recall_pruned_turns" not in active_short, (
+                f"recall_pruned_turns must not be active in DOMAIN_CHAOTIC at {short_len} turns (K=10 cutoff=0)"
+            )
 
-        # Positive assertion: > 10 turns in chaotic domain
         ctx_chaotic = _ctx(
             brain_phase="dispatch",
             event_source="aligner",
             context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
-            conversation=[_turn("user", "message")] * 15,
+            conversation=[_turn("user", "message")] * 21,
         )
         active = _names(evaluate_gates(ALL_SCHEMAS, ctx_chaotic))
         assert "recall_pruned_turns" in active, (
-            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CHAOTIC when conversation > 10 turns"
+            "recall_pruned_turns must be dynamically un-gated in DOMAIN_CHAOTIC at >= 21 turns"
         )
 
-    def test_pre_classification_dynamic_ungating_with_over_10_turns(self):
-        """CR-09: Given an event prior to classification (triage phase, brain_has_classified=False),
-        When evaluate_gates() is called with > 10 turns,
-        Then recall_pruned_turns is un-gated in _tools_pre_classification so the model can recall history to classify.
-        When <= 10 turns, recall_pruned_turns is NOT in pre-classification tools.
-        """
-        ctx_short = _ctx(
-            brain_phase="triage",
-            event_source="chat",
-            context_flags={"brain_has_classified": False},
-            conversation=[_turn("user", "message")] * 10,
-        )
-        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
-        assert "recall_pruned_turns" not in active_short
+    def test_pre_classification_dynamic_ungating_with_epoch_quantized_cutoff(self):
+        """CR-09 (Step 8 K=10 quantized): PRE_CLASSIFICATION un-gates recall_pruned_turns at >= 21 turns
+        (first K=10 snap) and keeps it stripped at <= 20 turns."""
+        for short_len in (10, 11, 20):
+            ctx_short = _ctx(
+                brain_phase="triage",
+                event_source="chat",
+                context_flags={"brain_has_classified": False},
+                conversation=[_turn("user", "message")] * short_len,
+            )
+            active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+            assert "recall_pruned_turns" not in active_short
 
         ctx_long = _ctx(
             brain_phase="triage",
             event_source="chat",
             context_flags={"brain_has_classified": False},
-            conversation=[_turn("user", "message")] * 11,
+            conversation=[_turn("user", "message")] * 21,
         )
         active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
         assert "recall_pruned_turns" in active_long, (
-            "recall_pruned_turns must be un-gated pre-classification when history > 10 turns"
+            "recall_pruned_turns must be un-gated pre-classification at >= 21 turns"
         )
 
     def test_explicit_has_pruned_flag_respected_over_raw_turn_length(self):
-        """CR-10: Given GateContext constructed explicitly with 15 turns but has_pruned_or_decayed_turns=False,
+        """CR-10: Given GateContext constructed explicitly with 25 turns (above K=10 snap)
+        but has_pruned_or_decayed_turns=False,
         When evaluate_gates() is called,
         Then gates respect the explicit flag and do NOT un-gate recall_pruned_turns.
         """
@@ -1541,7 +1543,7 @@ class TestDynamicRecallPrunedTurns:
             brain_phase="dispatch",
             event_source="chat",
             context_flags={"brain_has_classified": True, "event_domain": "casual"},
-            conversation=[_turn("user", "message")] * 15,
+            conversation=[_turn("user", "message")] * 25,
             has_pruned_or_decayed_turns=False,
         )
         active = _names(evaluate_gates(ALL_SCHEMAS, ctx_explicit))
@@ -1574,21 +1576,33 @@ class TestDynamicRecallPrunedTurns:
 
     @pytest.mark.parametrize(
         "turn_count,expected",
-        [(10, False), (11, False), (12, True), (30, True)],
+        [(10, False), (11, False), (12, False), (15, False), (20, False), (21, True), (30, True)],
     )
     def test_build_gate_context_flag_matches_real_decay_distance(self, turn_count, expected):
-        """H3: the gate flag follows REAL decay (distance len-1-idx > 10 AND payload > 400 chars), not len > 10.
+        """H3 + Step 8 (K=10 quantized): the gate flag follows decay_cutoff_index(conv_len, 10, 10).
 
-        With the heavy tool turn first, distance == turn_count - 1: 10/11 turns -> 9/10 (still raw, nothing to
-        recall); 12 turns -> 11 (decayed).
+        With the heavy tool turn first (idx=0): 10..20 turns -> cutoff 0 (nothing decayed yet);
+        21+ turns -> cutoff 10 (idx 0..9 decayed).
         """
+        ctx = build_gate_context(self._doc_with_old_payload(turn_count, 500), "dispatch", {})
+        assert ctx.has_pruned_or_decayed_turns is expected
+
+    @pytest.mark.parametrize(
+        "turn_count,expected",
+        [(10, False), (11, False), (12, True), (30, True)],
+    )
+    def test_build_gate_context_flag_matches_sliding_decay_when_epoch_size_1(
+        self, monkeypatch, turn_count, expected,
+    ):
+        """Step 8: When BRAIN_DECAY_EPOCH_SIZE=1, decay falls back to exact continuous sliding."""
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "1")
         ctx = build_gate_context(self._doc_with_old_payload(turn_count, 500), "dispatch", {})
         assert ctx.has_pruned_or_decayed_turns is expected
 
     @pytest.mark.parametrize("payload_chars,expected", [(399, False), (400, False), (401, True)])
     def test_build_gate_context_flag_respects_decay_payload_threshold(self, payload_chars, expected):
-        """H3: at decay distance, only payloads > DECAY_MIN_CHARS (400) count -- 399/400 stay raw, 401 decays."""
-        ctx = build_gate_context(self._doc_with_old_payload(12, payload_chars), "dispatch", {})
+        """H3 + Step 8: at the K=10 first epoch snap (21 turns), only payloads > DECAY_MIN_CHARS (400) count."""
+        ctx = build_gate_context(self._doc_with_old_payload(21, payload_chars), "dispatch", {})
         assert ctx.has_pruned_or_decayed_turns is expected
 
     def test_build_gate_context_short_turns_never_flag_regardless_of_length(self):
@@ -1651,40 +1665,38 @@ class TestDynamicRecallPrunedTurns:
 
 
 
-    def test_t4_intermediate_gate_dynamic_ungating_with_over_10_turns(self):
-        """T-4: Given an intermediate turn before final triage with > 10 turns,
+    def test_t4_intermediate_gate_dynamic_ungating_with_epoch_quantized_cutoff(self):
+        """T-4 (Step 8 K=10 quantized): Given an intermediate turn with <= 20 turns vs >= 21 turns,
         When INTERMEDIATE_TOOLS gate is evaluated,
-        Then recall_pruned_turns is retained in active tools.
-        Conversely, when <= 10 turns, recall_pruned_turns is NOT in intermediate tools.
+        Then recall_pruned_turns is stripped at <= 20 turns and retained at >= 21 turns.
         """
-        # Case A: Short intermediate turn (1 turn) -> recall_pruned_turns stripped
-        ctx_short = _ctx(
-            brain_phase="dispatch",
-            context_flags={"is_intermediate": True, "brain_has_classified": True},
-            conversation=[_turn("jarvis", "message")],
-        )
-        active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
-        assert "recall_pruned_turns" not in active_short
+        for short_len in (1, 15, 20):
+            ctx_short = _ctx(
+                brain_phase="dispatch",
+                context_flags={"is_intermediate": True, "brain_has_classified": True},
+                conversation=[_turn("brain", "tool_result", waitingFor="run_bash")] * short_len,
+            )
+            active_short = _names(evaluate_gates(ALL_SCHEMAS, ctx_short))
+            assert "recall_pruned_turns" not in active_short
 
-        # Case B: Intermediate turn with > 10 turns -> recall_pruned_turns retained
         ctx_long = _ctx(
             brain_phase="dispatch",
             context_flags={"is_intermediate": True, "brain_has_classified": True},
-            conversation=[_turn("brain", "tool_result", waitingFor="run_bash")] * 15,
+            conversation=[_turn("brain", "tool_result", waitingFor="run_bash")] * 21,
         )
         active_long = _names(evaluate_gates(ALL_SCHEMAS, ctx_long))
         assert "recall_pruned_turns" in active_long, (
-            "recall_pruned_turns must be retained in INTERMEDIATE mode when conversation > 10 turns"
+            "recall_pruned_turns must be retained in INTERMEDIATE mode at >= 21 turns (first K=10 snap)"
         )
 
     def test_build_gate_context_computes_has_pruned_or_decayed_turns_flag(self):
-        """build_gate_context sets has_pruned_or_decayed_turns from decay eligibility (see the parametrized
-        distance/threshold tests above), not from len(conversation)."""
-        short = build_gate_context(self._doc_with_old_payload(5, 5000), "dispatch", {})
-        assert hasattr(short, "has_pruned_or_decayed_turns")
-        assert short.has_pruned_or_decayed_turns is False
+        """build_gate_context sets has_pruned_or_decayed_turns from quantized decay eligibility (K=10)."""
+        for short_len in (5, 12, 15, 20):
+            short = build_gate_context(self._doc_with_old_payload(short_len, 5000), "dispatch", {})
+            assert hasattr(short, "has_pruned_or_decayed_turns")
+            assert short.has_pruned_or_decayed_turns is False, f"expected False at conv_len={short_len}"
 
-        long_ = build_gate_context(self._doc_with_old_payload(15, 5000), "dispatch", {})
+        long_ = build_gate_context(self._doc_with_old_payload(21, 5000), "dispatch", {})
         assert hasattr(long_, "has_pruned_or_decayed_turns")
         assert long_.has_pruned_or_decayed_turns is True
 
@@ -1801,7 +1813,9 @@ class TestRecallGateThroughBrainLoop:
 
     @pytest.mark.asyncio
     async def test_intermediate_event_keeps_recall_tool_when_contents_pruned(self):
-        """TOOL LEAK check must not strip recall_pruned_turns from an intermediate event whose history was pruned."""
+        """Step 7 + TOOL LEAK invariant: wire_tools stays canonical sorted BRAIN_TOOL_SCHEMAS for
+        caching, while server-side intermediate enforcement admits recall_pruned_turns on pruned
+        history and rejects non-intermediate tools like select_agent."""
         from types import SimpleNamespace as NS
         from unittest.mock import AsyncMock
 
@@ -1811,22 +1825,44 @@ class TestRecallGateThroughBrainLoop:
             _make_chunk,
         )
 
+        # Case 1: recall_pruned_turns is admitted server-side on pruned intermediate event
         event = _budget_pruned_short_casual_event()
-        stream = _async_stream_from_chunks([
-            _make_chunk(function_call=NS(name="wait_for_agent", args={}), raw_parts=[
-                {"functionCall": {"name": "wait_for_agent", "args": {}}}
-            ]),
+        stream_recall = _async_stream_from_chunks([
+            _make_chunk(
+                function_call=NS(name="recall_pruned_turns", args={"from_turn": 2, "to_turn": 2}),
+                raw_parts=[{"functionCall": {"name": "recall_pruned_turns", "args": {"from_turn": 2, "to_turn": 2}}}],
+            ),
         ])
-        brain, _bb = _make_brain_for_shedding(lambda *a, **k: stream)
+        brain, _bb = _make_brain_for_shedding(lambda *a, **k: stream_recall)
         brain._extract_context_flags = AsyncMock(
             return_value={"event_domain": "casual", "is_intermediate": True}
         )
         await brain._process_with_llm(event.id, event)
 
-        tools = {t["name"] for t in brain._adapter.generate_stream.call_args_list[0].kwargs["tools"]}
-        assert "recall_pruned_turns" in tools
-        assert tools <= {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis",
-                         "defer_event", "recall_pruned_turns"}, f"unexpected intermediate toolset: {tools}"
+        wire_tools = brain._adapter.generate_stream.call_args_list[0].kwargs["tools"]
+        assert [t["name"] for t in wire_tools] == sorted(t["name"] for t in ALL_SCHEMAS), (
+            "Step 7: wire_tools sent to LLM must be canonical sorted BRAIN_TOOL_SCHEMAS"
+        )
+        executed = [c.args[1] for c in brain._execute_function_call.await_args_list]
+        assert executed == ["recall_pruned_turns"], (
+            f"TOOL LEAK check must permit recall_pruned_turns on pruned intermediate event, executed={executed}"
+        )
+
+        # Case 2: unauthorized non-intermediate tool (select_agent) is STILL rejected server-side
+        stream_blocked = _async_stream_from_chunks([
+            _make_chunk(
+                function_call=NS(name="select_agent", args={"agent": "developer"}),
+                raw_parts=[{"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}}],
+            ),
+        ])
+        brain_blocked, _bb2 = _make_brain_for_shedding(lambda *a, **k: stream_blocked)
+        brain_blocked._extract_context_flags = AsyncMock(
+            return_value={"event_domain": "casual", "is_intermediate": True}
+        )
+        await brain_blocked._process_with_llm(event.id, event)
+        assert brain_blocked._execute_function_call.await_count == 0, (
+            "Server-side intermediate gate must reject unauthorized non-intermediate tool select_agent"
+        )
 
 class TestPredIdleAgentWait:
     """Per-gate unit tests for _pred_idle_agent_wait (named predicate, ai-rules #4)."""
@@ -2072,3 +2108,110 @@ class TestPhaseToolMapIncludesIdleGate:
         assert corpus_key == "always/phase-tool-map.md"
         assert "IDLE_AGENT_WAIT" in body
         assert "no running agent task" in body
+
+
+class TestATDDT16WaitForUserAdmissibilityAfterResponse:
+    """T-16 (Step 5): _single_tool_survives_gates(exclude_gates=...) and
+    is_wait_for_user_admissible_after_response(ctx) exclude ONLY SILENT_PARK."""
+
+    def test_true_when_only_silent_park_fires(self):
+        from src.agents.tool_gates import (
+            _single_tool_survives_gates,
+            is_wait_for_user_admissible_after_response,
+        )
+
+        ctx = _ctx(
+            brain_phase="dispatch",
+            event_source="slack",
+            context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": False},
+            conversation=[_turn("user", "message", thoughts="hello")],
+        )
+        # Without exclusion, SILENT_PARK blocks wait_for_user
+        assert _single_tool_survives_gates("wait_for_user", ctx) is False
+        # With SILENT_PARK excluded, wait_for_user survives all other gates
+        assert _single_tool_survives_gates(
+            "wait_for_user", ctx, exclude_gates=frozenset({"SILENT_PARK"})
+        ) is True
+        assert is_wait_for_user_admissible_after_response(ctx) is True
+
+    def test_false_when_hard_strip_wait_user_fires(self):
+        from src.agents.tool_gates import is_wait_for_user_admissible_after_response
+
+        ctx_triage = _ctx(
+            brain_phase="triage",
+            event_source="headhunter",
+            context_flags={"brain_has_classified": True, "event_domain": "complicated"},
+            conversation=[],
+        )
+        assert is_wait_for_user_admissible_after_response(ctx_triage) is False
+
+        ctx_no_user = _ctx(
+            brain_phase="dispatch",
+            event_source="aligner",
+            context_flags={"brain_has_classified": True, "event_domain": "complicated"},
+            conversation=[],
+        )
+        assert is_wait_for_user_admissible_after_response(ctx_no_user) is False
+
+    def test_false_when_intermediate_fires_even_on_slack(self):
+        from src.agents.tool_gates import is_wait_for_user_admissible_after_response
+
+        ctx = _ctx(
+            brain_phase="dispatch",
+            event_source="slack",
+            context_flags={"brain_has_classified": True, "event_domain": "complicated", "is_intermediate": True},
+            conversation=[_turn("user", "message", thoughts="status?")],
+        )
+        assert is_wait_for_user_admissible_after_response(ctx) is False
+
+    def test_false_when_domain_chaotic_fires_even_on_slack(self):
+        from src.agents.tool_gates import is_wait_for_user_admissible_after_response
+
+        ctx = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "chaotic", "is_intermediate": False},
+            conversation=[_turn("user", "message", thoughts="prod down!")],
+        )
+        assert is_wait_for_user_admissible_after_response(ctx) is False
+
+    def test_false_when_pre_classification_blocks_even_if_hard_strip_clear(self):
+        from src.agents.tool_gates import (
+            _pred_hard_strip_wait_user,
+            is_wait_for_user_admissible_after_response,
+        )
+
+        # Past triage + user turn present => HARD_STRIP_WAIT_USER is False,
+        # yet PRE_CLASSIFICATION excludes wait_for_user for non-chat/slack sources.
+        ctx = _ctx(
+            brain_phase="dispatch",
+            event_source="aligner",
+            context_flags={"brain_has_classified": False, "event_domain": "complicated"},
+            conversation=[_turn("user", "message", thoughts="please check")],
+        )
+        assert _pred_hard_strip_wait_user(ctx) is False
+        assert is_wait_for_user_admissible_after_response(ctx) is False
+
+
+class TestATDDT27GateContextAndConversationDecayLockstep:
+    """T-27 (Step 8): conversation_has_decayed_turns() and GateContext.__post_init__
+    agree in 100% lockstep with decay_cutoff_index(conv_len) across conv_len 15..22."""
+
+    @pytest.mark.parametrize("conv_len", list(range(15, 23)))
+    def test_gate_context_post_init_and_conversation_has_decayed_turns_lockstep(self, conv_len):
+        from src.agents.tool_gates import conversation_has_decayed_turns
+        from src.utils.turn_decay import decay_cutoff_index
+
+        turns = [
+            _turn("brain", "tool_result", waitingFor="run_bash", evidence="X" * 500)
+            for _ in range(conv_len)
+        ]
+        expected = decay_cutoff_index(conv_len) > 0
+        expected_at_k10 = conv_len >= 21
+        assert expected is expected_at_k10
+
+        ctx = _ctx(brain_phase="dispatch", conversation=turns)
+        assert ctx.has_pruned_or_decayed_turns is expected
+        assert conversation_has_decayed_turns(turns) is expected
+
+

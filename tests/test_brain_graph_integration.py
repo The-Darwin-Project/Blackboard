@@ -98,11 +98,15 @@ def _make_brain_stub(kg_store=None):
 
 @pytest.mark.asyncio
 class TestPreGenerationRecall:
-    """T-B1, T-B2: _build_system_prompt graph recall integration."""
+    """T-B1, T-B2 (Step 7+9): Global Core SI excludes dynamic graph recall;
+    _get_graph_recall queries KG and _build_contents embeds prior_knowledge in Turn-0 anchor."""
 
     @patch("src.agents.graph_recall.get_graph_context", new_callable=AsyncMock)
     async def test_calls_graph_recall_when_kg_available(self, mock_get_graph_context):
-        """T-B1: get_graph_context called with correct args when kg_store is available."""
+        """T-B1: get_graph_context called via _get_graph_recall when kg_store is available;
+        prior_knowledge stays out of Global Core SI and lands in Turn-0 anchor contents[0]."""
+        from src.models import EventDocument, EventEvidence, EventInput
+
         mock_get_graph_context.return_value = (
             '<prior_knowledge source="knowledge_graph" volatile="true">\n'
             "Service: kubevirt-plugin\n"
@@ -112,27 +116,43 @@ class TestPreGenerationRecall:
 
         kg_store = MagicMock(spec=KnowledgeGraphStore)
         brain = _make_brain_stub(kg_store=kg_store)
-
-        from src.agents.brain import Brain
-        prompt = await Brain._build_system_prompt(
-            brain, _make_event_stub(service="kubevirt-plugin"),
-            ["always"], context_flags=None,
+        brain._get_journal_cached = AsyncMock(return_value=[])
+        event = EventDocument(
+            id="evt-test0001",
+            source="chat",
+            service="kubevirt-plugin",
+            brain_phase="triage",
+            event=EventInput(
+                reason="Check kubevirt-plugin",
+                evidence=EventEvidence(display_text="degraded", source_type="chat"),
+                timeDate="2026-11-23T12:00:00Z",
+            ),
+            conversation=[],
         )
 
+        from src.agents.brain import Brain
+        recall = await brain._get_graph_recall(event)
         mock_get_graph_context.assert_called_once()
-        assert "prior_knowledge" in prompt
+        assert recall is not None and "Service: kubevirt-plugin" in recall
+
+        prompt = await Brain._build_system_prompt(
+            brain, event, ["always"], context_flags=None,
+        )
+        assert "prior_knowledge" not in prompt
+
+        contents = await Brain._build_contents(brain, event, graph_recall=recall)
+        anchor_text = contents[0]["parts"][0]["text"]
+        assert "Service: kubevirt-plugin" in anchor_text
+        assert "evt-abc12345" in anchor_text
 
     @patch("src.agents.graph_recall.get_graph_context", new_callable=AsyncMock)
     async def test_skips_graph_recall_for_general_service(self, mock_get_graph_context):
         """T-B2: No KG call made when service is "general"."""
         brain = _make_brain_stub()
+        event = _make_event_stub(service="general")
 
-        from src.agents.brain import Brain
-        await Brain._build_system_prompt(
-            brain, _make_event_stub(service="general"),
-            ["always"], context_flags=None,
-        )
-
+        recall = await brain._get_graph_recall(event)
+        assert recall is None
         mock_get_graph_context.assert_not_called()
 
 
@@ -329,24 +349,45 @@ class TestPostAgentEnrichment:
 
 @pytest.mark.asyncio
 class TestQdrantFallback:
-    """T-B8: Qdrant fallback when graph context is None."""
+    """T-B8 (Step 7+9): Qdrant fallback when graph context is None lands in <event_state> tail
+    (never in static Global Core SI)."""
 
     @patch("src.agents.graph_recall.get_graph_context", new_callable=AsyncMock)
     async def test_recall_still_works_when_graph_empty(self, mock_get_graph_context):
-        """T-B8: When graph context is None, existing RECALL behavior unchanged."""
+        """T-B8: When graph context is None, RECALL stays out of Global Core SI and lands in
+        <event_state> at contents[-1]."""
+        from src.models import EventDocument, EventEvidence, EventInput
+
         mock_get_graph_context.return_value = None
 
         brain = _make_brain_stub()
+        brain._get_journal_cached = AsyncMock(return_value=[])
         brain._post_agent_recall = AsyncMock(
             return_value="## RECALL\n- Lesson 1: Always check logs"
+        )
+        event = EventDocument(
+            id="evt-test0001",
+            source="chat",
+            service="kubevirt-plugin",
+            brain_phase="verify",
+            event=EventInput(
+                reason="Check logs",
+                evidence=EventEvidence(display_text="ev", source_type="chat"),
+                timeDate="2026-11-23T12:00:00Z",
+            ),
+            conversation=[],
         )
 
         from src.agents.brain import Brain
         prompt = await Brain._build_system_prompt(
-            brain, _make_event_stub(),
-            ["always", "post-agent"], context_flags=None,
+            brain, event, ["always", "post-agent"], context_flags=None,
         )
-
         assert "prior_knowledge" not in prompt
-        assert "RECALL" in prompt
-        assert "Always check logs" in prompt
+        assert "RECALL" not in prompt
+
+        contents = await Brain._build_contents(brain, event, graph_recall=None)
+        tail = contents[-1]["parts"][0]["text"]
+        assert tail.startswith("<event_state>")
+        assert "prior_knowledge" not in tail
+        assert "RECALL" in tail
+        assert "Always check logs" in tail

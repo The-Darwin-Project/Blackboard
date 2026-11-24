@@ -71,9 +71,15 @@ class _SkillCorpus:
 class BrainSkillLoader:
     """Dual-source brain skill discovery and loading (Redis primary, filesystem fallback)."""
 
-    def __init__(self, skills_dir: str, redis: "Redis | None" = None):
+    def __init__(
+        self,
+        skills_dir: str,
+        redis: "Redis | None" = None,
+        include_generated_map: bool = False,
+    ):
         self._skills_dir = Path(skills_dir)
         self._redis = redis
+        self._include_generated_map = include_generated_map
         self._corpus = _SkillCorpus()
         self._discover()
 
@@ -110,6 +116,23 @@ class BrainSkillLoader:
                 path_index[rel_path] = (body, meta)
                 for tag in meta.get("tags", []):
                     tag_index[tag].append(rel_path)
+
+        if self._include_generated_map and "always/phase-tool-map.md" not in path_index:
+            try:
+                from src.skill_reconciler.generate_map import generate_phase_tool_map
+
+                corpus_key, raw_json = generate_phase_tool_map()
+                entry = json.loads(raw_json)
+                body = entry.get("body", "")
+                meta = entry.get("frontmatter", {})
+                phase = corpus_key.split("/")[0]
+                cache.setdefault(phase, []).append((corpus_key, body, meta))
+                cache[phase].sort(key=lambda item: item[0])
+                path_index[corpus_key] = (body, meta)
+                for tag in meta.get("tags", []):
+                    tag_index[tag].append(corpus_key)
+            except Exception as e:
+                logger.warning(f"Failed to synthesize generated phase-tool-map on FS fallback: {e}")
 
         tool_map = self._build_tool_map(path_index)
 

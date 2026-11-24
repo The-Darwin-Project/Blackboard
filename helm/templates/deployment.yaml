@@ -179,6 +179,8 @@ spec:
               value: {{ .Values.brain.tailBudgetTokens | default "40000" | quote }}
             - name: BRAIN_FULL_TIER_MAX_CHARS
               value: {{ .Values.brain.fullTierMaxChars | default "100000" | quote }}
+            - name: BRAIN_DECAY_EPOCH_SIZE
+              value: {{ .Values.brain.decayEpochSize | default "10" | quote }}
             - name: LLM_STREAM_TTFB_TIMEOUT_SEC
               value: {{ if and (hasKey .Values.brain "streamTtfbTimeoutSec") (not (kindIs "invalid" .Values.brain.streamTtfbTimeoutSec)) (ne (toString .Values.brain.streamTtfbTimeoutSec) "") }}{{ .Values.brain.streamTtfbTimeoutSec | quote }}{{ else }}"600"{{ end }}
             - name: LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC

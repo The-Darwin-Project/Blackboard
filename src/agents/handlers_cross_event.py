@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, _resolve_phase
 from ..utils.pii_redaction import redact_pii
-from ..utils.prompt_sanitize import strip_xml_fences
+from ..utils.prompt_sanitize import _CALL_TAG_RE, strip_xml_fences
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -242,7 +242,7 @@ def _sanitize_recalled(raw: str, max_chars: int, marker: str) -> str:
         text = text[:ceiling]
     text = strip_xml_fences(text)
     text = redact_pii(text)
-    text = text.replace("[!call:", "[call:")
+    text = _CALL_TAG_RE.sub("[call:", text)
     if len(text) > max_chars:
         text = text[:max_chars] + marker
     return text

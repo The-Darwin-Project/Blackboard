@@ -213,9 +213,6 @@ class FlowCollector:
         except Exception:
             pass
 
-        # Token meter: snapshot() returns interval deltas, get_platform_totals() returns cumulative
-        token_snap = self._token_meter.snapshot() if self._token_meter else {}
-        platform_totals = self._token_meter.get_platform_totals() if self._token_meter else {}
         tpm_used, tpm_limit, tpm_util, quota_throttle_delta = self._collect_quota_stats()
 
         # Quota shedding telemetry counters
@@ -247,6 +244,14 @@ class FlowCollector:
                         quota_shed_tier2 = int(r2)
         except Exception:
             pass
+
+        # Token meter: snapshot_with_callers() atomically drains aggregate + per-caller intervals
+        if self._token_meter:
+            token_snap, by_caller = self._token_meter.snapshot_with_callers()
+            platform_totals = self._token_meter.get_platform_totals()
+        else:
+            token_snap, by_caller, platform_totals = {}, {}, {}
+        brain_snap = by_caller.get("brain", {})
 
         return FlowSnapshot(
             timestamp=now,
@@ -287,6 +292,8 @@ class FlowCollector:
             token_total_delta=token_snap.get("total_tokens", 0),
             token_calls_delta=token_snap.get("calls", 0),
             token_total_cumulative=platform_totals.get("total_tokens", 0),
+            brain_token_input_delta=brain_snap.get("input_tokens", 0),
+            brain_token_cached_delta=brain_snap.get("cached_tokens", 0),
             tpm_used=tpm_used,
             tpm_limit=tpm_limit,
             tpm_utilization_pct=tpm_util,

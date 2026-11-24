@@ -203,23 +203,31 @@ class TestDeterministicOperationalBriefing:
         assert briefing.index("Sticky note 2:") < briefing.index("Sticky note 4:") < briefing.index("Sticky note 8:")
 
     @pytest.mark.asyncio
-    async def test_t10_operational_briefing_injected_into_message_0_context(self):
-        """T-10b: Given an event with active context and sticky notes,
+    async def test_t10_operational_briefing_injected_into_event_state_tail(self):
+        """T-10b (Step 9): Given an event with active context and sticky notes,
         When Brain._build_contents() builds the structured LLM contents payload,
-        Then the deterministic briefing is injected into Message 0 context_text,
-        and Message 0 strictly retains role == 'user'.
+        Then Message 0 holds the immutable event anchor (without volatile Operational Briefing)
+        and the deterministic operational briefing + sticky notes live inside <event_state>
+        in the dedicated trailing user message (contents[-1]).
         """
         event = _make_briefing_event()
         brain = _make_brain_for_briefing()
 
         contents = await brain._build_contents(event)
 
-        # Gemini alternation and structure invariants
-        assert len(contents) >= 1
+        assert len(contents) >= 2
         assert contents[0]["role"] == "user"
+        assert contents[-1]["role"] == "user"
 
         message_0_text = contents[0]["parts"][0].get("text", "")
-        assert "### Deterministic Operational Briefing" in message_0_text, (
-            "Message 0 context_text must include the Deterministic Operational Briefing section"
+        assert "### Deterministic Operational Briefing" not in message_0_text, (
+            "Step 9: Volatile operational briefing must not mutate immutable Message 0 anchor"
         )
-        assert "Redis connection pool exhausted" in message_0_text
+        assert "Redis connection pool exhausted" not in message_0_text
+
+        tail_text = contents[-1]["parts"][0].get("text", "")
+        assert tail_text.startswith("<event_state>")
+        assert "### Deterministic Operational Briefing" in tail_text, (
+            "Trailing <event_state> must include the Deterministic Operational Briefing section"
+        )
+        assert "Redis connection pool exhausted" in tail_text

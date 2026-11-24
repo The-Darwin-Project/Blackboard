@@ -552,8 +552,9 @@ class TestIssueContextGateAndSkillFollowup:
                 ),
             ),
         )
-        prompt = await brain._build_system_prompt(event, ["always", "triage"], context_flags={}, graph_recall=None)
-        assert "github-environment" in prompt or "refresh_github_context" in prompt
+        from src.agents.brain import _build_turn0_anchor
+        anchor = _build_turn0_anchor(brain, event, graph_recall=None)
+        assert "github-environment" in anchor.text or "refresh_github_context" in anchor.text
 
 
 # =============================================================================

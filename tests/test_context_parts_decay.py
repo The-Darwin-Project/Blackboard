@@ -379,22 +379,22 @@ class TestEvidenceDecayAndRecall:
         )
 
     @pytest.mark.asyncio
-    async def test_build_contents_evidence_decay_boundary_and_structured_logging(self, caplog):
-        """CR-01 & CR-06: Brain._build_contents with 15 turns under _THOUGHT_SIG_V2=True:
+    async def test_build_contents_evidence_decay_boundary_and_structured_logging(self, caplog, monkeypatch):
+        """CR-01, CR-06 & Step 8: Brain._build_contents under _THOUGHT_SIG_V2=True:
         Verifies:
-        1. Turns at turn_distance > 10 decay their evidence to <blackboard_evidence_reference>.
-        2. Turns at turn_distance <= 10 preserve their full raw evidence.
+        1. Default K=10 quantized mode at 21 turns (cutoff=10): turns at idx < 10 (Turns 2, 4, 6, 8, 10)
+           decay to <blackboard_evidence_reference>, while idx >= 10 (Turn 12+) stay raw.
+        2. Sliding mode (BRAIN_DECAY_EPOCH_SIZE=1) at 15 turns: Turns 2 & 4 decay, Turn 6 stays raw.
         3. Structured debug log on 'darwin.brain' is emitted with raw_tokens, prompt_tokens,
            decayed_turns_count, and pruned_turns_count.
         """
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
         turns: list[ConversationTurn] = []
-        # Turns 1..15
-        for i in range(1, 16):
+        # Turns 1..21 (first K=10 epoch snap: cutoff = 10 -> idx 0..9 decay, idx 10..20 raw)
+        for i in range(1, 22):
             if i % 2 == 1:
-                # user turn
                 turns.append(ConversationTurn(turn=i, actor="user", action="message", thoughts=f"user turn {i}"))
             else:
-                # brain tool_result turn with evidence >400 chars
                 turns.append(_make_tool_turn(
                     turn=i,
                     tool_name="run_bash",
@@ -408,31 +408,26 @@ class TestEvidenceDecayAndRecall:
             with caplog.at_level(logging.DEBUG, logger="darwin.brain"):
                 contents = await Brain._build_contents(brain, event)
 
-        # Verification 1 & 2: Boundary check
-        # len(turns) == 15.
-        # turn 1 (idx 0): dist 14 > 10
-        # turn 2 (idx 1): dist 13 > 10 -> decayed!
-        # turn 4 (idx 3): dist 11 > 10 -> decayed!
-        # turn 6 (idx 5): dist 9 <= 10 -> raw!
-        all_text = " ".join(
-            p.get("text", "")
-            for m in contents
-            for p in m.get("parts", [])
-        )
-        fr_results = [
-            p["functionResponse"]["response"]["result"]
-            for m in contents
-            for p in m.get("parts", [])
-            if p.get("functionResponse")
-        ]
-        combined = all_text + " " + " ".join(fr_results)
+        def _combine(msgs: list[dict]) -> str:
+            txt = " ".join(p.get("text", "") for m in msgs for p in m.get("parts", []))
+            frs = " ".join(
+                p["functionResponse"]["response"]["result"]
+                for m in msgs
+                for p in m.get("parts", [])
+                if p.get("functionResponse")
+            )
+            return txt + " " + frs
 
-        assert '<blackboard_evidence_reference turn="2"' in combined, "Turn 2 (distance 13) must decay"
-        assert '<blackboard_evidence_reference turn="4"' in combined, "Turn 4 (distance 11) must decay"
-        assert '<blackboard_evidence_reference turn="6"' not in combined, "Turn 6 (distance 9) must NOT decay"
-        assert "EVIDENCE_FOR_TURN_6_" in combined, "Turn 6 must preserve full raw evidence"
+        combined = _combine(contents)
+        # idx 1, 3, 5, 7, 9 -> turns 2, 4, 6, 8, 10 decay; idx 11 -> turn 12 stays raw
+        for decayed_t in (2, 4, 6, 8, 10):
+            assert f'<blackboard_evidence_reference turn="{decayed_t}"' in combined, (
+                f"Turn {decayed_t} (idx < 10) must decay at K=10 snap (conv_len=21)"
+            )
+        assert '<blackboard_evidence_reference turn="12"' not in combined, "Turn 12 (idx 11 >= 10) must NOT decay"
+        assert "EVIDENCE_FOR_TURN_12_" in combined, "Turn 12 must preserve full raw evidence"
 
-        # Verification 3: Structured debug logging emitted
+        # Structured debug logging emitted
         log_records = [r for r in caplog.records if r.name == "darwin.brain"]
         field_matches = [
             r for r in log_records
@@ -443,6 +438,17 @@ class TestEvidenceDecayAndRecall:
             "Expected Brain._build_contents to emit structured debug log containing "
             "'raw_tokens', 'prompt_tokens', 'decayed_turns_count', 'pruned_turns_count'"
         )
+
+        # Sliding mode (BRAIN_DECAY_EPOCH_SIZE=1) at 15 turns: Turns 2 & 4 decay, Turn 6 raw
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "1")
+        sliding_event = _make_event_with_evidence(event_id="evt-boundary-sliding", turns=turns[:15])
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            sliding_contents = await Brain._build_contents(_make_brain_mock(), sliding_event)
+        sliding_combined = _combine(sliding_contents)
+        assert '<blackboard_evidence_reference turn="2"' in sliding_combined
+        assert '<blackboard_evidence_reference turn="4"' in sliding_combined
+        assert '<blackboard_evidence_reference turn="6"' not in sliding_combined
+        assert "EVIDENCE_FOR_TURN_6_" in sliding_combined
 
 
 # ---------------------------------------------------------------------------
@@ -648,15 +654,26 @@ class TestDecayBoundaries:
         return '<blackboard_evidence_reference turn="1"' in str(contents)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "n_turns,expected",
+        [(10, False), (11, False), (12, False), (20, False), (21, True), (22, True)],
+    )
+    async def test_distance_boundary(self, monkeypatch, n_turns, expected):
+        # Default K=10 quantized snap: 0..20 -> cutoff 0 (raw), 21+ -> cutoff 10 (idx 0..9 decay)
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+        assert self._decayed(await self._contents(n_turns, 500)) is expected
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("n_turns,expected", [(10, False), (11, False), (12, True), (13, True)])
-    async def test_distance_boundary(self, n_turns, expected):
-        # first turn distance = n_turns - 1 : decays only when > 10
+    async def test_distance_boundary_sliding_epoch_1(self, monkeypatch, n_turns, expected):
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "1")
         assert self._decayed(await self._contents(n_turns, 500)) is expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("payload,expected", [(399, False), (400, False), (401, True)])
-    async def test_length_boundary_at_decay_distance(self, payload, expected):
-        assert self._decayed(await self._contents(12, payload)) is expected
+    async def test_length_boundary_at_decay_distance(self, monkeypatch, payload, expected):
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+        assert self._decayed(await self._contents(21, payload)) is expected
 
     @pytest.mark.parametrize("payload,expected", [(399, False), (400, False), (401, True)])
     def test_length_boundary_in_function_response_builders(self, payload, expected):
@@ -1014,4 +1031,278 @@ class TestLookupJournalBoundingAndRecallStabilization:
         assert "</functionResponse>" not in text_long
         assert text_long.count("</blackboard_evidence_reference>") == 1
         assert '<blackboard_evidence_reference turn="4"' in text_long
+
+
+# ---------------------------------------------------------------------------
+# VMER-2450 Step 8 ATDD: Epoch-Quantized Decay (T-25, T-26, T-27, T-28)
+# ---------------------------------------------------------------------------
+
+
+class TestATDDStep8EpochQuantizedDecay:
+    """Layer 1-4 ATDD specs for Step 8 (T-25..T-28): decay_cutoff_index(K=10),
+    env safety & seam guard, Tier-1 sliding bypass, 4-site lockstep, and intra-epoch stability."""
+
+    def test_t25_decay_cutoff_step_function_env_fallback_and_seam_guard(self, monkeypatch):
+        """T-25: decay_cutoff_index(conv_len, 10, 10) across 0..35 returns 0 (0..20),
+        10 (21..30), 20 (31..35); get_decay_epoch_size() safely falls back to 10 on malformed
+        BRAIN_DECAY_EPOCH_SIZE values; src/utils/turn_decay.py has ZERO src.agents imports."""
+        import ast
+        from pathlib import Path
+        from src.utils.turn_decay import (
+            DEFAULT_DECAY_EPOCH_SIZE,
+            decay_cutoff_index,
+            get_decay_epoch_size,
+        )
+
+        assert DEFAULT_DECAY_EPOCH_SIZE == 10
+
+        for conv_len in range(0, 36):
+            expected = 0 if conv_len <= 20 else (10 if conv_len <= 30 else 20)
+            got = decay_cutoff_index(conv_len, 10, 10)
+            assert got == expected, f"conv_len={conv_len}: expected cutoff {expected}, got {got}"
+
+        # Malformed or non-positive env values safely fall back to 10
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+        assert get_decay_epoch_size() == 10
+
+        for bad_val in ("abc", "", "   ", "0", "-5", "3.5"):
+            monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", bad_val)
+            assert get_decay_epoch_size() == 10, f"Malformed env {bad_val!r} must fall back to 10"
+
+        for good_val, expected_int in (("1", 1), ("5", 5), ("15", 15), (" 20 ", 20)):
+            monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", good_val)
+            assert get_decay_epoch_size() == expected_int
+
+        # Verify decay_cutoff_index respects BRAIN_DECAY_EPOCH_SIZE when epoch_size=None
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "1")
+        assert decay_cutoff_index(12, 10) == 1
+        monkeypatch.setenv("BRAIN_DECAY_EPOCH_SIZE", "abc")
+        assert decay_cutoff_index(12, 10) == 0
+
+        # AST seam guard: src/utils/turn_decay.py must have ZERO src.agents imports
+        turn_decay_path = Path(__file__).resolve().parent.parent / "src" / "utils" / "turn_decay.py"
+        tree = ast.parse(turn_decay_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("src.agents"), f"Forbidden import {alias.name}"
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                assert not mod.startswith("src.agents"), f"Forbidden import from {mod}"
+                assert "agents" not in mod.split("."), f"Forbidden relative agent import {mod}"
+
+    @pytest.mark.asyncio
+    async def test_t26_tier1_quota_shedding_bypasses_quantization_on_8_turn_event(self, monkeypatch):
+        """T-26: Given Tier-1 quota shedding (turn_decay_distance=2) on an 8-turn event,
+        When Brain._build_contents runs,
+        Then quantization is bypassed and turns 0..4 decay immediately while turns 5..7 stay raw."""
+        from src.utils.turn_decay import decay_cutoff_index
+
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+        assert decay_cutoff_index(8, decay_distance=2, epoch_size=10) == 5
+
+        turns = [
+            _make_tool_turn(
+                turn=i,
+                tool_name="run_bash",
+                evidence=f"TIER1_TURN_{i}_" + ("Q" * 700),
+            )
+            for i in range(1, 9)
+        ]
+        event = _make_event_with_evidence(event_id="evt-t26-tier1", turns=turns)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            normal_contents = await Brain._build_contents(_make_brain_mock(), event)
+            shed_contents = await Brain._build_contents(_make_brain_mock(), event, turn_decay_distance=2)
+
+        normal_str = str(normal_contents)
+        shed_str = str(shed_contents)
+
+        # Normal mode (K=10): 0 turns decayed on an 8-turn event
+        assert "<blackboard_evidence_reference" not in normal_str
+
+        # Tier-1 shedding (distance=2): idx 0..4 (turns 1..5) decayed immediately, idx 5..7 (turns 6..8) raw
+        for t_num in range(1, 6):
+            assert f'<blackboard_evidence_reference turn="{t_num}"' in shed_str, (
+                f"Turn {t_num} (idx {t_num - 1} < 5) must decay immediately under Tier-1 distance=2"
+            )
+            assert f"TIER1_TURN_{t_num}_" not in shed_str
+        for t_num in range(6, 9):
+            assert f'<blackboard_evidence_reference turn="{t_num}"' not in shed_str, (
+                f"Turn {t_num} (idx {t_num - 1} >= 5) must stay raw under Tier-1 distance=2"
+            )
+            assert f"TIER1_TURN_{t_num}_" in shed_str
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("conv_len", list(range(15, 23)))
+    async def test_t27_lockstep_across_build_contents_batch_continuation_and_tool_gates(
+        self, monkeypatch, conv_len,
+    ):
+        """T-27: Lockstep agreement across Brain._build_contents (main loop AND batch continuation),
+        tool_gates.conversation_has_decayed_turns(), and GateContext.__post_init__ across conv_len 15..22.
+        At conv_len=20 -> 0 decayed & False; at conv_len=21 -> 10 decayed (incl. batch continuation) & True."""
+        from src.agents.tool_gates import GateContext, conversation_has_decayed_turns
+
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+
+        # Build conv_len heavy tool turns including a 2-FC batch at idx 0..1 AND a 2-FC batch
+        # straddling the epoch boundary at idx 9..10 (so idx=9 decays at conv_len>=21 while idx=10 stays raw!).
+        turns: list[ConversationTurn] = []
+        i = 0
+        while i < conv_len:
+            turn_num = i + 1
+            if i in (0, 9) and i + 1 < conv_len:
+                batch_rps = [
+                    {"functionCall": {"name": "run_bash", "args": {"cmd": f"b{turn_num}"}}},
+                    {"functionCall": {"name": "run_bash", "args": {"cmd": f"b{turn_num + 1}"}}},
+                ]
+                turns.append(
+                    ConversationTurn(
+                        turn=turn_num,
+                        actor="brain",
+                        action="tool_result",
+                        waitingFor="run_bash",
+                        evidence=f"BATCH_HEAD_{turn_num}_" + ("B" * 600),
+                        response_parts=batch_rps,
+                        batch_size=2,
+                    )
+                )
+                turns.append(
+                    ConversationTurn(
+                        turn=turn_num + 1,
+                        actor="brain",
+                        action="tool_result",
+                        waitingFor="run_bash",
+                        evidence=f"BATCH_CONT_{turn_num + 1}_" + ("C" * 600),
+                        response_parts=None,
+                        batch_index=1,
+                    )
+                )
+                i += 2
+            else:
+                turns.append(
+                    _make_tool_turn(
+                        turn=turn_num,
+                        tool_name="run_bash",
+                        evidence=f"SINGLE_TURN_{turn_num}_" + ("S" * 600),
+                    )
+                )
+                i += 1
+
+        event = _make_event_with_evidence(event_id=f"evt-t27-{conv_len}", turns=turns)
+        with (
+            patch("src.agents.brain._THOUGHT_SIG_V2", True),
+            patch("src.agents.context_parts._CONTENT_BUDGET", 10**9),
+            patch("src.agents.context_parts._TAIL_BUDGET", 10**9),
+        ):
+            contents = await Brain._build_contents(
+                _make_brain_mock(),
+                event,
+                context_cache={"_cached_header": "FIXED_HEADER"},
+                terminal_prompt="",
+            )
+
+        decayed_refs = sum(
+            str(p["functionResponse"]["response"]["result"]).count("<blackboard_evidence_reference")
+            for m in contents
+            for p in m.get("parts", [])
+            if p.get("functionResponse")
+        )
+        gate_has_decayed = conversation_has_decayed_turns(turns)
+        gate_ctx = GateContext(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={},
+            conversation=turns,
+            is_defer_wake=False,
+            iteration=0,
+            has_kargo_context=False,
+            has_github_context=False,
+            unread_notes=0,
+        )
+
+        if conv_len <= 20:
+            assert decayed_refs == 0, f"conv_len={conv_len}: expected 0 decayed refs, got {decayed_refs}"
+            assert gate_has_decayed is False
+            assert gate_ctx.has_pruned_or_decayed_turns is False
+        else:
+            assert decayed_refs == 10, (
+                f"conv_len={conv_len}: expected exact 10 decayed refs (idx 0..9 incl. batch cont), got {decayed_refs}"
+            )
+            combined = str(contents)
+            # Batch continuation at idx=1 (turn 2) and batch head at idx=9 (turn 10) decayed;
+            # batch continuation at idx=10 (turn 11) stays raw!
+            assert '<blackboard_evidence_reference turn="2"' in combined
+            assert '<blackboard_evidence_reference turn="10"' in combined
+            assert '<blackboard_evidence_reference turn="11"' not in combined
+            assert "BATCH_CONT_11_" in combined
+            assert gate_has_decayed is True
+            assert gate_ctx.has_pruned_or_decayed_turns is True
+
+    @pytest.mark.asyncio
+    async def test_t28_intra_epoch_prefix_stability_turns_21_to_30(self, monkeypatch):
+        """T-28: Given an event growing from Turn 21 to Turn 30 (conv_len 21..30),
+        When Brain._build_contents runs at each turn,
+        Then turns 0..9 remain decayed, turns 10..t-1 remain raw, and contents[0..len(prev)-1]
+        has ZERO byte mutations across all 10 turns; at Turn 31 cutoff snaps cleanly to 20."""
+        import json
+
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+        all_turns = [
+            _make_tool_turn(
+                turn=i,
+                tool_name="run_bash",
+                evidence=f"EPOCH_EVIDENCE_TURN_{i}_" + ("Z" * 600),
+            )
+            for i in range(1, 32)
+        ]
+
+        prev_contents: list[dict] | None = None
+        with (
+            patch("src.agents.brain._THOUGHT_SIG_V2", True),
+            patch("src.agents.context_parts._CONTENT_BUDGET", 10**9),
+            patch("src.agents.context_parts._TAIL_BUDGET", 10**9),
+        ):
+            for t in range(21, 31):
+                event = _make_event_with_evidence(event_id="evt-t28-epoch", turns=all_turns[:t])
+                curr_contents = await Brain._build_contents(
+                    _make_brain_mock(),
+                    event,
+                    context_cache={"_cached_header": "FIXED_HEADER"},
+                    terminal_prompt="",
+                )
+                curr_str = str(curr_contents)
+                # Turns 1..10 (idx 0..9) stay decayed
+                for d_turn in range(1, 11):
+                    assert f'<blackboard_evidence_reference turn="{d_turn}"' in curr_str
+                # Turns 11..t (idx 10..t-1) stay raw
+                for r_turn in range(11, t + 1):
+                    assert f'<blackboard_evidence_reference turn="{r_turn}"' not in curr_str
+                    assert f"EPOCH_EVIDENCE_TURN_{r_turn}_" in curr_str
+
+                assert curr_contents[-1]["role"] == "user"
+                assert curr_contents[-1]["parts"][0].get("text", "").startswith("<event_state>"), (
+                    "Step 9: <event_state> must live in dedicated trailing user message"
+                )
+                if prev_contents is not None:
+                    # Compare append-only history prefix (excluding volatile <event_state> tail)
+                    assert json.dumps(curr_contents[:len(prev_contents) - 1], sort_keys=True) == json.dumps(
+                        prev_contents[:-1], sort_keys=True
+                    ), f"Mid-history prefix mutation detected between Turn {t - 1} and Turn {t}"
+                prev_contents = curr_contents
+
+            # Turn 31 crosses the next epoch boundary -> cutoff snaps from 10 to 20
+            ev_31 = _make_event_with_evidence(event_id="evt-t28-epoch", turns=all_turns[:31])
+            contents_31 = await Brain._build_contents(
+                _make_brain_mock(),
+                ev_31,
+                context_cache={"_cached_header": "FIXED_HEADER"},
+                terminal_prompt="",
+            )
+            str_31 = str(contents_31)
+            for d_turn in range(1, 21):
+                assert f'<blackboard_evidence_reference turn="{d_turn}"' in str_31
+            assert '<blackboard_evidence_reference turn="21"' not in str_31
+            assert "EPOCH_EVIDENCE_TURN_21_" in str_31
+
 

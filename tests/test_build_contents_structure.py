@@ -219,8 +219,9 @@ class TestBuildContentsStructure:
     """Brain._build_contents delta markers, boundaries, and merging."""
 
     @pytest.mark.asyncio
-    async def test_t6_delta_marker_before_last_non_brain_turn(self):
-        """5-turn conversation ending with user.message → delta marker present."""
+    async def test_t6_no_moving_delta_marker_and_event_state_tail_appended(self):
+        """Step 9: 5-turn conversation ending with user.message → NO moving '--- RESPOND TO THIS ---'
+        marker in historical turns; volatile state lives in dedicated trailing <event_state> message."""
         conversation = [
             _make_turn(turn=1, actor="brain", action="response", thoughts="Noted"),
             _make_turn(turn=2, actor="user", action="message", thoughts="check status"),
@@ -234,7 +235,9 @@ class TestBuildContentsStructure:
 
         contents = await Brain._build_contents(brain, event)
 
-        assert "--- RESPOND TO THIS ---" in _all_text(contents)
+        assert "--- RESPOND TO THIS ---" not in _all_text(contents)
+        assert contents[-1]["role"] == "user"
+        assert contents[-1]["parts"][0]["text"].startswith("<event_state>")
 
     @staticmethod
     def _marker_locations(contents: list[dict]) -> list[tuple[int, int]]:
@@ -244,13 +247,6 @@ class TestBuildContentsStructure:
             for pi, part in enumerate(msg.get("parts", []))
             if "--- RESPOND TO THIS ---" in part.get("text", "")
         ]
-
-    @staticmethod
-    def _content_index_with(contents: list[dict], needle: str) -> int:
-        return next(
-            ci for ci, msg in enumerate(contents)
-            if any(needle in part.get("text", "") for part in msg.get("parts", []))
-        )
 
     _T6B_CONVERSATION = [
         ("brain", "response", "Noted"),
@@ -266,39 +262,28 @@ class TestBuildContentsStructure:
         ])
 
     @pytest.mark.asyncio
-    async def test_t6b_dispatcher_turns_ignored_by_last_non_brain_pos(self):
-        """Dispatcher turns (actor='dispatcher') are system control signals and must NOT anchor
-        the '--- RESPOND TO THIS ---' marker or displace the actual user turn: the marker sits
-        immediately before the real user part and never inside the dispatcher's content."""
-        contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
+    async def test_t6b_dispatcher_turns_excluded_as_participant_and_no_moving_delta_marker(self):
+        """Step 9: _is_participant_turn still excludes dispatcher turns (SSOT @ai-rules #51),
+        while _build_contents emits ZERO moving '--- RESPOND TO THIS ---' markers."""
+        from src.agents.brain import _is_participant_turn
 
-        locs = self._marker_locations(contents)
-        assert len(locs) == 1
-        ci, pi = locs[0]
-        # Immediately before the real user turn's part ...
-        assert "check status" in contents[ci]["parts"][pi + 1]["text"]
-        # ... and not in the dispatcher's content.
-        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
-        assert ci != dispatcher_ci
-        assert not any(
-            "RESPOND TO THIS" in part.get("text", "") for part in contents[dispatcher_ci]["parts"]
-        )
+        ev = self._t6b_event()
+        participant_actors = [t.actor for t in ev.conversation if _is_participant_turn(t)]
+        assert participant_actors == ["user"]
+
+        contents = await Brain._build_contents(_make_brain_mock(), ev)
+        assert self._marker_locations(contents) == []
 
     @pytest.mark.asyncio
     async def test_t6b_guard_fails_against_pre_pr_ordering(self):
-        """Regression guard for t6b: with the pre-PR actor check (only 'brain' excluded) the
-        marker lands in the dispatcher's content -- proving t6b's assertions are discriminating."""
-        with patch("src.agents.brain._NON_PARTICIPANT_ACTORS", frozenset({"brain"})):
-            contents = await Brain._build_contents(_make_brain_mock(), self._t6b_event())
+        """Regression guard for _is_participant_turn: with only 'brain' excluded,
+        dispatcher would be misclassified as a participant."""
+        from src.agents.brain import _is_participant_turn
 
-        locs = self._marker_locations(contents)
-        assert len(locs) == 1
-        dispatcher_ci = self._content_index_with(contents, "worker pod scheduled")
-        assert locs[0][0] == dispatcher_ci
-        assert "check status" not in "".join(
-            part.get("text", "")
-            for part in contents[dispatcher_ci]["parts"][locs[0][1] + 1:]
-        )
+        ev = self._t6b_event()
+        with patch("src.agents.brain._NON_PARTICIPANT_ACTORS", frozenset({"brain"})):
+            participant_actors = [t.actor for t in ev.conversation if _is_participant_turn(t)]
+        assert "dispatcher" in participant_actors
 
     @pytest.mark.asyncio
     async def test_t6c_dispatcher_only_conversation_has_no_delta_marker(self):
@@ -3766,7 +3751,8 @@ class TestContextSlidingWindowPruning:
         assert raw_tokens > 100000, f"Setup error: expected >100k tokens, got {raw_tokens}"
 
         # Test with default arguments (no explicit max_tokens or tail_budget passed)
-        result = compress_contents(contents)
+        result, newly_pruned = compress_contents(contents)
+        assert newly_pruned > 0
 
         # 1. Total tokens capped below 60,000
         result_tokens = estimate_tokens(result)
@@ -3807,18 +3793,19 @@ class TestContextSlidingWindowPruning:
                 "parts": [{"text": "User turn 2:\n" + ("U" * 100000)}],
             },
         ]
-        large_result = compress_contents(large_header_contents)
+        large_result, _large_pruned = compress_contents(large_header_contents)
         large_tokens = estimate_tokens(large_result)
         assert large_tokens <= 60000, (
             f"compress_contents must enforce total max_tokens <= 60000 even with 25k context_msg, got {large_tokens}"
         )
 
     def test_latest_fc_fr_survives_compression_with_trailing_terminal_prompt(self):
-        """CR-04: Given [header, model:FC, user:FR(45k tokens), user:terminal_prompt],
+        """CR-04 (Step 9): Given [header, model:FC, user:FR(45k tokens), user:terminal_prompt],
         When compress_contents(max_tokens=30000, tail_budget=20000) is called,
-        Then the latest model:FC and user:FR survive with 1:1 parity and strict alternation.
-        """
+        Then the latest model:FC and user:FR survive with 1:1 parity, trailing prompt stays
+        separate from user:FR (L505 guard), and GeminiAdapter wire conversion strictly alternates."""
         from src.agents.context_parts import compress_contents
+        from src.agents.llm.gemini_client import GeminiAdapter
 
         contents = [
             {
@@ -3845,7 +3832,8 @@ class TestContextSlidingWindowPruning:
         import copy
         snapshot = copy.deepcopy(contents)
 
-        result = compress_contents(contents, max_tokens=30000, tail_budget=20000)
+        result, newly_pruned = compress_contents(contents, max_tokens=30000, tail_budget=20000)
+        assert newly_pruned == 0
         assert contents == snapshot, "compress_contents must not mutate caller message dicts or parts lists in place"
 
         # Latest FC/FR must survive and maintain 1:1 count parity
@@ -3853,12 +3841,18 @@ class TestContextSlidingWindowPruning:
         fr_count = sum(sum(1 for p in m.get("parts", []) if "functionResponse" in p) for m in result)
         assert fc_count >= 1, "Latest model:FC must survive compression"
         assert fc_count == fr_count, f"1:1 FC/FR parity required, got FC={fc_count}, FR={fr_count}"
-        assert len(result) >= 3, f"Expected at least header + model + user, got {len(result)}"
+        assert len(result) == 4, f"Expected [header, model:FC, user:FR, user:trailing], got {len(result)}"
+        # Step 9 L505 guard: trailing prompt MUST NOT merge into user(FR)
+        assert result[-2]["role"] == "user"
+        assert any("functionResponse" in p for p in result[-2]["parts"])
+        assert not any("text" in p for p in result[-2]["parts"])
+        assert result[-1] == {"role": "user", "parts": [{"text": "What is the next action?"}]}
 
-        # Strict alternating roles
-        for idx in range(len(result) - 1):
-            assert result[idx]["role"] != result[idx + 1]["role"], (
-                f"Consecutive identical roles at index {idx} ({result[idx]['role']}) and {idx + 1}"
+        # Strict alternating roles on wire via GeminiAdapter bridge
+        wire = GeminiAdapter.__new__(GeminiAdapter)._convert_structured(result)
+        for idx in range(len(wire) - 1):
+            assert wire[idx].role != wire[idx + 1].role, (
+                f"Consecutive identical wire roles at index {idx} ({wire[idx].role}) and {idx + 1}"
             )
 
     def test_three_message_batch_fc_fr_compression_preserves_parity(self):
@@ -3889,7 +3883,7 @@ class TestContextSlidingWindowPruning:
             },
         ]
 
-        result = compress_contents(contents, max_tokens=20000, tail_budget=15000)
+        result, _pruned = compress_contents(contents, max_tokens=20000, tail_budget=15000)
 
         fc_count = sum(sum(1 for p in m.get("parts", []) if "functionCall" in p) for m in result)
         fr_count = sum(sum(1 for p in m.get("parts", []) if "functionResponse" in p) for m in result)
@@ -3911,7 +3905,8 @@ class TestContextSlidingWindowPruning:
 
         contents = self._simulate_batch_fc_fr_turns()
 
-        result = compress_contents(contents, max_tokens=60000, tail_budget=40000)
+        result, newly_pruned = compress_contents(contents, max_tokens=60000, tail_budget=40000)
+        assert newly_pruned > 0
 
         # Verify 1:1 FC/FR count parity across all retained messages
         fc_count = sum(
@@ -3985,7 +3980,8 @@ def _notices(contents: list[dict]) -> list[int]:
 
 class TestPruneNoticeIdempotenceAndAccuracy:
     def test_notice_uses_canonical_prefix_and_keeps_recall_hint(self):
-        out = _compress(_alt_contents(30), max_tokens=6000, tail_budget=3000)
+        out, newly_pruned = _compress(_alt_contents(30), max_tokens=6000, tail_budget=3000)
+        assert newly_pruned > 0
         text = out[0]["parts"][-1]["text"] if _notices(out) else ""
         notice = next(p["text"] for p in out[0]["parts"] if prune_notice_count(p) is not None)
         assert notice.lstrip().startswith(PRUNE_NOTICE_PREFIX)
@@ -3994,38 +3990,41 @@ class TestPruneNoticeIdempotenceAndAccuracy:
 
     def test_recompression_never_stacks_notices_and_merges_counts(self):
         x = _alt_contents(40)
-        first = _compress(x, max_tokens=12000, tail_budget=8000)
+        first, p1 = _compress(x, max_tokens=12000, tail_budget=8000)
         n1 = _notices(first)
-        assert len(n1) == 1 and n1[0] > 0
+        assert len(n1) == 1 and n1[0] == p1 > 0
 
-        second = _compress(first, max_tokens=5000, tail_budget=3000)
+        second, p2 = _compress(first, max_tokens=5000, tail_budget=3000)
         n2 = _notices(second)
         assert len(n2) == 1, f"compress(compress(x)) must carry exactly ONE notice, got {n2}"
-        assert n2[0] > n1[0], "merged notice must account for turns pruned by BOTH passes"
+        assert p2 > 0 and n2[0] == p1 + p2, "merged notice must account for turns pruned by BOTH passes"
 
-        third = _compress(second, max_tokens=2500, tail_budget=1200)
+        third, p3 = _compress(second, max_tokens=2500, tail_budget=1200)
         n3 = _notices(third)
-        assert len(n3) == 1 and n3[0] >= n2[0]
+        assert len(n3) == 1 and n3[0] == n2[0] + p3 >= n2[0]
         for res in (first, second, third):
             for i in range(len(res) - 1):
                 assert res[i]["role"] != res[i + 1]["role"]
 
     def test_recompression_under_budget_is_a_noop_with_single_notice(self):
-        first = _compress(_alt_contents(40), max_tokens=12000, tail_budget=8000)
-        again = _compress(first, max_tokens=12000, tail_budget=8000)
+        first, _ = _compress(_alt_contents(40), max_tokens=12000, tail_budget=8000)
+        again, pruned_again = _compress(first, max_tokens=12000, tail_budget=8000)
+        assert pruned_again == 0
         assert again is first or again == first
         assert len(_notices(again)) == 1
 
     def test_same_budget_recompression_is_idempotent(self):
-        once = _compress(_alt_contents(40), max_tokens=9000, tail_budget=6000)
-        twice = _compress(once, max_tokens=9000, tail_budget=6000)
+        once, _ = _compress(_alt_contents(40), max_tokens=9000, tail_budget=6000)
+        twice, pruned_twice = _compress(once, max_tokens=9000, tail_budget=6000)
+        assert pruned_twice == 0
         assert _json.dumps(twice, sort_keys=True) == _json.dumps(once, sort_keys=True)
 
     def test_notice_count_equals_messages_actually_dropped(self):
         """L10: the number in the notice is real (entries removed), not an inflated/guessed range."""
         x = _alt_contents(30)
-        out = _compress(x, max_tokens=9000, tail_budget=6000)
+        out, newly_pruned = _compress(x, max_tokens=9000, tail_budget=6000)
         (count,) = _notices(out)
+        assert newly_pruned == count
         kept = len(out) - 1
         merged = len(out[0]["parts"]) - len(x[0]["parts"]) - 1  # kept user messages folded into Message 0
         assert count == (len(x) - 1) - kept - merged
@@ -4036,10 +4035,10 @@ class TestPruneNoticeIdempotenceAndAccuracy:
         parts += [{"text": f"turn {i} " + "z" * 3000} for i in range(60)]
         parts += [{"text": "ACTION PROMPT"}]
         x = [{"role": "user", "parts": parts}]
-        first = _compress(x, max_tokens=8000, tail_budget=5000)
-        second = _compress(first, max_tokens=3000, tail_budget=1500)
+        first, p1 = _compress(x, max_tokens=8000, tail_budget=5000)
+        second, p2 = _compress(first, max_tokens=3000, tail_budget=1500)
         n1, n2 = _notices(first), _notices(second)
-        assert len(n1) == 1 and len(n2) == 1 and n2[0] > n1[0]
+        assert len(n1) == 1 and len(n2) == 1 and n1[0] == p1 and n2[0] == p1 + p2 > n1[0]
         assert second[0]["parts"][-1]["text"] == "ACTION PROMPT"
 
 
@@ -4051,7 +4050,8 @@ class TestTrailingPromptNonMutation:
         trailing_before = _json.dumps(x[-1], sort_keys=True)
         parts_ids = [id(m["parts"]) for m in x]
 
-        out = _compress(x, max_tokens=7000, tail_budget=4000)
+        out, newly_pruned = _compress(x, max_tokens=7000, tail_budget=4000)
+        assert newly_pruned > 0
 
         assert _json.dumps(x, sort_keys=True) == before, "compress_contents mutated its input"
         assert _json.dumps(x[-1], sort_keys=True) == trailing_before
@@ -4061,16 +4061,17 @@ class TestTrailingPromptNonMutation:
 
     def test_trailing_prompt_survives_recompression_unmodified(self):
         prompt = "ACTION?"
-        first = _compress(_alt_contents(30, trailing_prompt=prompt), max_tokens=9000, tail_budget=5000)
+        first, _ = _compress(_alt_contents(30, trailing_prompt=prompt), max_tokens=9000, tail_budget=5000)
         snap = _copy.deepcopy(first)
-        second = _compress(first, max_tokens=4000, tail_budget=2000)
+        second, _ = _compress(first, max_tokens=4000, tail_budget=2000)
         assert first == snap, "second pass mutated the first pass's output"
         assert second[-1]["parts"][-1] == {"text": prompt}
 
 
 class TestRecallGatePredicateHygiene:
     def _notice_contents(self):
-        return _compress(_alt_contents(30), max_tokens=6000, tail_budget=3000)
+        out, _ = _compress(_alt_contents(30), max_tokens=6000, tail_budget=3000)
+        return out
 
     def test_real_prune_notice_counts(self):
         assert contents_have_pruned_or_decayed(self._notice_contents()) is True
@@ -4133,9 +4134,10 @@ class TestBrainContentsHygiene:
         x = _alt_contents(30)
         assert _estimate(x) > 5000
         with patch("src.agents.context_parts._CONTENT_BUDGET", 3000), patch("src.agents.context_parts._TAIL_BUDGET", 1500):
-            out = Brain._compress_contents(x)
-        assert _estimate(out) <= 3000 and _notices(out)
-        assert Brain._compress_contents(x, max_tokens=10**9, tail_budget=10**9) is x
+            out, newly_pruned = Brain._compress_contents(x)
+        assert _estimate(out) <= 3000 and _notices(out) and newly_pruned > 0
+        same_out, same_pruned = Brain._compress_contents(x, max_tokens=10**9, tail_budget=10**9)
+        assert same_out is x and same_pruned == 0
 
     @pytest.mark.asyncio
     async def test_build_contents_does_not_regex_scan_huge_message_0(self):

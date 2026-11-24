@@ -22,10 +22,10 @@ function formatTime(ts: number): string {
 
 const formatTokens = formatTokenCount;
 
-function SparkCard({ title, data, dataKey, color }: {
-  title: string; data: FlowSnapshot[]; dataKey: keyof FlowSnapshot; color: string;
+function SparkCard({ title, data, dataKey, color, subtitle }: {
+  title: string; data: FlowSnapshot[]; dataKey: keyof FlowSnapshot; color: string; subtitle?: string;
 }) {
-  const values = data.map(s => (s[dataKey] as number) || 0);
+  const values = data.map(s => (s[dataKey] as number | undefined) ?? 0);
   const n = values.length;
   const rangeTotal = values.reduce((a, b) => a + b, 0);
   const rms = n > 0 ? Math.round(Math.sqrt(values.reduce((a, v) => a + v * v, 0) / n)) : 0;
@@ -33,7 +33,12 @@ function SparkCard({ title, data, dataKey, color }: {
   return (
     <div className="bg-bg-secondary border border-border rounded-lg p-4">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-medium text-text-primary">{title}</h3>
+        <div>
+          <h3 className="text-sm font-medium text-text-primary">{title}</h3>
+          {subtitle && (
+            <div className="text-[10px] text-text-muted font-mono">{subtitle}</div>
+          )}
+        </div>
         <div className="text-right">
           <span className="text-lg font-mono" style={{ color }}>
             {isCalls ? rms : formatTokens(rms)}
@@ -95,6 +100,12 @@ export default function TokenUtilizationPage() {
 
   const cumTotal = snapshots.length > 0
     ? (snapshots[snapshots.length - 1].token_total_cumulative ?? 0) : 0;
+  const totalInput = snapshots.reduce((a, s) => a + (s.token_input_delta ?? 0), 0);
+  const totalCached = snapshots.reduce((a, s) => a + (s.token_cached_delta ?? 0), 0);
+  const brainInput = snapshots.reduce((a, s) => a + (s.brain_token_input_delta ?? 0), 0);
+  const brainCached = snapshots.reduce((a, s) => a + (s.brain_token_cached_delta ?? 0), 0);
+  const cacheHitPct = totalInput > 0 ? ((totalCached / totalInput) * 100).toFixed(1) : '0.0';
+  const brainHitPct = brainInput > 0 ? ((brainCached / brainInput) * 100).toFixed(1) : '0.0';
 
   return (
     <div className="p-6 space-y-6">
@@ -122,7 +133,13 @@ export default function TokenUtilizationPage() {
         <SparkCard title="Input Tokens" data={snapshots} dataKey="token_input_delta" color="#34d399" />
         <SparkCard title="Output Tokens" data={snapshots} dataKey="token_output_delta" color="#f472b6" />
         <SparkCard title="Thinking Tokens" data={snapshots} dataKey="token_thinking_delta" color="#a78bfa" />
-        <SparkCard title="Cached Tokens" data={snapshots} dataKey="token_cached_delta" color="#fbbf24" />
+        <SparkCard
+          title="Cached Tokens"
+          data={snapshots}
+          dataKey="token_cached_delta"
+          color="#fbbf24"
+          subtitle={`${cacheHitPct}% hit (Brain: ${brainHitPct}%)`}
+        />
         <SparkCard title="LLM Calls" data={snapshots} dataKey="token_calls_delta" color="#fb923c" />
       </div>
     </div>

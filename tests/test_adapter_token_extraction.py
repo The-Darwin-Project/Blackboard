@@ -1043,3 +1043,528 @@ class TestGemini4DrainAndTrailingThoughtSignature:
             ])
         assert "1 additional function_call" in caplog.text
 
+
+# ---------------------------------------------------------------------------
+# VMER-2450 Step 10 (4-Layer ATDD): T-35, T-36 & Helm BRAIN_DECAY_EPOCH_SIZE
+# ---------------------------------------------------------------------------
+
+def _record_has_structured_field(record: logging.LogRecord, key: str, value: str) -> bool:
+    """Layer 2 DSL helper: verify structured log field in message or LogRecord extra."""
+    import re
+
+    msg = record.getMessage()
+    pattern = rf"\b{re.escape(key)}[=:]\s*['\"]?{re.escape(value)}(?:%|['\"]|\b|$)"
+    if re.search(pattern, msg):
+        return True
+    extra_val = getattr(record, key, None)
+    return extra_val is not None and str(extra_val) == value
+
+
+class _RecordingLogHandler(logging.Handler):
+    """Layer 3 driver: captures emitted LogRecords and invocation order."""
+
+    def __init__(self, order_events: list[str]):
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+        self._order_events = order_events
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+        self._order_events.append(f"log:{record.levelname}")
+
+
+class TestT35CallerAwareCacheLogging:
+    """T-35: Caller-aware structured cache logging in src/agents/llm/__init__.py:record_token_usage."""
+
+    @staticmethod
+    def _invoke_record_token_usage(
+        monkeypatch,
+        *,
+        caller: str,
+        usage: TokenUsage,
+        event_id: str | None,
+    ) -> tuple[list[str], list[tuple], list[logging.LogRecord]]:
+        import src.agents.llm as llm_pkg
+
+        order_events: list[str] = []
+        meter_calls: list[tuple] = []
+
+        class _FakeMeter:
+            def record(self, c, model, u, eid=None):
+                order_events.append("record")
+                meter_calls.append((c, model, u, eid))
+
+        monkeypatch.setattr(llm_pkg, "get_token_meter", lambda: _FakeMeter())
+
+        target_logger = logging.getLogger("src.agents.llm")
+        prev_level = target_logger.level
+        handler = _RecordingLogHandler(order_events)
+        target_logger.setLevel(logging.DEBUG)
+        target_logger.addHandler(handler)
+        try:
+            llm_pkg.record_token_usage(caller, usage, event_id)
+        finally:
+            target_logger.removeHandler(handler)
+            target_logger.setLevel(prev_level)
+        return order_events, meter_calls, handler.records
+
+    def test_t35_brain_caller_records_meter_before_info_log_and_gemini_stays_debug_only(
+        self, monkeypatch, caplog
+    ):
+        """Given brain caller with 27k/30k cached tokens and 50 thinking tokens,
+        When GeminiAdapter._record_usage extracts usage and record_token_usage runs,
+        Then TokenMeter.record fires BEFORE the 1-line INFO log carrying all 7 fields,
+        and GeminiAdapter._record_usage emits ZERO INFO logs (no duplicate INFO)."""
+        from unittest.mock import MagicMock
+        from src.agents.llm.gemini_client import GeminiAdapter
+
+        adapter = GeminiAdapter.__new__(GeminiAdapter)
+        adapter._model_name = "gemini-4-neon"
+        adapter._tracker = MagicMock()
+        adapter._tracker.get_stats.return_value = {"utilization_pct": 12}
+
+        meta = SimpleNamespace(
+            prompt_token_count=30000,
+            candidates_token_count=120,
+            cached_content_token_count=27000,
+            thoughts_token_count=50,
+            tool_use_prompt_token_count=0,
+            total_token_count=30170,
+        )
+        with caplog.at_level(logging.DEBUG, logger="src.agents.llm.gemini_client"):
+            usage = adapter._record_usage(meta, estimate=29000)
+
+        assert usage is not None
+        gemini_info_records = [
+            r for r in caplog.records
+            if r.name == "src.agents.llm.gemini_client" and r.levelno >= logging.INFO
+        ]
+        assert gemini_info_records == [], "GeminiAdapter._record_usage must stay debug-only"
+
+        order_events, meter_calls, records = self._invoke_record_token_usage(
+            monkeypatch, caller="brain", usage=usage, event_id="evt-1"
+        )
+
+        assert meter_calls == [("brain", "gemini-4-neon", usage, "evt-1")]
+        assert order_events == ["record", "log:INFO"], (
+            f"TokenMeter.record must run strictly before INFO log; got {order_events}"
+        )
+        info_records = [r for r in records if r.levelno == logging.INFO]
+        assert len(info_records) == 1
+        rec = info_records[0]
+        assert "\n" not in rec.getMessage(), "Brain INFO log must be concise single-line"
+        for key, expected in (
+            ("caller", "brain"),
+            ("event_id", "evt-1"),
+            ("input_tokens", "30000"),
+            ("cached_tokens", "27000"),
+            ("cache_hit_pct", "90.0"),
+            ("thinking_tokens", "50"),
+            ("output_tokens", "120"),
+        ):
+            assert _record_has_structured_field(rec, key, expected), (
+                f"Missing structured field {key}={expected!r} in log: {rec.getMessage()!r}"
+            )
+
+    def test_t35_non_brain_callers_record_first_and_log_at_debug_only(self, monkeypatch):
+        """Given non-brain callers ('aligner', 'headhunter'),
+        When record_token_usage runs,
+        Then TokenMeter.record fires first and structured cache log emits at DEBUG (never INFO)."""
+        usage = TokenUsage(
+            input_tokens=10000,
+            output_tokens=200,
+            cached_tokens=5000,
+            thinking_tokens=25,
+            total_tokens=10225,
+            model_version="gemini-4-argon",
+        )
+        for caller, event_id in (("aligner", "evt-align-1"), ("headhunter", "evt-hh-2")):
+            order_events, meter_calls, records = self._invoke_record_token_usage(
+                monkeypatch, caller=caller, usage=usage, event_id=event_id
+            )
+            assert meter_calls == [(caller, "gemini-4-argon", usage, event_id)]
+            assert order_events == ["record", "log:DEBUG"], (
+                f"Expected record then DEBUG log for {caller}; got {order_events}"
+            )
+            assert [r for r in records if r.levelno >= logging.INFO] == [], (
+                f"Non-brain caller {caller!r} must NOT emit INFO+ log"
+            )
+            debug_records = [r for r in records if r.levelno == logging.DEBUG]
+            assert len(debug_records) == 1
+            rec = debug_records[0]
+            for key, expected in (
+                ("caller", caller),
+                ("event_id", event_id),
+                ("input_tokens", "10000"),
+                ("cached_tokens", "5000"),
+                ("cache_hit_pct", "50.0"),
+                ("thinking_tokens", "25"),
+                ("output_tokens", "200"),
+            ):
+                assert _record_has_structured_field(rec, key, expected), (
+                    f"Missing structured field {key}={expected!r} in DEBUG log: {rec.getMessage()!r}"
+                )
+
+    def test_t35_zero_input_tokens_logs_zero_cache_hit_pct_safely(self, monkeypatch):
+        """Given TokenUsage with input_tokens=0,
+        When record_token_usage('brain', ...) runs,
+        Then no ZeroDivisionError occurs, meter updates first, and INFO log reports cache_hit_pct=0.0."""
+        usage = TokenUsage(
+            input_tokens=0,
+            output_tokens=0,
+            cached_tokens=0,
+            thinking_tokens=0,
+            total_tokens=0,
+            model_version="gemini-4-neon",
+        )
+        order_events, meter_calls, records = self._invoke_record_token_usage(
+            monkeypatch, caller="brain", usage=usage, event_id="evt-zero"
+        )
+        assert meter_calls == [("brain", "gemini-4-neon", usage, "evt-zero")]
+        assert order_events == ["record", "log:INFO"]
+        info_records = [r for r in records if r.levelno == logging.INFO]
+        assert len(info_records) == 1
+        rec = info_records[0]
+        assert _record_has_structured_field(rec, "input_tokens", "0")
+        assert _record_has_structured_field(rec, "cached_tokens", "0")
+        assert _record_has_structured_field(rec, "cache_hit_pct", "0.0")
+
+
+class TestT36ClaudeStructuredMultiFCAndEventStateParity:
+    """T-36: ClaudeAdapter._convert_structured FIFO pending_tool_ids & <event_state> parity."""
+
+    @staticmethod
+    def _shape_claude_wire(contents: list[dict]) -> list[dict]:
+        from src.agents.llm.claude_client import ClaudeAdapter
+
+        return ClaudeAdapter._convert_structured(contents)
+
+    def test_t36_single_fc_colocated_fr_and_event_state_orders_tool_result_before_other_blocks(self):
+        """Given single-FC model turn followed by user turn with co-located [FR_1, text(<event_state>)]
+        (and also reversed [text, FR_1, image]),
+        When ClaudeAdapter._convert_structured runs,
+        Then tool_result maps to exact tool_use ID 'call_1' and is emitted strictly BEFORE text/image blocks."""
+        contents = [
+            {"role": "user", "parts": [{"text": "Initial anchor"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "lookup_service", "args": {"service_name": "payments"}}}
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "lookup_service", "response": {"result": "healthy"}}},
+                    {"text": "<event_state>\nStatus: active\n</event_state>"},
+                ],
+            },
+        ]
+        messages = self._shape_claude_wire(contents)
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert messages[1]["content"] == [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "lookup_service",
+                "input": {"service_name": "payments"},
+            }
+        ]
+        user_blocks = messages[2]["content"]
+        assert len(user_blocks) == 2
+        assert user_blocks[0]["type"] == "tool_result"
+        assert user_blocks[0]["tool_use_id"] == "call_1"
+        assert "healthy" in user_blocks[0]["content"]
+        assert user_blocks[1] == {"type": "text", "text": "<event_state>\nStatus: active\n</event_state>"}
+
+        # Reversed input order [text, FR_1, image]: tool_result MUST still precede text and image.
+        reversed_contents = [
+            {"role": "user", "parts": [{"text": "Initial anchor"}]},
+            {
+                "role": "model",
+                "parts": [{"functionCall": {"name": "lookup_service", "args": {}}}],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"text": "<event_state>\nStatus: active\n</event_state>"},
+                    {"functionResponse": {"name": "lookup_service", "response": {"result": "healthy"}}},
+                    {"bytes": b"\x89PNG", "mime_type": "image/png"},
+                ],
+            },
+        ]
+        rev_messages = self._shape_claude_wire(reversed_contents)
+        rev_blocks = rev_messages[2]["content"]
+        assert [b["type"] for b in rev_blocks] == ["tool_result", "text", "image"]
+        assert rev_blocks[0]["tool_use_id"] == "call_1"
+        assert "healthy" in rev_blocks[0]["content"]
+
+    def test_t36_parallel_2fc_batch_fifo_pads_unconsumed_and_coalesces_trailing_event_state(self):
+        """Given 2-FC parallel batch model([FC_1, FC_2]) -> user([FR_1]) -> trailing user(<event_state>),
+        When ClaudeAdapter._convert_structured runs,
+        Then FIFO assigns call_1/call_2, FR_1 pops call_1, unconsumed call_2 is padded inside the FR
+        user turn BEFORE text/image blocks, and trailing <event_state> coalesces cleanly without double user."""
+        # Case A: partial FR_1 + separate trailing user(<event_state>)
+        contents = [
+            {"role": "user", "parts": [{"text": "Initial anchor"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "lookup_service", "args": {"service_name": "payments"}}},
+                    {"functionCall": {"name": "lookup_journal", "args": {"service": "payments"}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "lookup_service", "response": {"result": "svc-ok"}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"text": "<event_state>\nPhase: dispatch\n</event_state>"}],
+            },
+        ]
+        messages = self._shape_claude_wire(contents)
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert [(b["id"], b["name"]) for b in messages[1]["content"]] == [
+            ("call_1", "lookup_service"),
+            ("call_2", "lookup_journal"),
+        ]
+        user_blocks = messages[2]["content"]
+        assert [b["type"] for b in user_blocks] == ["tool_result", "tool_result", "text"]
+        assert user_blocks[0]["tool_use_id"] == "call_1"
+        assert "svc-ok" in user_blocks[0]["content"]
+        assert user_blocks[1]["tool_use_id"] == "call_2"
+        assert user_blocks[1]["content"]  # non-empty padded result
+        assert user_blocks[2] == {"type": "text", "text": "<event_state>\nPhase: dispatch\n</event_state>"}
+
+        # Case B: partial FR_1 + co-located text + image -> padded call_2 precedes co-located other_blocks
+        colocated = [
+            {"role": "user", "parts": [{"text": "Initial anchor"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "lookup_service", "args": {}}},
+                    {"functionCall": {"name": "lookup_journal", "args": {}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "lookup_service", "response": {"result": "svc-ok"}}},
+                    {"text": "<skill_overlay>\ndispatch\n</skill_overlay>"},
+                    {"bytes": b"img", "mime_type": "image/png"},
+                ],
+            },
+        ]
+        col_messages = self._shape_claude_wire(colocated)
+        col_blocks = col_messages[2]["content"]
+        assert [b["type"] for b in col_blocks] == ["tool_result", "tool_result", "text", "image"]
+        assert [b["tool_use_id"] for b in col_blocks[:2]] == ["call_1", "call_2"]
+        assert "svc-ok" in col_blocks[0]["content"]
+
+        # Case C: full 2-FC [FR_1, FR_2] + trailing separate user(<event_state>)
+        full_batch = [
+            {"role": "user", "parts": [{"text": "Initial anchor"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "lookup_service", "args": {}}},
+                    {"functionCall": {"name": "lookup_journal", "args": {}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "lookup_service", "response": {"result": "svc-ok"}}},
+                    {"functionResponse": {"name": "lookup_journal", "response": {"result": "journal-ok"}}},
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"text": "<event_state>\nPhase: verify\n</event_state>"}],
+            },
+        ]
+        full_messages = self._shape_claude_wire(full_batch)
+        assert [m["role"] for m in full_messages] == ["user", "assistant", "user"]
+        full_blocks = full_messages[2]["content"]
+        assert [b["type"] for b in full_blocks] == ["tool_result", "tool_result", "text"]
+        assert full_blocks[0]["tool_use_id"] == "call_1" and "svc-ok" in full_blocks[0]["content"]
+        assert full_blocks[1]["tool_use_id"] == "call_2" and "journal-ok" in full_blocks[1]["content"]
+        assert full_blocks[2]["text"] == "<event_state>\nPhase: verify\n</event_state>"
+
+    def test_t36_consecutive_coalesced_model_turns_preserve_pending_tool_ids(self):
+        """Given consecutive model([FC_1]) followed immediately by model([FC_2]),
+        When ClaudeAdapter._convert_structured runs,
+        Then pending_tool_ids is NOT reset across coalesced assistant turns and maps call_1/call_2 FIFO."""
+        contents = [
+            {"role": "user", "parts": [{"text": "Start"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "tool_a", "args": {"x": 1}}}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "tool_b", "args": {"y": 2}}}]},
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "tool_a", "response": {"result": "res-a"}}},
+                    {"functionResponse": {"name": "tool_b", "response": {"result": "res-b"}}},
+                ],
+            },
+        ]
+        messages = self._shape_claude_wire(contents)
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert [(b["id"], b["name"]) for b in messages[1]["content"]] == [
+            ("call_1", "tool_a"),
+            ("call_2", "tool_b"),
+        ]
+        user_blocks = messages[2]["content"]
+        assert [b["type"] for b in user_blocks] == ["tool_result", "tool_result"]
+        assert user_blocks[0]["tool_use_id"] == "call_1" and "res-a" in user_blocks[0]["content"]
+        assert user_blocks[1]["tool_use_id"] == "call_2" and "res-b" in user_blocks[1]["content"]
+
+    def test_t36_user_turn_without_fr_wraps_text_for_all_pending_ids_and_clears_queue(self):
+        """Given pending_tool_ids=[call_1, call_2] and a user turn with NO functionResponse parts,
+        When ClaudeAdapter._convert_structured runs,
+        Then text is wrapped into tool_result blocks for EACH pending ID, pending_tool_ids is cleared,
+        and a subsequent trailing user(<event_state>) coalesces as a text block (not tool_result)."""
+        contents = [
+            {"role": "user", "parts": [{"text": "Start"}]},
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "tool_a", "args": {}}},
+                    {"functionCall": {"name": "tool_b", "args": {}}},
+                ],
+            },
+            {"role": "user", "parts": [{"text": "Human interrupted before tool output"}]},
+            {"role": "user", "parts": [{"text": "<event_state>\nStatus: active\n</event_state>"}]},
+        ]
+        messages = self._shape_claude_wire(contents)
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        user_blocks = messages[2]["content"]
+        assert [b["type"] for b in user_blocks] == ["tool_result", "tool_result", "text"]
+        assert [b["tool_use_id"] for b in user_blocks[:2]] == ["call_1", "call_2"]
+        assert "Human interrupted before tool output" in user_blocks[0]["content"]
+        assert "Human interrupted before tool output" in user_blocks[1]["content"]
+        assert user_blocks[2] == {"type": "text", "text": "<event_state>\nStatus: active\n</event_state>"}
+
+    def test_t36_extra_fr_with_empty_pending_tool_ids_falls_back_safely(self):
+        """Given extra functionResponse when pending_tool_ids is empty (or orphan FR),
+        When ClaudeAdapter._convert_structured runs,
+        Then it falls back cleanly to synthetic call_{counter} without raising IndexError."""
+        contents = [
+            {"role": "user", "parts": [{"text": "Start"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "tool_a", "args": {}}}]},
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "tool_a", "response": {"result": "res-a"}}},
+                    {"functionResponse": {"name": "extra_tool", "response": {"result": "res-extra"}}},
+                ],
+            },
+        ]
+        messages = self._shape_claude_wire(contents)
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        user_blocks = messages[2]["content"]
+        assert len(user_blocks) == 2
+        assert user_blocks[0]["type"] == "tool_result"
+        assert user_blocks[0]["tool_use_id"] == "call_1"
+        assert "res-a" in user_blocks[0]["content"]
+        assert user_blocks[1]["type"] == "tool_result"
+        assert user_blocks[1]["tool_use_id"].startswith("call_")
+        assert "res-extra" in user_blocks[1]["content"]
+
+        # Orphan FR with zero preceding model FCs
+        orphan = self._shape_claude_wire([
+            {"role": "user", "parts": [{"functionResponse": {"name": "orphan", "response": {"result": "orphan-res"}}}]}
+        ])
+        assert len(orphan) == 1
+        assert orphan[0]["content"][0]["type"] == "tool_result"
+        assert orphan[0]["content"][0]["tool_use_id"].startswith("call_")
+        assert "orphan-res" in orphan[0]["content"][0]["content"]
+
+
+class TestStep10HelmDecayEpochSizeWiring:
+    """Step 10 Helm env wiring: brain.decayEpochSize defaults to '10' and wires BRAIN_DECAY_EPOCH_SIZE."""
+
+    def test_step10_helm_decay_epoch_size_wired_in_values_and_deployment(self):
+        """Given helm/values.yaml and helm/templates/deployment.yaml,
+        When parsed (and rendered via helm template if available),
+        Then brain.decayEpochSize defaults to '10' and BRAIN_DECAY_EPOCH_SIZE is wired from it."""
+        from pathlib import Path
+        import shutil
+        import subprocess
+        import yaml
+
+        repo_root = Path(__file__).resolve().parent.parent
+        values = yaml.safe_load((repo_root / "helm" / "values.yaml").read_text(encoding="utf-8"))
+        assert isinstance(values.get("brain"), dict)
+        assert values["brain"].get("decayEpochSize") == "10", (
+            f"Expected helm/values.yaml brain.decayEpochSize='10', got {values['brain'].get('decayEpochSize')!r}"
+        )
+
+        deploy_lines = (repo_root / "helm" / "templates" / "deployment.yaml").read_text(encoding="utf-8").splitlines()
+        env_idx = next(
+            (i for i, line in enumerate(deploy_lines) if "- name: BRAIN_DECAY_EPOCH_SIZE" in line),
+            None,
+        )
+        assert env_idx is not None, "BRAIN_DECAY_EPOCH_SIZE env entry missing from helm/templates/deployment.yaml"
+        value_line = deploy_lines[env_idx + 1] if env_idx + 1 < len(deploy_lines) else ""
+        assert ".Values.brain.decayEpochSize" in value_line, (
+            f"BRAIN_DECAY_EPOCH_SIZE must be wired from .Values.brain.decayEpochSize, got: {value_line!r}"
+        )
+
+        if shutil.which("helm"):
+            proc = subprocess.run(
+                ["helm", "template", "darwin", "helm"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            assert proc.returncode == 0, f"helm template failed: {proc.stderr}"
+            docs = [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)]
+            dep = next(d for d in docs if d.get("kind") == "Deployment")
+            brain_container = next(
+                c for c in dep["spec"]["template"]["spec"]["containers"]
+                if any(e.get("name") == "BRAIN_CONTENT_BUDGET_TOKENS" for e in c.get("env", []))
+            )
+            env_map = {e["name"]: e.get("value") for e in brain_container.get("env", [])}
+            assert env_map.get("BRAIN_DECAY_EPOCH_SIZE") == "10"
+
+
+
+class TestR1L5AdapterTokenExtraction:
+    def test_r1_l5_convert_structured_coalesces_user_tool_results_first(self):
+        """[R1-L5] _convert_structured groups tool_result blocks strictly before text blocks when 
+        coalescing multiple user messages (e.g. text message followed by FR-bearing message)."""
+        from src.agents.llm.claude_client import ClaudeAdapter
+        
+        contents = [
+            {
+                "role": "user",
+                "parts": [{"text": "Hello text 1"}]
+            },
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "tool1", "response": {"res": "ok"}}},
+                    {"text": "Hello text 2"}
+                ]
+            }
+        ]
+        
+        wire = ClaudeAdapter._convert_structured(contents)
+        
+        assert len(wire) == 1
+        msg = wire[0]
+        assert msg["role"] == "user"
+        
+        # Verify order: tool_results must come before text
+        # ClaudeAdapter parts is a list of blocks.
+        seen_text = False
+        for part in msg["content"]:
+            if part.get("type") if isinstance(part, dict) else getattr(part, "type", part.__class__.__name__) == "tool_result":
+                assert not seen_text, "tool_result block found after a text block"
+            elif part.get("type") if isinstance(part, dict) else getattr(part, "type", part.__class__.__name__) == "text":
+                seen_text = True
