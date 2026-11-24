@@ -196,72 +196,118 @@ class ClaudeAdapter:
         """Convert Gemini-format structured contents to Anthropic messages.
 
         Role mapping: model->assistant, user->user.
-        functionCall parts -> tool_use content blocks.
-        After tool_use, the next user message becomes tool_result (Claude requires this).
+        functionCall parts -> tool_use content blocks tracked in FIFO pending_tool_ids.
+        functionResponse parts -> tool_result blocks emitted strictly before text/image blocks.
         """
         import base64
-        messages = []
+
+        def _encode_image(part: dict) -> dict:
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": part["mime_type"],
+                    "data": base64.b64encode(part["bytes"]).decode(),
+                },
+            }
+
+        messages: list[dict] = []
         tool_call_counter = 0
-        pending_tool_id: str | None = None
+        pending_tool_ids: list[str] = []
 
         for msg in contents:
             role = "assistant" if msg["role"] == "model" else "user"
-            blocks = []
+            parts = msg.get("parts", [])
+            blocks: list[dict] = []
 
-            # If previous assistant had tool_use and this is the user response,
-            # wrap the entire user message as a tool_result
-            if pending_tool_id and role == "user":
-                text_parts = []
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and not p.get("thought") and p.get("text"):
-                        text_parts.append(p["text"])
+            if role == "assistant":
+                if not messages or messages[-1]["role"] != "assistant":
+                    pending_tool_ids = []
+                for p in parts:
+                    if isinstance(p, dict) and "functionCall" in p:
+                        tool_call_counter += 1
+                        fc = p["functionCall"]
+                        tid = f"call_{tool_call_counter}"
+                        blocks.append({
+                            "type": "tool_use",
+                            "id": tid,
+                            "name": fc["name"],
+                            "input": fc.get("args", {}),
+                        })
+                        pending_tool_ids.append(tid)
+                    elif isinstance(p, dict) and "bytes" in p:
+                        blocks.append(_encode_image(p))
+                    elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
+                        blocks.append({"type": "text", "text": p["text"]})
                     elif isinstance(p, str) and p:
-                        text_parts.append(p)
-                blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": pending_tool_id,
-                    "content": "\n".join(text_parts) if text_parts else "(no output)",
-                })
-                pending_tool_id = None
-                messages.append({"role": role, "content": blocks})
-                continue
+                        blocks.append({"type": "text", "text": p})
+            else:
+                has_fr = any(isinstance(p, dict) and "functionResponse" in p for p in parts)
+                if has_fr:
+                    fr_blocks: list[dict] = []
+                    other_blocks: list[dict] = []
+                    for p in parts:
+                        if isinstance(p, dict) and "functionResponse" in p:
+                            fr = p["functionResponse"]
+                            if pending_tool_ids:
+                                tid = pending_tool_ids.pop(0)
+                            else:
+                                tool_call_counter += 1
+                                tid = f"call_{tool_call_counter}"
+                            fr_blocks.append({
+                                "type": "tool_result",
+                                "tool_use_id": tid,
+                                "content": str(fr.get("response", "")),
+                            })
+                        elif isinstance(p, dict) and "bytes" in p:
+                            other_blocks.append(_encode_image(p))
+                        elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
+                            other_blocks.append({"type": "text", "text": p["text"]})
+                        elif isinstance(p, str) and p:
+                            other_blocks.append({"type": "text", "text": p})
+                    while pending_tool_ids:
+                        fr_blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": pending_tool_ids.pop(0),
+                            "content": "(no output)",
+                        })
+                    blocks = fr_blocks + other_blocks
+                elif pending_tool_ids:
+                    text_parts: list[str] = []
+                    image_blocks: list[dict] = []
+                    for p in parts:
+                        if isinstance(p, dict) and "bytes" in p:
+                            image_blocks.append(_encode_image(p))
+                        elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
+                            text_parts.append(p["text"])
+                        elif isinstance(p, str) and p:
+                            text_parts.append(p)
+                    wrapped_content = "\n".join(text_parts) if text_parts else "(no output)"
+                    for tid in pending_tool_ids:
+                        blocks.append({
+                            "type": "tool_result",
+                            "tool_use_id": tid,
+                            "content": wrapped_content,
+                        })
+                    pending_tool_ids = []
+                    blocks.extend(image_blocks)
+                else:
+                    for p in parts:
+                        if isinstance(p, dict) and "bytes" in p:
+                            blocks.append(_encode_image(p))
+                        elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
+                            blocks.append({"type": "text", "text": p["text"]})
+                        elif isinstance(p, str) and p:
+                            blocks.append({"type": "text", "text": p})
 
-            pending_tool_id = None
-            for p in msg.get("parts", []):
-                if isinstance(p, dict) and "functionCall" in p:
-                    tool_call_counter += 1
-                    fc = p["functionCall"]
-                    tid = f"call_{tool_call_counter}"
-                    blocks.append({
-                        "type": "tool_use",
-                        "id": tid,
-                        "name": fc["name"],
-                        "input": fc.get("args", {}),
-                    })
-                    pending_tool_id = tid
-                elif isinstance(p, dict) and "functionResponse" in p:
-                    fr = p["functionResponse"]
-                    blocks.append({
-                        "type": "tool_result",
-                        "tool_use_id": f"call_{tool_call_counter}",
-                        "content": str(fr.get("response", "")),
-                    })
-                    pending_tool_id = None
-                elif isinstance(p, dict) and "bytes" in p:
-                    blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": p["mime_type"],
-                            "data": base64.b64encode(p["bytes"]).decode(),
-                        },
-                    })
-                elif isinstance(p, dict) and not p.get("thought") and p.get("text"):
-                    blocks.append({"type": "text", "text": p["text"]})
-                elif isinstance(p, str):
-                    blocks.append({"type": "text", "text": p})
             if blocks:
-                if messages and messages[-1]["role"] == role:
+                if messages and messages[-1]["role"] == role == "user":
+                    messages[-1]["content"].extend(blocks)
+                    if any(b.get("type") == "tool_result" for b in blocks):
+                        tool_results = [b for b in messages[-1]["content"] if b.get("type") == "tool_result"]
+                        others = [b for b in messages[-1]["content"] if b.get("type") != "tool_result"]
+                        messages[-1]["content"] = tool_results + others
+                elif messages and messages[-1]["role"] == role:
                     messages[-1]["content"].extend(blocks)
                 else:
                     messages.append({"role": role, "content": blocks})

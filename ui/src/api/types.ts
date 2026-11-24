@@ -387,6 +387,10 @@ export interface FlowMetrics {
   avg_reconcile_ms: number;
   token_total_60s: number;
   token_calls_60s: number;
+  token_input_60s?: number;
+  token_cached_60s?: number;
+  cache_hit_rate_pct?: number;
+  brain_cache_hit_rate_pct?: number;
   snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
   staleness_guards: Array<Record<string, unknown>>;
@@ -427,6 +431,8 @@ export interface FlowSnapshot {
   token_total_delta: number;
   token_calls_delta: number;
   token_total_cumulative: number;
+  brain_token_input_delta?: number;
+  brain_token_cached_delta?: number;
   tpm_used?: number;
   tpm_limit?: number;
   tpm_utilization_pct?: number;

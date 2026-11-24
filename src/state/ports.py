@@ -365,6 +365,14 @@ class EventRepository(Protocol):
 
     async def get_event(self, event_id: str) -> Optional[EventDocument]: ...
 
+    # --- Frozen Turn-0 event anchor (VMER-2450) ---
+
+    async def get_event_anchor(self, event_id: str) -> dict | None: ...
+
+    async def set_event_anchor_nx(
+        self, event_id: str, payload: dict, ttl_sec: int = 2592000,
+    ) -> bool: ...
+
     # --- Conversation turns (WATCH/MULTI) ---
 
     async def append_turn(self, event_id: str, turn: ConversationTurn) -> int: ...

@@ -114,8 +114,10 @@ async def _async_stream_from_chunks(chunks: list[SimpleNamespace]):
 
 
 def _assert_wire_invariants(contents: list[dict], event_id: str = "evt-shed-test"):
-    """Verify Gemini alternating wire invariants and deterministic briefing injection."""
-    assert len(contents) >= 3, f"Expected >= 3 messages, got {len(contents)}"
+    """Verify Gemini alternating wire invariants and Step 9 frozen anchor + <event_state> briefing."""
+    from src.agents.llm.gemini_client import GeminiAdapter
+
+    assert len(contents) >= 4, f"Expected >= 4 messages (prefill + anchor + tail), got {len(contents)}"
     assert contents[0]["role"] == "user"
     assert contents[0]["parts"][0].get("text") == BRAIN_PREFILL_USER
     assert contents[1]["role"] == "model"
@@ -124,13 +126,36 @@ def _assert_wire_invariants(contents: list[dict], event_id: str = "evt-shed-test
 
     c2_text = contents[2]["parts"][0].get("text", "")
     assert f"Event ID: {event_id}" in c2_text, f"Missing Event ID in message 2 text: {c2_text[:200]}"
-    assert "### Deterministic Operational Briefing" in c2_text, (
-        f"Missing '### Deterministic Operational Briefing' in message 2: {c2_text[:200]}"
+    assert "### Deterministic Operational Briefing" not in c2_text, (
+        "Step 9: Deterministic Operational Briefing must live in <event_state> tail, not frozen anchor"
     )
 
+    tail_text = contents[-1]["parts"][-1].get("text", "")
+    assert contents[-1]["role"] == "user"
+    assert tail_text.lstrip().startswith("<event_state>"), (
+        f"Expected dedicated <event_state> tail at contents[-1], got: {tail_text[:120]!r}"
+    )
+    assert "### Deterministic Operational Briefing" in tail_text, (
+        f"Missing '### Deterministic Operational Briefing' in <event_state> tail: {tail_text[:200]}"
+    )
+
+    # Raw provider-agnostic contents: zero consecutive model turns; consecutive user turns only
+    # allowed between history tail and dedicated trailing <event_state> message.
     for i in range(len(contents) - 1):
-        assert contents[i]["role"] != contents[i + 1]["role"], (
-            f"Consecutive identical roles at index {i} and {i+1}: {contents[i]['role']} == {contents[i+1]['role']}"
+        if contents[i]["role"] == contents[i + 1]["role"]:
+            assert (
+                contents[i]["role"] == "user"
+                and i == len(contents) - 2
+                and contents[-1]["parts"][-1].get("text", "").lstrip().startswith("<event_state>")
+            ), (
+                f"Consecutive identical roles at index {i} and {i+1}: {contents[i]['role']} == {contents[i+1]['role']}"
+            )
+
+    # Wire-level alternation via GeminiAdapter must strictly alternate roles
+    wire = GeminiAdapter.__new__(GeminiAdapter)._convert_structured(contents)
+    for i in range(len(wire) - 1):
+        assert wire[i].role != wire[i + 1].role, (
+            f"Gemini wire consecutive roles at {i} and {i+1}: {wire[i].role}"
         )
 
     fc_count = 0
@@ -1140,7 +1165,9 @@ class TestQuotaShedGuards:
     def _noop_compress():
         return patch.object(
             Brain, "_compress_contents",
-            new=classmethod(lambda cls, contents, max_tokens=None, tail_budget=None: contents),
+            new=classmethod(
+                lambda cls, contents, max_tokens=None, tail_budget=None, active_overlay=None: (contents, 0)
+            ),
         )
 
     @pytest.mark.asyncio
@@ -1185,10 +1212,10 @@ class TestQuotaShedGuards:
         retrying through the generic backoff, and finally record the error turn (no exception out)."""
         monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
 
-        def _boom(cls, contents, max_tokens=None, tail_budget=None):
+        def _boom(cls, contents, max_tokens=None, tail_budget=None, active_overlay=None):
             if max_tokens is not None:
                 raise RuntimeError("compress exploded")
-            return _real_compress(contents)
+            return _real_compress(contents, active_overlay=active_overlay)
 
         with (
             patch("src.agents.brain._THOUGHT_SIG_V2", True),
@@ -1319,3 +1346,98 @@ class TestQuotaTrackerBalanceAndPriority:
         event = _make_shedding_event()
         first = derive_llm_priority(event)
         assert derive_llm_priority(event) == first == derive_llm_priority(event)
+
+
+# ---------------------------------------------------------------------------
+# VMER-2450 Step 7 & Step 8 ATDD (T-24, T-26): Tier-1 Shedding at conv_len 11..20
+# ---------------------------------------------------------------------------
+
+
+class TestATDDT24T26Tier1ShedRecallAndWireToolsParity:
+    """T-24 & T-26: Under K=10 quantized decay, a 14-turn casual event (conv_len in 11..20)
+    starts with 0 decayed turns; after Tier-1 shedding (turn_decay_distance=2):
+    - wire_tools stays 100% byte-identical across attempts (never mutated by _QuotaShedState.adopt),
+    - build_gate_context receives explicit has_pruned_or_decayed_turns=True, and
+    - recall_pruned_turns executes server-side in both single-FC and batch-FC paths."""
+
+    @staticmethod
+    def _make_14_turn_casual_event(event_id: str = "evt-t26-14turn") -> EventDocument:
+        ev = _make_shedding_event(event_id)
+        ev.event.evidence.domain = "casual"
+        return ev
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["single", "batch"])
+    async def test_t24_t26_tier1_shed_at_conv_len_14_keeps_wire_tools_static_and_permits_recall(
+        self, monkeypatch, mode,
+    ):
+        import json
+        from src.agents import tool_gates
+        from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
+
+        monkeypatch.setenv("BRAIN_THOUGHT_SIG_V2", "true")
+        monkeypatch.delenv("BRAIN_DECAY_EPOCH_SIZE", raising=False)
+
+        event = self._make_14_turn_casual_event(f"evt-t26-{mode}")
+        assert len(event.conversation) == 14
+
+        if mode == "single":
+            fc = SimpleNamespace(name="recall_pruned_turns", args={"from_turn": 2, "to_turn": 2})
+            parts = [{"functionCall": {"name": "recall_pruned_turns", "args": {"from_turn": 2, "to_turn": 2}}}]
+        else:
+            fc = SimpleNamespace(name="lookup_service", args={"service_name": "payments"})
+            parts = [
+                {"functionCall": {"name": "lookup_service", "args": {"service_name": "payments"}}},
+                {"functionCall": {"name": "recall_pruned_turns", "args": {"from_turn": 2, "to_turn": 2}}},
+            ]
+
+        success_stream = _async_stream_from_chunks([_make_chunk(function_call=fc, raw_parts=parts)])
+        brain, bb = _make_brain_for_shedding(
+            _scripted_factory([QuotaExhaustedError("local quota 0"), success_stream])
+        )
+        bb.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"event_domain": "casual", "brain_has_classified": True}
+        )
+        brain._normalize_response_parts = MagicMock(return_value=parts)
+
+        seen_gate_flags: list[bool | None] = []
+        real_build_gate_ctx = tool_gates.build_gate_context
+
+        def _spy_build_gate_ctx(*args, **kwargs):
+            seen_gate_flags.append(kwargs.get("has_pruned_or_decayed_turns"))
+            return real_build_gate_ctx(*args, **kwargs)
+
+        with (
+            patch("src.agents.brain._THOUGHT_SIG_V2", True),
+            patch("src.agents.tool_gates.build_gate_context", side_effect=_spy_build_gate_ctx),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await brain._process_with_llm(event.id, event)
+
+        assert result is True
+        assert brain._adapter.generate_stream.call_count == 2
+
+        # 1. T-24: wire_tools sent to LLM is canonical sorted BRAIN_TOOL_SCHEMAS and byte-identical
+        #    across attempt 0 and attempt 1 (_QuotaShedState.adopt never mutates wire_tools).
+        tools_0 = brain._adapter.generate_stream.call_args_list[0].kwargs["tools"]
+        tools_1 = brain._adapter.generate_stream.call_args_list[1].kwargs["tools"]
+        assert json.dumps(tools_0) == json.dumps(tools_1), "wire_tools must not mutate across quota-shed retries"
+        assert [t["name"] for t in tools_0] == sorted(t["name"] for t in BRAIN_TOOL_SCHEMAS)
+
+        # 2. T-26: Pre-shed (conv_len=14 under K=10) has 0 decayed turns -> False;
+        #    Post-Tier-1-shed passes explicit has_pruned_or_decayed_turns=True to build_gate_context.
+        assert seen_gate_flags, "Expected build_gate_context to be called"
+        assert seen_gate_flags[0] is False, (
+            f"Pre-shed at conv_len=14 (K=10) must pass has_pruned_or_decayed_turns=False, got {seen_gate_flags}"
+        )
+        assert True in seen_gate_flags[1:], (
+            f"Post-Tier-1-shed ({mode}) must pass explicit has_pruned_or_decayed_turns=True to "
+            f"build_gate_context; observed flags={seen_gate_flags}"
+        )
+
+        # 3. T-24 & T-26: Server-side execution permits recall_pruned_turns post-shed.
+        executed = [c.args[1] for c in brain._execute_function_call.await_args_list]
+        expected_exec = ["recall_pruned_turns"] if mode == "single" else ["lookup_service", "recall_pruned_turns"]
+        assert executed == expected_exec, f"Expected {expected_exec}, executed={executed}"
+

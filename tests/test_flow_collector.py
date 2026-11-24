@@ -324,3 +324,241 @@ class TestFlowCollectorScenarioT8:
             with patch("src.agents.llm.gemini_client.GeminiAdapter") as mock_adapter_cls:
                 llm_pkg.create_adapter("gemini", "proj", "global", "gemini-4-carbon")
             assert mock_adapter_cls.call_args.kwargs["quota_tracker"].get_stats()["tpm_limit"] == 3_000_000
+
+
+# =============================================================================
+# 4-Layer ATDD Specification: VMER-2450 Step 2 (Scenario T-4)
+# Per-Caller Cache Hit-Rate Telemetry (FlowCollector + GET /flow)
+# =============================================================================
+
+
+class SpyTokenMeter:
+    """Layer 3 Spy wrapper over TokenMeter verifying single atomic snapshot_with_callers() drain."""
+
+    def __init__(self) -> None:
+        from src.agents.llm.token_meter import TokenMeter
+
+        self._inner = TokenMeter()
+        self.snapshot_calls = 0
+        self.snapshot_with_callers_calls = 0
+
+    def record(self, caller: str, model: str, usage: Any, event_id: str | None = None) -> None:
+        self._inner.record(caller, model, usage, event_id)
+
+    def snapshot(self) -> dict[str, int]:
+        self.snapshot_calls += 1
+        return self._inner.snapshot()
+
+    def snapshot_with_callers(self) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+        self.snapshot_with_callers_calls += 1
+        return self._inner.snapshot_with_callers()
+
+    def get_platform_totals(self) -> dict[str, int]:
+        return self._inner.get_platform_totals()
+
+
+class CacheTelemetryProtocolDriver:
+    """Layer 3 Protocol Driver adapting FlowCollector._build_snapshot() and GET /flow."""
+
+    def __init__(self) -> None:
+        self.meter = SpyTokenMeter()
+
+    def record_tokens(self, caller: str, *, input_tokens: int, cached_tokens: int) -> None:
+        from src.agents.llm.types import TokenUsage
+
+        self.meter.record(
+            caller,
+            "gemini-4-neon",
+            TokenUsage(
+                input_tokens=input_tokens,
+                cached_tokens=cached_tokens,
+                total_tokens=input_tokens,
+            ),
+        )
+
+    async def build_flow_snapshot(self) -> FlowSnapshot:
+        from src.observers.flow_collector import FlowCollector
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(
+            return_value={"queue_depth": 0, "active_events": 0, "waiting_approval_events": 0}
+        )
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.redis = None
+
+        collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+            token_meter=self.meter,  # type: ignore[arg-type]
+        )
+        return await collector._build_snapshot()
+
+    async def get_flow_endpoint(self, latest_snapshot: FlowSnapshot | None) -> tuple[int, dict[str, Any]]:
+        from src.main import app
+
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(
+            return_value={"queue_depth": 0, "active_events": 0, "waiting_approval_events": 0}
+        )
+        mock_bb.get_latest_flow_snapshot = AsyncMock(return_value=latest_snapshot)
+
+        with (
+            patch("src.dependencies._blackboard", mock_bb),
+            patch("src.dependencies.get_brain", AsyncMock(return_value=None)),
+            patch("src.dependencies.get_registry_and_bridge", return_value=(None, None)),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/flow")
+                return resp.status_code, resp.json()
+
+
+class CacheTelemetryDSL:
+    """Layer 2 Domain DSL for FlowCollector atomic drain and /flow cache hit-rate assertions."""
+
+    def __init__(self, driver: CacheTelemetryProtocolDriver) -> None:
+        self.driver = driver
+        self.snapshot: FlowSnapshot | None = None
+        self.flow_status: int | None = None
+        self.flow_body: dict[str, Any] = {}
+
+    def given_caller_tokens(self, caller: str, *, input_tokens: int, cached_tokens: int) -> None:
+        self.driver.record_tokens(caller, input_tokens=input_tokens, cached_tokens=cached_tokens)
+
+    async def when_snapshot_collected(self) -> FlowSnapshot:
+        self.snapshot = await self.driver.build_flow_snapshot()
+        return self.snapshot
+
+    async def when_flow_endpoint_queried(
+        self, latest_snapshot: FlowSnapshot | None = None, *, use_collected: bool = True
+    ) -> dict[str, Any]:
+        target = self.snapshot if use_collected else latest_snapshot
+        self.flow_status, self.flow_body = await self.driver.get_flow_endpoint(target)
+        return self.flow_body
+
+    def then_single_atomic_drain_was_used(self) -> None:
+        assert self.driver.meter.snapshot_calls == 0, (
+            f"FlowCollector must NOT co-call snapshot() (called {self.driver.meter.snapshot_calls}x)"
+        )
+        assert self.driver.meter.snapshot_with_callers_calls == 1, (
+            f"FlowCollector must call snapshot_with_callers() exactly once "
+            f"(called {self.driver.meter.snapshot_with_callers_calls}x)"
+        )
+
+    def then_snapshot_deltas_are(
+        self,
+        *,
+        token_input_delta: int,
+        token_cached_delta: int,
+        brain_token_input_delta: int,
+        brain_token_cached_delta: int,
+    ) -> None:
+        assert self.snapshot is not None
+        assert "brain_token_input_delta" in FlowSnapshot.model_fields
+        assert "brain_token_cached_delta" in FlowSnapshot.model_fields
+        assert self.snapshot.token_input_delta == token_input_delta
+        assert self.snapshot.token_cached_delta == token_cached_delta
+        assert self.snapshot.brain_token_input_delta == brain_token_input_delta
+        assert self.snapshot.brain_token_cached_delta == brain_token_cached_delta
+
+    def then_flow_cache_metrics_are(
+        self,
+        *,
+        token_input_60s: int,
+        token_cached_60s: int,
+        cache_hit_rate_pct: float,
+        brain_cache_hit_rate_pct: float,
+    ) -> None:
+        assert self.flow_status == 200, f"Expected HTTP 200, got {self.flow_status}"
+        for key in ("token_input_60s", "token_cached_60s", "cache_hit_rate_pct", "brain_cache_hit_rate_pct"):
+            assert key in self.flow_body, f"GET /flow missing required field {key!r}"
+        assert self.flow_body["token_input_60s"] == token_input_60s
+        assert self.flow_body["token_cached_60s"] == token_cached_60s
+        assert self.flow_body["cache_hit_rate_pct"] == pytest.approx(cache_hit_rate_pct)
+        assert self.flow_body["brain_cache_hit_rate_pct"] == pytest.approx(brain_cache_hit_rate_pct)
+
+
+class TestFlowCollectorCacheTelemetryT4:
+    """Layer 1 Domain Scenarios: Scenario T-4 FlowCollector + GET /flow cache hit rates."""
+
+    @pytest.mark.asyncio
+    async def test_t4_single_atomic_drain_populates_brain_deltas_and_flow_hit_rates(self):
+        """
+        Scenario T-4a:
+        Given "brain" recorded 900/1000 cached/input tokens and "aligner" recorded 0/500
+        When FlowCollector._build_snapshot() runs and GET /flow serves that snapshot
+        Then snapshot_with_callers() is called exactly once (never co-calling snapshot()),
+        FlowSnapshot records brain_token_input_delta=1000 & brain_token_cached_delta=900,
+        and GET /flow returns cache_hit_rate_pct=60.0 and brain_cache_hit_rate_pct=90.0.
+        """
+        dsl = CacheTelemetryDSL(CacheTelemetryProtocolDriver())
+        dsl.given_caller_tokens("brain", input_tokens=1000, cached_tokens=900)
+        dsl.given_caller_tokens("aligner", input_tokens=500, cached_tokens=0)
+
+        await dsl.when_snapshot_collected()
+        dsl.then_single_atomic_drain_was_used()
+        dsl.then_snapshot_deltas_are(
+            token_input_delta=1500,
+            token_cached_delta=900,
+            brain_token_input_delta=1000,
+            brain_token_cached_delta=900,
+        )
+
+        await dsl.when_flow_endpoint_queried()
+        dsl.then_flow_cache_metrics_are(
+            token_input_60s=1500,
+            token_cached_60s=900,
+            cache_hit_rate_pct=60.0,
+            brain_cache_hit_rate_pct=90.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t4_zero_input_deltas_return_zero_hit_rates_safely(self):
+        """
+        Scenario T-4b:
+        Given zero token input delta or non-brain-only input delta
+        When FlowCollector._build_snapshot() and GET /flow run
+        Then cache_hit_rate_pct and brain_cache_hit_rate_pct return 0.0 safely without division errors.
+        """
+        # Case 1: Zero total input and zero brain input
+        dsl_zero = CacheTelemetryDSL(CacheTelemetryProtocolDriver())
+        await dsl_zero.when_snapshot_collected()
+        dsl_zero.then_single_atomic_drain_was_used()
+        await dsl_zero.when_flow_endpoint_queried()
+        dsl_zero.then_flow_cache_metrics_are(
+            token_input_60s=0,
+            token_cached_60s=0,
+            cache_hit_rate_pct=0.0,
+            brain_cache_hit_rate_pct=0.0,
+        )
+
+        # Case 2: Aligner traffic only (brain_token_input_delta == 0 while token_input_delta > 0)
+        dsl_aligner_only = CacheTelemetryDSL(CacheTelemetryProtocolDriver())
+        dsl_aligner_only.given_caller_tokens("aligner", input_tokens=500, cached_tokens=0)
+        await dsl_aligner_only.when_snapshot_collected()
+        await dsl_aligner_only.when_flow_endpoint_queried()
+        dsl_aligner_only.then_flow_cache_metrics_are(
+            token_input_60s=500,
+            token_cached_60s=0,
+            cache_hit_rate_pct=0.0,
+            brain_cache_hit_rate_pct=0.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_t4_flow_endpoint_missing_snapshot_returns_zero_cache_rates(self):
+        """
+        Scenario T-4c:
+        Given no FlowSnapshot has been persisted yet (latest_snapshot=None)
+        When GET /flow is invoked directly
+        Then HTTP 200 returns zeroed token_input_60s, token_cached_60s, and 0.0 hit rates.
+        """
+        dsl_none = CacheTelemetryDSL(CacheTelemetryProtocolDriver())
+        await dsl_none.when_flow_endpoint_queried(latest_snapshot=None, use_collected=False)
+        dsl_none.then_flow_cache_metrics_are(
+            token_input_60s=0,
+            token_cached_60s=0,
+            cache_hit_rate_pct=0.0,
+            brain_cache_hit_rate_pct=0.0,
+        )

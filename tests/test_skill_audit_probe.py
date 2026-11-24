@@ -819,10 +819,40 @@ class TestVmer2409KargoSystemicConsolidationAndTsGuardProbe:
         assert "gated/kargo-environment.md" in kargo_paths
         injected = "\n".join(_skill(loader, p) for p in kargo_paths)
         assert "## Post-Resolution Promotion Guard" in injected
-        src = inspect.getsource(Brain._build_system_prompt)
-        call = src.index('find_paths_by_tag("kargo")')
+        from types import SimpleNamespace
+        from src.agents.brain import _build_turn0_anchor
+        from src.models import EventDocument, EventEvidence, EventInput
+
+        src = inspect.getsource(_build_turn0_anchor)
+        call = src.index('_safe_loader_tag_paths(loader, "kargo")')
         gate = src[max(0, call - 400):call]
         assert "kargo_context" in gate and "brain_phase" not in gate
+
+        verify_event = EventDocument(
+            id="evt-kargo-verify",
+            source="aligner",
+            service="svc",
+            brain_phase="verify",
+            event=EventInput(
+                reason="Kargo promotion failed",
+                evidence=EventEvidence(
+                    display_text="Stage prod failed",
+                    source_type="aligner",
+                    domain="complicated",
+                    severity="warning",
+                    kargo_context={
+                        "stage": "prod",
+                        "project": "demo",
+                        "promotion": "promo-1",
+                        "phase": "Errored",
+                    },
+                ),
+            ),
+            conversation=[],
+        )
+        anchor = _build_turn0_anchor(SimpleNamespace(_skill_loader=loader), verify_event)
+        assert "gated/kargo-environment.md" in anchor.initial_paths
+        assert "## Post-Resolution Promotion Guard" in anchor.text
 
     def test_phase_lifecycle_escalation_resume_precedence_and_edges(self, loader):
         phase_lf = _skill(loader, "always/09-phase-lifecycle.md")
@@ -936,4 +966,90 @@ class TestATDDT12VcsSkillTagRouting:
         _, meta = result
         assert "refresh_github_context" in (meta.get("tools") or [])
         assert "always/08-flow-engineering.md" in loader.get_tool_skills("refresh_github_context")
+
+
+class TestATDDVmer2450ThinkingLevelAndSkillCleanup:
+    """VMER-2450 Step 6 ATDD (T-18, T-19, T-20): 2-bucket thinking_level pinning,
+    dead template_vars / wait-protocol cleanup, and kargo tag deduplication."""
+
+    @staticmethod
+    def _llm_params_stub(loader):
+        from types import SimpleNamespace
+        from src.agents.brain import Brain
+
+        stub = SimpleNamespace(
+            _skill_loader=loader,
+            temperature=1.0,
+            max_output_tokens=65536,
+            provider="gemini",
+            model_name="gemini-4-neon",
+            _clamp_casual_thinking=Brain._clamp_casual_thinking,
+        )
+        stub._clamp_model_max_tokens = Brain._clamp_model_max_tokens.__get__(stub, SimpleNamespace)
+        stub._resolve_llm_params = Brain._resolve_llm_params.__get__(stub, SimpleNamespace)
+        return stub
+
+    def test_t18_all_12_phase_yamls_pin_thinking_level_high_and_65536_tokens(self, loader):
+        """T-18: All 12 src/agents/brain_skills/*/_phase.yaml files declare
+        thinking_level == 'high' and max_output_tokens == 65536, and Brain._resolve_llm_params
+        resolves 'high' for every operational phase."""
+        phase_yamls = sorted(SKILLS_DIR.glob("*/_phase.yaml"))
+        assert len(phase_yamls) == 12
+
+        stub = self._llm_params_stub(loader)
+        for yaml_path in phase_yamls:
+            phase = yaml_path.parent.name
+            meta = loader.get_phase_meta(phase)
+            assert meta is not None, f"Missing phase metadata for {phase}"
+            assert meta.get("thinking_level") == "high", (
+                f"{phase}/_phase.yaml expected thinking_level='high', got {meta.get('thinking_level')!r}"
+            )
+            assert meta.get("max_output_tokens") == 65536, (
+                f"{phase}/_phase.yaml expected max_output_tokens=65536, got {meta.get('max_output_tokens')!r}"
+            )
+            thinking, _, tokens = stub._resolve_llm_params(["always", phase], domain="complicated")
+            assert thinking == "high", f"Operational phase {phase} resolved thinking_level={thinking!r}"
+            assert tokens == 65536
+
+    @pytest.mark.parametrize("domain", ["CASUAL", "casual", " casual "])
+    @pytest.mark.parametrize("phases", [["always"], ["always", "close"], ["always", "waiting"], ["always", "coordination"]])
+    def test_t19_casual_domain_resolves_thinking_level_low(self, loader, domain, phases):
+        """T-19: CASUAL domain clamps thinking_level to 'low' via _resolve_llm_params / _clamp_casual_thinking."""
+        from src.agents.brain import Brain
+
+        stub = self._llm_params_stub(loader)
+        thinking, _, _ = stub._resolve_llm_params(phases, domain=domain)
+        assert thinking == "low"
+        assert Brain._clamp_casual_thinking("high", domain) == "low"
+
+    def test_t20_wait_protocol_has_no_mustache_template_and_references_event_state(self, loader):
+        """T-20: waiting/wait-protocol.md removes dead {{maintainer_emails}} literal and references <event_state>."""
+        raw_text = _skill_text("waiting", "wait-protocol.md")
+        body = _skill(loader, "waiting/wait-protocol.md")
+        assert "{{maintainer_emails}}" not in raw_text
+        assert "{{" not in raw_text, "Dead mustache template literal still present in waiting/wait-protocol.md"
+        assert "{{" not in body
+        assert "<event_state>" in raw_text
+
+    def test_t20_kargo_tag_deduped_exclusively_to_gated_kargo_environment(self, loader):
+        """T-20: find_paths_by_tag('kargo') returns ONLY ['gated/kargo-environment.md']
+        (duplicate kargo tag removed from always/11-subject-semantics.md)."""
+        assert loader.find_paths_by_tag("kargo") == ["gated/kargo-environment.md"]
+
+        subj = loader.get_with_meta("always/11-subject-semantics.md")
+        assert subj is not None
+        body, meta = subj
+        assert "kargo" not in (meta.get("tags") or [])
+        assert "ci_gating" in body
+
+    def test_t20_brain_build_system_prompt_has_no_dead_template_vars(self):
+        """T-20: src/agents/brain.py removes dead template_vars dict construction in _build_system_prompt."""
+        import inspect
+        from src.agents.brain import Brain
+
+        src = inspect.getsource(Brain._build_system_prompt)
+        assert "template_vars" not in src, (
+            "Dead template_vars construction still present in Brain._build_system_prompt"
+        )
+
 

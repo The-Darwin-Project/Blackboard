@@ -12,6 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, _resolve_phase, resolve_event_domain
+from .tool_gates import has_unevaluated_close_blocker
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -21,6 +22,12 @@ logger = logging.getLogger("darwin.brain")
 
 def can_transition_to_close(event_doc) -> tuple[bool, str | None]:
     """Return (allowed, rejection_reason) for transitioning event_doc to 'close'."""
+    if event_doc and has_unevaluated_close_blocker(event_doc.conversation or []):
+        return (
+            False,
+            "Cannot transition to 'close' while unevaluated user or JARVIS messages exist. "
+            "Evaluate and respond to them first.",
+        )
     domain = resolve_event_domain(event_doc)
     if domain in ("complicated", "complex"):
         has_verify = False
@@ -59,10 +66,12 @@ async def handle_set_phase(
         allowed, reject_msg = can_transition_to_close(event_doc)
         if not allowed:
             turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
-                actor="system",
-                action="error",
-                result=reject_msg,
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                waitingFor="set_phase",
+                thoughts=reject_msg,
+                response_parts=response_parts,
                 timestamp=time.time(),
             )
             await ctx.append_and_broadcast(event_id, turn)

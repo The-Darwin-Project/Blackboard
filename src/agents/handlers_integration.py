@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ..models import ConversationTurn
+from ..slack_gate import SlackAccessGate
 from ..utils import redact_pii
-from ..utils.maintainers import resolve_maintainer_emails
+from ..utils.maintainers import is_slack_recipient_allowed, resolve_maintainer_emails
 from ..utils.prompt_sanitize import sanitize_untrusted_line
 
 if TYPE_CHECKING:
@@ -50,44 +51,23 @@ def _resolve_maintainer_enum(event) -> list[str]:
 
 
 async def _resolve_slack_user(slack_channel, user_email: str, event_doc) -> str | None:
-    """Resolve user_email to a Slack user ID with maintainer fallback."""
-    if user_email.startswith("U") and user_email.isalnum():
-        return user_email
+    """Resolve an allowed user_email or Slack user ID to a Slack user ID (no cross-user fallback)."""
+    if not isinstance(user_email, str):
+        return None
+    target = user_email.strip()
+    if not target:
+        return None
+    if target.startswith("U") and target.isalnum():
+        return target
 
-    async def _lookup(email: str) -> str | None:
+    if "@" in target:
         try:
-            info = await slack_channel._app.client.users_lookupByEmail(email=email)
+            info = await slack_channel._app.client.users_lookupByEmail(email=target)
             return info["user"]["id"]
         except Exception as exc:
-            logger.debug("Slack user lookup failed for '%s': %s", email, exc)
+            logger.debug("Slack user lookup failed for '%s': %s", target, exc)
             return None
 
-    if "@" in user_email:
-        uid = await _lookup(user_email)
-        if uid:
-            return uid
-        logger.warning(
-            "notify_user_slack: '%s' not found in Slack, trying maintainer fallback",
-            user_email,
-        )
-
-    maintainer_emails = _resolve_maintainer_enum(event_doc) if event_doc else []
-    for fallback_email in maintainer_emails:
-        if "@" not in fallback_email:
-            continue
-        if fallback_email == user_email:
-            continue
-        uid = await _lookup(fallback_email)
-        if uid:
-            logger.info("notify_user_slack: resolved via maintainer fallback '%s'", fallback_email)
-            return uid
-
-    if event_doc and event_doc.slack_user_id:
-        logger.warning(
-            "notify_user_slack: all lookups failed, using event slack_user_id %s",
-            event_doc.slack_user_id,
-        )
-        return event_doc.slack_user_id
     return None
 
 
@@ -104,12 +84,102 @@ async def handle_notify_user_slack(
     if not slack_channel:
         result_text = "Slack integration not available. Cannot send notification."
         await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.3)])
-    elif not user_email or not message:
+    elif not isinstance(user_email, str) or not isinstance(message, str):
+        turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts="Invalid parameter type: user_email and message must be strings.",
+            waitingFor="notify_user_slack",
+            response_parts=response_parts if _THOUGHT_SIG_V2 else None,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.0)])
+        return True
+    elif not user_email.strip() or not message.strip():
         result_text = "Missing user_email or message parameter."
         await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.3)])
     else:
         try:
+            user_email = user_email.strip()
             event_doc = await bb.get_event(event_id)
+            allowed, allowed_list = is_slack_recipient_allowed(user_email, event_doc)
+            if not allowed:
+                if event_doc is None:
+                    deny_text = (
+                        f"Cannot notify '{user_email}': event '{event_id}' not found "
+                        "(fail-closed allowlist check)."
+                    )
+                elif allowed_list:
+                    deny_text = (
+                        f"Recipient '{user_email}' is not allowed for this event. "
+                        f"Allowed recipients: {', '.join(allowed_list)}."
+                    )
+                else:
+                    deny_text = (
+                        f"Recipient '{user_email}' denied: allowlist is empty for this event."
+                    )
+                logger.warning(
+                    "notify_user_slack denied for event=%s recipient=%r allowed=%s",
+                    event_id, user_email, allowed_list,
+                )
+                turn = ConversationTurn(
+                    turn=0,
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=deny_text,
+                    waitingFor="notify_user_slack",
+                    response_parts=response_parts if _THOUGHT_SIG_V2 else None,
+                )
+                await ctx.append_and_broadcast(event_id, turn)
+                await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.0)])
+                return True
+
+            gate = getattr(slack_channel, "_access_gate", None)
+            if isinstance(gate, SlackAccessGate):
+                deny_text = None
+                if "@" in user_email:
+                    if not gate.check(user_email):
+                        deny_text = (
+                            f"Recipient '{user_email}' denied by Slack access gate "
+                            "(not an authorized group member or maintainer)."
+                        )
+                else:
+                    if event_doc is not None and user_email == getattr(event_doc, "slack_user_id", None):
+                        pass
+                    else:
+                        try:
+                            resp = await slack_channel._app.client.users_info(user=user_email)
+                            user_obj = resp.get("user")
+                            profile_obj = user_obj.get("profile") if user_obj else None
+                            resolved_email = profile_obj.get("email") if profile_obj else None
+                            if not resolved_email or not gate.check(resolved_email):
+                                deny_text = (
+                                    f"Recipient '{user_email}' denied by Slack access gate "
+                                    "(not an authorized group member or maintainer)."
+                                )
+                        except Exception:
+                            deny_text = (
+                                f"Recipient '{user_email}' denied by Slack access gate "
+                                "(could not resolve email)."
+                            )
+                if deny_text:
+                    logger.warning(
+                        "notify_user_slack denied by SlackAccessGate for event=%s",
+                        event_id,
+                    )
+                    turn = ConversationTurn(
+                        turn=0,
+                        actor="brain",
+                        action="tool_result",
+                        thoughts=deny_text,
+                        waitingFor="notify_user_slack",
+                        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
+                    )
+                    await ctx.append_and_broadcast(event_id, turn)
+                    await ctx.emit_pulse(event_id, [("tool:notify_user_slack", "tool", 0.0)])
+                    return True
+
             slack_user_id = await _resolve_slack_user(slack_channel, user_email, event_doc)
             if not slack_user_id:
                 result_text = f"Could not resolve Slack user for '{user_email}'. No valid maintainer found."

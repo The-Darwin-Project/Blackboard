@@ -19,8 +19,15 @@ remain highest priority.
 from __future__ import annotations
 
 import os
+import re
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from ..models import EventDocument
 
 _CONTEXT_ATTRS = ("gitlab_context", "github_context", "github_issue_context", "ci_context")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+_SLACK_MENTION_RE = re.compile(r"<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>")
 
 
 def maintainer_env_key(subject_type: str | None) -> str:
@@ -28,31 +35,134 @@ def maintainer_env_key(subject_type: str | None) -> str:
     return "JENKINS_OBSERVER_MAINTAINERS" if subject_type == "ci_gating" else "HEADHUNTER_MAINTAINERS"
 
 
-def resolve_maintainer_emails(event, *, prefer_slack_user: bool = False) -> list[str]:
-    """Extract a deduplicated list of maintainer emails from event evidence + static config."""
+def _dedupe(items: list[str], *, case_insensitive_emails: bool = False) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        key = item.lower() if (case_insensitive_emails and "@" in item) else item
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result
+
+
+def _extract_evidence_maintainer_emails(event) -> list[str]:
+    """Extract cleaned maintainer emails from the highest-priority evidence context dict."""
     emails: list[str] = []
     evidence = getattr(getattr(event, "event", None), "evidence", None)
     if evidence:
         for attr in _CONTEXT_ATTRS:
             if emails:
                 break
-            ctx = getattr(evidence, attr, None) or {}
+            ctx = getattr(evidence, attr, None)
             if isinstance(ctx, dict):
-                emails.extend(ctx.get("maintainer", {}).get("emails", []))
-    slack_user_id = getattr(event, "slack_user_id", None) if event else None
+                m = ctx.get("maintainer")
+                raw_emails = m.get("emails") if isinstance(m, dict) else []
+                raw_list = raw_emails if isinstance(raw_emails, (list, tuple, set)) else []
+                emails.extend(e.strip() for e in raw_list if isinstance(e, str) and e.strip())
+    return emails
+
+
+def _resolve_static_env_emails(event) -> list[str]:
+    subject_type = getattr(event, "subject_type", None) if event is not None else None
+    static = os.getenv(maintainer_env_key(subject_type), "")
+    return [e.strip() for e in static.split(",") if e.strip()]
+
+
+def _resolve_evidence_env_maintainer_emails(event) -> list[str]:
+    """Extract deduplicated maintainer emails from event evidence + static env fallback."""
+    emails = _extract_evidence_maintainer_emails(event)
+    if not emails:
+        emails = _resolve_static_env_emails(event)
+    return _dedupe(emails)
+
+
+def resolve_maintainer_emails(event, *, prefer_slack_user: bool = False) -> list[str]:
+    """Extract a deduplicated list of maintainer emails from event evidence + static config."""
+    emails = _extract_evidence_maintainer_emails(event)
+    raw_slack_uid = getattr(event, "slack_user_id", None) if event else None
+    slack_user_id = raw_slack_uid.strip() if isinstance(raw_slack_uid, str) and raw_slack_uid.strip() else None
     if prefer_slack_user:
         if slack_user_id:
             emails.append(slack_user_id)
         if not emails:
-            subject_type = getattr(event, "subject_type", None)
-            static = os.getenv(maintainer_env_key(subject_type), "")
-            emails = [e.strip() for e in static.split(",") if e.strip()]
+            emails = _resolve_static_env_emails(event)
     else:
         if not emails:
-            subject_type = getattr(event, "subject_type", None)
-            static = os.getenv(maintainer_env_key(subject_type), "")
-            emails = [e.strip() for e in static.split(",") if e.strip()]
+            emails = _resolve_static_env_emails(event)
         if slack_user_id:
             emails.append(slack_user_id)
-    seen: set[str] = set()
-    return [e for e in emails if e and e not in seen and not seen.add(e)]
+    return _dedupe(emails)
+
+
+def is_slack_recipient_allowed(
+    user_email: str, event_doc: Optional[EventDocument],
+) -> tuple[bool, list[str]]:
+    """Fail-closed allowlist check for notify_user_slack recipients.
+
+    - Missing event or non-str/blank target: fail closed.
+    - Automated + 'jarvis' sources (source not in ('chat', 'slack')): strict case-insensitive
+      email match solely against evidence+env maintainer emails; raw U... IDs rejected.
+    - Authenticated human sources ('chat', 'slack'): allows created_by_email, slack_user_id,
+      evidence+env maintainer emails, authenticated actor=='user' turn.user_email, plus
+      same-domain emails and framed <@U...> mentions from actor=='user' turn.thoughts/result.
+    """
+    if event_doc is None:
+        return False, []
+    if not isinstance(user_email, str) or not user_email.strip():
+        return False, []
+
+    target = user_email.strip()
+    source = getattr(event_doc, "source", None)
+
+    if source not in ("chat", "slack"):
+        allowlist = _dedupe(
+            [e for e in _resolve_evidence_env_maintainer_emails(event_doc) if "@" in e],
+            case_insensitive_emails=True,
+        )
+        if not allowlist or "@" not in target:
+            return False, allowlist
+        allowed_lower = {e.lower() for e in allowlist}
+        return target.lower() in allowed_lower, allowlist
+
+    candidates: list[str] = []
+    created_by = getattr(event_doc, "created_by_email", None)
+    if isinstance(created_by, str) and created_by.strip():
+        candidates.append(created_by.strip())
+    slack_uid = getattr(event_doc, "slack_user_id", None)
+    if isinstance(slack_uid, str) and slack_uid.strip():
+        candidates.append(slack_uid.strip())
+    candidates.extend(_resolve_evidence_env_maintainer_emails(event_doc))
+
+    allowed_domains: set[str] = set()
+    env_domain = os.getenv("SLACK_ACCESS_EMAIL_DOMAIN", "").strip().lstrip("@").lower()
+    if env_domain:
+        allowed_domains.add(env_domain)
+    if isinstance(created_by, str) and "@" in created_by.strip():
+        allowed_domains.add(created_by.strip().rsplit("@", 1)[1].lower())
+
+    for turn in getattr(event_doc, "conversation", None) or []:
+        actor = turn.get("actor") if isinstance(turn, dict) else getattr(turn, "actor", None)
+        if actor != "user":
+            continue
+        t_email = turn.get("user_email") if isinstance(turn, dict) else getattr(turn, "user_email", None)
+        if isinstance(t_email, str) and t_email.strip():
+            candidates.append(t_email.strip())
+        for field in ("thoughts", "result"):
+            text = turn.get(field) if isinstance(turn, dict) else getattr(turn, field, None)
+            if not isinstance(text, str) or not text:
+                continue
+            if allowed_domains:
+                for email_match in _EMAIL_RE.findall(text):
+                    if email_match.rsplit("@", 1)[1].lower() in allowed_domains:
+                        candidates.append(email_match)
+            candidates.extend(_SLACK_MENTION_RE.findall(text))
+
+    allowlist = _dedupe(candidates, case_insensitive_emails=True)
+    if "@" in target:
+        allowed_emails_lower = {e.lower() for e in allowlist if "@" in e}
+        return target.lower() in allowed_emails_lower, allowlist
+    allowed_uids = {u for u in allowlist if "@" not in u}
+    return target in allowed_uids, allowlist

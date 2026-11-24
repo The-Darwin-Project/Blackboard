@@ -1043,3 +1043,82 @@ class TestReplayInjectionSelector:
         loader = BrainSkillLoader(str(tmp_path))
         target = self._find_target([], loader)
         assert target is None
+
+
+# =========================================================================
+# VMER-2450 Step 7 ATDD (T-21): FS-Fallback Generated phase-tool-map Parity
+# =========================================================================
+
+
+class TestFSGeneratedPhaseToolMap:
+    """T-21: BrainSkillLoader(include_generated_map=True) synthesizes always/phase-tool-map.md
+    on FS fallback byte-identically to generate_phase_tool_map(), sorted identically to
+    discover_from_redis, populating path_index/tag_index before _build_tool_map()."""
+
+    def test_default_include_generated_map_false_preserves_existing_behavior(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"00-identity.md": "# Identity", "zz-last.md": "# Last"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_with_meta("always/phase-tool-map.md") is None
+        assert loader.get_all_paths_for_phase("always") == [
+            "always/00-identity.md",
+            "always/zz-last.md",
+        ]
+
+    def test_include_generated_map_true_synthesizes_byte_identical_sorted_map_and_indexes(
+        self, tmp_path: Path,
+    ):
+        from src.skill_reconciler.generate_map import CORPUS_KEY, generate_phase_tool_map
+
+        _make_skills(tmp_path, {
+            "always": {"00-identity.md": "# Identity", "zz-last.md": "# Last"},
+        })
+        loader = BrainSkillLoader(str(tmp_path), include_generated_map=True)
+
+        expected_key, raw_json = generate_phase_tool_map()
+        expected_payload = json.loads(raw_json)
+        expected_body = expected_payload["body"]
+        expected_fm = expected_payload["frontmatter"]
+
+        assert expected_key == "always/phase-tool-map.md"
+        loaded = loader.get_with_meta(CORPUS_KEY)
+        assert loaded is not None, "Expected always/phase-tool-map.md to be generated on FS fallback"
+        body, meta = loaded
+        assert body == expected_body, "Generated body must be byte-identical to generate_phase_tool_map()"
+        assert meta == expected_fm, "Generated frontmatter must match generate_phase_tool_map()"
+
+        # Canonical sorted ordering inside cache["always"] (matches discover_from_redis)
+        always_paths = loader.get_all_paths_for_phase("always")
+        assert always_paths == [
+            "always/00-identity.md",
+            "always/phase-tool-map.md",
+            "always/zz-last.md",
+        ]
+        assert always_paths == sorted(always_paths)
+
+        # tag_index populated (e.g. "ooda" tag from _FRONTMATTER)
+        assert CORPUS_KEY in loader.find_paths_by_tag("ooda")
+
+        # tool_skill_map built AFTER path_index includes generated map
+        for declared_tool in expected_fm.get("tools", []):
+            assert CORPUS_KEY in loader.get_tool_skills(declared_tool), (
+                f"tool_skill_map missing {CORPUS_KEY} for declared tool {declared_tool!r}"
+            )
+
+        # tag_type respects frontmatter override ("navigation")
+        assert loader.get_tag_type(CORPUS_KEY) == "navigation"
+
+    def test_include_generated_map_true_does_not_duplicate_existing_disk_map(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "00-identity.md": "# Identity",
+                "phase-tool-map.md": "---\ntag_type: navigation\n---\n# Custom Disk Map",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path), include_generated_map=True)
+        paths = loader.get_all_paths_for_phase("always")
+        assert paths.count("always/phase-tool-map.md") == 1
+        body, _ = loader.get_with_meta("always/phase-tool-map.md")
+        assert "# Custom Disk Map" in body
+

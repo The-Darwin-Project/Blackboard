@@ -44,3 +44,25 @@ docs/*Review*.md
 docs/events/**
 docs/evt-*.md
 gemini-sidecar/REFACTOR-DOC.md
+
+# Non-architectural examples, inventories, permission matrices, and community files
+docs/*-example.md
+docs/DOCS-INVENTORY-PRE-OVERHAUL.md
+gemini-sidecar/claude-settings/**
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+
+# Non-architectural guides & repo metadata
+README.md
+ui/README.md
+docs/README.md
+docs/jira-missions-user-guide.md
+docs/Darwin-Release-Console-Integration-Contract.md
+docs/ai-review.md
+docker-compose.yml
+requirements.txt
+requirements-dev.txt
+ui/index.html
+.github/**

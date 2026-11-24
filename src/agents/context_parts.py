@@ -297,6 +297,25 @@ def estimate_tokens(contents: list[dict]) -> int:
 PRUNE_NOTICE_PREFIX = "[Context pruned:"
 _PRUNE_NOTICE_COUNT_RE = re.compile(r"\[Context pruned: (\d{1,9}) earlier conversation entries")
 _DECAY_REF_TAG = "<blackboard_evidence_reference"
+_SKILL_OVERLAY_SENTINEL = "<skill_overlay"
+_EVENT_STATE_SENTINEL = "<event_state>"
+
+
+def _is_skill_overlay_part(part: dict) -> bool:
+    """True when ``part`` is a synthetic <skill_overlay> part."""
+    text = part.get("text") if isinstance(part, dict) else None
+    return isinstance(text, str) and text.lstrip().startswith(_SKILL_OVERLAY_SENTINEL)
+
+
+def _is_event_state_msg(msg: dict) -> bool:
+    """True when ``msg`` begins with the dedicated fenced <event_state> tail."""
+    parts = msg.get("parts") or []
+    return bool(
+        parts
+        and isinstance(parts[0], dict)
+        and isinstance(parts[0].get("text"), str)
+        and parts[0]["text"].lstrip().startswith(_EVENT_STATE_SENTINEL)
+    )
 
 
 def format_prune_notice(count: int) -> dict:
@@ -343,13 +362,86 @@ def contents_have_pruned_or_decayed(contents: list[dict]) -> bool:
     return False
 
 
+def _compress_single_msg_parts(
+    msg: dict,
+    *,
+    has_trailing_action_part: bool,
+    extra_reserved_chars: int,
+    resolved_max: int,
+    resolved_tail: int,
+    active_overlay: str | None,
+) -> tuple[dict | None, int]:
+    """Prune conversation parts folded into a single user message.
+
+    Shared by len(contents) == 1 (action prompt in parts[-1]) and len(contents) == 2
+    when all turns merged into Message 0 ahead of a standalone trailing <event_state>.
+    Returns (new_msg, newly_pruned) or (None, 0) when nothing was pruned.
+    """
+    parts = list(msg.get("parts", []))
+    min_parts = 3 if has_trailing_action_part else 2
+    if len(parts) <= min_parts:
+        return None, 0
+    if any("functionCall" in p or "functionResponse" in p for p in parts):
+        return None, 0
+
+    header_len = 2 if len(parts) > 2 and "--- CONVERSATION ---" in str(parts[1].get("text", "")) else 1
+    header_parts = list(parts[:header_len])
+    action_parts = parts[-1:] if has_trailing_action_part else []
+    conv_slice = parts[header_len:-1] if has_trailing_action_part else parts[header_len:]
+
+    conv_parts: list[dict] = []
+    prior_pruned = 0
+    for cp in conv_slice:
+        prior_count = prune_notice_count(cp)
+        if prior_count is None:
+            conv_parts.append(cp)
+        else:
+            prior_pruned += prior_count
+    if not conv_parts:
+        return None, 0
+
+    tail_budget_chars = min(resolved_tail, resolved_max) * 4
+    running_chars = extra_reserved_chars + sum(len(str(p.get("text", ""))) for p in header_parts + action_parts)
+    kept_parts: list[dict] = []
+    for p in reversed(conv_parts):
+        p_chars = len(str(p.get("text", "")))
+        if running_chars + p_chars > tail_budget_chars and kept_parts:
+            break
+        kept_parts.append(p)
+        running_chars += p_chars
+    kept_parts.reverse()
+
+    if len(kept_parts) < len(conv_parts):
+        newly_pruned = len(conv_parts) - len(kept_parts)
+        pruned_count = prior_pruned + newly_pruned
+        if active_overlay:
+            header_parts = [p for p in header_parts if not _is_skill_overlay_part(p)]
+            kept_parts = [p for p in kept_parts if not _is_skill_overlay_part(p)]
+            overlay_parts = [{"text": active_overlay}]
+        else:
+            overlay_parts = []
+        new_msg = dict(msg)
+        new_msg["parts"] = (
+            header_parts
+            + [format_prune_notice(pruned_count)]
+            + overlay_parts
+            + kept_parts
+            + action_parts
+        )
+        return new_msg, newly_pruned
+    return None, 0
+
+
 def compress_contents(
     contents: list[dict],
     max_tokens: int | None = None,
     tail_budget: int | None = None,
-) -> list[dict]:
+    active_overlay: str | None = None,
+) -> tuple[list[dict], int]:
     """Tail-keep prune: drop oldest conversation turns when over budget.
 
+    Returns ``(compressed_contents, newly_pruned)`` where ``newly_pruned`` is the
+    per-call count of entries dropped on this call (exclusive of ``prior_pruned``).
     First message (event context header) always kept intact.
     No truncation of individual turns — full fidelity until prune threshold.
     When over budget: keep header + last ~tail_budget tokens of conversation from the end.
@@ -359,48 +451,20 @@ def compress_contents(
     resolved_tail = _TAIL_BUDGET if tail_budget is None else tail_budget
 
     if not contents or estimate_tokens(contents) < resolved_max:
-        return contents
+        return contents, 0
 
     if len(contents) == 1:
-        last_msg = dict(contents[0])
-        parts = list(last_msg.get("parts", []))
-        if len(parts) <= 3:
-            return contents
-        if any("functionCall" in p or "functionResponse" in p for p in parts):
-            return contents
-
-        header_len = 2 if len(parts) > 2 and "--- CONVERSATION ---" in str(parts[1].get("text", "")) else 1
-        header_parts = parts[:header_len]
-        action_parts = parts[-1:]
-        # Notices from an earlier pass are lifted out (and their counts carried) so they are never
-        # pruned/kept as ordinary conversation parts and never stack with the new one.
-        conv_parts = []
-        prior_pruned = 0
-        for cp in parts[header_len:-1]:
-            prior_count = prune_notice_count(cp)
-            if prior_count is None:
-                conv_parts.append(cp)
-            else:
-                prior_pruned += prior_count
-        if not conv_parts:
-            return contents
-
-        tail_budget_chars = min(resolved_tail, resolved_max) * 4
-        running_chars = sum(len(str(p.get("text", ""))) for p in header_parts + action_parts)
-        kept_parts = []
-        for p in reversed(conv_parts):
-            p_chars = len(str(p.get("text", "")))
-            if running_chars + p_chars > tail_budget_chars and kept_parts:
-                break
-            kept_parts.append(p)
-            running_chars += p_chars
-        kept_parts.reverse()
-
-        if len(kept_parts) < len(conv_parts):
-            pruned_count = prior_pruned + len(conv_parts) - len(kept_parts)
-            last_msg["parts"] = header_parts + [format_prune_notice(pruned_count)] + kept_parts + action_parts
-            return [last_msg]
-        return contents
+        pruned_msg, newly_pruned = _compress_single_msg_parts(
+            contents[0],
+            has_trailing_action_part=True,
+            extra_reserved_chars=0,
+            resolved_max=resolved_max,
+            resolved_tail=resolved_tail,
+            active_overlay=active_overlay,
+        )
+        if pruned_msg is not None:
+            return [pruned_msg], newly_pruned
+        return contents, 0
 
     context_msg = dict(contents[0])
     # Lift prune notices left by an earlier pass out of Message 0 (idempotence): their counts merge into
@@ -419,19 +483,36 @@ def compress_contents(
     context_msg["parts"] = header_parts
     conv_msgs = list(contents[1:])
 
-    # Trailing standalone prompt protection:
+    # Structural trailing <event_state> / standalone prompt protection:
     trailing_prompt_msg = None
+    trailing_is_event_state = False
     if (
-        len(conv_msgs) >= 2
+        len(conv_msgs) >= 1
         and conv_msgs[-1].get("role") == "user"
         and not any("functionResponse" in p for p in conv_msgs[-1].get("parts", []))
         and (
-            conv_msgs[-2].get("role") == "user"
-            or (estimate_msg_tokens(conv_msgs[-1]) // 4) <= 250
+            _is_event_state_msg(conv_msgs[-1])
+            or (len(conv_msgs) >= 2 and conv_msgs[-2].get("role") == "user")
         )
     ):
+        trailing_is_event_state = _is_event_state_msg(conv_msgs[-1])
         trailing_prompt_msg = {"role": "user", "parts": list(conv_msgs[-1].get("parts", []))}
         conv_msgs = conv_msgs[:-1]
+
+    # When all conversation turns had role=='user' and merged into Message 0 ahead of a dedicated
+    # trailing <event_state> message, conv_msgs is empty: compress Message 0's folded conversation parts.
+    if not conv_msgs and trailing_prompt_msg is not None:
+        pruned_msg, newly_pruned = _compress_single_msg_parts(
+            contents[0],
+            has_trailing_action_part=False,
+            extra_reserved_chars=estimate_msg_tokens(trailing_prompt_msg),
+            resolved_max=resolved_max,
+            resolved_tail=resolved_tail,
+            active_overlay=active_overlay,
+        )
+        if pruned_msg is not None:
+            return [pruned_msg, trailing_prompt_msg], newly_pruned
+        return contents, 0
 
     header_tokens = estimate_msg_tokens(context_msg) // 4
     trailing_tokens = (estimate_msg_tokens(trailing_prompt_msg) // 4) if trailing_prompt_msg else 0
@@ -455,6 +536,8 @@ def compress_contents(
                 pair_buddy[i] = i + 1
                 pair_buddy[i + 1] = i
 
+    msg_token_counts = [estimate_msg_tokens(m) // 4 for m in conv_msgs]
+
     kept_indices: list[int] = []
     kept_set: set[int] = set()
     running_tokens = 0
@@ -463,12 +546,12 @@ def compress_contents(
         if rev_idx in kept_set:
             continue
         msg = conv_msgs[rev_idx]
-        msg_tokens = estimate_msg_tokens(msg) // 4
+        msg_tokens = msg_token_counts[rev_idx]
 
         buddy_idx = pair_buddy.get(rev_idx)
         pair_tokens = msg_tokens
         if buddy_idx is not None and buddy_idx not in kept_set:
-            pair_tokens += estimate_msg_tokens(conv_msgs[buddy_idx]) // 4
+            pair_tokens += msg_token_counts[buddy_idx]
 
         if running_tokens + pair_tokens > effective_tail and kept_indices:
             break
@@ -479,10 +562,11 @@ def compress_contents(
         if buddy_idx is not None and buddy_idx not in kept_set:
             kept_indices.append(buddy_idx)
             kept_set.add(buddy_idx)
-            running_tokens += estimate_msg_tokens(conv_msgs[buddy_idx]) // 4
+            running_tokens += msg_token_counts[buddy_idx]
 
     kept_indices.sort()
-    kept = [conv_msgs[i] for i in kept_indices]
+    import collections
+    kept = collections.deque(conv_msgs[i] for i in kept_indices)
 
     newly_pruned = len(conv_msgs) - len(kept)
     notice_pos = len(context_msg["parts"]) if notice_at is None else notice_at
@@ -491,25 +575,56 @@ def compress_contents(
         # Guarantee [context_msg] + kept never has consecutive user messages or orphaned FR
         while kept and kept[0].get("role") == "user":
             if any("functionResponse" in p for p in kept[0].get("parts", [])):
-                kept.pop(0)
+                kept.popleft()
                 newly_pruned += 1  # dropped orphan FR is pruned too: keep the notice count honest
             else:
-                context_msg["parts"].extend(kept.pop(0).get("parts", []))
+                context_msg["parts"].extend(kept.popleft().get("parts", []))
+    
+    kept = list(kept)
+
+    if newly_pruned and active_overlay:
+        # Strip stale <skill_overlay> parts from BOTH header_parts and kept without mutating caller dicts.
+        new_header: list[dict] = []
+        adjusted_notice_pos = notice_pos
+        for hi, hp in enumerate(context_msg["parts"]):
+            if _is_skill_overlay_part(hp):
+                if hi < notice_pos:
+                    adjusted_notice_pos -= 1
+            else:
+                new_header.append(hp)
+        context_msg["parts"] = new_header
+        notice_pos = max(0, min(adjusted_notice_pos, len(context_msg["parts"])))
+
+        cleaned_kept: list[dict] = []
+        for km in kept:
+            kparts = km.get("parts", [])
+            if any(_is_skill_overlay_part(p) for p in kparts):
+                filtered = [p for p in kparts if not _is_skill_overlay_part(p)]
+                if filtered:
+                    copied = dict(km)
+                    copied["parts"] = filtered
+                    cleaned_kept.append(copied)
+            else:
+                cleaned_kept.append(km)
+        kept = cleaned_kept
 
     total_pruned = prior_pruned + newly_pruned
     if total_pruned:
         context_msg["parts"].insert(notice_pos, format_prune_notice(total_pruned))
+        if newly_pruned and active_overlay:
+            context_msg["parts"].insert(notice_pos + 1, {"text": active_overlay})
 
     result = [context_msg] + kept
     if trailing_prompt_msg:
-        if result and result[-1].get("role") == "user":
+        last_has_fr = bool(result and any("functionResponse" in p for p in result[-1].get("parts", [])))
+        if result and result[-1].get("role") == "user" and not last_has_fr and not trailing_is_event_state:
             merged_last = dict(result[-1])
             merged_last["parts"] = list(result[-1].get("parts", [])) + list(trailing_prompt_msg.get("parts", []))
             result[-1] = merged_last
         else:
             result.append(trailing_prompt_msg)
 
-    return result
+    return result, newly_pruned
 
 
 def normalize_response_parts(raw_parts: list) -> list[dict]:

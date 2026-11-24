@@ -259,6 +259,20 @@ async def lifespan(app: FastAPI):
             headhunter_close_signal = asyncio.Event()
             brain.set_headhunter_close_signal(headhunter_close_signal)
 
+        # Lock Jira incident enum options into BRAIN_TOOL_SCHEMAS BEFORE Brain starts
+        # its event loop so Brain's first cached wire_tools includes configured enums.
+        from .agents.llm.types import set_incident_options
+        incident_options: dict[str, list[str]] = {}
+        for env_key, opt_key in (
+            ("JIRA_INCIDENT_PLATFORMS", "platforms"),
+            ("JIRA_INCIDENT_PRIORITIES", "priorities"),
+            ("JIRA_INCIDENT_STATUSES", "statuses"),
+        ):
+            raw = os.getenv(env_key, "")
+            if raw:
+                incident_options[opt_key] = [v.strip() for v in raw.split(",") if v.strip()]
+        set_incident_options(incident_options)
+
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
         logger.info("Brain event loop started - WebSocket conversation queue active")
@@ -424,18 +438,6 @@ async def lifespan(app: FastAPI):
             logger.info("JiraIncidentAdapter initialized (project=%s)", jira_project)
         else:
             logger.info("JiraIncidentAdapter not configured (missing JIRA_URL/EMAIL/TOKEN/PROJECT_KEY)")
-
-        from .agents.llm.types import set_incident_options
-        incident_options: dict[str, list[str]] = {}
-        for env_key, opt_key in (
-            ("JIRA_INCIDENT_PLATFORMS", "platforms"),
-            ("JIRA_INCIDENT_PRIORITIES", "priorities"),
-            ("JIRA_INCIDENT_STATUSES", "statuses"),
-        ):
-            raw = os.getenv(env_key, "")
-            if raw:
-                incident_options[opt_key] = [v.strip() for v in raw.split(",") if v.strip()]
-        set_incident_options(incident_options)
 
         brain._incident_adapter = incident_adapter
         app.state.incident_adapter = incident_adapter
@@ -710,6 +712,17 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     except Exception:
         pass
 
+    token_input_60s = latest.token_input_delta if latest else 0
+    token_cached_60s = latest.token_cached_delta if latest else 0
+    brain_input_60s = latest.brain_token_input_delta if latest else 0
+    brain_cached_60s = latest.brain_token_cached_delta if latest else 0
+    cache_hit_rate_pct = (
+        round(token_cached_60s / token_input_60s * 100, 1) if token_input_60s > 0 else 0.0
+    )
+    brain_cache_hit_rate_pct = (
+        round(brain_cached_60s / brain_input_60s * 100, 1) if brain_input_60s > 0 else 0.0
+    )
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
@@ -731,6 +744,10 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
         token_total_60s=latest.token_total_delta if latest else 0,
         token_calls_60s=latest.token_calls_delta if latest else 0,
+        token_input_60s=token_input_60s,
+        token_cached_60s=token_cached_60s,
+        cache_hit_rate_pct=cache_hit_rate_pct,
+        brain_cache_hit_rate_pct=brain_cache_hit_rate_pct,
         snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,
         staleness_guards=staleness_guards,

@@ -1220,6 +1220,7 @@ return 1
                 f"{self.EVENT_PREFIX}{event.id}",
                 json.dumps(event.model_dump()),
             )
+            pipe.delete(f"{self.EVENT_PREFIX}{event.id}:anchor")
             pipe.sadd(self.EVENT_ACTIVE, event.id)
             pipe.lpush(self.EVENT_QUEUE, event.id)
             await pipe.execute()
@@ -1270,6 +1271,48 @@ return 1
                     continue
         logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
         return turn.turn
+
+    async def append_turns(
+        self,
+        event_id: str,
+        turns: list[ConversationTurn],
+        *,
+        max_retries: int = _WATCH_MAX_RETRIES
+    ) -> list[int]:
+        """Append multiple conversation turns to an event document atomically."""
+        if not turns:
+            return []
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            retries = 0
+            while retries < max_retries:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for append_turns")
+                        await pipe.unwatch()
+                        return []
+                    event = EventDocument(**json.loads(data))
+                    start_turn = len(event.conversation) + 1
+                    assigned = []
+                    for i, t in enumerate(turns):
+                        t.turn = start_turn + i
+                        assigned.append(t.turn)
+                        event.conversation.append(t)
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    if event.slack_channel_id and event.slack_thread_ts:
+                        slack_key = f"{self.SLACK_THREAD_PREFIX}{event.slack_channel_id}:{event.slack_thread_ts}"
+                        pipe.expire(slack_key, self.SLACK_MAPPING_TTL)
+                    await pipe.execute()
+                    logger.debug(f"Appended {len(turns)} turns ({assigned[0]}..{assigned[-1]}) to event {event_id}")
+                    return assigned
+                except WatchError:
+                    retries += 1
+                    continue
+            logger.error(f"Failed to append_turns to {event_id} after {max_retries} retries")
+            raise RuntimeError("WATCH_MAX_RETRIES exceeded in append_turns")
 
     async def mark_turns_delivered(
         self,
@@ -1719,6 +1762,8 @@ return 1
                 token_tool_use_delta=sum(s.token_tool_use_delta for s in group),
                 token_total_delta=sum(s.token_total_delta for s in group),
                 token_calls_delta=sum(s.token_calls_delta for s in group),
+                brain_token_input_delta=sum(s.brain_token_input_delta for s in group),
+                brain_token_cached_delta=sum(s.brain_token_cached_delta for s in group),
                 # Cumulative counters: max()
                 dispatch_total=max(s.dispatch_total for s in group),
                 dispatch_infra_fails=max(s.dispatch_infra_fails for s in group),
@@ -2469,11 +2514,64 @@ return 1
                     pipe.srem(self.EVENT_ACTIVE, event_id)
                     pipe.srem(self.EVENT_WAITING_APPROVAL, event_id)
                     pipe.zadd(self.EVENT_CLOSED, {event_id: time.time()})
+                    pipe.delete(f"{self.EVENT_PREFIX}{event_id}:anchor")
                     await pipe.execute()
                     break
                 except WatchError:
                     continue
         logger.info(f"Closed event: {event_id}")
+
+    # =========================================================================
+    # Frozen Turn-0 Event Anchor (write-once Redis SSOT for context caching)
+    # =========================================================================
+
+    EVENT_ANCHOR_TTL_SECONDS = 2592000  # 30d sliding TTL
+
+    async def get_event_anchor(self, event_id: str) -> dict | None:
+        """Read frozen Turn-0 anchor payload from companion key and refresh sliding 30d TTL."""
+        key = f"{self.EVENT_PREFIX}{event_id}:anchor"
+        raw = None
+        if hasattr(self.redis, "getex"):
+            try:
+                raw = await self.redis.getex(key, ex=self.EVENT_ANCHOR_TTL_SECONDS)
+                if raw is not None and not isinstance(raw, (bytes, bytearray, str)):
+                    # Unconfigured AsyncMock fallback
+                    raw = await self.redis.get(key)
+                    if raw is not None:
+                        await self.redis.expire(key, self.EVENT_ANCHOR_TTL_SECONDS)
+            except (AttributeError, NotImplementedError):
+                raw = await self.redis.get(key)
+                if raw is not None:
+                    await self.redis.expire(key, self.EVENT_ANCHOR_TTL_SECONDS)
+        else:
+            raw = await self.redis.get(key)
+            if raw is not None:
+                await self.redis.expire(key, self.EVENT_ANCHOR_TTL_SECONDS)
+
+        if not raw:
+            return None
+
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            logger.warning("Corrupt anchor JSON for %s; ignoring", event_id)
+            return None
+
+        if not isinstance(parsed, dict):
+            logger.warning("Corrupt anchor JSON for %s; ignoring", event_id)
+            return None
+
+        return parsed
+
+    async def set_event_anchor_nx(
+        self, event_id: str, payload: dict, ttl_sec: int = 2592000,
+    ) -> bool:
+        """Write-once SET NX EX for frozen Turn-0 anchor companion key."""
+        key = f"{self.EVENT_PREFIX}{event_id}:anchor"
+        ttl = max(1, int(ttl_sec))
+        ok = await self.redis.set(key, json.dumps(payload), nx=True, ex=ttl)
+        return bool(ok)
 
     # =========================================================================
     # Approval Parking (park/resume for events awaiting human authorization)
