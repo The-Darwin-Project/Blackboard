@@ -347,8 +347,10 @@ from ..utils.prompt_sanitize import (
     sanitize_untrusted_block,
     sanitize_untrusted_line,
     strip_xml_fences,
+    sanitize_kargo_id,
 )
 from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE, decay_cutoff_index
+from ..utils.vcs_approval import is_stale_verification_gitlab_mirror
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 from .event_state_tail import format_event_state_tail
@@ -2209,13 +2211,14 @@ class Brain:
         if not (event.event and event.event.evidence):
             return None
         ev = event.event.evidence
+        stale_mirror = is_stale_verification_gitlab_mirror(event)
         url = None
         gl = getattr(ev, "gitlab_context", None)
-        if isinstance(gl, dict) and gl.get("target_url"):
+        if not stale_mirror and isinstance(gl, dict) and gl.get("target_url"):
             url = gl["target_url"]
         if not url:
             kc = getattr(ev, "kargo_context", None)
-            if isinstance(kc, dict) and kc.get("mr_url"):
+            if not stale_mirror and isinstance(kc, dict) and kc.get("mr_url") and kc.get("failure_type") != "verification":
                 url = kc["mr_url"]
         if not url:
             gh = getattr(ev, "github_context", None)
@@ -2303,14 +2306,24 @@ class Brain:
             kc = evidence.kargo_context
             lines.append("")
             lines.append("## Kargo Context")
-            lines.append(f"- **Project:** {kc.get('project', '')}")
-            lines.append(f"- **Stage:** {kc.get('stage', '')}")
-            lines.append(f"- **Promotion:** {kc.get('promotion', '')}")
-            lines.append(f"- **Phase:** {kc.get('phase', '')}")
-            lines.append(f"- **Failed Step:** {kc.get('failed_step', 'N/A')}")
-            lines.append(f"- **Error:** {kc.get('message', '')}")
+            lines.append(f"- **Project:** {sanitize_untrusted_line(kc.get('project', ''), max_len=120, redact=False)}")
+            lines.append(f"- **Stage:** {sanitize_untrusted_line(kc.get('stage', ''), max_len=120, redact=False)}")
+            lines.append(f"- **Promotion:** {sanitize_untrusted_line(kc.get('promotion', ''), max_len=120, redact=False)}")
+            lines.append(f"- **Phase:** {sanitize_untrusted_line(kc.get('phase', ''), max_len=120, redact=False)}")
+            lines.append(f"- **Failed Step:** {sanitize_untrusted_line(kc.get('failed_step') or 'N/A', max_len=120, redact=False)}")
+            if kc.get("failure_type") == "verification":
+                lines.append("- **Failure Type:** verification")
+            if kc.get("verification_id"):
+                lines.append(
+                    f"- **Verification ID:** {sanitize_kargo_id(kc['verification_id'], max_len=120)}"
+                )
+            if kc.get("analysis_run"):
+                lines.append(
+                    f"- **AnalysisRun:** {sanitize_kargo_id(kc['analysis_run'], max_len=120)}"
+                )
+            lines.append(f"- **Error:** {sanitize_untrusted_line(kc.get('message', ''), max_len=200, redact=True)}")
             if kc.get("mr_url"):
-                lines.append(f"- **MR URL:** {kc['mr_url']}")
+                lines.append(f"- **MR URL:** {sanitize_untrusted_line(kc['mr_url'], max_len=512, redact=True)}")
         return "\n".join(lines)
 
     async def process_event(

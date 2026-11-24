@@ -22,7 +22,7 @@ class KargoStageSnapshot(BaseModel):
     """Response model matching KargoObserver._failure_details values."""
     project: str
     stage: str
-    promotion: str
+    promotion: str = ""
     freight: str = ""
     phase: str
     message: str = ""
@@ -31,6 +31,9 @@ class KargoStageSnapshot(BaseModel):
     service: str
     started_at: str = ""
     finished_at: str = ""
+    failure_type: str = "promotion"
+    verification_id: str = ""
+    analysis_run: str = ""
 
 
 @router.get("/api/kargo/stages", response_model=list[KargoStageSnapshot])

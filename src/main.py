@@ -348,8 +348,8 @@ async def lifespan(app: FastAPI):
         # === KARGO OBSERVER ===
         kargo_observer = None
         if KARGO_OBSERVER_ENABLED:
-            async def kargo_failure_callback(**kwargs) -> None:
-                await aligner.handle_failed_promotion(**kwargs)
+            async def kargo_failure_callback(**kwargs) -> Optional[str]:
+                return await aligner.handle_failed_promotion(**kwargs)
 
             async def kargo_recovery_callback(**kwargs) -> None:
                 await aligner.handle_promotion_recovery(**kwargs)

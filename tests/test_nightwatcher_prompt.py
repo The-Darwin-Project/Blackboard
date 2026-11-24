@@ -306,3 +306,15 @@ class TestReportIterationPromptLinks:
         cluster = {"root_cause": "test", "platform": "Konflux", "services": ["svc"], "events": ["evt-1"]}
         prompt = build_report_iteration_prompt(cluster, 1, 1, [])
         assert "### Related Links" not in prompt
+
+def test_t21_extract_event_links_kargo_promo():
+    esc_verif = StagedEscalation(event_id="e", service="s", source="headhunter", reason="r", summary="s", evidence_snapshot={"kargo_context": {"mr_url": "u", "failure_type": "verification"}}, slack_thread_url="")
+    esc_promo = StagedEscalation(event_id="e", service="s", source="headhunter", reason="r", summary="s", evidence_snapshot={"kargo_context": {"mr_url": "u", "failure_type": "promotion"}}, slack_thread_url="")
+    
+    assert "Kargo MR (promo)" in extract_event_links(esc_verif)
+    assert "Kargo MR" in extract_event_links(esc_promo)
+    assert "Kargo MR (promo)" not in extract_event_links(esc_promo)
+    
+    assert "Kargo MR (promo): u" in extract_full_links(esc_verif)
+    assert "Kargo MR: u" in extract_full_links(esc_promo)
+    assert "Kargo MR (promo): u" not in extract_full_links(esc_promo)

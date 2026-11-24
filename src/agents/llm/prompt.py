@@ -37,6 +37,7 @@ from src.utils.prompt_sanitize import (
     sanitize_prompt_text,
     sanitize_untrusted_block,
     sanitize_untrusted_line,
+    sanitize_kargo_id,
 )
 from ..headhunter_utils import _DESC_SAFETY_CAP
 
@@ -239,6 +240,12 @@ def _build_subject_block(
             lines.append(f"  Phase: {sanitize_untrusted_line(kc['phase'], max_len=80, redact=True)}")
         if kc.get("failed_step"):
             lines.append(f"  Failed Step: {sanitize_untrusted_line(kc['failed_step'], max_len=200, redact=True)}")
+        if kc.get("failure_type") == "verification":
+            lines.append("  Failure Type: verification")
+        if kc.get("verification_id"):
+            lines.append(f"  Verification ID: {sanitize_kargo_id(kc['verification_id'], max_len=120)}")
+        if kc.get("analysis_run"):
+            lines.append(f"  AnalysisRun: {sanitize_kargo_id(kc['analysis_run'], max_len=120)}")
         if kc.get("mr_url"):
             lines.append(f"  MR: {sanitize_untrusted_line(kc['mr_url'], max_len=500, redact=True)}")
 

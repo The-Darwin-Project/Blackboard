@@ -43,7 +43,10 @@ def extract_event_links(e: "StagedEscalation") -> str:
     if gc.get("check_run_url"):
         parts.append("Checks")
     if kc.get("mr_url"):
-        parts.append("Kargo MR")
+        if kc.get("failure_type") == "verification":
+            parts.append("Kargo MR (promo)")
+        else:
+            parts.append("Kargo MR")
     if jc.get("issue_url"):
         parts.append(jc.get("issue_key", "Jira"))
     if e.slack_thread_url:
@@ -76,7 +79,10 @@ def extract_full_links(e: "StagedEscalation") -> str:
     if gc.get("check_run_url"):
         lines.append(f"- Check Run: {gc['check_run_url']}")
     if kc.get("mr_url"):
-        lines.append(f"- Kargo MR: {kc['mr_url']}")
+        if kc.get("failure_type") == "verification":
+            lines.append(f"- Kargo MR (promo): {kc['mr_url']}")
+        else:
+            lines.append(f"- Kargo MR: {kc['mr_url']}")
     if jc.get("issue_url"):
         lines.append(f"- Jira: {jc['issue_url']}")
     if e.slack_thread_url:

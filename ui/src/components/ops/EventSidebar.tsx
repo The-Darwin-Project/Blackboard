@@ -441,7 +441,7 @@ export default function EventSidebar() {
                     <TreeNode key={`${s.project}/${s.stage}`}
                       icon={<SourceIcon source="aligner" subjectType="kargo_stage" size={18} />}
                       label={s.stage}
-                      sublabel={s.failed_step || s.phase}
+                      sublabel={s.failure_type === 'verification' ? `verify: ${s.phase}` : (s.failed_step || s.phase)}
                       sublabelColor="#ef4444"
                       onContextMenu={(e) => {
                         e.preventDefault();

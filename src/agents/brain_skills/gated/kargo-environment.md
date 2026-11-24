@@ -38,9 +38,13 @@ Kargo promotions are observable resources. The evidence of success or failure
 lives in the stage status and the MR pipeline -- not in reasoning or memory.
 
 Closing a Kargo event requires observable proof: either a newer promotion
-with phase=Succeeded on the same stage, or a verified root cause that is
-documented and reported. "I believe it will fail" is not evidence -- it's
-a hypothesis. Hypotheses are tested, not acted on.
+with phase=Succeeded on the same stage (and, when post-promotion verification
+is active, a newer Verification ID reaching Verification Phase=Successful),
+a newer Verification ID reaching Verification Phase=Successful on the same
+stage for a verification-only failure even when the promotion name is
+unchanged, or a verified root cause that is documented and reported.
+"I believe it will fail" is not evidence -- it's a hypothesis. Hypotheses
+are tested, not acted on.
 
 If an agent reports it retried something, verify the outcome via
 refresh_kargo_context before deciding next steps. Running state means
@@ -81,12 +85,13 @@ On a wake after the tracked incident resolved, refresh the Stage and compare the
 - **A newer promotion failed**: this is a fresh failure cycle, even when the error text matches the earlier one. When the event already recorded an incident, `report_incident` skips as a per-event duplicate, so enter the escalate phase and follow `escalate/incident-tracking.md` § Per-event incident deduplication to alert maintainers with the fresh evidence. When it has not, escalate normally.
 - **The same pre-recovery promotion is still reported**: the controller may not have reconciled yet. Record a fresh observation of the Stage state and defer one controller-reconcile interval, sized from reconcile latency in earlier observations and deep memory. Refresh again on wake. When the same failed promotion is still reported after that interval, fail closed and escalate the Stage as still failing with the refreshed evidence, using the per-event deduplication path above when an incident is already recorded.
 
-Closing is reserved for confirmed recovery: a newer promotion that reached phase=Succeeded on the same Stage.
+Closing is reserved for confirmed recovery: a newer promotion that reached phase=Succeeded on the same Stage (with post-promotion verification Successful when configured), or for verification-only failures, a newer Verification ID that reached Verification Phase=Successful on the same Stage even when the promotion name is unchanged.
 
 ## Kargo Concepts
 
 - Each Kargo **Stage** represents a deployment target in a CD pipeline.
 - Each promotion attempt creates a **new Promotion CR** (retries are new objects, not state transitions on old ones).
 - **Freight** is the versioned artifact being promoted (image, commit, chart).
-- A Stage refresh reports the in-flight promotion when one exists and otherwise the most recent completed attempt. Compare the reported promotion name with the name recorded earlier to tell a fresh attempt from a stale one.
-- Recovery = a newer Promotion on the same Stage reaches phase=Succeeded.
+- Post-promotion **Verification** runs after a Promotion succeeds (typically backed by an AnalysisRun) and records a unique **Verification ID** per attempt; a manual re-verify creates a new Verification ID without creating a new Promotion CR.
+- A Stage refresh reports the in-flight promotion when one exists and otherwise the most recent completed attempt plus its active verification state. Compare the reported promotion name (and Verification ID for verification failures) with the values recorded earlier to tell a fresh attempt from a stale one.
+- Recovery = a newer Promotion on the same Stage reaches phase=Succeeded (with verification Successful when configured), or for verification-only failures, a newer Verification ID reaches Verification Phase=Successful even when the Promotion name is unchanged.

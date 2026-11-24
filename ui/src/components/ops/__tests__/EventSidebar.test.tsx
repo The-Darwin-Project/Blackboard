@@ -19,7 +19,7 @@ import {
 import { useSchedules } from '../../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../../hooks/useJira';
 import { getClosedEvents } from '../../../api/client';
-import type { AgentRegistryEntry } from '../../../api/types';
+import type { AgentRegistryEntry, KargoStageStatus } from '../../../api/types';
 
 vi.mock('../../../contexts/OpsStateContext', () => ({
   useOpsControl: vi.fn(),
@@ -145,7 +145,7 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
 
   const setupOpsControl = (
     registeredAgents: AgentRegistryEntry[],
-    overrides: { selectedEventId?: string | null; closedEvents?: unknown[] } = {},
+    overrides: { selectedEventId?: string | null; closedEvents?: unknown[]; kargoStages?: KargoStageStatus[] } = {},
   ) => {
     vi.mocked(getClosedEvents).mockResolvedValue((overrides.closedEvents ?? []) as never);
     vi.mocked(useOpsControl).mockReturnValue({
@@ -156,7 +156,7 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
       send: vi.fn(),
       openContentTile: vi.fn(),
       registeredAgents,
-      kargoStages: [],
+      kargoStages: overrides.kargoStages ?? [],
     } as never);
   };
 
@@ -793,6 +793,69 @@ describe('EventSidebar - Dynamic Agents Tree with Squads', () => {
 
       fireEvent.click(within(section).getByRole('button', { name: /^GitHub$/i }));
       expect(screen.queryByRole('menu')).toBeNull();
+    });
+  });
+
+  describe('Kargo Stages verification & promotion sublabels (T-18)', () => {
+    it('renders "verify: <phase>" sublabel for verification failures', () => {
+      setupOpsControl([], {
+        kargoStages: [
+          {
+            project: 'v4-22',
+            stage: 'verify-release-chart',
+            promotion: 'verify-release-chart.01m83xf2.dae4bb2',
+            freight: 'dae4bb27ec6bad98e8f2fbee9ed5f6a39d7b1091',
+            phase: 'Failed',
+            message: 'Metric "check-chart-exists" assessed Failed',
+            failed_step: '',
+            service: 'verify-release-chart@v4-22',
+            mr_url: '',
+            failure_type: 'verification',
+            verification_id: '1605daa6-92cb-4050-addd-89465a90f331',
+            analysis_run: 'verify-release-chart.01m83xf2.3aa0ebb',
+          },
+        ],
+      });
+      renderSidebar();
+
+      const { section } = groupSection('Kargo Stages');
+      expect(within(section).getByText('verify-release-chart')).toBeInTheDocument();
+      expect(within(section).getByText('verify: Failed')).toBeInTheDocument();
+    });
+
+    it('preserves failed_step || phase sublabel for promotion failures (explicit or omitted failure_type)', () => {
+      setupOpsControl([], {
+        kargoStages: [
+          {
+            project: 'v4-22',
+            stage: 'promote-stage',
+            promotion: 'promote-stage.01abc',
+            phase: 'Errored',
+            message: 'step timed out',
+            failed_step: 'wait-for-merge',
+            service: 'promote-stage@v4-22',
+            mr_url: 'https://gitlab.com/org/repo/-/merge_requests/1',
+            failure_type: 'promotion',
+          },
+          {
+            project: 'v4-22',
+            stage: 'legacy-stage',
+            promotion: 'legacy-stage.02def',
+            phase: 'Errored',
+            message: 'generic failure',
+            failed_step: '',
+            service: 'legacy-stage@v4-22',
+            mr_url: '',
+          },
+        ],
+      });
+      renderSidebar();
+
+      const { section } = groupSection('Kargo Stages');
+      expect(within(section).getByText('promote-stage')).toBeInTheDocument();
+      expect(within(section).getByText('wait-for-merge')).toBeInTheDocument();
+      expect(within(section).getByText('legacy-stage')).toBeInTheDocument();
+      expect(within(section).getByText('Errored')).toBeInTheDocument();
     });
   });
 });

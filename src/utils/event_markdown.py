@@ -118,7 +118,13 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
             lines.append(f"- **Promotion:** {_esc(kc.get('promotion', ''))}")
             lines.append(f"- **Freight:** {_esc((kc.get('freight') or '')[:12])}...")
             lines.append(f"- **Phase:** {_esc(kc.get('phase', ''))}")
-            lines.append(f"- **Failed Step:** {_esc(kc.get('failed_step', 'N/A'))}")
+            lines.append(f"- **Failed Step:** {_esc(kc.get('failed_step') or 'N/A')}")
+            if kc.get("failure_type") == "verification":
+                lines.append("- **Failure Type:** verification")
+            if kc.get("verification_id"):
+                lines.append(f"- **Verification ID:** {_esc(kc['verification_id'])}")
+            if kc.get("analysis_run"):
+                lines.append(f"- **AnalysisRun:** {_esc(kc['analysis_run'])}")
             lines.append(f"- **Error:** {_esc(kc.get('message', ''))}")
             if kc.get("mr_url"):
                 lines.append(f"- **MR URL:** {_esc(kc['mr_url'])}")

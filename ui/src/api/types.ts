@@ -612,7 +612,7 @@ export interface ReportFull extends ReportMeta {
 }
 
 // =============================================================================
-// Kargo Stage Status (failed promotion snapshots from KargoObserver)
+// Kargo Stage Status (failed promotion and verification snapshots from KargoObserver)
 // =============================================================================
 
 export interface KargoStageStatus {
@@ -626,6 +626,10 @@ export interface KargoStageStatus {
   mr_url: string;
   started_at?: string;
   finished_at?: string;
+  freight?: string;
+  failure_type?: 'promotion' | 'verification';
+  verification_id?: string;
+  analysis_run?: string;
 }
 
 // =============================================================================

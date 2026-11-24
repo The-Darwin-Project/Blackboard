@@ -1215,12 +1215,16 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "refresh_kargo_context",
         "description": (
-            "Re-read current Kargo Stage promotion state without dispatching an agent. "
-            "Returns promotion phase, failed step, and error message. "
+            "Re-read current Kargo Stage promotion state and post-promotion "
+            "verification / AnalysisRun status without dispatching an agent. "
+            "Returns promotion phase, failed step, verification phase/ID/AnalysisRun, "
+            "and error message (omit promotion_id to query the Stage for both "
+            "promotion and verification status). "
             "Works for any event source -- Kargo events carry stage context "
             "automatically; for other events, supply the project and stage names. "
             "Can optionally subscribe to background state monitoring -- the system "
-            "watches for promotion state changes (succeeded, failed, progressing) "
+            "watches for promotion and verification phase/ID transitions "
+            "(succeeded, failed, progressing, re-verify) "
             "and injects a notification turn when something changes."
         ),
         "input_schema": {
@@ -1228,7 +1232,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "check_condition": {
                     "type": "string",
-                    "description": "What to verify (e.g., 'promotion succeeded after retry', 'new promotion running')",
+                    "description": (
+                        "What to verify (e.g., 'promotion succeeded after retry', "
+                        "'new promotion running', 'verification completed after re-verify')"
+                    ),
                 },
                 "kargo_project": {
                     "type": "string",

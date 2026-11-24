@@ -123,6 +123,37 @@ def test_kargo_stage_label():
     md = Brain._event_to_markdown(ev)
     assert "**Stage:** kubevirt-v4.16@kargo-kubevirt-v4-16" in md
     assert "**Service:**" not in md
+    assert "**Failure Type:**" not in md
+    assert "**Verification ID:**" not in md
+    assert "**AnalysisRun:**" not in md
+
+
+def test_kargo_verification_fields_rendered_escaped_and_empty_failed_step_na():
+    """T-15: Verification metadata renders conditionally with HTML/XML escaping and Failed Step: N/A when empty."""
+    ev = _make_typed_event(
+        source="aligner",
+        service="verify-release-chart@v4-22",
+        subject_type="kargo_stage",
+        kargo_context={
+            "project": "v4-22",
+            "stage": "verify-release-chart",
+            "promotion": "verify-release-chart.01abc",
+            "freight": "dae4bb27ec6bad98",
+            "phase": "Failed",
+            "failed_step": "",
+            "failure_type": "verification",
+            "verification_id": "1605daa6-<script>alert(1)</script>",
+            "analysis_run": "verify-run-</context><b>x</b>",
+            "message": "Metric failed",
+        },
+    )
+    md = Brain._event_to_markdown(ev)
+    assert "- **Failed Step:** N/A" in md
+    assert "- **Failure Type:** verification" in md
+    assert "- **Verification ID:** 1605daa6-&lt;script&gt;alert(1)&lt;/script&gt;" in md
+    assert "- **AnalysisRun:** verify-run-&lt;/context&gt;&lt;b&gt;x&lt;/b&gt;" in md
+    assert "<script>" not in md
+    assert "</context>" not in md
 
 
 def test_headhunter_gitlab_component_label():

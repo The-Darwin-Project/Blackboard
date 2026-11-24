@@ -24,7 +24,7 @@ from ..models import ConversationTurn
 from ..slack_gate import SlackAccessGate
 from ..utils import redact_pii
 from ..utils.maintainers import is_slack_recipient_allowed, resolve_maintainer_emails
-from ..utils.prompt_sanitize import sanitize_untrusted_line
+from ..utils.prompt_sanitize import sanitize_kargo_id, sanitize_untrusted_line
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -676,6 +676,7 @@ async def handle_refresh_gitlab_context(
                 "project_id": override_project_id,
                 "mr_iid": override_mr_iid,
                 "target_url": mr_url,
+                "mirrored_from_kargo": False,
             })
         if "error" in state:
             from datetime import datetime as _dt
@@ -818,9 +819,39 @@ async def handle_refresh_kargo_context(
     else:
         new_mr_url = state.get("mr_url", "")
         old_mr_url = kc.get("mr_url", "")
+        is_verif_state = state.get("failure_type") == "verification"
+        switched_to_promotion = (
+            not is_verif_state
+            and kc.get("failure_type") == "verification"
+            and state.get("_promotion_phase") in {"Errored", "Failed"}
+        )
+        kc_updates: dict = {}
         if new_mr_url and new_mr_url != old_mr_url:
-            await bb.update_event_kargo_context(event_id, {"mr_url": new_mr_url})
-            logger.info(f"Updated kargo_context.mr_url for {event_id}: {new_mr_url}")
+            kc_updates["mr_url"] = new_mr_url
+        if is_verif_state and (kc_updates or kc.get("failure_type") != "verification"):
+            kc_updates["failure_type"] = "verification"
+        elif switched_to_promotion:
+            kc_updates["failure_type"] = "promotion"
+        effective_failure_type = kc_updates.get("failure_type", kc.get("failure_type"))
+        if effective_failure_type == "verification" and old_mr_url and new_mr_url != old_mr_url:
+            gl_ctx = getattr(getattr(getattr(event, "event", None), "evidence", None), "gitlab_context", None)
+            if isinstance(gl_ctx, dict) and gl_ctx and gl_ctx.get("mirrored_from_kargo") is None:
+                try:
+                    from ..utils.vcs_approval import _gitlab_ctx_matches_mr_url
+                    if _gitlab_ctx_matches_mr_url(gl_ctx, old_mr_url):
+                        await bb.update_event_gitlab_context(event_id, {"mirrored_from_kargo": True})
+                except Exception as e:
+                    logger.warning(f"Failed to tag legacy gitlab_context mirror for {event_id} (non-fatal): {e}")
+        if kc_updates:
+            await bb.update_event_kargo_context(event_id, kc_updates)
+            if "mr_url" in kc_updates:
+                logger.info(f"Updated kargo_context.mr_url for {event_id}: {new_mr_url}")
+        if (
+            new_mr_url
+            and (new_mr_url != old_mr_url or switched_to_promotion)
+            and effective_failure_type != "verification"
+            and state.get("_promotion_phase") != "Succeeded"
+        ):
             # Secondary, best-effort mirror into gitlab_context (VCS approval SHA resolution reads it).
             # kargo_context.mr_url is already persisted above; a failure here must not discard the
             # refreshed promotion state the Brain is waiting on.
@@ -833,19 +864,39 @@ async def handle_refresh_kargo_context(
                         "target_url": new_mr_url,
                         "project_id": str(project_id),
                         "mr_iid": int(mr_iid),
+                        "mirrored_from_kargo": True,
                     })
                     if updated:
                         logger.info(f"Updated gitlab_context for {event_id}: project_id={project_id}, mr_iid={mr_iid}")
             except Exception as e:
                 logger.warning(f"Failed to update gitlab_context for {event_id} (non-fatal): {e}")
-        result_text = (
-            f"Kargo Stage: {stage}@{project}\n"
-            f"Promotion: {state.get('promotion', '?')}\n"
-            f"Phase: {state.get('phase', '?')}\n"
-            f"Failed Step: {state.get('failed_step', 'N/A')}\n"
-            f"Message: {state.get('message', '')}\n"
-            f"MR URL: {new_mr_url or 'N/A'}"
-        )
+        lines = [
+            f"Kargo Stage: {sanitize_untrusted_line(stage, max_len=120, redact=False)}@{sanitize_untrusted_line(project, max_len=120, redact=False)}",
+            f"Promotion: {sanitize_untrusted_line(state.get('promotion', '?'), max_len=120, redact=False)}",
+            f"Phase: {sanitize_untrusted_line(state.get('phase', '?'), max_len=120, redact=False)}",
+            f"Failed Step: {sanitize_untrusted_line(state.get('failed_step') or 'N/A', max_len=120, redact=False)}",
+            f"Message: {sanitize_untrusted_line(state.get('message', ''), max_len=200, redact=True)}",
+            f"MR URL: {sanitize_untrusted_line(new_mr_url or 'N/A', max_len=512, redact=True)}",
+        ]
+        verif = state.get("_verification") if isinstance(state.get("_verification"), dict) else {}
+        if is_verif_state:
+            lines.append("Failure Type: verification")
+            lines.append(f"Promotion Phase: {sanitize_untrusted_line(state.get('_promotion_phase') or 'N/A', max_len=120, redact=False)}")
+            verif_id = verif.get("id") or state.get("verification_id") or ""
+            analysis_run = verif.get("analysis_run") or state.get("analysis_run") or ""
+            if verif_id:
+                lines.append(f"Verification ID: {sanitize_kargo_id(verif_id, max_len=120)}")
+            if analysis_run:
+                lines.append(f"AnalysisRun: {sanitize_kargo_id(analysis_run, max_len=120)}")
+        elif verif.get("phase"):
+            lines.append(f"Verification Phase: {sanitize_untrusted_line(verif['phase'], max_len=120, redact=False)}")
+            if verif.get("id"):
+                lines.append(f"Verification ID: {sanitize_kargo_id(verif['id'], max_len=120)}")
+            if verif.get("analysis_run"):
+                lines.append(f"AnalysisRun: {sanitize_kargo_id(verif['analysis_run'], max_len=120)}")
+            if verif.get("message"):
+                lines.append(f"Verification Message: {sanitize_untrusted_line(verif['message'], max_len=200, redact=True)}")
+        result_text = "\n".join(lines)
 
     subscription_active = False
     state_watcher = ctx.get_state_watcher()
@@ -853,17 +904,29 @@ async def handle_refresh_kargo_context(
         from ..scheduling import SubscriptionSpec, KargoStageRef
         from ..observers.kargo import KargoObserver as _KO
         interval = max(15, min(int(args.get("poll_interval", 30)), 300))
-        promo_status = state.get("_promo_status", {})
+        promo_status = state.get("_promo_status") if isinstance(state.get("_promo_status"), dict) else {}
+        verif = state.get("_verification") if isinstance(state.get("_verification"), dict) else {}
+        state_key = None
+        if promotion_id:
+            try:
+                state_key = await kargo_observer.poll_kargo_stage_status(project, stage)
+            except Exception as e:
+                logger.warning(f"Failed to poll stage state_key for {project}/{stage} (falling back): {e}")
+        if state_key is None:
+            if promo_status or verif:
+                state_key = _KO.extract_kargo_state_key(promo_status, verification=verif or None)
+            else:
+                state_key = {
+                    "phase": state.get("phase") or "unknown",
+                    "failed_step": state.get("failed_step") or "",
+                }
         spec = SubscriptionSpec(
             event_id=event_id,
             resource_type="kargo_stage",
             resource_ref=KargoStageRef(project=project, stage=stage),
             poll_fn=kargo_observer.poll_kargo_stage_status,
             interval=interval,
-            state_key=_KO.extract_kargo_state_key(promo_status) if promo_status else {
-                "phase": state.get("phase", "unknown"),
-                "failed_step": state.get("failed_step"),
-            },
+            state_key=state_key,
             registered_at=time.time(),
             cycle_id=ctx.get_cycle_id(event_id),
         )

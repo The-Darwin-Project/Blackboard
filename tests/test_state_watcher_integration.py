@@ -381,6 +381,105 @@ class TestCanonicalStateKeyBuilders:
         key = KargoObserver.extract_kargo_state_key(promo_status)
         assert key == {"phase": "Errored", "failed_step": "deploy"}
 
+    def test_kargo_state_key_with_verification(self):
+        from src.observers.kargo import KargoObserver
+        promo_status = {"phase": "Succeeded", "stepExecutionMetadata": []}
+        key = KargoObserver.extract_kargo_state_key(
+            promo_status, verification={"phase": "Running", "id": "uuid-v1"},
+        )
+        assert key == {
+            "phase": "Succeeded",
+            "failed_step": "",
+            "verification_phase": "Running",
+            "verification_id": "uuid-v1",
+        }
+
+
+class TestKargoVerificationStateWatcherWake:
+    """T-10: StateWatcher wakes deferred event on verification Running->Failed and re-verify UUID change."""
+
+    @pytest.mark.asyncio
+    async def test_wakes_on_verification_running_to_failed(self, on_change, is_deferred):
+        from src.observers.kargo import KargoObserver
+        obs = KargoObserver(blackboard=AsyncMock())
+        obs._k8s_available = True
+        obs._custom_api = MagicMock()
+
+        initial_key = KargoObserver.extract_kargo_state_key(
+            {"phase": "Succeeded"}, verification={"phase": "Running", "id": "uuid-1"},
+        )
+        failed_cr = {
+            "status": {
+                "lastPromotion": {
+                    "name": "p1",
+                    "status": {"phase": "Succeeded", "freightCollection": {"id": "f1"}},
+                },
+                "freightHistory": [
+                    {"id": "f1", "verificationHistory": [{"id": "uuid-1", "phase": "Failed"}]},
+                ],
+            },
+        }
+        obs._custom_api.get_namespaced_custom_object = MagicMock(return_value=failed_cr)
+
+        w = StateWatcher(on_change=on_change, is_deferred=is_deferred)
+        spec = _make_spec(
+            event_id="evt-verif-1",
+            poll_fn=obs.poll_kargo_stage_status,
+            interval=1,
+            state_key=initial_key,
+            resource_type="kargo_stage",
+        )
+        w.register(spec)
+        await w.start()
+        await asyncio.sleep(2.2)
+        await w.stop()
+
+        on_change.assert_awaited_once()
+        new_state = on_change.call_args.args[2]
+        assert new_state["verification_phase"] == "Failed"
+        assert new_state["verification_id"] == "uuid-1"
+
+    @pytest.mark.asyncio
+    async def test_wakes_on_reverify_uuid_change_same_phase(self, on_change, is_deferred):
+        from src.observers.kargo import KargoObserver
+        obs = KargoObserver(blackboard=AsyncMock())
+        obs._k8s_available = True
+        obs._custom_api = MagicMock()
+
+        initial_key = KargoObserver.extract_kargo_state_key(
+            {"phase": "Succeeded"}, verification={"phase": "Failed", "id": "uuid-1"},
+        )
+        reverify_cr = {
+            "status": {
+                "lastPromotion": {
+                    "name": "p1",
+                    "status": {"phase": "Succeeded", "freightCollection": {"id": "f1"}},
+                },
+                "freightHistory": [
+                    {"id": "f1", "verificationHistory": [{"id": "uuid-2", "phase": "Failed"}]},
+                ],
+            },
+        }
+        obs._custom_api.get_namespaced_custom_object = MagicMock(return_value=reverify_cr)
+
+        w = StateWatcher(on_change=on_change, is_deferred=is_deferred)
+        spec = _make_spec(
+            event_id="evt-verif-2",
+            poll_fn=obs.poll_kargo_stage_status,
+            interval=1,
+            state_key=initial_key,
+            resource_type="kargo_stage",
+        )
+        w.register(spec)
+        await w.start()
+        await asyncio.sleep(2.2)
+        await w.stop()
+
+        on_change.assert_awaited_once()
+        new_state = on_change.call_args.args[2]
+        assert new_state["verification_phase"] == "Failed"
+        assert new_state["verification_id"] == "uuid-2"
+
 
 class TestPollFnProtocol:
     """PollFn protocol is importable and usable for type checking."""

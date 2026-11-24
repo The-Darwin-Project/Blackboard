@@ -441,3 +441,834 @@ def test_event_document_deserialize_without_subject_type():
     }
     doc = EventDocument.model_validate(old_json)
     assert doc.subject_type == "service"
+
+
+# =========================================================================
+# Helpers for verification failure tests (T-1 .. T-11)
+# =========================================================================
+
+def _make_verif_stage(
+    namespace: str = "v4-22",
+    name: str = "verify-release-chart",
+    promo_name: str = "verify-release-chart.01m83xf2.dae4bb2",
+    promo_phase: str = "Succeeded",
+    promo_fc_id: str = "dae4bb27ec6bad98e8f2fbee9ed5f6a39d7b1091",
+    promo_started_at: str = "2026-11-23T09:58:15Z",
+    promo_finished_at: str = "2026-11-23T09:58:15Z",
+    fh_id: str = "dae4bb27ec6bad98e8f2fbee9ed5f6a39d7b1091",
+    verif_id: str = "1605daa6-92cb-4050-addd-89465a90f331",
+    verif_phase: str = "Failed",
+    verif_message: str = 'Metric "check-chart-exists" assessed Failed',
+    verif_start: str = "2026-11-23T09:58:15Z",
+    verif_finish: str = "2026-11-23T11:30:21Z",
+    analysis_run: str | None = "verify-release-chart.01m83xf2jcgzpb7323tcajppsx.3aa0ebb",
+    include_last_promo: bool = True,
+    include_verif: bool = True,
+    has_spec_verification: bool = False,
+    mr_url: str = "",
+) -> dict:
+    status: dict = {"freightSummary": fh_id}
+    if include_last_promo:
+        promo_status: dict = {
+            "phase": promo_phase,
+            "startedAt": promo_started_at,
+            "finishedAt": promo_finished_at,
+            "freightCollection": {"id": promo_fc_id},
+        }
+        if mr_url:
+            promo_status["state"] = {"open-mr": {"pr": {"id": 42, "url": mr_url}}}
+        status["lastPromotion"] = {
+            "name": promo_name,
+            "finishedAt": promo_finished_at,
+            "status": promo_status,
+        }
+    if include_verif:
+        vh0: dict = {
+            "id": verif_id,
+            "phase": verif_phase,
+            "startTime": verif_start,
+            "finishTime": verif_finish,
+            "message": verif_message,
+        }
+        if analysis_run is not None:
+            vh0["analysisRun"] = {"name": analysis_run, "namespace": namespace, "phase": verif_phase}
+        status["freightHistory"] = [{"id": fh_id, "verificationHistory": [vh0]}]
+    else:
+        status["freightHistory"] = []
+
+    stage: dict = {
+        "metadata": {"namespace": namespace, "name": name, "resourceVersion": "999"},
+        "status": status,
+    }
+    if has_spec_verification:
+        stage["spec"] = {"verification": {"analysisTemplates": [{"name": "check-chart-exists"}]}}
+    return stage
+
+
+# =========================================================================
+# T-1: Verification Failed / Error (no analysisRun) / Inconclusive
+# =========================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verif_phase", "analysis_run"),
+    [
+        ("Failed", "verify-release-chart.ar-1"),
+        ("Error", None),
+        ("Inconclusive", "verify-release-chart.ar-2"),
+    ],
+)
+async def test_t1_verification_failure_phases_fire_callback_and_populate_snapshot(verif_phase, analysis_run):
+    """T-1: Failed, Error (absent analysisRun), and Inconclusive fire verification failure_callback."""
+    failure_cb = AsyncMock()
+    broadcast_cb = AsyncMock()
+    obs = KargoObserver(blackboard=AsyncMock(), failure_callback=failure_cb, broadcast_callback=broadcast_cb)
+
+    stage = _make_verif_stage(
+        verif_phase=verif_phase,
+        verif_message=f"verification {verif_phase} detail",
+        analysis_run=analysis_run,
+        mr_url="https://gitlab.example.com/org/repo/-/merge_requests/99",
+    )
+    await obs._process_stage(stage)
+
+    failure_cb.assert_awaited_once()
+    kw = failure_cb.call_args.kwargs
+    assert kw["failure_type"] == "verification"
+    assert kw["phase"] == verif_phase
+    assert kw["message"] == f"verification {verif_phase} detail"
+    assert kw["failed_step"] == ""
+    assert kw["verification_id"] == "1605daa6-92cb-4050-addd-89465a90f331"
+    assert kw["analysis_run"] == (analysis_run or "")
+    assert kw["started_at"] == "2026-11-23T09:58:15Z"
+    assert kw["finished_at"] == "2026-11-23T11:30:21Z"
+    assert kw["freight"] == "dae4bb27ec6bad98e8f2fbee9ed5f6a39d7b1091"
+    assert kw["mr_url"] == "https://gitlab.example.com/org/repo/-/merge_requests/99"
+
+    snaps = obs.get_failed_stages()
+    assert len(snaps) == 1
+    assert snaps[0]["failure_type"] == "verification"
+    assert snaps[0]["phase"] == verif_phase
+    assert snaps[0]["verification_id"] == "1605daa6-92cb-4050-addd-89465a90f331"
+    assert snaps[0]["analysis_run"] == (analysis_run or "")
+    broadcast_cb.assert_awaited_once()
+
+
+# =========================================================================
+# T-2: Verification Aborted neither fails nor recovers
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t2_verification_aborted_ignored_and_holds_active_watch():
+    """T-2: Aborted verification neither fires failure_callback nor clears active watches."""
+    failure_cb = AsyncMock()
+    recovery_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb, recovery_cb=recovery_cb)
+
+    aborted = _make_verif_stage(verif_phase="Aborted", verif_id="uuid-aborted")
+    await obs._process_stage(aborted)
+    failure_cb.assert_not_called()
+    recovery_cb.assert_not_called()
+    assert obs.get_failed_stages() == []
+
+    # Active watch from a prior verification failure must remain intact on Aborted
+    failed = _make_verif_stage(verif_phase="Failed", verif_id="uuid-fail-1")
+    await obs._process_stage(failed)
+    assert "v4-22/verify-release-chart" in obs._active_watches
+
+    aborted_next = _make_verif_stage(verif_phase="Aborted", verif_id="uuid-aborted-2")
+    await obs._process_stage(aborted_next)
+    recovery_cb.assert_not_called()
+    assert "v4-22/verify-release-chart" in obs._active_watches
+    assert failure_cb.call_count == 1
+
+
+# =========================================================================
+# T-3: Re-verification UUID dedup on same promotion/freight
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t3_reverification_same_promo_new_uuid_fires_duplicate_deduped():
+    """T-3: Duplicate verification id is deduplicated; new id on same promotion fires again."""
+    failure_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb)
+
+    v1 = _make_verif_stage(verif_id="uuid-1", verif_phase="Failed")
+    await obs._process_stage(v1)
+    await obs._process_stage(v1)
+    assert failure_cb.call_count == 1
+
+    v2 = _make_verif_stage(verif_id="uuid-2", verif_phase="Failed")
+    await obs._process_stage(v2)
+    assert failure_cb.call_count == 2
+    assert obs._reported_failures["v4-22/verify-release-chart"] == "verification:uuid-2"
+
+
+# =========================================================================
+# T-4: Manual re-verify after Aborted promotion / absent lastPromotion / RFC3339 fractional ordering
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t4_manual_reverify_after_aborted_and_absent_last_promo():
+    """T-4: Post-abort manual re-verify fires; stale pre-abort blocked; fractional RFC3339 accurate."""
+    from src.observers.kargo_helpers import is_verification_stale
+
+    # 1. kargo-demo-alraj/test1 pattern: Aborted promo (June 30) + later manual re-verify Error (July 9)
+    failure_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb)
+    later_reverify = _make_verif_stage(
+        namespace="kargo-demo-alraj", name="test1",
+        promo_name="test1.01k", promo_phase="Aborted",
+        promo_fc_id="0946cd5d", promo_started_at="2026-06-30T09:55:00Z", promo_finished_at="2026-06-30T10:00:00Z",
+        fh_id="ad03b0c3", verif_id="b7c1", verif_phase="Error",
+        verif_start="2026-07-09T12:00:00Z", verif_finish="2026-07-09T12:00:01Z",
+        analysis_run=None,
+    )
+    await obs._process_stage(later_reverify)
+    failure_cb.assert_awaited_once()
+    assert failure_cb.call_args.kwargs["failure_type"] == "verification"
+    assert failure_cb.call_args.kwargs["phase"] == "Error"
+    assert failure_cb.call_args.kwargs["analysis_run"] == ""
+
+    # 2. Absent lastPromotion still triggers verification failure
+    failure_cb2 = AsyncMock()
+    obs2 = _make_observer(failure_cb=failure_cb2)
+    no_promo = _make_verif_stage(include_last_promo=False, verif_id="uuid-nopromo", verif_phase="Failed")
+    await obs2._process_stage(no_promo)
+    failure_cb2.assert_awaited_once()
+    assert failure_cb2.call_args.kwargs["promotion"] == ""
+    assert failure_cb2.call_args.kwargs["failure_type"] == "verification"
+
+    # 3. Stale pre-abort verification (verif_ts < promo_ts) must NOT re-fire
+    failure_cb3 = AsyncMock()
+    obs3 = _make_observer(failure_cb=failure_cb3)
+    stale_pre_abort = _make_verif_stage(
+        promo_phase="Aborted", promo_finished_at="2026-07-09T12:00:00Z",
+        verif_phase="Failed", verif_start="2026-07-08T12:00:00Z", verif_finish="2026-07-08T12:05:00Z",
+    )
+    await obs3._process_stage(stale_pre_abort)
+    failure_cb3.assert_not_called()
+
+    # 4. Fractional-second RFC3339 ordering: .500Z > whole-second Z (lexical compare would fail: '.' < 'Z')
+    promo_whole = {"status": {"phase": "Aborted", "finishedAt": "2026-07-09T12:00:00Z"}}
+    verif_frac_after = {"phase": "Error", "start_time": "2026-07-09T12:00:00.500Z", "finish_time": ""}
+    assert is_verification_stale(promo_whole, verif_frac_after) is False
+
+    promo_frac = {"status": {"phase": "Aborted", "finishedAt": "2026-07-09T12:00:00.500Z"}}
+    verif_whole_before = {"phase": "Error", "start_time": "2026-07-09T12:00:00Z", "finish_time": ""}
+    assert is_verification_stale(promo_frac, verif_whole_before) is True
+
+
+# =========================================================================
+# T-5: False-recovery guard
+# =========================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verif_phase", ["Running", "Pending", "Failed"])
+async def test_t5_false_recovery_blocked_while_verification_not_successful(verif_phase):
+    """T-5: Errored -> Succeeded promotion does NOT recover while verification is Running/Pending/Failed."""
+    failure_cb = AsyncMock()
+    recovery_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb, recovery_cb=recovery_cb)
+
+    errored = _make_stage(namespace="v4-22", name="verify-release-chart", promo_name="p1", phase="Errored")
+    await obs._process_stage(errored)
+    assert "v4-22/verify-release-chart" in obs._active_watches
+
+    next_stage = _make_verif_stage(promo_name="p2", promo_phase="Succeeded", verif_phase=verif_phase)
+    await obs._process_stage(next_stage)
+    recovery_cb.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_t5_false_recovery_blocked_empty_freight_history_with_spec_verification():
+    """T-5: Empty freightHistory on a stage with spec.verification blocks premature recovery."""
+    failure_cb = AsyncMock()
+    recovery_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb, recovery_cb=recovery_cb)
+
+    errored = _make_stage(namespace="v4-22", name="verify-release-chart", promo_name="p1", phase="Errored")
+    await obs._process_stage(errored)
+
+    succeeded_no_vh = _make_verif_stage(
+        promo_name="p2", promo_phase="Succeeded", include_verif=False, has_spec_verification=True,
+    )
+    await obs._process_stage(succeeded_no_vh)
+    recovery_cb.assert_not_called()
+    assert "v4-22/verify-release-chart" in obs._active_watches
+
+
+# =========================================================================
+# T-6: Stale freightHistory[0] guard
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t6_stale_freight_history_guard():
+    """T-6: (a) failed promo + stale Successful verif reports promo failure; (b) Succeeded fc_id mismatch ignored."""
+    # (a) Failed promotion + stale Successful verification -> reports promotion failure
+    failure_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb)
+    failed_promo = _make_verif_stage(
+        promo_name="p-fail", promo_phase="Errored", promo_fc_id="fc-new",
+        fh_id="fc-old", verif_phase="Successful",
+    )
+    await obs._process_stage(failed_promo)
+    failure_cb.assert_awaited_once()
+    assert failure_cb.call_args.kwargs["failure_type"] == "promotion"
+    assert failure_cb.call_args.kwargs["promotion"] == "p-fail"
+
+    # (b) Succeeded promotion with freightCollection.id != freightHistory[0].id ignores stale verif failure & recovery
+    failure_cb2 = AsyncMock()
+    recovery_cb2 = AsyncMock()
+    obs2 = _make_observer(failure_cb=failure_cb2, recovery_cb=recovery_cb2)
+    obs2._active_watches["v4-22/verify-release-chart"] = "verify-release-chart@v4-22"
+    obs2._reported_failures["v4-22/verify-release-chart"] = "p-old"
+
+    stale_verif_fail = _make_verif_stage(
+        promo_name="p-new", promo_phase="Succeeded", promo_fc_id="fc-new",
+        fh_id="fc-old", verif_phase="Failed", verif_id="uuid-stale-fail",
+    )
+    await obs2._process_stage(stale_verif_fail)
+    failure_cb2.assert_not_called()
+    recovery_cb2.assert_not_called()
+
+    stale_verif_ok = _make_verif_stage(
+        promo_name="p-new", promo_phase="Succeeded", promo_fc_id="fc-new",
+        fh_id="fc-old", verif_phase="Successful", verif_id="uuid-stale-ok",
+    )
+    await obs2._process_stage(stale_verif_ok)
+    recovery_cb2.assert_not_called()
+    assert "v4-22/verify-release-chart" in obs2._active_watches
+
+
+# =========================================================================
+# T-7: Verification recovery (Failed -> Successful on new UUID, same promotion)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t7_verification_recovery_same_promo_new_uuid():
+    """T-7: Failed -> Successful verification on new UUID with unchanged promo fires recovery and clears state."""
+    failure_cb = AsyncMock()
+    recovery_cb = AsyncMock()
+    broadcast_cb = AsyncMock()
+    obs = KargoObserver(
+        blackboard=AsyncMock(), failure_callback=failure_cb,
+        recovery_callback=recovery_cb, broadcast_callback=broadcast_cb,
+    )
+
+    failed = _make_verif_stage(promo_name="same-promo", verif_id="uuid-fail", verif_phase="Failed")
+    await obs._process_stage(failed)
+    assert "v4-22/verify-release-chart" in obs._active_watches
+    assert obs._reported_failures["v4-22/verify-release-chart"] == "verification:uuid-fail"
+
+    succeeded = _make_verif_stage(promo_name="same-promo", verif_id="uuid-pass", verif_phase="Successful")
+    await obs._process_stage(succeeded)
+
+    recovery_cb.assert_awaited_once()
+    kw = recovery_cb.call_args.kwargs
+    assert kw["service"] == "verify-release-chart@v4-22"
+    assert kw["project"] == "v4-22"
+    assert kw["stage"] == "verify-release-chart"
+    assert kw["promotion"] == "same-promo"
+    assert kw["failure_type"] == "verification"
+    assert kw["verification_id"] == "uuid-pass"
+    assert "v4-22/verify-release-chart" not in obs._failure_details
+    assert "v4-22/verify-release-chart" not in obs._reported_failures
+    assert "v4-22/verify-release-chart" not in obs._active_watches
+    assert broadcast_cb.call_count == 2
+
+
+# =========================================================================
+# T-8: Initial sync suppression + callback exception safety
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t8_initial_sync_verification_and_callback_exception_safety():
+    """T-8: suppress_callbacks=True records failure without watch/broadcast; later recovery clears quietly; callback error safe."""
+    failure_cb = AsyncMock()
+    recovery_cb = AsyncMock()
+    broadcast_cb = AsyncMock()
+    obs = KargoObserver(
+        blackboard=AsyncMock(), failure_callback=failure_cb,
+        recovery_callback=recovery_cb, broadcast_callback=broadcast_cb,
+    )
+
+    failed = _make_verif_stage(verif_id="uuid-init", verif_phase="Failed")
+    await obs._process_stage(failed, suppress_callbacks=True)
+
+    failure_cb.assert_not_called()
+    broadcast_cb.assert_not_called()
+    assert obs._reported_failures["v4-22/verify-release-chart"] == "verification:uuid-init"
+    assert "v4-22/verify-release-chart" in obs._failure_details
+    assert "v4-22/verify-release-chart" not in obs._active_watches
+
+    # Later watch recovery clears _failure_details & broadcasts without calling recovery_callback
+    recovered = _make_verif_stage(verif_id="uuid-ok", verif_phase="Successful")
+    await obs._process_stage(recovered, suppress_callbacks=False)
+    recovery_cb.assert_not_called()
+    assert "v4-22/verify-release-chart" not in obs._failure_details
+    assert "v4-22/verify-release-chart" not in obs._reported_failures
+    broadcast_cb.assert_awaited_once()
+
+    # failure_callback raising must not crash _process_stage or set _active_watches
+    boom_cb = AsyncMock(side_effect=RuntimeError("aligner down"))
+    obs_err = _make_observer(failure_cb=boom_cb)
+    await obs_err._process_stage(_make_verif_stage(verif_id="uuid-boom", verif_phase="Failed"))
+    assert "v4-22/verify-release-chart" not in obs_err._active_watches
+
+    # Same for promotion failure callback exception
+    boom_promo_cb = AsyncMock(side_effect=RuntimeError("boom"))
+    obs_err2 = _make_observer(failure_cb=boom_promo_cb)
+    await obs_err2._process_stage(_make_stage(promo_name="p-boom", phase="Errored"))
+    assert "kargo-test-project/test-stage" not in obs_err2._active_watches
+
+
+# =========================================================================
+# T-9: get_stage_status() <-> Aligner.handle_failed_promotion 1:1 key contract & _extract_failed_step
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t9_get_stage_status_matches_aligner_signature_and_failed_step_phases():
+    """T-9: Non-_ keys + 'service' strictly match Aligner.handle_failed_promotion params; _extract_failed_step handles Failed."""
+    import inspect
+    from src.agents.aligner import Aligner
+
+    expected_params = set(inspect.signature(Aligner.handle_failed_promotion).parameters) - {"self"}
+
+    obs = _make_observer()
+    obs._k8s_available = True
+    obs._custom_api = MagicMock()
+
+    # 1. Promotion failure stage
+    promo_cr = _make_stage(namespace="proj", name="prod", phase="Errored")
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=promo_cr)
+        res_promo = await obs.get_stage_status("proj", "prod")
+    non_private_promo = {k for k in res_promo if not k.startswith("_")} | {"service"}
+    assert non_private_promo == expected_params
+    assert res_promo["failure_type"] == "promotion"
+    assert res_promo["_promotion_phase"] == "Errored"
+
+    # 2. Verification failure stage
+    verif_cr = _make_verif_stage(verif_phase="Failed")
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=verif_cr)
+        res_verif = await obs.get_stage_status("v4-22", "verify-release-chart")
+    non_private_verif = {k for k in res_verif if not k.startswith("_")} | {"service"}
+    assert non_private_verif == expected_params
+    assert res_verif["failure_type"] == "verification"
+    assert res_verif["phase"] == "Failed"
+    assert res_verif["_promotion_phase"] == "Succeeded"
+    assert res_verif["_verification"]["id"] == "1605daa6-92cb-4050-addd-89465a90f331"
+
+    # 3. Direct promotion_id branch
+    direct_promo = {"spec": {"freight": {"name": "f1"}}, "status": {"phase": "Failed", "message": "boom"}}
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=direct_promo)
+        res_direct = await obs.get_stage_status("proj", "prod", promotion_id="p-1")
+    non_private_direct = {k for k in res_direct if not k.startswith("_")} | {"service"}
+    assert non_private_direct == expected_params
+    assert res_direct["failure_type"] == "promotion"
+
+    # 4. _extract_failed_step matches both Errored and Failed
+    assert KargoObserver._extract_failed_step(
+        {"stepExecutionMetadata": [{"alias": "step-a", "status": "Failed"}]}
+    ) == "step-a"
+    assert KargoObserver._extract_failed_step(
+        {"stepExecutionMetadata": [{"alias": "step-b", "status": "Errored"}]}
+    ) == "step-b"
+
+
+# =========================================================================
+# T-10 (observer part): extract_kargo_state_key & poll_kargo_stage_status parity
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t10_poll_and_get_stage_status_share_projection_and_state_key():
+    """T-10: extract_kargo_state_key preserves 2 keys without verif; adds 2 keys with verif; poll matches get_stage_status."""
+    ps = {"phase": "Succeeded", "stepExecutionMetadata": []}
+    assert KargoObserver.extract_kargo_state_key(ps) == {"phase": "Succeeded", "failed_step": ""}
+    assert KargoObserver.extract_kargo_state_key(ps, verification=None) == {"phase": "Succeeded", "failed_step": ""}
+    assert KargoObserver.extract_kargo_state_key(ps, verification={}) == {"phase": "Succeeded", "failed_step": ""}
+    assert KargoObserver.extract_kargo_state_key(
+        ps, verification={"phase": "Failed", "id": "uuid-9"},
+    ) == {"phase": "Succeeded", "failed_step": "", "verification_phase": "Failed", "verification_id": "uuid-9"}
+
+    obs = _make_observer()
+    obs._k8s_available = True
+    obs._custom_api = MagicMock()
+
+    # Active verification on Succeeded promotion: get_stage_status and poll_kargo_stage_status produce identical state_key
+    stage_cr = _make_verif_stage(verif_phase="Running", verif_id="uuid-run")
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=stage_cr)
+        status_res = await obs.get_stage_status("v4-22", "verify-release-chart")
+        poll_res = await obs.poll_kargo_stage_status("v4-22", "verify-release-chart")
+    reg_key = KargoObserver.extract_kargo_state_key(
+        status_res["_promo_status"], verification=status_res["_verification"] or None,
+    )
+    assert reg_key == poll_res == {
+        "phase": "Succeeded", "failed_step": "",
+        "verification_phase": "Running", "verification_id": "uuid-run",
+    }
+
+    # Active currentPromotion drops stale prior verification in both get_stage_status and poll_kargo_stage_status
+    stage_cr["status"]["currentPromotion"] = {"name": "promo-live", "status": {"phase": "Running"}}
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=stage_cr)
+        status_cur = await obs.get_stage_status("v4-22", "verify-release-chart")
+        poll_cur = await obs.poll_kargo_stage_status("v4-22", "verify-release-chart")
+    assert status_cur["_verification"] == {}
+    assert poll_cur == {"phase": "Running", "failed_step": ""}
+
+
+# =========================================================================
+# T-11: Null/malformed CRD JSON resilience
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_t11_null_and_malformed_crd_json_resilience():
+    """T-11: Null/malformed metadata, status, lastPromotion, message, analysisRun, freight never raise."""
+    from src.observers.kargo_helpers import (
+        _parse_ts,
+        build_verification_dedup_key,
+        extract_latest_verification,
+    )
+
+    failure_cb = AsyncMock()
+    obs = _make_observer(failure_cb=failure_cb)
+
+    malformed_stages = [
+        None,
+        {},
+        {"metadata": None, "status": None},
+        {"metadata": {"namespace": "", "name": "s1"}, "status": {}},
+        {"metadata": {"namespace": "ns", "name": None}, "status": {}},
+        {"metadata": {"namespace": "ns", "name": "s1"}, "status": {"lastPromotion": None}},
+        {
+            "metadata": {"namespace": "ns", "name": "s2"},
+            "status": {
+                "lastPromotion": {
+                    "name": "p1",
+                    "freight": "string-ref",
+                    "status": {
+                        "phase": "Errored",
+                        "message": None,
+                        "startedAt": None,
+                        "finishedAt": None,
+                        "stepExecutionMetadata": [None, {"alias": None, "status": "Errored"}],
+                        "state": None,
+                    },
+                },
+            },
+        },
+        {
+            "metadata": {"namespace": "ns", "name": "s3"},
+            "status": {
+                "lastPromotion": {"name": "p2", "status": {"phase": "Succeeded"}},
+                "freightHistory": [
+                    {
+                        "id": None,
+                        "verificationHistory": [
+                            {
+                                "id": None,
+                                "phase": "Failed",
+                                "message": None,
+                                "startTime": None,
+                                "finishTime": None,
+                                "analysisRun": "bad-type",
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            "metadata": {"namespace": "ns", "name": "s4"},
+            "status": {
+                "lastPromotion": {"name": "p3", "status": {"phase": "Succeeded"}},
+                "freightHistory": [
+                    {
+                        "id": "fh-1",
+                        "verificationHistory": [
+                            {"id": "v-null-ar", "phase": "Error", "message": None, "analysisRun": None},
+                        ],
+                    },
+                ],
+            },
+        },
+    ]
+
+    for stage in malformed_stages:
+        await obs._process_stage(stage)
+
+    # s2 (promotion), s3 (verification without id -> fallback key), s4 (verification with analysisRun=None) all fired safely
+    assert failure_cb.call_count == 3
+    assert obs._failure_details["ns/s2"]["failed_step"] == "unknown"
+    assert obs._failure_details["ns/s2"]["message"] == ""
+    assert obs._failure_details["ns/s3"]["analysis_run"] == ""
+    assert obs._reported_failures["ns/s3"] == "verification:p2:Failed"
+    assert obs._failure_details["ns/s4"]["analysis_run"] == ""
+
+    # Pure helper edge cases
+    assert _parse_ts("") is None
+    assert _parse_ts("not-a-date") is None
+    assert _parse_ts("2026-07-09T12:00:00") is not None  # naive normalized to UTC
+    assert extract_latest_verification(None) == {}  # type: ignore[arg-type]
+    assert build_verification_dedup_key({"phase": "Failed"}, "p-x") == "verification:p-x:Failed"
+    assert KargoObserver._extract_failed_step(None) == ""  # type: ignore[arg-type]
+    assert KargoObserver._extract_mr_url(None) == ""  # type: ignore[arg-type]
+
+@pytest.mark.asyncio
+async def test_t21_kargo_deleted_event_clears_state():
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock, AsyncMock
+    obs = KargoObserver(blackboard=MagicMock())
+    obs.broadcast_callback = AsyncMock()
+    obs._reported_failures["ns/name"] = "dedup"
+    obs._failure_details["ns/name"] = {"phase": "Failed"}
+    obs._active_watches["ns/name"] = 123
+    
+    await obs._handle_deleted_stage({"metadata": {"namespace": "ns", "name": "name"}})
+    assert "ns/name" not in obs._reported_failures
+    assert "ns/name" not in obs._failure_details
+    assert "ns/name" not in obs._active_watches
+    obs.broadcast_callback.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_t21_initial_sync_restores_state_on_exception():
+    """M8: Failed _initial_sync rolls back _reported_failures, _failure_details, and _active_watches
+    even after _process_stage mutates state on an earlier item in the list."""
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock
+
+    obs = KargoObserver(blackboard=MagicMock())
+    obs._reported_failures["old/stage"] = "old-promo"
+    obs._failure_details["old/stage"] = {"stage": "old", "phase": "Failed"}
+    obs._active_watches["old/stage"] = "stage@old"
+    obs._k8s_available = True
+    obs._custom_api = MagicMock()
+    obs._custom_api.list_cluster_custom_object = MagicMock(
+        return_value={
+            "metadata": {"resourceVersion": "500"},
+            "items": [
+                _make_verif_stage(namespace="new", name="s1", verif_id="v-new", verif_phase="Failed"),
+                "boom-trigger",
+            ],
+        }
+    )
+
+    orig_process = obs._process_stage
+
+    async def _process_with_boom(stage, suppress_callbacks=False):
+        if stage == "boom-trigger":
+            raise RuntimeError("mid-sync boom")
+        await orig_process(stage, suppress_callbacks=suppress_callbacks)
+
+    obs._process_stage = _process_with_boom  # type: ignore[method-assign]
+    await obs._initial_sync()
+
+    assert obs._reported_failures == {"old/stage": "old-promo"}
+    assert obs._failure_details == {"old/stage": {"stage": "old", "phase": "Failed"}}
+    assert obs._active_watches == {"old/stage": "stage@old"}
+
+@pytest.mark.asyncio
+async def test_t21_watch_loop_invokes_stop_in_finally():
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock, patch
+    import asyncio
+    obs = KargoObserver(blackboard=MagicMock())
+    obs._k8s_available = True
+    obs._running = True
+    mock_watch = MagicMock()
+    obs._current_watch = mock_watch
+    
+    async def mock_run_in_executor(*args, **kwargs):
+        raise asyncio.CancelledError()
+        
+    with patch("kubernetes.watch.Watch", return_value=mock_watch):
+        with patch("asyncio.get_running_loop") as mock_loop:
+            mock_loop_instance = MagicMock()
+            mock_loop_instance.run_in_executor = mock_run_in_executor
+            mock_loop.return_value = mock_loop_instance
+            await obs._watch_loop()
+        
+    mock_watch.stop.assert_called_once()
+    assert obs._current_watch is None
+
+
+@pytest.mark.asyncio
+async def test_t21_failure_callback_exception_pops_reported_failures():
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock, AsyncMock
+    obs = KargoObserver(blackboard=MagicMock())
+    obs.failure_callback = AsyncMock(side_effect=Exception("cb_boom"))
+    obs._reported_failures["ns/name"] = "dedup"
+    obs._failure_details["ns/name"] = {"phase": "Failed", "stage": "stg", "project": "prj", "promotion": "p", "freight": "f", "message": "m", "failed_step": "s", "mr_url": "u"}
+    
+    await obs._record_failure(stage_key="ns/name", dedup_key="dedup", details=obs._failure_details["ns/name"], suppress_callbacks=False)
+    assert "ns/name" not in obs._reported_failures
+    assert "ns/name" not in obs._failure_details
+
+def test_t21_is_verification_stale_freight_fallback():
+    from src.observers import kargo_helpers
+    promo = {"status": {"phase": "Succeeded", "freightCollection": {}}, "freight": {"name": "p_name"}}
+    verif = {"freight_id": "v_name"}
+    assert kargo_helpers.is_verification_stale(promo, verif)
+
+def test_t21_parse_ts_rejects_long_string():
+    from src.observers import kargo_helpers
+    assert kargo_helpers._parse_ts("a" * 65) is None
+
+def test_t21_resolve_stage_freight_prefers_verif_id():
+    from src.observers import kargo_helpers
+    assert kargo_helpers.resolve_stage_freight({"freightSummary": "prose"}, {}, {"freight_id": "v_id"}) == "v_id"
+
+def test_t21_build_verification_dedup_key_fallback():
+    from src.observers import kargo_helpers
+    assert kargo_helpers.build_verification_dedup_key({"start_time": "st"}, "promo") == "verification:promo:st"
+
+
+@pytest.mark.asyncio
+async def test_m3_m9_410_relist_preserves_hold_watch_and_positive_verification_recovery():
+    """M3 + M9: Verification failure -> 410 _initial_sync during hold (Running/Aborted) keeps
+    _active_watches intact -> subsequent Successful verification fires recovery_callback and clears state."""
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock
+
+    failure_cb = AsyncMock(return_value="evt-verif-1")
+    recovery_cb = AsyncMock()
+    broadcast_cb = AsyncMock()
+    obs = KargoObserver(
+        blackboard=AsyncMock(),
+        failure_callback=failure_cb,
+        recovery_callback=recovery_cb,
+        broadcast_callback=broadcast_cb,
+    )
+    obs._k8s_available = True
+    stage_key = "v4-22/verify-release-chart"
+
+    # 1. Verification v-1 fails
+    await obs._process_stage(_make_verif_stage(verif_id="v-1", verif_phase="Failed"))
+    failure_cb.assert_awaited_once()
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert obs._reported_failures[stage_key] == "verification:v-1"
+
+    # 2. 410 re-list occurs while retry verification v-2 is Running (hold phase)
+    hold_stage = _make_verif_stage(verif_id="v-2", verif_phase="Running")
+    obs._custom_api = MagicMock()
+    obs._custom_api.list_cluster_custom_object = MagicMock(
+        return_value={"metadata": {"resourceVersion": "1001"}, "items": [hold_stage]}
+    )
+    await obs._initial_sync()
+
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert obs._reported_failures[stage_key] == "verification:v-1"
+    assert stage_key in obs._failure_details
+
+    # 3. Retry verification v-2 succeeds -> positive recovery fires
+    await obs._process_stage(_make_verif_stage(verif_id="v-2", verif_phase="Successful"))
+    recovery_cb.assert_awaited_once_with(
+        service="verify-release-chart@v4-22",
+        project="v4-22",
+        stage="verify-release-chart",
+        promotion="verify-release-chart.01m83xf2.dae4bb2",
+        failure_type="verification",
+        verification_id="v-2",
+    )
+    assert stage_key not in obs._active_watches
+    assert stage_key not in obs._reported_failures
+    assert stage_key not in obs._failure_details
+
+
+@pytest.mark.asyncio
+async def test_m4_cooldown_none_return_does_not_consume_dedup_key():
+    """M4: When failure_callback returns None (e.g. cooldown), verification:<id> is not consumed
+    while _active_watches & _failure_details still track the failure for sidebar & recovery."""
+    failure_cb = AsyncMock(side_effect=[None, "evt-verif-2"])
+    obs = _make_observer(failure_cb=failure_cb)
+    stage_key = "v4-22/verify-release-chart"
+    stage = _make_verif_stage(verif_id="v-cooldown", verif_phase="Failed")
+
+    await obs._process_stage(stage)
+    assert stage_key not in obs._reported_failures
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert stage_key in obs._failure_details
+
+    await obs._process_stage(stage)
+    assert failure_cb.await_count == 2
+    assert obs._reported_failures[stage_key] == "verification:v-cooldown"
+
+
+@pytest.mark.asyncio
+async def test_m12_failed_promotion_beats_stale_verification_in_snapshot_and_poll():
+    """M12: When lastPromotion failed, get_stage_status returns promotion failure and poll omits verification_phase."""
+    from unittest.mock import MagicMock
+
+    obs = _make_observer()
+    obs._k8s_available = True
+    failed_stage = _make_verif_stage(
+        promo_phase="Failed",
+        promo_name="promo-bad",
+        verif_id="v-old",
+        verif_phase="Failed",
+    )
+    obs._custom_api = MagicMock()
+    obs._custom_api.get_namespaced_custom_object = MagicMock(return_value=failed_stage)
+
+    snap = await obs.get_stage_status("v4-22", "verify-release-chart")
+    assert snap["failure_type"] == "promotion"
+    assert snap["phase"] == "Failed"
+    assert snap["verification_id"] == ""
+
+    polled = await obs.poll_kargo_stage_status("v4-22", "verify-release-chart")
+    assert polled == {"phase": "Failed", "failed_step": ""}
+
+
+def test_m7_m13_put_bounded_logs_warning_and_evicts_oldest(caplog):
+    """M7 / M13: _put_bounded drops oldest item with warning log when queue is full."""
+    import queue as _queue
+    from src.observers.kargo import KargoObserver
+
+    q: _queue.Queue = _queue.Queue(maxsize=2)
+    assert KargoObserver._put_bounded(q, "e1") is True
+    assert KargoObserver._put_bounded(q, "e2") is True
+    with caplog.at_level("WARNING"):
+        assert KargoObserver._put_bounded(q, "e3") is False
+    assert [q.get_nowait(), q.get_nowait()] == ["e2", "e3"]
+    assert any("dropped oldest watch event" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_m13_watch_loop_410_triggers_initial_sync_and_broadcast():
+    """M13: _watch_loop handles K8s 410 Gone by resetting rv, calling _initial_sync and _fire_broadcast."""
+    import asyncio
+    from kubernetes.client.exceptions import ApiException
+    from unittest.mock import MagicMock, patch
+    from src.observers.kargo import KargoObserver
+
+    obs = KargoObserver(blackboard=MagicMock(), broadcast_callback=AsyncMock())
+    obs._k8s_available = True
+    obs._running = True
+    obs._resource_version = "stale-rv"
+    obs._initial_sync = AsyncMock()  # type: ignore[method-assign]
+
+    def fake_run_in_executor(_executor, fn, *_args):
+        if getattr(fn, "__name__", "") == "_run_watch":
+            return MagicMock()
+        async def _get_item():
+            if obs._initial_sync.await_count == 0:
+                return ApiException(status=410, reason="Expired")
+            obs._running = False
+            raise asyncio.CancelledError()
+        return _get_item()
+
+    with patch("kubernetes.watch.Watch", return_value=MagicMock()), patch("asyncio.get_running_loop") as mock_loop:
+        loop_inst = MagicMock()
+        loop_inst.run_in_executor = fake_run_in_executor
+        mock_loop.return_value = loop_inst
+        await obs._watch_loop()
+
+    obs._initial_sync.assert_awaited_once()
+    obs.broadcast_callback.assert_awaited_once()
+    assert obs._resource_version == ""
