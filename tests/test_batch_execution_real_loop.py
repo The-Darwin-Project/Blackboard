@@ -41,6 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agents.brain import Brain
+from src.agents.tool_gates import GateContext
 from src.models import EventDocument, EventEvidence, EventInput, EventStatus
 
 
@@ -112,6 +113,7 @@ def _make_brain(stream_factory=None) -> Brain:
     bb.record_event = AsyncMock()
     bb.get_flow_metrics = AsyncMock(return_value={"queue_depth": 0, "active_events": []})
     bb.get_service = AsyncMock(return_value=None)
+    bb.get_services = AsyncMock(return_value={})
 
     brain = Brain(blackboard=bb, agents={})
 
@@ -167,8 +169,28 @@ def _gate_patch(tool_names: list[str]):
     )
 
 
+def _default_gate_ctx(**overrides) -> GateContext:
+    defaults = dict(
+        brain_phase="dispatch",
+        event_source="headhunter",
+        context_flags={"brain_has_classified": True, "event_domain": "complicated"},
+        conversation=[],
+        is_defer_wake=False,
+        iteration=0,
+        has_kargo_context=False,
+        has_github_context=False,
+        unread_notes=0,
+    )
+    defaults.update(overrides)
+    return GateContext(**defaults)
+
+
 def _gate_ctx_patch(side_effect=None, return_value=None):
-    kwargs = {"side_effect": side_effect} if side_effect is not None else {"return_value": return_value or MagicMock()}
+    kwargs = (
+        {"side_effect": side_effect}
+        if side_effect is not None
+        else {"return_value": return_value if return_value is not None else _default_gate_ctx()}
+    )
     return patch("src.agents.tool_gates.build_gate_context", **kwargs)
 
 
@@ -191,40 +213,64 @@ def _turns(brain: Brain) -> list:
 # ---------------------------------------------------------------------------
 
 class TestFC0GateRejection:
-    """Batch loop's authorization re-check must cover FC[0], not just FC[1+]."""
+    """Batch loop's authorization re-check must cover FC[0], not just FC[1+], and
+    maintain 1:1 FR parity (Step 5) when halting on a gated FC."""
 
     @pytest.mark.asyncio
     async def test_fc0_rejected_by_gate_never_executes_and_writes_no_turn(self):
-        """FC[0]'s tool is absent from active_tools -- batch must stop before any
-        FC executes and real handlers (classify_event/select_agent) must never run."""
+        """FC[0]'s tool is absent from active_tools -- real handlers (classify_event/select_agent)
+        must never run; Step 5 emits paired [GATE] + [GATE] Skipped FR turns (turn=0) and
+        returns True so the LLM can self-correct."""
         fcs = [_fc("classify_event", {"domain": "clear"}), _fc("select_agent", {"agent_name": "developer"})]
         stream = MockStream([_Chunk(raw_parts=fcs)])
         brain = _make_brain(stream_factory=lambda **kw: stream)
         event = _make_event()
+        gated_ctx = _default_gate_ctx(
+            context_flags={"is_intermediate": True, "brain_has_classified": True, "event_domain": "complicated"},
+        )
 
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-                _gate_patch(["close_event"]), _gate_ctx_patch():
+                _gate_patch(["close_event"]), _gate_ctx_patch(return_value=gated_ctx):
             result = await brain._process_with_llm("evt-test", event)
 
-        assert result is False
+        assert result is True
         brain.blackboard.update_event_domain.assert_not_awaited()
-        assert brain._append_and_broadcast.await_count == 0, (
-            "gate-rejected FC[0] must not execute a handler or write any turn"
-        )
+        turns = _turns(brain)
+        assert len(turns) == 2, f"Expected 2 paired FR turns (FC[0] rejected + FC[1] skipped), got {len(turns)}"
+        assert turns[0].turn == 0
+        assert turns[0].actor == "brain"
+        assert turns[0].action == "tool_result"
+        assert turns[0].waitingFor == "classify_event"
+        assert turns[0].batch_size == 2
+        assert turns[0].batch_index is None
+        assert turns[0].response_parts == fcs
+        assert (turns[0].thoughts or "").startswith("[GATE] ")
+        assert "[GATE] [GATE]" not in (turns[0].thoughts or "")
+
+        assert turns[1].turn == 0
+        assert turns[1].actor == "brain"
+        assert turns[1].action == "tool_result"
+        assert turns[1].waitingFor == "select_agent"
+        assert turns[1].batch_index == 1
+        assert "[GATE] Skipped" in (turns[1].thoughts or "")
+        assert "classify_event" in (turns[1].thoughts or "")
 
     @pytest.mark.asyncio
     async def test_fc1_still_rejected_when_gate_narrows_after_fc0(self):
-        """Sanity check: FC[1] rejection (pre-existing behavior) still works
-        after the FC[0] fix -- FC[0] executes, FC[1] is rejected by the
-        freshly re-evaluated gate and the batch stops there."""
+        """Sanity check: FC[1] rejection executes FC[0], rejects FC[1] via freshly
+        re-evaluated gate, emits a paired [GATE] tool_result turn (batch_index=1, turn=0),
+        and returns True so the LLM can continue."""
         fcs = [_fc("classify_event", {"domain": "clear"}), _fc("select_agent", {"agent_name": "developer"})]
         stream = MockStream([_Chunk(raw_parts=fcs)])
         brain = _make_brain(stream_factory=lambda **kw: stream)
         event = _make_event()
+        open_ctx = _default_gate_ctx()
+        narrowed_ctx = _default_gate_ctx(
+            context_flags={"is_intermediate": True, "brain_has_classified": True, "event_domain": "clear"},
+        )
 
         with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
-                _gate_patch(["classify_event", "select_agent"]), \
-                _gate_ctx_patch(), \
+                _gate_ctx_patch(side_effect=[open_ctx, narrowed_ctx]), \
                 patch("src.agents.tool_gates.evaluate_gates") as mock_eval:
             # First call = outer active_tools (both allowed). Second call = FC[1] re-eval
             # (select_agent no longer allowed after classify_event ran).
@@ -234,10 +280,19 @@ class TestFC0GateRejection:
             ]
             result = await brain._process_with_llm("evt-test", event)
 
-        assert result is False
+        assert result is True
         brain.blackboard.update_event_domain.assert_awaited_once()
         turns = _turns(brain)
-        assert len(turns) == 2, f"Only classify_event's 2 turns expected, got {len(turns)}"
+        assert len(turns) == 3, f"classify_event's 2 turns + FC[1] rejection turn expected, got {len(turns)}"
+        rej = turns[-1]
+        assert rej.turn == 0
+        assert rej.actor == "brain"
+        assert rej.action == "tool_result"
+        assert rej.waitingFor == "select_agent"
+        assert rej.batch_index == 1
+        assert rej.response_parts is None
+        assert (rej.thoughts or "").startswith("[GATE] ")
+        assert "[GATE] [GATE]" not in (rej.thoughts or "")
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +319,10 @@ class TestBatchEarlyExitBreaks:
         assert result is False
         brain.blackboard.update_event_domain.assert_not_awaited(), "FC[1] must not run after FC[0] returns False"
         turns = _turns(brain)
-        assert len(turns) == 1, f"Only select_agent's dup-turn expected, got {len(turns)}"
+        assert len(turns) == 2, f"select_agent's dup-turn and 1 skipped turn expected, got {len(turns)}"
         assert "already actively working" in (turns[0].thoughts or "")
+        assert "Skipped:" in (turns[1].thoughts or "")
+        assert turns[1].waitingFor == "classify_event"
 
     @pytest.mark.asyncio
     async def test_batch_stops_when_event_closed_after_fc(self):
@@ -298,8 +355,9 @@ class TestGateReEvalExceptionPath:
     @pytest.mark.asyncio
     async def test_exception_during_fc1_gate_reeval_halts_batch_with_diagnostic_turn(self):
         """FC[0] succeeds; the FC[1] gate re-fetch/re-eval raises (e.g. Redis error) --
-        must be caught, logged, produce a diagnostic tool_result turn, and halt the
-        batch (FC[2] never runs), instead of bubbling to the generic caller."""
+        must be caught, logged, produce a diagnostic tool_result turn for FC[1] AND a
+        paired [GATE] Skipped FR turn for FC[2] (1:1 FR parity, turn=0), halt the batch
+        (FC[2] never runs), and return True so the LLM can recover."""
         fcs = [
             _fc("classify_event", {"domain": "clear"}),
             _fc("select_agent", {"agent_name": "developer"}),
@@ -313,21 +371,35 @@ class TestGateReEvalExceptionPath:
                 _gate_patch(["classify_event", "select_agent", "set_phase"]), \
                 patch("src.agents.tool_gates.build_gate_context") as mock_ctx:
             # 1st call = outer gate_ctx build (succeeds). 2nd call = FC[1] re-eval (raises).
-            mock_ctx.side_effect = [MagicMock(), RuntimeError("Redis connection reset")]
+            mock_ctx.side_effect = [_default_gate_ctx(), RuntimeError("Redis connection reset")]
             result = await brain._process_with_llm("evt-test", event)
 
-        assert result is False
+        assert result is True
         brain.blackboard.update_event_domain.assert_awaited_once(), "FC[0] (classify_event) must have executed"
         brain.blackboard.update_event_phase.assert_not_awaited(), "FC[2] (set_phase) must never run after the exception halts the batch"
 
         turns = _turns(brain)
-        assert len(turns) == 3, f"classify_event's 2 turns + 1 diagnostic error turn expected, got {len(turns)}"
-        error_turn = turns[-1]
+        assert len(turns) == 4, (
+            f"classify_event's 2 turns + FC[1] error turn + FC[2] skipped turn expected, got {len(turns)}"
+        )
+        error_turn = turns[-2]
+        assert error_turn.turn == 0
         assert error_turn.action == "tool_result"
+        assert error_turn.waitingFor == "select_agent"
+        assert error_turn.batch_index == 1
         assert "select_agent" in error_turn.thoughts
         assert "batch position 1" in error_turn.thoughts
         assert "Redis connection reset" in error_turn.thoughts
         assert "halted" in error_turn.thoughts.lower()
+
+        skipped_turn = turns[-1]
+        assert skipped_turn.turn == 0
+        assert skipped_turn.actor == "brain"
+        assert skipped_turn.action == "tool_result"
+        assert skipped_turn.waitingFor == "set_phase"
+        assert skipped_turn.batch_index == 2
+        assert "[GATE] Skipped" in (skipped_turn.thoughts or "")
+        assert "select_agent" in (skipped_turn.thoughts or "")
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +708,11 @@ class TestBatchClosePhaseFlush:
         assert turns[0].action == "thoughts"
         assert turns[0].thoughts == "Premature close text."
         assert "evt-test" not in brain._response_emitted_for
-        assert any(t.actor == "system" and t.action == "error" for t in turns)
+        assert any(
+            t.actor == "brain" and t.action == "tool_result" and t.waitingFor == "set_phase"
+            and "Cannot transition to 'close'" in (t.thoughts or "")
+            for t in turns
+        )
         assert event.brain_phase != "close"
 
     @pytest.mark.asyncio
@@ -663,7 +739,11 @@ class TestBatchClosePhaseFlush:
         assert turns[0].action == "thoughts"
         assert turns[0].thoughts == "Wrong order text."
         assert "evt-test" not in brain._response_emitted_for
-        assert any(t.actor == "system" and t.action == "error" for t in turns)
+        assert any(
+            t.actor == "brain" and t.action == "tool_result" and t.waitingFor == "set_phase"
+            and "Cannot transition to 'close'" in (t.thoughts or "")
+            for t in turns
+        )
         assert event.event.evidence.brain_domain == "clear"
         assert event.brain_phase == "dispatch"
 
@@ -792,10 +872,15 @@ class TestBatchClosePhaseFlush:
         with patch("src.agents.brain._THOUGHT_SIG_V2", True):
             res2 = await brain2._process_with_llm("evt-test", event2)
 
-        assert res2 is False
+        assert res2 is True
         assert event2.event.evidence.brain_domain == "casual"
         turns2 = _turns(brain2)
-        assert len(turns2) == 3  # 1 thoughts turn + 2 classify_event turns; fetch_jira_issue halted by DOMAIN_CASUAL
+        assert len(turns2) == 4  # 1 thoughts + 2 classify_event + 1 [GATE] rejection for fetch_jira_issue
+        assert turns2[-1].actor == "brain"
+        assert turns2[-1].action == "tool_result"
+        assert turns2[-1].waitingFor == "fetch_jira_issue"
+        assert turns2[-1].batch_index == 1
+        assert (turns2[-1].thoughts or "").startswith("[GATE] ")
 
     def test_batch_intra_batch_ordering_and_default_domain_guards(self):
         """CF-2 & CF-3: _batch_is_terminal_for_flush returns False for default complicated
@@ -857,15 +942,15 @@ class TestBatchClosePhaseFlush:
 
 
 class TestBatchFC0WaitForUserReadmission:
-    """M5: FC[0] `wait_for_user` re-admission after a response was already emitted
-    (SILENT_PARK) is governed by `_pred_hard_strip_wait_user(gate_ctx)`."""
+    """M5 & Step 5: FC[0] `wait_for_user` re-admission after a response was already emitted
+    (SILENT_PARK) is governed by `is_wait_for_user_admissible_after_response(gate_ctx)`."""
 
     @staticmethod
     def _readmission_brain(source: str, phase: str, with_user_turn: bool):
-        gate_ctx = SimpleNamespace(
+        gate_ctx = _default_gate_ctx(
             event_source=source,
             brain_phase=phase,
-            conversation=[{"actor": "user"}] if with_user_turn else [],
+            conversation=[{"actor": "user", "action": "message"}] if with_user_turn else [],
         )
         fcs = [_fc("wait_for_user", {"summary": "waiting"}), _fc("classify_event", {"domain": "clear"})]
         stream = MockStream([_Chunk(raw_parts=fcs)])
@@ -896,8 +981,18 @@ class TestBatchFC0WaitForUserReadmission:
                 _gate_patch(["classify_event"]), _gate_ctx_patch(return_value=gate_ctx):
             result = await brain._process_with_llm("evt-test", event)
 
-        assert result is False
+        assert result is True
         brain._execute_function_call.assert_not_awaited()
+        turns = _turns(brain)
+        assert len(turns) == 2
+        assert turns[0].turn == 0
+        assert turns[0].waitingFor == "wait_for_user"
+        assert turns[0].batch_size == 2
+        assert (turns[0].thoughts or "").startswith("[GATE] ")
+        assert turns[1].turn == 0
+        assert turns[1].waitingFor == "classify_event"
+        assert turns[1].batch_index == 1
+        assert "[GATE] Skipped" in (turns[1].thoughts or "")
 
 
 class TestBatchGateReEvalUsesLiveEvidence:
@@ -933,15 +1028,23 @@ class TestBatchGateReEvalUsesLiveEvidence:
                 patch("src.agents.tool_gates.build_gate_context", side_effect=_spy):
             result = await brain._process_with_llm("evt-test", event)
 
-        assert result is False
+        assert result is True
         assert event.event.evidence.brain_domain == "casual"
         assert len(seen_flags) >= 2
         assert seen_flags[0]["event_domain"] == "complicated"
         assert seen_flags[-1]["event_domain"] == "casual", (
             "FC[1] gate re-eval must use refreshed evidence_overrides, not stale context_flags"
         )
-        # fetch_jira_issue is disallowed under DOMAIN_CASUAL -> rejected, only classify_event's turns.
-        assert not any("fetch_jira_issue" in (t.thoughts or "") for t in _turns(brain) if t.actor == "brain" and t.action == "tool_result")
+        # fetch_jira_issue is disallowed under DOMAIN_CASUAL -> rejected with paired [GATE] FR turn
+        rejected_turns = [
+            t for t in _turns(brain)
+            if t.actor == "brain" and t.action == "tool_result" and t.waitingFor == "fetch_jira_issue"
+        ]
+        assert len(rejected_turns) == 1
+        assert rejected_turns[0].batch_index == 1
+        assert (rejected_turns[0].thoughts or "").startswith("[GATE] ")
+        assert "[GATE] [GATE]" not in (rejected_turns[0].thoughts or "")
+        assert "CASUAL" in (rejected_turns[0].thoughts or "")
 
 
 class TestBatchGateReEvalClassifiedFlag:
@@ -988,3 +1091,482 @@ class TestBatchGateReEvalClassifiedFlag:
         assert [c.args[1] for c in brain._execute_function_call.await_args_list] == [
             "classify_event", "fetch_jira_issue",
         ]
+
+
+# ---------------------------------------------------------------------------
+# VMER-2450 Step 5 ATDD (T-14, T-15, T-16, T-17): Batch 1:1 FR parity,
+# single [GATE] prefix, skipped-turn batch_index preservation, return value
+# semantics, SILENT_PARK full-gate guard, and set_phase rejection replay
+# ---------------------------------------------------------------------------
+
+def _fc_sig(name: str, args: dict | None = None, sig: str | None = None) -> dict:
+    part: dict = {"functionCall": {"name": name, "args": args or {}}}
+    if sig is not None:
+        part["thought_signature"] = sig
+    return part
+
+
+class TestATDDT14T15BatchGateAndExceptionParity:
+    """Layer 1-4 ATDD specs for T-14 & T-15 (Step 5 batch FR parity)."""
+
+    @pytest.mark.asyncio
+    async def test_t14_2fc_batch_allowed_then_gated_single_prefix_fr_parity_and_replay(self):
+        """T-14: Given [lookup_service (allowed), close_event (gated)] under BRAIN_THOUGHT_SIG_V2=true
+        When executed
+        Then FC[0] executes, FC[1] writes single-prefixed '[GATE] ' tool_result (turn=0,
+        batch_index=1, waitingFor='close_event'), returns True, and native replay pairs 2 FCs with 2 FRs."""
+        from tests.test_build_contents_structure import _make_brain_mock
+
+        fcs = [
+            _fc_sig("lookup_service", {"service": "test-svc"}, sig="sig-t14"),
+            _fc_sig("close_event", {"summary": "premature"}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="headhunter", brain_phase="dispatch")
+        event.event.evidence.brain_domain = "complicated"
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"brain_has_classified": True, "event_domain": "complicated"}
+        )
+
+        # Capture raw turn.turn before persisting to event.conversation for replay verification
+        initial_turns: list[int] = []
+
+        async def _capture_and_store(_eid, turn, _ev=None):
+            initial_turns.append(turn.turn)
+            turn.turn = len(event.conversation) + 1
+            event.conversation.append(turn)
+            return turn.turn
+
+        brain._append_and_broadcast = AsyncMock(side_effect=_capture_and_store)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        brain.blackboard.get_service.assert_awaited_once()
+        assert len(event.conversation) == 2
+        fc0_turn, fc1_turn = event.conversation
+        assert fc0_turn.waitingFor == "lookup_service"
+        assert fc0_turn.batch_size == 2
+        assert fc0_turn.response_parts == fcs
+
+        assert initial_turns[1] == 0, "FC[1] gate rejection turn must be constructed with turn=0"
+        assert fc1_turn.actor == "brain"
+        assert fc1_turn.action == "tool_result"
+        assert fc1_turn.waitingFor == "close_event"
+        assert fc1_turn.batch_index == 1
+        assert fc1_turn.response_parts is None
+        assert (fc1_turn.thoughts or "").startswith("[GATE] ")
+        assert "[GATE] [GATE]" not in (fc1_turn.thoughts or "")
+
+        # Verify native FC/FR replay parity + verbatim thought_signature
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+        fc_parts = [p for m in contents if m["role"] == "model" for p in m["parts"] if "functionCall" in p]
+        fr_parts = [p for m in contents if m["role"] == "user" for p in m["parts"] if "functionResponse" in p]
+        assert len(fc_parts) == 2
+        assert len(fr_parts) == 2
+        assert fc_parts[0].get("thought_signature") == "sig-t14"
+        assert [p["functionResponse"]["name"] for p in fr_parts] == ["lookup_service", "close_event"]
+
+    @pytest.mark.asyncio
+    async def test_t14_unknown_tool_in_batch_writes_unknown_prefix_tool_result(self):
+        """Unknown tool name in batch writes [UNKNOWN] tool_result (turn=0, batch_index=1) and returns True."""
+        fcs = [
+            _fc_sig("lookup_service", {"service": "test-svc"}, sig="sig-unk"),
+            _fc_sig("nonexistent_tool", {}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="headhunter", brain_phase="dispatch")
+        event.event.evidence.brain_domain = "complicated"
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"brain_has_classified": True, "event_domain": "complicated"}
+        )
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        turns = _turns(brain)
+        assert len(turns) == 2
+        unk = turns[1]
+        assert unk.turn == 0
+        assert unk.actor == "brain"
+        assert unk.action == "tool_result"
+        assert unk.waitingFor == "nonexistent_tool"
+        assert unk.batch_index == 1
+        assert "[UNKNOWN]" in (unk.thoughts or "")
+
+    @pytest.mark.asyncio
+    async def test_t15_3fc_batch_fc0_gated_writes_paired_gate_and_skipped_turns(self):
+        """T-15 (gate rejection at i=0): 3-FC batch [close_event (gated), lookup_service, select_agent]
+        writes FC[0] [GATE] turn (batch_size=3, response_parts) plus FC[1] (batch_index=1) and
+        FC[2] (batch_index=2) [GATE] Skipped turns with turn=0 and un-clobbered batch_index."""
+        from tests.test_build_contents_structure import _make_brain_mock
+
+        fcs = [
+            _fc_sig("close_event", {"summary": "nope"}, sig="sig-t15-0"),
+            _fc_sig("lookup_service", {"service": "test-svc"}),
+            _fc_sig("select_agent", {"agent_name": "developer"}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="headhunter", brain_phase="dispatch")
+        event.event.evidence.brain_domain = "complicated"
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"brain_has_classified": True, "event_domain": "complicated"}
+        )
+
+        initial_turns: list[int] = []
+
+        async def _capture_and_store(_eid, turn, _ev=None):
+            initial_turns.append(turn.turn)
+            turn.turn = len(event.conversation) + 1
+            event.conversation.append(turn)
+            return turn.turn
+
+        brain._append_and_broadcast = AsyncMock(side_effect=_capture_and_store)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        brain.blackboard.get_service.assert_not_awaited()
+        assert initial_turns == [0, 0, 0]
+        assert len(event.conversation) == 3
+
+        t0, t1, t2 = event.conversation
+        assert t0.actor == "brain" and t0.action == "tool_result" and t0.waitingFor == "close_event"
+        assert t0.batch_size == 3 and t0.batch_index is None
+        assert t0.response_parts == fcs
+        assert (t0.thoughts or "").startswith("[GATE] ")
+        assert "[GATE] [GATE]" not in (t0.thoughts or "")
+
+        assert t1.actor == "brain" and t1.action == "tool_result" and t1.waitingFor == "lookup_service"
+        assert t1.batch_index == 1 and t1.batch_size is None
+        assert "[GATE] Skipped" in (t1.thoughts or "") and "close_event" in (t1.thoughts or "")
+
+        assert t2.actor == "brain" and t2.action == "tool_result" and t2.waitingFor == "select_agent"
+        assert t2.batch_index == 2 and t2.batch_size is None
+        assert "[GATE] Skipped" in (t2.thoughts or "") and "close_event" in (t2.thoughts or "")
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+        fc_parts = [p for m in contents if m["role"] == "model" for p in m["parts"] if "functionCall" in p]
+        fr_parts = [p for m in contents if m["role"] == "user" for p in m["parts"] if "functionResponse" in p]
+        assert len(fc_parts) == 3
+        assert len(fr_parts) == 3
+        assert fc_parts[0].get("thought_signature") == "sig-t15-0"
+        assert [p["functionResponse"]["name"] for p in fr_parts] == [
+            "close_event", "lookup_service", "select_agent",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_t15_3fc_batch_exception_at_fc1_writes_error_and_skipped_turn(self):
+        """T-15 (re-eval exception at i=1): FC[0] runs, FC[1] raises during gate re-eval ->
+        FC[1] writes tool_result (turn=0, batch_index=1) AND FC[2] writes [GATE] Skipped
+        (turn=0, batch_index=2, waitingFor='close_event'); returns True."""
+        fcs = [
+            _fc_sig("lookup_service", {"service": "test-svc"}, sig="sig-exc"),
+            _fc_sig("select_agent", {"agent_name": "developer"}),
+            _fc_sig("close_event", {"summary": "skipped"}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+                _gate_patch(["lookup_service", "select_agent", "close_event"]), \
+                patch("src.agents.tool_gates.build_gate_context") as mock_ctx:
+            mock_ctx.side_effect = [_default_gate_ctx(), RuntimeError("transient redis drop")]
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        turns = _turns(brain)
+        assert len(turns) == 3
+        assert turns[0].waitingFor == "lookup_service" and turns[0].batch_size == 3
+        assert turns[1].turn == 0 and turns[1].waitingFor == "select_agent" and turns[1].batch_index == 1
+        assert "transient redis drop" in (turns[1].thoughts or "")
+        assert turns[2].turn == 0 and turns[2].waitingFor == "close_event" and turns[2].batch_index == 2
+        assert "[GATE] Skipped" in (turns[2].thoughts or "") and "select_agent" in (turns[2].thoughts or "")
+
+    @pytest.mark.asyncio
+    async def test_t15_halt_returns_false_if_event_closed_before_fc1_rejection(self):
+        """Return value contract: if FC[0] ran and event is closed by the time FC[1] is rejected,
+        halt_reinvoke must NOT force True -- returns False."""
+        fcs = [
+            _fc_sig("lookup_service", {"service": "test-svc"}, sig="sig-closed"),
+            _fc_sig("close_event", {"summary": "gated"}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="headhunter", brain_phase="dispatch")
+        event.event.evidence.brain_domain = "complicated"
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(
+            return_value={"brain_has_classified": True, "event_domain": "complicated"}
+        )
+        # Pre-batch closed check=False, post-FC[0] closed check=False, halt_reinvoke closed check=True
+        brain._is_event_closed = AsyncMock(side_effect=[False, False, True])
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is False
+        turns = _turns(brain)
+        assert len(turns) == 2
+        assert turns[1].waitingFor == "close_event" and turns[1].batch_index == 1
+
+
+class TestATDDT16BatchFlushAndReadmission:
+    """T-16 (Step 5): _batch_is_terminal_for_flush (L657) & batch FC[0] re-admission (L2790)."""
+
+    def test_t16_batch_is_terminal_for_flush_backward_compat_and_gate_checks(self):
+        """3-arg call (gate_ctx=None) stays backward-compatible while gating non-active
+        _CYCLE_ENDING_TOOLS; 4-arg call with gate_ctx enforces is_wait_for_user_admissible_after_response."""
+        from src.agents.brain import _batch_is_terminal_for_flush
+        from src.models import ConversationTurn
+
+        event = _make_event(source="slack", brain_phase="triage")
+        event.event.evidence.brain_domain = "complicated"
+        event.conversation = [
+            ConversationTurn(turn=1, actor="user", action="message", thoughts="hi"),
+        ]
+
+        # 3-arg backward compat: gated close_event/defer_event NOT in active_tool_names -> False
+        assert _batch_is_terminal_for_flush([_fc("close_event", {})], event, {"classify_event"}) is False
+        assert _batch_is_terminal_for_flush([_fc("defer_event", {})], event, {"classify_event"}) is False
+        # Active close_event -> True
+        assert _batch_is_terminal_for_flush([_fc("close_event", {})], event, {"close_event"}) is True
+
+        # 4-arg call: INTERMEDIATE blocks wait_for_user -> False
+        interm_ctx = _default_gate_ctx(
+            event_source="slack",
+            brain_phase="dispatch",
+            context_flags={"is_intermediate": True, "brain_has_classified": True, "event_domain": "complicated"},
+            conversation=event.conversation,
+        )
+        assert _batch_is_terminal_for_flush(
+            [_fc("wait_for_user", {})], event, {"wait_for_agent"}, gate_ctx=interm_ctx,
+        ) is False
+
+        # 4-arg call: DOMAIN_CHAOTIC blocks wait_for_user -> False
+        chaotic_ctx = _default_gate_ctx(
+            event_source="slack",
+            brain_phase="dispatch",
+            context_flags={"is_intermediate": False, "brain_has_classified": True, "event_domain": "chaotic"},
+            conversation=event.conversation,
+        )
+        assert _batch_is_terminal_for_flush(
+            [_fc("wait_for_user", {})], event, {"select_agent"}, gate_ctx=chaotic_ctx,
+        ) is False
+
+        # 4-arg call: ONLY SILENT_PARK firing -> True (flushing response satisfies SILENT_PARK)
+        silent_park_only_ctx = _default_gate_ctx(
+            event_source="slack",
+            brain_phase="dispatch",
+            context_flags={"is_intermediate": False, "brain_has_classified": True, "event_domain": "complicated"},
+            conversation=event.conversation,
+        )
+        assert _batch_is_terminal_for_flush(
+            [_fc("wait_for_user", {})], event, {"classify_event"}, gate_ctx=silent_park_only_ctx,
+        ) is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"is_intermediate": True, "brain_has_classified": True, "event_domain": "complicated"},
+            {"is_intermediate": False, "brain_has_classified": True, "event_domain": "chaotic"},
+        ],
+        ids=["intermediate", "domain_chaotic"],
+    )
+    async def test_t16_batch_wait_for_user_blocked_by_intermediate_or_chaotic_suppresses_flush_and_readmission(
+        self, flags,
+    ):
+        """Even on slack source with narration + _response_emitted_for, INTERMEDIATE and DOMAIN_CHAOTIC
+        must prevent both pre-batch response flush and FC[0] wait_for_user re-admission."""
+        from src.models import ConversationTurn
+
+        fcs = [_fc_sig("wait_for_user", {"summary": "park"}, sig="sig-t16"), _fc_sig("lookup_service", {})]
+        stream = MockStream([_Chunk(text="Should NOT be flushed as brain.response.", raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="dispatch")
+        event.event.evidence.brain_domain = flags["event_domain"]
+        event.conversation = [
+            ConversationTurn(turn=1, actor="user", action="message", thoughts="status?"),
+        ]
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(return_value=flags)
+        brain._execute_function_call = AsyncMock(return_value=False)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        brain._execute_function_call.assert_not_awaited()
+        assert result is True
+        turns = _turns(brain)
+        assert not any(t.action == "response" for t in turns), "Must not emit brain.response when wait_for_user is gated"
+        assert "evt-test" not in brain._response_emitted_for
+        assert turns[0].action == "thoughts"
+        tool_results = [t for t in turns if t.action == "tool_result"]
+        assert len(tool_results) == 2
+        assert tool_results[0].waitingFor == "wait_for_user" and tool_results[0].batch_size == 2
+        assert tool_results[1].waitingFor == "lookup_service" and tool_results[1].batch_index == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"is_intermediate": True, "brain_has_classified": True, "event_domain": "complicated"},
+            {"is_intermediate": False, "brain_has_classified": True, "event_domain": "chaotic"},
+        ],
+        ids=["intermediate_pre_emitted", "domain_chaotic_pre_emitted"],
+    )
+    async def test_t16_batch_fc0_readmission_blocked_even_when_response_already_emitted(self, flags):
+        """Directly exercises L2790: even when _response_emitted_for already contains event_id
+        on a slack event, INTERMEDIATE or DOMAIN_CHAOTIC blocks FC[0] wait_for_user re-admission."""
+        from src.models import ConversationTurn
+
+        fcs = [_fc_sig("wait_for_user", {"summary": "park"}, sig="sig-t16-re"), _fc_sig("lookup_service", {})]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        brain._response_emitted_for = {"evt-test"}
+        event = _make_event(source="slack", brain_phase="dispatch")
+        event.event.evidence.brain_domain = flags["event_domain"]
+        event.conversation = [
+            ConversationTurn(turn=1, actor="user", action="message", thoughts="status?"),
+        ]
+        brain.blackboard.get_event = AsyncMock(return_value=event)
+        brain._extract_context_flags = AsyncMock(return_value=flags)
+        brain._execute_function_call = AsyncMock(return_value=False)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        brain._execute_function_call.assert_not_awaited()
+        assert result is True
+        tool_results = [t for t in _turns(brain) if t.action == "tool_result"]
+        assert len(tool_results) == 2
+        assert tool_results[0].waitingFor == "wait_for_user" and tool_results[0].batch_size == 2
+        assert tool_results[1].waitingFor == "lookup_service" and tool_results[1].batch_index == 1
+
+
+class TestATDDT17BatchSetPhaseRejection:
+    """T-17 (Step 5): handle_set_phase('close') rejected as FC[0] in a real batch preserves
+    turn=0, actor='brain', action='tool_result', waitingFor='set_phase', response_parts, and native replay."""
+
+    @pytest.mark.asyncio
+    async def test_t17_set_phase_close_rejected_as_fc0_in_batch_preserves_native_fc_fr_replay(self):
+        from tests.test_build_contents_structure import _make_brain_mock
+
+        fcs = [
+            _fc_sig("set_phase", {"phase": "close", "reasoning": "premature"}, sig="sig-t17"),
+            _fc_sig("lookup_service", {"service": "test-svc"}),
+        ]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event(source="slack", brain_phase="dispatch")
+        event.event.evidence.brain_domain = "complicated"
+        _wire_mutable_event(brain, event)
+
+        initial_turns: list[int] = []
+        orig_append = brain._append_and_broadcast.side_effect
+
+        async def _spy_append(_eid, turn, _ev=None):
+            initial_turns.append(turn.turn)
+            return await orig_append(_eid, turn, _ev)
+
+        brain._append_and_broadcast = AsyncMock(side_effect=_spy_append)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            result = await brain._process_with_llm("evt-test", event)
+
+        assert result is True
+        assert len(event.conversation) == 2
+        fc0_turn, fc1_turn = event.conversation
+        assert initial_turns[0] == 0
+        assert fc0_turn.actor == "brain"
+        assert fc0_turn.action == "tool_result"
+        assert fc0_turn.waitingFor == "set_phase"
+        assert "Cannot transition to 'close'" in (fc0_turn.thoughts or "")
+        assert fc0_turn.response_parts == fcs
+        assert fc0_turn.batch_size == 2
+        assert fc1_turn.waitingFor == "lookup_service"
+        assert fc1_turn.batch_index == 1
+
+        # Native FC/FR replay preserves thought_signature and both FRs
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(_make_brain_mock(), event)
+        fc_parts = [p for m in contents if m["role"] == "model" for p in m["parts"] if "functionCall" in p]
+        fr_parts = [p for m in contents if m["role"] == "user" for p in m["parts"] if "functionResponse" in p]
+        assert len(fc_parts) == 2
+        assert len(fr_parts) == 2
+        assert fc_parts[0].get("thought_signature") == "sig-t17"
+        assert [p["functionResponse"]["name"] for p in fr_parts] == ["set_phase", "lookup_service"]
+
+
+
+class TestC7CritC4F4BatchAppendTurnsAndAbort:
+    @pytest.mark.asyncio
+    async def test_c7_crit_c4_f4_batch_append_turns_and_abort(self):
+        """[C7-CRIT + C4-F4] BlackboardState.append_turns() monotonically assigns turns
+        in fakeredis and returns [] if missing. Batch-FC aborts cleanly if _append_turns_and_broadcast fails."""
+        from src.state.blackboard import BlackboardState
+        from fakeredis.aioredis import FakeRedis
+        from src.models import ConversationTurn, EventDocument
+        import time
+        from unittest.mock import AsyncMock
+
+        redis = FakeRedis()
+        state = BlackboardState(redis)
+
+        res = await state.append_turns("nonexistent", [
+            ConversationTurn(turn=0, actor="brain", action="response", thoughts="t1"),
+            ConversationTurn(turn=0, actor="brain", action="response", thoughts="t2")
+        ])
+        assert res == []
+
+        from src.models import Literal
+        event_id = await state.create_event(
+            source="chat",
+            service="test_svc",
+            reason="Test event",
+            evidence="none"
+        )
+        res = await state.append_turns(event_id, [
+            ConversationTurn(turn=0, actor="brain", action="response", thoughts="t1"),
+            ConversationTurn(turn=0, actor="brain", action="response", thoughts="t2")
+        ])
+        assert len(res) == 2
+        assert res[0] == 1
+        assert res[1] == 2
+
+        fcs = [_fc("select_agent", {"agent_name": "developer", "task_instruction": "go"}),
+               _fc("classify_event", {"domain": "clear"})]
+        stream = MockStream([_Chunk(raw_parts=fcs)])
+        brain = _make_brain(stream_factory=lambda **kw: stream)
+        event = _make_event()
+
+        brain._append_turns_and_broadcast = AsyncMock(return_value=False)
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), _gate_patch(["select_agent", "classify_event"]), _gate_ctx_patch():
+            result = await brain._process_with_llm(event_id, event)
+
+        assert result is False
+        
+        # Now test with exception
+        brain._append_turns_and_broadcast = AsyncMock(side_effect=Exception("Redis dead"))
+        stream2 = MockStream([_Chunk(raw_parts=fcs)])
+        brain2 = _make_brain(stream_factory=lambda **kw: stream2)
+        brain2._append_turns_and_broadcast = AsyncMock(side_effect=Exception("Redis dead"))
+        
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), _gate_patch(["select_agent", "classify_event"]), _gate_ctx_patch():
+            result2 = await brain2._process_with_llm(event_id, event)
+            
+        assert result2 is False

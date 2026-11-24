@@ -71,10 +71,12 @@ _FENCE_TAGS = (
     "--- CONVERSATION ---",
 )
 # Linear bounded pattern covering Brain XML prompt fences (open/close/whitespace/attributes).
-# Requires closing '>' so nested split tags like '<context<context>>' peel inner-outward per pass.
+# Optional closing '>' strips unclosed trailing tags and >512-char padded attributes; outer-first
+# pass on '<context<context>>' leaves at most a harmless stray '>' with zero '<' or tag reassembly.
 _BRAIN_FENCE_PATTERN = (
-    r"<\s*(?:/\s*)?(?:functionResponse|functionCall|context|blackboard_evidence_reference)\b"
-    r"[^<>]{0,512}>"
+    r"<\s*(?:/\s*)?(?:functionResponse|functionCall|context|blackboard_evidence_reference"
+    r"|event_state|skill_overlay|prior_knowledge|memory_recall)\b"
+    r"(?:[^<>]{0,512}>)?"
 )
 # Decay-reference OPEN tag is also removed if unclosed (bounded, linear).
 _EVIDENCE_OPEN = r"<blackboard_evidence_reference[^<>]{0,512}>?"

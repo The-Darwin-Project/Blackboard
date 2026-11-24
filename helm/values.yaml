@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "12c2e38" # Updated by CI to commit SHA
+  tag: "cf61057" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -293,6 +293,7 @@ brain:
   contentBudgetTokens: "60000" # Conversation sliding-window compression trigger budget in tokens (BRAIN_CONTENT_BUDGET_TOKENS, clamped [2000, 1000000])
   tailBudgetTokens: "40000" # Retained recent conversation tail budget in tokens when compression fires (BRAIN_TAIL_BUDGET_TOKENS, <= contentBudgetTokens)
   fullTierMaxChars: "100000" # Per-turn ceiling in the uncompressed "full" tier -- caps one oversized message
+  decayEpochSize: "10" # Turn-decay epoch quantization cadence for implicit prompt cache stability (BRAIN_DECAY_EPOCH_SIZE; 1 = sliding decay)
   streamTtfbTimeoutSec: "600" # Phase 1 (pre-substantive TTFB) streaming timeout in seconds for deep-prefill Gemini 4 models, Neon default / Carbon rollback (LLM_STREAM_TTFB_TIMEOUT_SEC)
   streamInterChunkTimeoutSec: "60" # Phase 2 (sliding activity/heartbeat) streaming timeout in seconds (LLM_STREAM_INTER_CHUNK_TIMEOUT_SEC)
   streamTotalTimeoutSec: "1200" # Non-retryable outer runaway streaming sanity ceiling in seconds (LLM_STREAM_TOTAL_TIMEOUT_SEC)

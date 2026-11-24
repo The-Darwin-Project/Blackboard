@@ -722,6 +722,10 @@ class FlowMetricsResponse(BaseModel):
     avg_reconcile_ms: float = 0.0
     token_total_60s: int = 0
     token_calls_60s: int = 0
+    token_input_60s: int = 0
+    token_cached_60s: int = 0
+    cache_hit_rate_pct: float = 0.0
+    brain_cache_hit_rate_pct: float = 0.0
     snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
@@ -771,6 +775,8 @@ class FlowSnapshot(BaseModel):
     token_total_delta: int = 0
     token_calls_delta: int = 0
     token_total_cumulative: int = 0
+    brain_token_input_delta: int = 0
+    brain_token_cached_delta: int = 0
     tpm_used: int = 0
     tpm_limit: int = 0
     tpm_utilization_pct: float = 0.0

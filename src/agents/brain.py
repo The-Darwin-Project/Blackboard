@@ -89,6 +89,7 @@
 #     on_change callback: transition deferred->active, inject system.notification turn (thoughts field),
 #     enqueue for immediate processing. Lifecycle tied to start_event_loop/stop_event_loop.
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
+#     VMER-2450 invariants: Redis write-once darwin:event:{id}:anchor, append-only contents, volatile <event_state> tail, K-quantized decay.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves full thought context (thought text + thought_signature)
@@ -142,7 +143,7 @@
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
 # 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
 # 42. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
-# 30. [Pattern]: _build_event_state_header: live 2-line compass inserted at TOP of system prompt
+# 30. [Pattern]: _build_event_state_tail_block: live 2-line compass inserted in the volatile <event_state> tail (event_state_tail.py).
 #     (insert(0), unlike DEFER/WAIT which append). Line 1: domain/severity/phase/turn/wall-clock.
 #     Line 2: evidence delta since last classify_event. Challenge question "Any new evidence to
 #     reclassify?" fires only on agent return (plan/execute) or user message -- prevents
@@ -296,6 +297,7 @@ import os
 import random
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -305,6 +307,7 @@ import httpx
 
 from src.agents.context_parts import (
     _TAIL_BUDGET,
+    _is_skill_overlay_part,
     build_function_response as _cp_build_function_response,
     build_single_function_response as _cp_build_single_fr,
     compress_contents as _cp_compress_contents,
@@ -335,6 +338,7 @@ from ..models import (
 )
 from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
+from ..utils.jira_context import extract_jira_context
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import (
@@ -345,10 +349,16 @@ from ..utils.prompt_sanitize import (
     strip_xml_fences,
     sanitize_kargo_id,
 )
-from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE
+from ..utils.turn_decay import DEFAULT_TURN_DECAY_DISTANCE, decay_cutoff_index
 from ..utils.vcs_approval import is_stale_verification_gitlab_mirror
 from . import llm as _llm_pkg
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
+from .event_state_tail import format_event_state_tail
+from .prefix_builder import (
+    GLOBAL_CORE_EXTRA_PATHS,
+    build_global_core_si,
+    canonical_wire_tools,
+)
 from .llm import (
     LLMChunk,
     LLMStreamInterChunkTimeoutError,
@@ -410,6 +420,7 @@ class _QuotaShedState:
     recall_enabled: bool = False
     tier1_done: bool = False
     tier1_noop: bool = False
+    active_overlay: str | None = None
 
     @property
     def prompt(self) -> list[dict]:
@@ -453,6 +464,11 @@ class ContextFlags(TypedDict, total=False):
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
     _cached_header: str
+    _cached_anchor: Any
+    _decay_cutoff: int
+    _pruned_turns_count: int
+    _newly_pruned: int
+    _active_tool_names: list[str]
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -617,7 +633,8 @@ BRAIN_PREFILL_MODEL = (
     "(3) Weigh agent findings against institutional memory. "
     "(4) Phase-gated close and escalation. "
     "(5) Voice: confident peer, Cynefin-gated tone. "
-    "Messages from other actors are prefixed [USER], [SYSTEM X], or [AGENT Y]. "
+    "Messages from other actors are prefixed [USER], [SYSTEM X], or [AGENT Y]; "
+    "runtime guidance and volatile telemetry appear inside <skill_overlay> and <event_state> fences. "
     "These are labels — never reproduce them in your responses. "
     "Let's get to work."
 )
@@ -660,10 +677,39 @@ def _batch_is_terminal_for_flush(
     batch_fcs: list[dict],
     event: EventDocument | None,
     active_tool_names: set[str],
+    gate_ctx: "GateContext | None" = None,
 ) -> bool:
     """True when pre-batch text is a user-visible response (terminal FC or admissible close)."""
-    if any(fc["functionCall"]["name"] in _CYCLE_ENDING_TOOLS for fc in batch_fcs):
-        return True
+    from .tool_gates import build_gate_context
+
+    if gate_ctx is None and event is not None:
+        ev_evidence = event.event.evidence if event.event else None
+        flags = (
+            {
+                "event_domain": getattr(ev_evidence, "brain_domain", None) or getattr(ev_evidence, "domain", None),
+                "domain_confidence": getattr(ev_evidence, "domain_confidence", None),
+                "brain_has_classified": getattr(ev_evidence, "brain_domain", None) is not None,
+            }
+            if ev_evidence is not None
+            else {}
+        )
+        gate_ctx = build_gate_context(
+            event=event,
+            brain_phase=_resolve_phase(getattr(event, "brain_phase", "triage")),
+            context_flags=flags,
+        )
+
+    for fc in batch_fcs:
+        fc_name = fc["functionCall"]["name"]
+        if fc_name not in _CYCLE_ENDING_TOOLS:
+            continue
+        if fc_name == "wait_for_user":
+            if fc_name in active_tool_names or (
+                gate_ctx is not None and _wait_for_user_admissible(gate_ctx)
+            ):
+                return True
+        elif fc_name in active_tool_names:
+            return True
     if not batch_fcs or batch_fcs[0]["functionCall"]["name"] not in active_tool_names:
         return False
     set_phase_allowed = "set_phase" in active_tool_names
@@ -996,6 +1042,657 @@ def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
     safe_path = _SAFE_PATH_RE.sub('_', path)
     return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
+
+
+_FROZEN_ANCHOR_MAX_ENTRIES = 2_000
+_DOMAIN_OUTCOME_RE = re.compile(r"(?:Domain\s+(?:locked|set)|Cynefin)\s*:\s*([a-zA-Z]+)", re.IGNORECASE)
+_PHASE_OUTCOME_RE = re.compile(r"Phase\s*:\s*([a-zA-Z]+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _FrozenAnchor:
+    """Write-once Turn-0 anchor cached in L1 LRU and backed by Redis darwin:event:{id}:anchor."""
+    text: str
+    initial_domains: frozenset[str] = frozenset()
+    initial_phases: frozenset[str] = frozenset()
+    initial_paths: frozenset[str] = frozenset()
+
+
+def _l1_get_anchor(brain: Any, event_id: str) -> _FrozenAnchor | None:
+    anchors = getattr(brain, "_frozen_anchors", None)
+    if not isinstance(anchors, OrderedDict):
+        return None
+    hit = anchors.get(event_id)
+    if isinstance(hit, _FrozenAnchor):
+        anchors.move_to_end(event_id)
+        return hit
+    return None
+
+
+def _l1_put_anchor(brain: Any, event_id: str, anchor: _FrozenAnchor) -> None:
+    anchors = getattr(brain, "_frozen_anchors", None)
+    if not isinstance(anchors, OrderedDict):
+        return
+    anchors[event_id] = anchor
+    anchors.move_to_end(event_id)
+    while len(anchors) > _FROZEN_ANCHOR_MAX_ENTRIES:
+        anchors.popitem(last=False)
+
+
+async def _call_anchor_get(brain: Any, event_id: str) -> dict | None:
+    bb = getattr(brain, "blackboard", None)
+    fn = getattr(bb, "get_event_anchor", None) if bb is not None else None
+    if not callable(fn):
+        return None
+    try:
+        res = fn(event_id)
+        if inspect.isawaitable(res):
+            res = await res
+    except Exception as e:
+        logger.warning("get_event_anchor failed for %s (fail-open): %s", event_id, e)
+        return None
+    return res if isinstance(res, dict) else None
+
+
+async def _call_anchor_set_nx(brain: Any, event_id: str, payload: dict) -> bool | None:
+    bb = getattr(brain, "blackboard", None)
+    fn = getattr(bb, "set_event_anchor_nx", None) if bb is not None else None
+    if not callable(fn):
+        return None
+    try:
+        res = fn(event_id, payload)
+        if inspect.isawaitable(res):
+            res = await res
+    except Exception as e:
+        logger.warning("set_event_anchor_nx failed for %s (fail-open): %s", event_id, e)
+        return None
+    return res if isinstance(res, bool) else None
+
+
+def _hydrate_anchor_dict(raw: dict) -> _FrozenAnchor | None:
+    text = raw.get("text")
+    if not isinstance(text, str):
+        return None
+    return _FrozenAnchor(
+        text=text,
+        initial_domains=frozenset(d for d in (raw.get("initial_domains") or ()) if isinstance(d, str)),
+        initial_phases=frozenset(p for p in (raw.get("initial_phases") or ()) if isinstance(p, str)),
+        initial_paths=frozenset(p for p in (raw.get("initial_paths") or ()) if isinstance(p, str)),
+    )
+
+
+async def _lookup_existing_anchor(brain: Any, event_id: str) -> _FrozenAnchor | None:
+    hit = _l1_get_anchor(brain, event_id)
+    if hit is not None:
+        return hit
+    raw = await _call_anchor_get(brain, event_id)
+    if raw is not None:
+        hydrated = _hydrate_anchor_dict(raw)
+        if hydrated is not None:
+            _l1_put_anchor(brain, event_id, hydrated)
+            return hydrated
+    return None
+
+
+def _safe_loader_paths(loader: Any, phase: str) -> list[str]:
+    fn = getattr(loader, "get_all_paths_for_phase", None)
+    if not callable(fn):
+        return []
+    raw = fn(phase)
+    return [p for p in raw if isinstance(p, str)] if isinstance(raw, (list, tuple)) else []
+
+
+def _safe_loader_tag_paths(loader: Any, tag: str) -> list[str]:
+    fn = getattr(loader, "find_paths_by_tag", None)
+    if not callable(fn):
+        return []
+    raw = fn(tag)
+    return [p for p in raw if isinstance(p, str)] if isinstance(raw, (list, tuple)) else []
+
+
+def _safe_loader_resolve(loader: Any, paths: list[str]) -> list[tuple[str, str]]:
+    if not paths:
+        return []
+    fn = getattr(loader, "resolve_dependencies_with_paths", None)
+    if not callable(fn):
+        return []
+    raw = fn(paths)
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], str):
+            out.append(item)
+    return out
+
+
+def _safe_loader_get_body(loader: Any, path: str) -> str | None:
+    fn = getattr(loader, "get_with_meta", None)
+    if not callable(fn):
+        return None
+    res = fn(path)
+    if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], str):
+        return res[0]
+    return None
+
+
+def _safe_loader_tag_type(loader: Any, path: str) -> str:
+    fn = getattr(loader, "get_tag_type", None)
+    if callable(fn):
+        tt = fn(path)
+        if isinstance(tt, str) and tt:
+            return tt
+    return "skill"
+
+
+def _get_global_core_paths(loader: Any) -> frozenset[str]:
+    """Return full transitive path closure of Global Core SI (always/ + GLOBAL_CORE_EXTRA_PATHS)."""
+    if loader is None:
+        return frozenset()
+    initial = _safe_loader_paths(loader, "always")
+    seen = set(initial)
+    for extra in GLOBAL_CORE_EXTRA_PATHS:
+        if extra not in seen:
+            initial.append(extra)
+            seen.add(extra)
+    pairs = _safe_loader_resolve(loader, initial)
+    return frozenset(p for p, _ in pairs) | frozenset(seen)
+
+
+def _build_turn0_anchor(
+    brain: Any,
+    event: EventDocument,
+    *,
+    graph_recall: str | None = None,
+) -> _FrozenAnchor:
+    """Build creation-immutable Turn-0 anchor text + initial embedded skill paths."""
+    from .llm.prompt import build_immutable_event_anchor
+
+    sections = [build_immutable_event_anchor(event)]
+    if isinstance(graph_recall, str) and graph_recall.strip():
+        sections.append(graph_recall.strip())
+
+    added_paths: list[str] = []
+    loader = getattr(brain, "_skill_loader", None)
+    if loader is not None:
+        core_paths = _get_global_core_paths(loader)
+        init_paths: list[str] = []
+        subject_type = getattr(event, "subject_type", "service") or "service"
+        all_source_paths = _safe_loader_paths(loader, "source")
+        composite_src = f"source/{event.source}_{subject_type}.md"
+        base_src = f"source/{event.source}.md"
+        if composite_src in all_source_paths:
+            init_paths.append(composite_src)
+        elif base_src in all_source_paths:
+            init_paths.append(base_src)
+
+        ev = getattr(getattr(event, "event", None), "evidence", None)
+        if ev is not None:
+            if getattr(ev, "kargo_context", None):
+                init_paths.extend(_safe_loader_tag_paths(loader, "kargo"))
+            if getattr(ev, "gitlab_context", None):
+                init_paths.extend(_safe_loader_tag_paths(loader, "gitlab"))
+            if getattr(ev, "github_context", None) or getattr(ev, "github_issue_context", None):
+                init_paths.extend(_safe_loader_tag_paths(loader, "github"))
+            if getattr(ev, "ci_context", None):
+                init_paths.extend(_safe_loader_tag_paths(loader, "ci_gating"))
+
+        if init_paths:
+            seen_added: set[str] = set(core_paths)
+            skill_blocks: list[str] = []
+            for path, body in _safe_loader_resolve(loader, init_paths):
+                if path in seen_added:
+                    continue
+                seen_added.add(path)
+                added_paths.append(path)
+                skill_blocks.append(_wrap_section(path, body, _safe_loader_tag_type(loader, path)))
+            if skill_blocks:
+                sections.append("\n\n".join(skill_blocks))
+
+    return _FrozenAnchor(
+        text="\n\n".join(sections),
+        initial_domains=frozenset(),
+        initial_phases=frozenset(),
+        initial_paths=frozenset(added_paths),
+    )
+
+
+async def _resolve_frozen_anchor(
+    brain: Any,
+    event: EventDocument,
+    *,
+    graph_recall: str | None = None,
+) -> _FrozenAnchor:
+    """Resolve Turn-0 anchor via L1 LRU -> Redis SSOT -> write-once SET NX (re-read on race loss)."""
+    event_id = event.id
+    cached = await _lookup_existing_anchor(brain, event_id)
+    if cached is not None:
+        return cached
+
+    candidate = _build_turn0_anchor(brain, event, graph_recall=graph_recall)
+    payload = {
+        "text": candidate.text,
+        "initial_domains": sorted(candidate.initial_domains),
+        "initial_phases": sorted(candidate.initial_phases),
+        "initial_paths": sorted(candidate.initial_paths),
+    }
+    won = await _call_anchor_set_nx(brain, event_id, payload)
+    if won is False:
+        winner = await _call_anchor_get(brain, event_id)
+        if winner is not None:
+            hydrated = _hydrate_anchor_dict(winner)
+            if hydrated is not None:
+                candidate = hydrated
+                _l1_put_anchor(brain, event_id, candidate)
+        return candidate
+    _l1_put_anchor(brain, event_id, candidate)
+    return candidate
+
+
+def _wait_for_user_admissible(gate_ctx: Any | None) -> bool:
+    if gate_ctx is None:
+        return False
+    from .tool_gates import is_wait_for_user_admissible_after_response
+    return is_wait_for_user_admissible_after_response(gate_ctx)
+
+
+def _extract_accepted_domain(turn: Any, fc_part: dict | None) -> str | None:
+    """Return canonical domain if turn represents an accepted classify_event outcome, else None."""
+    fc_obj = fc_part.get("functionCall") if isinstance(fc_part, dict) else None
+    if fc_part is None:
+        if getattr(turn, "waitingFor", None) != "classify_event" and getattr(turn, "action", None) != "triage":
+            return None
+    else:
+        if not isinstance(fc_obj, dict) or fc_obj.get("name") != "classify_event":
+            return None
+    text = (getattr(turn, "evidence", None) or getattr(turn, "thoughts", None) or "").strip()
+    if text.startswith("[GATE]") or text.startswith("[UNKNOWN]") or "rejected" in text.lower():
+        return None
+    raw_domain = None
+    if isinstance(fc_obj, dict) and isinstance(fc_obj.get("args"), dict):
+        raw_domain = fc_obj["args"].get("domain")
+    if not raw_domain:
+        m = _DOMAIN_OUTCOME_RE.search(text)
+        if m:
+            raw_domain = m.group(1)
+    if not isinstance(raw_domain, str) or not raw_domain.strip():
+        return None
+    resolved = _resolve_domain(raw_domain)
+    return resolved if resolved in BRAIN_DOMAIN_SKILLS else None
+
+
+def _extract_accepted_phase(turn: Any, fc_part: dict | None) -> str | None:
+    """Return canonical phase if turn represents an accepted set_phase transition, else None."""
+    fc_obj = fc_part.get("functionCall") if isinstance(fc_part, dict) else None
+    if fc_part is None:
+        if getattr(turn, "waitingFor", None) != "set_phase" and getattr(turn, "action", None) != "phase":
+            return None
+    else:
+        if not isinstance(fc_obj, dict) or fc_obj.get("name") != "set_phase":
+            return None
+    # Accepted set_phase always persists action='phase'; close-gate & gate rejections use action='tool_result'.
+    if getattr(turn, "action", None) != "phase":
+        return None
+    text = (getattr(turn, "evidence", None) or getattr(turn, "thoughts", None) or "").strip()
+    if text.startswith("[GATE]") or text.startswith("[UNKNOWN]"):
+        return None
+    raw_phase = None
+    if isinstance(fc_obj, dict) and isinstance(fc_obj.get("args"), dict):
+        raw_phase = fc_obj["args"].get("phase")
+    if not raw_phase:
+        m = _PHASE_OUTCOME_RE.search(text)
+        if m:
+            raw_phase = m.group(1)
+    if not isinstance(raw_phase, str) or not raw_phase.strip():
+        return None
+    resolved = _resolve_phase(raw_phase)
+    return resolved if resolved in BRAIN_PHASE_SKILLS else None
+
+
+def _collect_turn_overlay_part(
+    loader: Any,
+    turn_fc_pairs: list[tuple[Any, dict | None]],
+    seen_domains: set[str],
+    seen_phases: set[str],
+    anchored_paths: set[str],
+) -> dict | None:
+    """Build one post-FR <skill_overlay> part for newly entered accepted domains/phases."""
+    if loader is None:
+        return None
+    to_resolve: list[str] = []
+    for turn, fc_part in turn_fc_pairs:
+        domain = _extract_accepted_domain(turn, fc_part)
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            for dom_path in BRAIN_DOMAIN_SKILLS.get(domain, ()):
+                rel = f"{dom_path}.md"
+                if rel not in anchored_paths:
+                    to_resolve.append(rel)
+        phase = _extract_accepted_phase(turn, fc_part)
+        if phase and phase not in seen_phases:
+            seen_phases.add(phase)
+            for folder in BRAIN_PHASE_SKILLS.get(phase, ()):
+                for rel in _safe_loader_paths(loader, folder):
+                    if rel not in anchored_paths:
+                        to_resolve.append(rel)
+    if not to_resolve:
+        return None
+    sections: list[str] = []
+    for path, body in _safe_loader_resolve(loader, to_resolve):
+        if path in anchored_paths:
+            continue
+        anchored_paths.add(path)
+        sections.append(_wrap_section(path, body, _safe_loader_tag_type(loader, path)))
+    if not sections:
+        return None
+    return {"text": "<skill_overlay>\n" + "\n\n".join(sections) + "\n</skill_overlay>"}
+
+
+def _build_active_overlay(
+    brain: Any,
+    event: EventDocument,
+    context_cache: dict | None = None,
+) -> str | None:
+    """Build active domain + brain_phase (+ multi-user) overlay for post-prune recovery."""
+    loader = getattr(brain, "_skill_loader", None)
+    if loader is None:
+        return None
+    core_paths = _get_global_core_paths(loader)
+    to_resolve: list[str] = []
+    ev = getattr(getattr(event, "event", None), "evidence", None)
+    brain_domain = getattr(ev, "brain_domain", None)
+    if isinstance(brain_domain, str) and brain_domain.strip():
+        resolved_dom = _resolve_domain(brain_domain)
+        for dom_path in BRAIN_DOMAIN_SKILLS.get(resolved_dom, ()):
+            to_resolve.append(f"{dom_path}.md")
+    brain_phase = _resolve_phase(getattr(event, "brain_phase", None))
+    for folder in BRAIN_PHASE_SKILLS.get(brain_phase, ()):
+        to_resolve.extend(_safe_loader_paths(loader, folder))
+    if context_cache and context_cache.get("has_slack_participant"):
+        to_resolve.extend(_safe_loader_paths(loader, "multi-user"))
+    if not to_resolve:
+        return None
+    seen: set[str] = set(core_paths)
+    sections: list[str] = []
+    for path, body in _safe_loader_resolve(loader, to_resolve):
+        if path in seen:
+            continue
+        seen.add(path)
+        sections.append(_wrap_section(path, body, _safe_loader_tag_type(loader, path)))
+    if not sections:
+        return None
+    return "<skill_overlay>\n" + "\n\n".join(sections) + "\n</skill_overlay>"
+
+
+def _build_transient_overlays(brain: Any, context_cache: dict | None) -> list[str]:
+    """Resolve transient micro-overlays (intermediate, waiting, coordination, multi-user, posture)."""
+    loader = getattr(brain, "_skill_loader", None)
+    if loader is None or not context_cache:
+        return []
+    core_paths = _get_global_core_paths(loader)
+    paths: list[str] = []
+    if context_cache.get("is_intermediate"):
+        paths.extend(_safe_loader_paths(loader, "intermediate"))
+    elif context_cache.get("is_waiting"):
+        paths.extend(_safe_loader_paths(loader, "waiting"))
+    if context_cache.get("has_pending_huddle"):
+        paths.extend(_safe_loader_paths(loader, "coordination"))
+    if context_cache.get("has_slack_participant"):
+        paths.extend(_safe_loader_paths(loader, "multi-user"))
+    if context_cache.get("is_first_human_turn"):
+        paths.extend(_safe_loader_tag_paths(loader, "user-energy"))
+    elif context_cache.get("is_operational_chat"):
+        paths.extend(_safe_loader_tag_paths(loader, "operational-posture"))
+    if not paths:
+        return []
+    seen: set[str] = set(core_paths)
+    overlays: list[str] = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        body = _safe_loader_get_body(loader, path)
+        if body:
+            overlays.append(_wrap_section(path, body, _safe_loader_tag_type(loader, path)))
+    return overlays
+
+
+async def _safe_bb_call(obj: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    fn = getattr(obj, method_name, None) if obj is not None else None
+    if not callable(fn):
+        return None
+    try:
+        res = fn(*args, **kwargs)
+        if inspect.isawaitable(res):
+            return await res
+        return res
+    except Exception:
+        return None
+
+
+async def _build_event_state_tail_block(
+    brain: Any,
+    event: EventDocument,
+    *,
+    context_cache: dict | None,
+    contents: list[dict],
+) -> str:
+    """Assemble the sanitized volatile <event_state> tail for contents[-1]."""
+    from ..models import EventEvidence
+    from .llm import BRAIN_TOOL_SCHEMAS
+    from .llm.prompt import format_service_meta_block
+    from .tool_gates import build_gate_context, evaluate_gates
+
+    bb = getattr(brain, "blackboard", None)
+    brain_phase = _resolve_phase(getattr(event, "brain_phase", None))
+    evidence = event.event.evidence if getattr(event, "event", None) else None
+    subject_type = getattr(event, "subject_type", "service")
+
+    # 1. 2-line classify compass (e3d1d97c)
+    header_fn = getattr(brain, "_build_event_state_header", Brain._build_event_state_header)
+    compass = header_fn(event, context_cache) if callable(header_fn) else ""
+    if not isinstance(compass, str):
+        compass = ""
+
+    # 2. Volatile status & approval
+    status_val = event.status.value if hasattr(event.status, "value") else str(event.status)
+    approved_by = getattr(event, "approved_by", None) or ""
+
+    # 3. Fixed DEFER WAKE-UP (strictly gated: is_defer_wakeup & consecutive_defers > 0 & phase != close)
+    defer_wakeup = ""
+    if (
+        context_cache
+        and bool(context_cache.get("is_defer_wakeup"))
+        and (context_cache.get("consecutive_defers") or 0) > 0
+        and brain_phase != "close"
+    ):
+        consecutive = int(context_cache.get("consecutive_defers", 0))
+        raw_reason = next(
+            (
+                t.thoughts
+                for t in reversed(event.conversation or [])
+                if t.actor == "brain" and t.action == "defer" and t.thoughts
+            ),
+            "unknown",
+        )
+        last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
+        last_agent = next(
+            (
+                t
+                for t in reversed(event.conversation or [])
+                if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")
+            ),
+            None,
+        )
+        elapsed_str = ""
+        if last_agent and getattr(last_agent, "timestamp", None):
+            elapsed_min = max(0, int((time.time() - last_agent.timestamp) / 60))
+            elapsed_str = (
+                f"Time elapsed since last {last_agent.actor} response "
+                f"({last_agent.action}): {elapsed_min} minutes."
+            )
+        defer_wakeup = (
+            f"**DEFER WAKE-UP ({consecutive}x):** You deferred because: {last_reason}\n"
+            f"{elapsed_str}\n"
+            f"That was {consecutive} defer(s) ago. What changed since then?"
+        ).strip()
+
+    # 4. Pre-built Deterministic Operational Briefing (with capped/sanitized sticky notes)
+    briefing = Brain._build_operational_briefing(event)
+
+    # 5. Live service_meta (K8s deployment only; cached per-call in context_cache for Tier-1 reuse)
+    svc = None
+    if (
+        subject_type == "service"
+        and event.service not in ("general", "system")
+        and not (
+            isinstance(evidence, EventEvidence)
+            and (evidence.gitlab_context or evidence.github_context or evidence.github_issue_context)
+        )
+    ):
+        if context_cache is not None and "_cached_service_meta" in context_cache:
+            svc = context_cache["_cached_service_meta"]
+        else:
+            raw_svc = await _safe_bb_call(bb, "get_service", event.service)
+            svc = raw_svc if (raw_svc is not None and isinstance(getattr(raw_svc, "name", None), str)) else None
+            if context_cache is not None:
+                context_cache["_cached_service_meta"] = svc
+    service_meta_text = format_service_meta_block(svc) if svc is not None else ""
+
+    # 6. Live related_events (cached per-call in context_cache)
+    if context_cache is not None and "_cached_related_lines" in context_cache:
+        related_lines = context_cache["_cached_related_lines"]
+    else:
+        if context_cache is not None and "_cached_active_ids" in context_cache:
+            active_event_ids = context_cache["_cached_active_ids"]
+        else:
+            raw_active = await _safe_bb_call(bb, "get_active_events")
+            active_event_ids = raw_active if isinstance(raw_active, (list, tuple)) else []
+        related_lines = []
+        for eid in active_event_ids:
+            if not isinstance(eid, str) or eid == event.id:
+                continue
+            other = await _safe_bb_call(bb, "get_event", eid)
+            if not other or not getattr(other, "event", None):
+                continue
+            other_svc = getattr(other, "service", None)
+            if other_svc == event.service:
+                other_conv = getattr(other, "conversation", None) or []
+                last_action = other_conv[-1] if other_conv else None
+                summary = f"{eid} ({other.source}): {other.event.reason}"
+                if last_action:
+                    summary += f" [last: {last_action.actor}.{last_action.action}]"
+                related_lines.append(summary)
+            elif other_svc == "general":
+                for turn in (getattr(other, "conversation", None) or [])[-3:]:
+                    if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
+                        related_lines.append(f"{eid} (chat): {other.event.reason}")
+                        break
+        if context_cache is not None:
+            context_cache["_cached_related_lines"] = related_lines
+
+    # 7. Live recent_closed
+    if context_cache is not None and "_cached_recent_closed" in context_cache:
+        recent_closed_raw = context_cache["_cached_recent_closed"]
+    else:
+        raw_rc = await _safe_bb_call(bb, "get_recent_closed_for_service", event.service, minutes=15)
+        recent_closed_raw = raw_rc if isinstance(raw_rc, (list, tuple)) else []
+        if context_cache is not None:
+            context_cache["_cached_recent_closed"] = recent_closed_raw
+    recent_closed_lines: list[str] = []
+    now_ts = time.time()
+    for item in recent_closed_raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 3:
+            cid, close_time, csummary = item[0], item[1], item[2]
+            ago_min = max(0, int(now_ts - float(close_time)) // 60) if isinstance(close_time, (int, float)) else 0
+            recent_closed_lines.append(f"{cid} (closed {ago_min}m ago): {csummary}")
+
+    # 8. Live service journal
+    journal_lines: list[str] = []
+    journal_fn = getattr(brain, "_get_journal_cached", None)
+    if callable(journal_fn):
+        try:
+            raw_journal = journal_fn(event.service)
+            if inspect.isawaitable(raw_journal):
+                raw_journal = await raw_journal
+            if isinstance(raw_journal, (list, tuple)) and raw_journal:
+                journal_lines.append(
+                    f"Service ops journal available ({len(raw_journal)} entries). Last: {raw_journal[-1]}"
+                )
+        except Exception:
+            pass
+
+    # 9. Active maintainers & authorized tools hint
+    resolve_maint = getattr(brain, "_resolve_maintainer_enum", Brain._resolve_maintainer_enum)
+    raw_maint = resolve_maint(event) if callable(resolve_maint) else []
+    maintainers = [m for m in raw_maint if isinstance(m, str)] if isinstance(raw_maint, (list, tuple)) else []
+
+    authorized_tool_names: list[str] = []
+    if context_cache and "_active_tool_names" in context_cache:
+        authorized_tool_names = context_cache["_active_tool_names"]
+    else:
+        try:
+            waiting_jarvis = getattr(brain, "_waiting_for_jarvis", None)
+            jarvis_counts = getattr(brain, "_jarvis_wait_count", None)
+            gate_ctx = build_gate_context(
+                event=event,
+                brain_phase=brain_phase,
+                context_flags=context_cache or {},
+                is_defer_wake=bool((context_cache or {}).get("is_defer_wakeup")),
+                jarvis_already_waiting=(event.id in waiting_jarvis) if isinstance(waiting_jarvis, (dict, set)) else False,
+                jarvis_wait_count=jarvis_counts.get(event.id, 0) if isinstance(jarvis_counts, dict) else 0,
+                has_pruned_or_decayed_turns=_cp_contents_have_pruned_or_decayed(contents),
+            )
+            authorized_tool_names = [
+                t["name"] for t in evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx) if isinstance(t, dict) and t.get("name")
+            ]
+        except Exception:
+            authorized_tool_names = []
+
+    # 10. Live recalls (_post_agent_recall + _format_recall_block)
+    recalls: list[str] = []
+    wants_post_agent = (
+        "post-agent" in BRAIN_PHASE_SKILLS.get(brain_phase, ())
+        or (event.brain_phase is None and bool((context_cache or {}).get("has_agent_result")))
+    )
+    if wants_post_agent:
+        post_recall_fn = getattr(brain, "_post_agent_recall", None)
+        if callable(post_recall_fn):
+            try:
+                pr = post_recall_fn(event)
+                if inspect.isawaitable(pr):
+                    pr = await pr
+                if isinstance(pr, str) and pr.strip():
+                    recalls.append(pr)
+            except Exception:
+                pass
+    fmt_recall_fn = getattr(brain, "_format_recall_block", None)
+    if callable(fmt_recall_fn):
+        try:
+            lb = fmt_recall_fn(event)
+            if isinstance(lb, str) and lb.strip():
+                recalls.append(lb)
+        except Exception:
+            pass
+
+    # 11. Transient micro-overlays
+    transient_overlays = _build_transient_overlays(brain, context_cache)
+
+    return format_event_state_tail(
+        compass=compass,
+        status=status_val,
+        approved_by=approved_by,
+        defer_wakeup=defer_wakeup,
+        authorized_tools=authorized_tool_names or None,
+        maintainers=maintainers or None,
+        briefing=briefing,
+        service_meta=service_meta_text,
+        related_events=related_lines or None,
+        recent_closed=recent_closed_lines or None,
+        journal_entries=journal_lines or None,
+        recalls=recalls or None,
+        transient_overlays=transient_overlays or None,
+    )
 
 
 class _BrainToolContext:
@@ -1374,10 +2071,16 @@ class Brain:
         self._skill_loader = None
         self._skills_version: str | None = None
         self._skills_reload_lock: asyncio.Lock = asyncio.Lock()
+        self._cached_wire_tools: list[dict] | None = None
+        self._cached_wire_tools_sha8: str | None = None
+        self._cached_global_core_si: tuple[Any, Any, str, str] | None = None
+        self._frozen_anchors: OrderedDict[str, _FrozenAnchor] = OrderedDict()
         try:
             from .brain_skill_loader import BrainSkillLoader
             skills_path = Path(__file__).parent / "brain_skills"
-            self._skill_loader = BrainSkillLoader(str(skills_path), redis=self.blackboard.redis)
+            self._skill_loader = BrainSkillLoader(
+                str(skills_path), redis=self.blackboard.redis, include_generated_map=True,
+            )
         except Exception as e:
             logger.error(f"Failed to load brain skills: {e}. Brain will raise on first event.")
             self._skill_loader = None
@@ -1482,6 +2185,22 @@ class Brain:
         if a_ctx.get("owner") and a_ctx.get("repo") and b_ctx.get("owner") and b_ctx.get("repo"):
             return (a_ctx["owner"], a_ctx["repo"], a_num) != (b_ctx["owner"], b_ctx["repo"], b_num)
         return a_num != b_num
+
+    @staticmethod
+    def _extract_jira_context(doc: EventDocument) -> tuple[bool, str | None]:
+        """Return (is_jira_event, normalized_issue_key) from top-level subject_type and nested jira_context."""
+        return extract_jira_context(doc)
+
+    @classmethod
+    def _jira_issue_differs(cls, a: EventDocument, b: EventDocument) -> bool:
+        """Return True if Jira context distinguishes the two events as different work items."""
+        a_is_jira, a_key = cls._extract_jira_context(a)
+        b_is_jira, b_key = cls._extract_jira_context(b)
+        if not a_is_jira and not b_is_jira:
+            return False
+        if a_is_jira != b_is_jira:
+            return True
+        return a_key != b_key
 
     @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
@@ -1759,13 +2478,17 @@ class Brain:
                         pass  # different GitLab MR
                     elif self._github_pr_differs(event, existing):
                         pass  # different GitHub PR or issue
+                    elif self._jira_issue_differs(event, existing):
+                        pass  # different Jira issue (or Jira vs non-Jira)
                     elif new_mr_url and self._extract_mr_url(existing) and new_mr_url != self._extract_mr_url(existing):
                         pass  # different PR/MR URL (catch-all)
                     else:
+                        _, ex_jira_key = self._extract_jira_context(existing)
                         logger.info(
                             f"Closing duplicate event {event_id} -- "
                             f"existing event {eid} already handling {event.service}"
                             f"{f' MR !{ex_mr}' if ex_mr else ''}"
+                            f"{f' Jira {ex_jira_key}' if ex_jira_key else ''}"
                         )
                         await self._close_and_broadcast(
                             event_id,
@@ -2130,15 +2853,20 @@ class Brain:
                         else:
                             logger.info("Skill reload fell back to filesystem -- version not updated")
 
-            # Fire the two KG lookups as tasks up front so they run concurrently
-            # with each other and with _extract_context_flags's own Redis reads,
-            # instead of the previous sequential await-then-await (worst case
-            # 2s + 3s = 5s on every prompt-build turn).
+            # Check L1/Redis frozen Turn-0 anchor BEFORE querying Postgres graph recall
+            # so Turns 1+ skip redundant DB lookups completely (VMER-2450 Step 9).
+            existing_anchor = await _lookup_existing_anchor(self, event_id)
+
+            # Fire KG lookups as tasks up front so they run concurrently with
+            # _extract_context_flags's own Redis reads.
             kg_edges_task = (
                 asyncio.create_task(self._check_graph_edges(event.service))
                 if not is_intermediate else None
             )
-            graph_recall_task = asyncio.create_task(self._get_graph_recall(event))
+            graph_recall_task = (
+                asyncio.create_task(self._get_graph_recall(event))
+                if existing_anchor is None else None
+            )
 
             context_flags = await self._extract_context_flags(
                 event, is_intermediate=is_intermediate, skip_kg=True,
@@ -2150,12 +2878,18 @@ class Brain:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
 
-            if kg_edges_task is not None:
+            graph_recall: str | None = None
+            if kg_edges_task is not None and graph_recall_task is not None:
                 has_edges, graph_recall = await asyncio.gather(
                     kg_edges_task, graph_recall_task, return_exceptions=True,
                 )
                 context_flags["has_graph_edges"] = False if isinstance(has_edges, BaseException) else has_edges
-            else:
+            elif kg_edges_task is not None:
+                try:
+                    context_flags["has_graph_edges"] = bool(await kg_edges_task)
+                except Exception:
+                    context_flags["has_graph_edges"] = False
+            elif graph_recall_task is not None:
                 try:
                     graph_recall = await graph_recall_task
                 except Exception:
@@ -2167,6 +2901,8 @@ class Brain:
             active_phases = self._match_phases(event, context_flags)
 
             system_prompt = await self._build_system_prompt(event, active_phases, context_flags, graph_recall=graph_recall)
+            if "post-agent" in active_phases and hasattr(self, "_schedule_graph_enrichment"):
+                self._schedule_graph_enrichment(event)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(
                 active_phases, domain=context_flags.get("event_domain"),
             )
@@ -2194,7 +2930,12 @@ class Brain:
         # decay reference, including budget-only pruning) is the single predicate that un-gates
         # recall_pruned_turns, and it can only be answered from the built contents.
         terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
-        raw_contents = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt)
+        raw_contents = await self._build_contents(
+            event,
+            context_cache=context_flags,
+            terminal_prompt=terminal_prompt,
+            graph_recall=graph_recall,
+        )
         recall_enabled = _contents_have_pruned_or_decayed(raw_contents)
 
         gate_ctx = build_gate_context(
@@ -2229,33 +2970,19 @@ class Brain:
                     if t["name"] in {"classify_event", "set_phase", "lookup_journal"}
                 ]
 
-        # Maintainer enum injection (AFTER gate evaluation, escalate/close only)
-        if brain_phase in ("escalate", "close"):
-            maintainer_emails = self._resolve_maintainer_enum(event)
-            if maintainer_emails:
-                active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
-
-        # Reorder tools: always-available first, then phase-relevant, then rest.
-        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "google_web_search", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
-        _phase_tool_priority: dict[str, set[str]] = {
-            "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
-            "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
-            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context", "get_plan_progress", "defer_event"},
-            "escalate":  {"report_incident", "notify_user_slack", "close_event", "defer_event"},
-            "close":     {"close_event", "notify_user_slack", "post_sticky_note", "hold_watch"},
-        }
-        priority_names = _phase_tool_priority.get(brain_phase, set())
-        tier_always = [t for t in active_tools if t["name"] in _always_tools]
-        tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
-        tier_rest = [t for t in active_tools if t["name"] not in _always_tools and t["name"] not in priority_names]
-        # Sticky note urgency: surface read_sticky_notes FIRST when unread
-        unread = getattr(event, "unread_notes", 0) or 0
-        if unread > 0:
-            tier_sticky = [t for t in tier_always if t["name"] == "read_sticky_notes"]
-            tier_always = [t for t in tier_always if t["name"] != "read_sticky_notes"]
-            active_tools = tier_sticky + tier_always + tier_phase + tier_rest
-        else:
-            active_tools = tier_always + tier_phase + tier_rest
+        # Canonical sorted wire_tools sent unchanged to LLMPort (AUTO) for Vertex implicit cache
+        # stability. Server-side gate enforcement still runs against `active_tools` below.
+        wire_tools = getattr(self, "_cached_wire_tools", None)
+        tools_sha8 = getattr(self, "_cached_wire_tools_sha8", None)
+        if wire_tools is None or tools_sha8 is None:
+            wire_tools = canonical_wire_tools(BRAIN_TOOL_SCHEMAS)
+            from .prefix_builder import sha8_json
+            tools_sha8 = sha8_json(wire_tools)
+            try:
+                self._cached_wire_tools = wire_tools
+                self._cached_wire_tools_sha8 = tools_sha8
+            except AttributeError:
+                pass
 
         # recall_pruned_turns must be present BEFORE the leak check below, which would otherwise strip it
         # from an intermediate event as an ungated tool.
@@ -2270,6 +2997,8 @@ class Brain:
                 leaked = final_names - allowed_intermediate
                 active_tools = [t for t in active_tools if t["name"] in allowed_intermediate]
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
+
+        context_flags["_active_tool_names"] = [t.get("name") for t in active_tools if isinstance(t, dict) and t.get("name")]
 
         prompt = [
             {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
@@ -2308,6 +3037,7 @@ class Brain:
             active_tools=active_tools,
             tail_budget=_TAIL_BUDGET,
             recall_enabled=recall_enabled,
+            active_overlay=_build_active_overlay(self, event, context_flags),
         )
 
         try:
@@ -2339,7 +3069,7 @@ class Brain:
                         stream_kwargs: dict[str, Any] = {
                             "system_prompt": system_prompt,
                             "contents": prompt,
-                            "tools": active_tools,
+                            "tools": wire_tools,
                             "temperature": call_temp,
                             "max_output_tokens": phase_max_tokens,
                             "thinking_level": thinking_level,
@@ -2348,6 +3078,35 @@ class Brain:
                         if getattr(self._adapter, "_tracker", None) is not None and inspect.iscoroutinefunction(acquire_fn):
                             preacquired = await acquire_fn(prompt, priority=llm_priority)
                             stream_kwargs["_preacquired"] = preacquired
+                        _hdr_text = (
+                            str(prompt[2]["parts"][0].get("text") or "")
+                            if len(prompt) > 2 and prompt[2].get("parts") and isinstance(prompt[2]["parts"][0], dict)
+                            else ""
+                        )
+                        from .prefix_builder import sha8_text, sha8_json
+                        tools_sha8 = getattr(self, "_cached_wire_tools_sha8", None) or sha8_json(wire_tools)
+                        _si_cache = getattr(self, "_cached_global_core_si", None)
+                        si_sha8 = _si_cache[3] if _si_cache and len(_si_cache) > 3 else sha8_text(system_prompt)
+                        hdr_sha8 = sha8_text(_hdr_text)
+                        hdr_full_sha8 = sha8_json(prompt[2]) if len(prompt) > 2 else ""
+
+                        logger.info(
+                            "Brain LLM call for %s: tools_sha8=%s si_sha8=%s hdr_sha8=%s hdr_full_sha8=%s "
+                            "phase=%s domain=%s thinking_level=%s turn_count=%d "
+                            "decay_cutoff=%d pruned_turns=%d/%d",
+                            event_id,
+                            tools_sha8,
+                            si_sha8,
+                            hdr_sha8,
+                            hdr_full_sha8,
+                            brain_phase,
+                            context_flags.get("event_domain") or "unknown",
+                            thinking_level,
+                            len(event.conversation or []),
+                            context_flags.get("_decay_cutoff", 0),
+                            context_flags.get("_pruned_turns_count", 0),
+                            context_flags.get("_newly_pruned", 0),
+                        )
                         stream = self._adapter.generate_stream(**stream_kwargs)
                         it = stream.__aiter__()
                         stream_start = time.monotonic()
@@ -2565,6 +3324,7 @@ class Brain:
                                     attempt=attempt,
                                     only_if_over_budget=is_upstream_rate_limit,
                                     is_burst_error=is_burst_error,
+                                    graph_recall=graph_recall,
                                 )
                             except Exception as shed_err:
                                 # Must never escape this handler: the error-turn recording below has to run.
@@ -2574,10 +3334,30 @@ class Brain:
                                 )
                                 shed_tier = 0
                             if shed_tier:
+                                prev_recall = recall_enabled
                                 raw_contents = shed.raw_contents
                                 active_tools = shed.active_tools
+                                context_flags["_active_tool_names"] = [t.get("name") for t in active_tools if isinstance(t, dict) and t.get("name")]
                                 prompt = shed.prompt
                                 recall_enabled = shed.recall_enabled
+                                if recall_enabled != prev_recall:
+                                    gate_ctx = build_gate_context(
+                                        event=event,
+                                        brain_phase=brain_phase,
+                                        context_flags=context_flags,
+                                        is_defer_wake=is_defer_wake,
+                                        iteration=iteration,
+                                        jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+                                        jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                                        has_pruned_or_decayed_turns=recall_enabled,
+                                    )
+                                    active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                                    if recall_enabled:
+                                        active_tools = _ensure_recall_tool_if_needed(active_tools, BRAIN_TOOL_SCHEMAS)
+                                    if context_flags.get("is_intermediate"):
+                                        allowed_intermediate = get_intermediate_tools(gate_ctx)
+                                        active_tools = [t for t in active_tools if t["name"] in allowed_intermediate]
+                                    shed.active_tools = active_tools
 
                         if shed_tier:
                             if is_local_quota and (shed_tier == 1 or is_burst_error):
@@ -2690,7 +3470,9 @@ class Brain:
             batch_fcs = function_calls[:_MAX_BATCH_SIZE]
             batch_size = len(batch_fcs)
             active_names = {t["name"] for t in active_tools}
-            is_terminal = _batch_is_terminal_for_flush(batch_fcs, event, active_names)
+            is_terminal = _batch_is_terminal_for_flush(
+                batch_fcs, event, active_names, gate_ctx=gate_ctx,
+            )
             # Flush text before batch
             clean_accumulated = sanitize_call_syntax(accumulated_text) or ""
             if clean_accumulated and not response_emitted:
@@ -2773,7 +3555,8 @@ class Brain:
             self._empty_output_retries.pop(event_id, None)
 
             batch_halted = False
-            last_result = False
+            last_result = None
+            halt_reinvoke = False
             for i, fc_part in enumerate(batch_fcs):
                 fc_name = fc_part["functionCall"]["name"]
                 fc_args = fc_part["functionCall"].get("args", {})
@@ -2799,8 +3582,8 @@ class Brain:
                             and "wait_for_user" not in valid_names
                             and event_id in self._response_emitted_for
                         ):
-                            from .tool_gates import _pred_hard_strip_wait_user
-                            if not _pred_hard_strip_wait_user(gate_ctx):
+                            
+                            if _wait_for_user_admissible(gate_ctx):
                                 valid_names.add("wait_for_user")
                     else:
                         event = await self.blackboard.get_event(event_id)
@@ -2849,23 +3632,91 @@ class Brain:
                         event_id, i, fc_name, e, exc_info=True,
                     )
                     error_turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
+                        turn=0,
                         actor="brain",
                         action="tool_result",
+                        waitingFor=fc_name,
                         thoughts=f"Internal error re-checking authorization before {fc_name} "
                                  f"(batch position {i}): {str(e)[:200]}. Batch execution halted; "
                                  "remaining queued calls in this batch were not run.",
                         response_parts=captured_parts if i == 0 else None,
+                        batch_size=batch_size if i == 0 else None,
+                        batch_index=i if i > 0 else None,
                     )
-                    await batch_ctx.append_and_broadcast(event_id, error_turn)
+                    batch_turns = [error_turn]
+                    for j in range(i + 1, batch_size):
+                        skipped_name = batch_fcs[j]["functionCall"]["name"]
+                        batch_turns.append(ConversationTurn(
+                            turn=0,
+                            actor="brain",
+                            action="tool_result",
+                            waitingFor=skipped_name,
+                            thoughts=f"[GATE] Skipped: batch halted after '{fc_name}' failed.",
+                            batch_index=j,
+                        ))
+                    try:
+                        persisted = await self._append_turns_and_broadcast(event_id, batch_turns, batch_ctx=batch_ctx)
+                        if not persisted:
+                            halt_reinvoke = False
+                            batch_halted = True
+                            break
+                    except Exception as e2:
+                        logger.error("Batch error persistence failed for %s: %s", event_id, e2)
+                        halt_reinvoke = False
+                        batch_halted = True
+                        break
+
+                    if i == 0 or (not await self._is_event_closed(event_id) and last_result is not False):
+                        halt_reinvoke = True
                     batch_halted = True
                     break
 
                 if fc_name not in valid_names:
+                    from .tool_gates import diagnose_rejection
+                    all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+                    if fc_name not in all_known:
+                        rejection_reason = f"[UNKNOWN] {fc_name} is not a recognized tool."
+                    else:
+                        rejection_reason = diagnose_rejection(fc_name, gate_ctx)
                     logger.warning(
-                        "Batch FC[%d] %s rejected by gate%s",
-                        i, fc_name, "" if i == 0 else f" after FC[{i - 1}]",
+                        "Batch FC[%d] %s rejected by gate%s: %s",
+                        i, fc_name, "" if i == 0 else f" after FC[{i - 1}]", rejection_reason,
                     )
+                    rej_turn = ConversationTurn(
+                        turn=0,
+                        actor="brain",
+                        action="tool_result",
+                        waitingFor=fc_name,
+                        thoughts=rejection_reason,
+                        response_parts=captured_parts if i == 0 else None,
+                        batch_size=batch_size if i == 0 else None,
+                        batch_index=i if i > 0 else None,
+                    )
+                    batch_turns = [rej_turn]
+                    for j in range(i + 1, batch_size):
+                        skipped_name = batch_fcs[j]["functionCall"]["name"]
+                        batch_turns.append(ConversationTurn(
+                            turn=0,
+                            actor="brain",
+                            action="tool_result",
+                            waitingFor=skipped_name,
+                            thoughts=f"[GATE] Skipped: batch halted after '{fc_name}' failed.",
+                            batch_index=j,
+                        ))
+                    try:
+                        persisted = await self._append_turns_and_broadcast(event_id, batch_turns, batch_ctx=batch_ctx)
+                        if not persisted:
+                            halt_reinvoke = False
+                            batch_halted = True
+                            break
+                    except Exception as e2:
+                        logger.error("Batch rejection persistence failed for %s: %s", event_id, e2)
+                        halt_reinvoke = False
+                        batch_halted = True
+                        break
+
+                    if i == 0 or (not await self._is_event_closed(event_id) and last_result is not False):
+                        halt_reinvoke = True
                     batch_halted = True
                     break
 
@@ -2881,13 +3732,30 @@ class Brain:
                 last_result = bool(result)
 
                 if not result:
+                    if i + 1 < batch_size and not await self._is_event_closed(event_id):
+                        batch_turns = []
+                        for j in range(i + 1, batch_size):
+                            skipped_name = batch_fcs[j]["functionCall"]["name"]
+                            batch_turns.append(ConversationTurn(
+                                turn=0,
+                                actor="brain",
+                                action="tool_result",
+                                waitingFor=skipped_name,
+                                thoughts=f"[GATE] Skipped: batch halted after '{fc_name}' ended the cycle.",
+                                batch_index=j,
+                            ))
+                        if batch_turns:
+                            try:
+                                await self._append_turns_and_broadcast(event_id, batch_turns, batch_ctx=None)
+                            except Exception as e2:
+                                logger.error("Batch skipped turns persistence failed for %s: %s", event_id, e2)
                     batch_halted = True
                     break
                 if await self._is_event_closed(event_id):
                     batch_halted = True
                     break
 
-            return bool(last_result and not batch_halted)
+            return True if halt_reinvoke else bool(last_result and not batch_halted)
 
         # Process the final result (single-FC path)
         if function_call:
@@ -2916,8 +3784,20 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             valid_tool_names = {t["name"] for t in active_tools}
+            
             is_terminal = (
-                function_call.name in _CYCLE_ENDING_TOOLS
+                (
+                    function_call.name == "wait_for_user"
+                    and (
+                        "wait_for_user" in valid_tool_names
+                        or _wait_for_user_admissible(gate_ctx)
+                    )
+                )
+                or (
+                    function_call.name in _CYCLE_ENDING_TOOLS
+                    and function_call.name != "wait_for_user"
+                    and function_call.name in valid_tool_names
+                )
                 or (
                     "set_phase" in valid_tool_names
                     and _is_close_phase_fc(function_call.name, function_call.args, event)
@@ -2948,13 +3828,13 @@ class Brain:
                     await self._append_and_broadcast(event_id, narration_turn)
 
             # SILENT_PARK invalidation: if we just flushed a brain.response above,
-            # wait_for_user is now valid (the gate's "no response after user message"
-            # premise was satisfied by the flush). Re-admit to prevent false rejection
-            # that causes duplicate text generation on the next iteration.
+            # wait_for_user is now valid ONLY when it survives all other gates in
+            # GATE_REGISTRY (excluding SILENT_PARK).
             if (
                 function_call.name == "wait_for_user"
                 and "wait_for_user" not in valid_tool_names
                 and event_id in self._response_emitted_for
+                and _wait_for_user_admissible(gate_ctx)
             ):
                 valid_tool_names.add("wait_for_user")
 
@@ -2970,9 +3850,10 @@ class Brain:
                     f"Tool rejection [{safe_name}] for {event_id}: {rejection_reason}"
                 )
                 turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
+                    turn=0,
                     actor="brain",
                     action="tool_result",
+                    waitingFor=function_call.name,
                     thoughts=rejection_reason,
                     response_parts=captured_parts,
                 )
@@ -3302,6 +4183,7 @@ class Brain:
         attempt: int,
         only_if_over_budget: bool = False,
         is_burst_error: bool = False,
+        graph_recall: str | None = None,
     ) -> int:
         """Shrink ``shed``'s prompt after a quota error. Returns 0 (nothing shrank), 1 or 2.
 
@@ -3335,6 +4217,7 @@ class Brain:
                     context_cache=context_flags,
                     terminal_prompt=terminal_prompt,
                     turn_decay_distance=2,
+                    graph_recall=graph_recall,
                 )
             except Exception as rebuild_err:
                 logger.warning(
@@ -3344,8 +4227,11 @@ class Brain:
                 if is_burst_error or before > shed.tail_budget or len(event.conversation) > 4:
                     fallback_budget = max(2000, shed.tail_budget // 2)
                     try:
-                        rebuilt = self._compress_contents(
-                            shed.raw_contents, max_tokens=fallback_budget, tail_budget=fallback_budget,
+                        rebuilt, _ = self._compress_contents(
+                            shed.raw_contents,
+                            max_tokens=fallback_budget,
+                            tail_budget=fallback_budget,
+                            active_overlay=shed.active_overlay,
                         )
                     except Exception as compress_err:
                         logger.warning(
@@ -3385,8 +4271,11 @@ class Brain:
             f"halving tail budget to {tail_budget}"
         )
         try:
-            compressed = self._compress_contents(
-                shed.raw_contents, max_tokens=tail_budget, tail_budget=tail_budget,
+            compressed, _ = self._compress_contents(
+                shed.raw_contents,
+                max_tokens=tail_budget,
+                tail_budget=tail_budget,
+                active_overlay=shed.active_overlay,
             )
         except Exception as compress_err:
             logger.warning(
@@ -3750,153 +4639,40 @@ class Brain:
         context_flags: dict | None = None,
         graph_recall: str | None | object = _UNSET,
     ) -> str:
-        """Assemble system prompt from matching skill phases + dependency resolution.
+        """Assemble and cache the immutable Global Core system prompt.
 
-        graph_recall: pre-fetched result of self._get_graph_recall(event), passed by
-        the caller so it can be gathered concurrently with _check_graph_edges instead
-        of being awaited here sequentially. Falls back to fetching it internally when
-        not provided (_UNSET sentinel), e.g. for direct/test callers.
+        Contains only always/ + promoted GLOBAL_CORE_EXTRA_PATHS (plus transitive requires:),
+        keyed on (_skills_version, _skill_loader._corpus) so every event/phase/domain/turn
+        shares a 100% byte-identical system_instruction for Vertex implicit context caching.
         """
-        if not self._skill_loader or not self._skill_loader.available_phases():
+        loader = getattr(self, "_skill_loader", None)
+        if not loader or not loader.available_phases():
             raise RuntimeError(
                 "BrainSkillLoader has no available phases. Ensure brain_skills/ directory exists "
                 "with at least the always/ phase folder."
             )
 
-        initial_paths: list[str] = []
-        for phase in active_phases:
-            if phase == "source":
-                subject_type = getattr(event, "subject_type", "service") or "service"
-                composite_file = f"source/{event.source}_{subject_type}.md"
-                source_file = f"source/{event.source}.md"
-                all_source_paths = self._skill_loader.get_all_paths_for_phase("source")
-                if composite_file in all_source_paths:
-                    initial_paths.append(composite_file)
-                elif source_file in all_source_paths:
-                    initial_paths.append(source_file)
-                else:
-                    logger.warning(f"No source skill for '{event.source}' (subject_type={subject_type})")
-            elif phase.startswith("domain/"):
-                domain_file = f"{phase}.md"
-                if self._skill_loader.get_with_meta(domain_file):
-                    initial_paths.append(domain_file)
-                else:
-                    logger.warning(f"Domain skill not found: {domain_file}")
-            else:
-                phase_paths = self._skill_loader.get_all_paths_for_phase(phase)
-                if phase == "context":
-                    gitlab_tagged = set(self._skill_loader.find_paths_by_tag("gitlab") or [])
-                    phase_paths = [p for p in phase_paths if p not in gitlab_tagged]
-                initial_paths.extend(phase_paths)
-
-        maintainer_env = maintainer_env_key(getattr(event, "subject_type", None))
-        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv(maintainer_env, "")}
-        resolved_pairs = self._skill_loader.resolve_dependencies_with_paths(
-            initial_paths, template_vars=template_vars
-        )
-        resolved_contents = [
-            _wrap_section(path, body, self._skill_loader.get_tag_type(path))
-            for path, body in resolved_pairs
-        ]
-
-        # Live event state header -- first thing the LLM reads, before all skill instructions.
-        resolved_contents.insert(0, self._build_event_state_header(event, context_flags))
-
-        # Evidence-driven context skills (deduplicated against already-loaded phase paths)
-        loaded_paths = {p for p, _ in resolved_pairs}
-        evidence = event.event.evidence if event.event else None
-
-        def _inject_evidence_paths(paths, tag: str) -> None:
-            for path in paths:
-                if path in loaded_paths:
-                    continue
-                result = self._skill_loader.get_with_meta(path)
-                if result:
-                    body, _ = result
-                    resolved_contents.append(
-                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
-                    )
-                    loaded_paths.add(path)
-                else:
-                    logger.debug(f"Evidence tag '{tag}' path '{path}' resolved to None in path_index")
-
-        if evidence and getattr(evidence, "kargo_context", None):
-            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("kargo"), "kargo")
-        if evidence and getattr(evidence, "gitlab_context", None):
-            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("gitlab"), "gitlab")
-        if evidence and (
-            getattr(evidence, "github_context", None)
-            or getattr(evidence, "github_issue_context", None)
+        version = getattr(self, "_skills_version", None)
+        corpus = getattr(loader, "_corpus", None)
+        cached = getattr(self, "_cached_global_core_si", None)
+        if (
+            isinstance(cached, tuple)
+            and len(cached) >= 4
+            and cached[0] == version
+            and cached[1] is corpus
         ):
-            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("github"), "github")
-        if evidence and getattr(evidence, "ci_context", None):
-            _inject_evidence_paths(self._skill_loader.find_paths_by_tag("ci_gating"), "ci_gating")
+            return cached[2]
 
-        # Gated posture skills for chat/slack events (mutually exclusive)
-        if context_flags and context_flags.get("is_first_human_turn"):
-            for path in self._skill_loader.find_paths_by_tag("user-energy"):
-                result = self._skill_loader.get_with_meta(path)
-                if result:
-                    body, _ = result
-                    resolved_contents.append(
-                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
-                    )
-        elif context_flags and context_flags.get("is_operational_chat"):
-            for path in self._skill_loader.find_paths_by_tag("operational-posture"):
-                result = self._skill_loader.get_with_meta(path)
-                if result:
-                    body, _ = result
-                    resolved_contents.append(
-                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
-                    )
-
-        if graph_recall is _UNSET:
-            graph_recall = await self._get_graph_recall(event)
-        if graph_recall:
-            resolved_contents.append(graph_recall)
-
-        if "post-agent" in active_phases:
-            recall_block = await self._post_agent_recall(event)
-            if recall_block:
-                resolved_contents.append(recall_block)
-            self._schedule_graph_enrichment(event)
-
-        if "defer-wake" in active_phases and context_flags:
-            consecutive = context_flags.get("consecutive_defers", 0)
-            raw_reason = next(
-                (t.thoughts for t in reversed(event.conversation)
-                 if t.actor == "brain" and t.action == "defer"),
-                "unknown",
-            )
-            last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
-            last_agent = next(
-                (t for t in reversed(event.conversation)
-                 if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")),
-                None,
-            )
-            elapsed_str = ""
-            if last_agent:
-                elapsed_min = int((time.time() - last_agent.timestamp) / 60)
-                elapsed_str = (
-                    f"Time elapsed since last {last_agent.actor} response "
-                    f"({last_agent.action}): {elapsed_min} minutes."
-                )
-            resolved_contents.append(
-                f"**DEFER WAKE-UP ({consecutive}x):** You deferred because: {last_reason}\n"
-                f"{elapsed_str}\n"
-                f"That was {consecutive} defer(s) ago. What changed since then?"
-            )
-
-        lesson_block = self._format_recall_block(event)
-        if lesson_block:
-            resolved_contents.append(lesson_block)
-
-        prompt = "\n\n---\n\n".join(resolved_contents)
+        prompt = build_global_core_si(loader)
+        from .prefix_builder import sha8_text
+        si_sha8 = sha8_text(prompt)
+        try:
+            self._cached_global_core_si = (version, corpus, prompt, si_sha8)
+        except AttributeError:
+            pass
 
         total_tokens = len(prompt) // 4
-        phase_str = ", ".join(active_phases)
-        logger.info(f"Brain skills: [{phase_str}] ({total_tokens} tokens) for {event.id}")
-
+        logger.info("Brain Global Core SI built (%d tokens, version=%s)", total_tokens, version or "fs")
         return prompt
 
     def _format_recall_block(self, event: "EventDocument") -> str | None:
@@ -3914,13 +4690,14 @@ class Brain:
         for lesson in lessons:
             p = lesson.get("payload", {})
             if "title" in p:
-                title = _strip_tool_names(p.get("title", "untitled"))
-                pattern = _strip_tool_names(p.get("pattern", ""))
+                title = sanitize_untrusted_line(_strip_tool_names(str(p.get("title", "untitled"))), max_len=200, redact=True)
+                pattern = sanitize_untrusted_line(_strip_tool_names(str(p.get("pattern", ""))), max_len=600, redact=True)
                 lines.append(f"- {title}: {pattern}")
             elif "topic" in p:
-                scope = p.get("scope", "")
-                fact = p.get("fact", "")
-                label = f"[Fact] {p.get('topic', 'unknown')}"
+                scope = sanitize_untrusted_line(p.get("scope", ""), max_len=120, redact=True)
+                fact = sanitize_untrusted_line(p.get("fact", ""), max_len=600, redact=True)
+                topic = sanitize_untrusted_line(p.get("topic", "unknown"), max_len=200, redact=True)
+                label = f"[Fact] {topic}"
                 lines.append(f"- {label} ({scope}): {fact}" if scope else f"- {label}: {fact}")
 
         logger.debug(f"Brain RECALL: {len(lessons)} lessons in SI for {event.id}")
@@ -4223,13 +5000,14 @@ class Brain:
         for hit in hits:
             p = hit.get("payload", {})
             if "title" in p:
-                title = _strip_tool_names(p.get("title", "untitled"))
-                pattern = _strip_tool_names(p.get("pattern", ""))
+                title = sanitize_untrusted_line(_strip_tool_names(str(p.get("title", "untitled"))), max_len=200, redact=True)
+                pattern = sanitize_untrusted_line(_strip_tool_names(str(p.get("pattern", ""))), max_len=600, redact=True)
                 lines.append(f"- {title}: {pattern}")
             elif "topic" in p:
-                scope = p.get("scope", "")
-                fact = p.get("fact", "")
-                label = f"[Fact] {p.get('topic', 'unknown')}"
+                scope = sanitize_untrusted_line(p.get("scope", ""), max_len=120, redact=True)
+                fact = sanitize_untrusted_line(p.get("fact", ""), max_len=600, redact=True)
+                topic = sanitize_untrusted_line(p.get("topic", "unknown"), max_len=200, redact=True)
+                label = f"[Fact] {topic}"
                 lines.append(f"- {label} ({scope}): {fact}" if scope else f"- {label}: {fact}")
 
         logger.info(
@@ -4272,192 +5050,215 @@ class Brain:
         return build_operational_briefing(event)
 
     async def _build_contents(
-        self, event: EventDocument, context_cache: ContextFlags | None = None,
+        self,
+        event: EventDocument,
+        context_cache: ContextFlags | None = None,
         terminal_prompt: str = _TERMINAL_PROMPT_FALLBACK,
         turn_decay_distance: int = DEFAULT_TURN_DECAY_DISTANCE,
+        graph_recall: str | None = None,
     ) -> list[dict]:
-        """Build structured Gemini-format contents array from Redis conversation.
+        """Build append-only structured Gemini-format contents array from Redis conversation.
 
-        Returns list of {role: str, parts: list[dict]} messages.
-        First message = event context (user role).
-        Subsequent messages alternate user/model based on ConversationTurn actor.
-        Consecutive same-role turns are merged (Gemini requires alternating roles).
-        context_cache: if provided, reuse cached Redis data from _extract_context_flags.
-        terminal_prompt: phase-contextual action prompt from _resolve_terminal_prompt().
+        First message = creation-immutable frozen Turn-0 anchor (Redis write-once SSOT + L1 LRU).
+        Subsequent messages alternate user/model with post-FR turn-anchored <skill_overlay> parts.
+        Final message = dedicated volatile fenced <event_state>...</event_state> + terminal_prompt.
         """
-        from ..models import EventEvidence
-        from .llm.prompt import build_event_header
+        extract_model_parts_fn = getattr(self, "_extract_model_parts", Brain._extract_model_parts)
+        build_fr_fn = getattr(self, "_build_function_response", Brain._build_function_response)
+        turn_to_parts_fn = getattr(self, "_turn_to_parts", Brain._turn_to_parts)
+        close_fc_fn = getattr(self, "_close_unanswered_fc", Brain._close_unanswered_fc)
+        compress_fn = getattr(self, "_compress_contents", Brain._compress_contents)
+        loader = getattr(self, "_skill_loader", None)
 
-        if context_cache is not None and "_cached_header" in context_cache:
-            header = context_cache["_cached_header"]
+        if context_cache is not None and context_cache.get("_cached_anchor") and isinstance(context_cache["_cached_anchor"], _FrozenAnchor):
+            anchor = context_cache["_cached_anchor"]
+        elif context_cache is not None and "_cached_header" in context_cache:
+            anchor = _FrozenAnchor(text=context_cache["_cached_header"])
         else:
-            # -- Resolve async data for the event header --
-            evidence = event.event.evidence
-            subject_type = event.subject_type
-
-            # Gate get_service: only for K8s deployment subjects
-            svc = None
-            if (subject_type == "service"
-                    and event.service not in ("general", "system")
-                    and not (
-                        isinstance(evidence, EventEvidence)
-                        and (evidence.gitlab_context or evidence.github_context or evidence.github_issue_context)
-                    )):
-                svc = await self.blackboard.get_service(event.service)
-
-            mermaid = ""
-
-            if context_cache and "_cached_active_ids" in context_cache:
-                active_event_ids = context_cache["_cached_active_ids"]
-            else:
-                active_event_ids = await self.blackboard.get_active_events()
-            related = []
-            for eid in active_event_ids:
-                if eid == event.id:
-                    continue
-                other = await self.blackboard.get_event(eid)
-                if not other:
-                    continue
-                if other.service == event.service:
-                    last_action = other.conversation[-1] if other.conversation else None
-                    summary = f"  - {eid} ({other.source}): {other.event.reason}"
-                    if last_action:
-                        summary += f" [last: {last_action.actor}.{last_action.action}]"
-                    related.append(summary)
-                elif other.service == "general":
-                    for turn in other.conversation[-3:]:
-                        if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
-                            related.append(f"  - {eid} (chat): {other.event.reason}")
-                            break
-
-            if context_cache and "_cached_recent_closed" in context_cache:
-                recent_closed = context_cache["_cached_recent_closed"]
-            else:
-                recent_closed = await self.blackboard.get_recent_closed_for_service(
-                    event.service, minutes=15
-                )
-
-            journal = await self._get_journal_cached(event.service)
-
-            # -- Build source-aware header via pure function --
-            header = build_event_header(
-                event,
-                service_meta=svc,
-                journal_entries=journal if journal else None,
-                related_events=related if related else None,
-                recent_closed=recent_closed if recent_closed else None,
-                mermaid=mermaid,
-            )
-
-            briefing = Brain._build_operational_briefing(event)
-            if briefing:
-                header = f"{header}\n\n{briefing}"
-
+            anchor = await _resolve_frozen_anchor(self, event, graph_recall=graph_recall)
             if context_cache is not None:
-                context_cache["_cached_header"] = header
+                context_cache["_cached_anchor"] = anchor
+                context_cache["_cached_header"] = anchor.text
 
-        if not event.conversation:
-            new_event_text = header + f"\n\n(No turns yet -- this is a new event. Triage it.)\n{terminal_prompt}"
-            return [{"role": "user", "parts": [{"text": new_event_text}]}]
+        contents: list[dict] = [{"role": "user", "parts": [{"text": anchor.text}]}]
+        seen_domains: set[str] = set(anchor.initial_domains)
+        seen_phases: set[str] = set(anchor.initial_phases)
+        anchored_paths: set[str] = set(_get_global_core_paths(loader)) | set(anchor.initial_paths)
 
-        context_text = header
+        conv = event.conversation or []
+        cutoff = 0
+        if conv:
+            header_separated = False
+            # A recalled payload is exactly what the model asked to see again: decaying it would send it
+            # straight back to recall_pruned_turns (ping-pong). Quota shedding (tight decay distance) overrides.
+            exempt_recall_from_decay = turn_decay_distance >= DEFAULT_TURN_DECAY_DISTANCE
+            cutoff = decay_cutoff_index(len(conv), turn_decay_distance)
+            _fc_emitted_for_turn: set[int] = set()
+            _last_emitted_idx: int | None = None
+            _skip_set: set[int] = set()
 
-        # -- Pre-scan: find last eligible tool_result/route for skill pointer injection --
-        target_skill_turn = None
-        if self._skill_loader:
-            for t in reversed(event.conversation):
-                if (t.actor == "brain" and t.action in ("tool_result", "route")
-                        and t.waitingFor
-                        and self._skill_loader.get_tool_skills(t.waitingFor)):
-                    target_skill_turn = t
-                    break
+            for idx, turn in enumerate(conv):
+                if idx in _skip_set:
+                    continue
 
-        # -- Build structured conversation messages --
-        contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
-        header_separated = False
-        # A recalled payload is exactly what the model asked to see again: decaying it would send it
-        # straight back to recall_pruned_turns (ping-pong). Quota shedding (tight decay distance) overrides.
-        exempt_recall_from_decay = turn_decay_distance >= DEFAULT_TURN_DECAY_DISTANCE
-        last_non_brain_pos: tuple[int, int] | None = None
-        _fc_emitted_for_turn: set[int] = set()
-        _last_emitted_idx: int | None = None
-        _skip_set: set[int] = set()
-
-        for idx, turn in enumerate(event.conversation):
-            if idx in _skip_set:
-                continue
-
-            turn_distance = len(event.conversation) - 1 - idx
-            decay = turn_distance > turn_decay_distance and not (
-                exempt_recall_from_decay and turn.waitingFor == "recall_pruned_turns"
-            )
-            turn_idx = getattr(turn, "turn", idx)
-
-            role = "model" if turn.actor == "brain" else "user"
-            if turn.actor == "brain" and turn.action == "tool_result":
-                role = "user"
-            skill_injected_by_v2 = False
-
-            # -- FC/FR-aware replay for tool_result turns (v2 path) --
-            # Batch-marked turns of ANY action type also enter this path (C1 fix)
-            if (
-                _THOUGHT_SIG_V2
-                and turn.actor == "brain"
-                and (
-                    turn.action in ("tool_result", "route", "phase", "respond_jarvis", "notify")
-                    or turn.batch_size
-                    or turn.batch_index
-                    or (turn.action not in ("response", "thoughts", "intermediate") and turn.waitingFor)
+                decay = idx < cutoff and not (
+                    exempt_recall_from_decay and turn.waitingFor == "recall_pruned_turns"
                 )
-                and turn.response_parts
-                and any(p.get("functionCall") for p in turn.response_parts)
-            ):
-                # Guard: exclude grounding turns from native FC/FR replay.
-                # Two cases: (a) pure grounding (FC name == "google_web_search"),
-                # (b) synthetic pre-turns (FC name != waitingFor, e.g. real FC
-                # carried on a google_web_search wrapper turn) -- EXCEPT when the
-                # turn is a batch head (turn.batch_size set): there, the wrapper
-                # turn carrying grounding evidence is the ONLY turn that ever holds
-                # the batch's real response_parts (the handler's own turn that
-                # follows has response_parts cleared to None), so excluding it here
-                # would silently drop native FC/FR replay for the WHOLE batch, not
-                # just the grounding display. The batch-replay branch below handles
-                # such turns correctly regardless of turn.waitingFor.
-                fc_names_in_parts = {
-                    p["functionCall"].get("name")
-                    for p in turn.response_parts
-                    if p.get("functionCall")
-                }
-                is_grounding_excluded = (
-                    "google_web_search" in fc_names_in_parts
-                    or (
-                        turn.waitingFor
-                        and fc_names_in_parts
-                        and turn.waitingFor not in fc_names_in_parts
-                        and not turn.batch_size
+                turn_idx = getattr(turn, "turn", idx)
+
+                role = "model" if turn.actor == "brain" else "user"
+                if turn.actor == "brain" and turn.action == "tool_result":
+                    role = "user"
+                single_fc_part: dict | None = None
+
+                # -- FC/FR-aware replay for tool_result turns (v2 path) --
+                # Batch-marked turns of ANY action type also enter this path (C1 fix)
+                if (
+                    _THOUGHT_SIG_V2
+                    and turn.actor == "brain"
+                    and (
+                        turn.action in ("tool_result", "route", "phase", "respond_jarvis", "notify")
+                        or turn.batch_size
+                        or turn.batch_index
+                        or (turn.action not in ("response", "thoughts", "intermediate") and turn.waitingFor)
                     )
-                )
+                    and turn.response_parts
+                    and any(p.get("functionCall") for p in turn.response_parts)
+                ):
+                    fc_names_in_parts = {
+                        p["functionCall"].get("name")
+                        for p in turn.response_parts
+                        if p.get("functionCall")
+                    }
+                    is_grounding_excluded = (
+                        "google_web_search" in fc_names_in_parts
+                        or (
+                            turn.waitingFor
+                            and fc_names_in_parts
+                            and turn.waitingFor not in fc_names_in_parts
+                            and not turn.batch_size
+                        )
+                    )
 
-                if not is_grounding_excluded:
-                    # -- Batch replay path: 1 model Content + 1 user Content --
-                    if turn.batch_size and turn.batch_size > 1:
-                        fc_parts = self._extract_model_parts(turn.response_parts)
+                    if not is_grounding_excluded:
+                        # -- Batch replay path: 1 model Content + 1 user Content --
+                        if turn.batch_size and turn.batch_size > 1:
+                            fc_parts = extract_model_parts_fn(turn.response_parts)
+                            if fc_parts:
+                                batch_fc_parts = [
+                                    p for p in turn.response_parts if p.get("functionCall")
+                                ][:turn.batch_size]
+                                batch_fc_names = [
+                                    p["functionCall"]["name"] for p in batch_fc_parts
+                                ]
+
+                                preceding_emitted = (
+                                    _last_emitted_idx is not None
+                                    and _last_emitted_idx in _fc_emitted_for_turn
+                                    and bool(contents)
+                                    and contents[-1]["role"] == "model"
+                                )
+                                if not preceding_emitted:
+                                    close_fc_fn(
+                                        contents, event, _last_emitted_idx,
+                                        context_label="Intermediate FC safety net",
+                                    )
+                                    if contents and contents[-1]["role"] == "model":
+                                        contents[-1]["parts"].extend(fc_parts)
+                                    else:
+                                        contents.append({"role": "model", "parts": list(fc_parts)})
+                                _fc_emitted_for_turn.add(idx)
+
+                                fc0_name = batch_fc_names[0] if batch_fc_names else None
+                                all_frs = [_cp_build_single_fr(turn, fc0_name, decay_evidence=decay, turn_index=turn_idx)]
+                                batch_turn_fc_pairs: list[tuple[Any, dict | None]] = [
+                                    (turn, batch_fc_parts[0] if batch_fc_parts else None)
+                                ]
+
+                                for bi in range(1, turn.batch_size):
+                                    found = False
+                                    for scan_idx in range(idx + 1, len(conv)):
+                                        scan_turn = conv[scan_idx]
+                                        if (
+                                            scan_turn.batch_index == bi
+                                            and scan_turn.actor == "brain"
+                                        ):
+                                            fc_name_for_bi = (
+                                                batch_fc_names[bi]
+                                                if bi < len(batch_fc_names)
+                                                else None
+                                            )
+                                            scan_decay = scan_idx < cutoff and not (
+                                                exempt_recall_from_decay
+                                                and scan_turn.waitingFor == "recall_pruned_turns"
+                                            )
+                                            scan_turn_idx = getattr(scan_turn, "turn", scan_idx)
+                                            all_frs.append(
+                                                _cp_build_single_fr(
+                                                    scan_turn, fc_name_for_bi,
+                                                    decay_evidence=scan_decay,
+                                                    turn_index=scan_turn_idx,
+                                                )
+                                            )
+                                            batch_turn_fc_pairs.append(
+                                                (scan_turn, batch_fc_parts[bi] if bi < len(batch_fc_parts) else None)
+                                            )
+                                            _skip_set.add(scan_idx)
+                                            found = True
+                                            break
+                                    if not found:
+                                        pad_name = (
+                                            batch_fc_names[bi]
+                                            if bi < len(batch_fc_names)
+                                            else "unknown_tool"
+                                        )
+                                        if pad_name in _NON_IDEMPOTENT_TOOLS:
+                                            pad_result = (
+                                                "unknown -- the process may have crashed after this "
+                                                "call's side effect already ran (e.g. an agent may "
+                                                "already be dispatched, or the event may already be "
+                                                "deferred). Do NOT blindly re-issue this exact call; "
+                                                "check current event state first."
+                                            )
+                                        else:
+                                            pad_result = "execution interrupted"
+                                        all_frs.append({
+                                            "functionResponse": {
+                                                "name": pad_name,
+                                                "response": {"result": pad_result},
+                                            }
+                                        })
+
+                                # Emit ONE user Content with all FRs, then post-FR <skill_overlay> BEFORE continue.
+                                if contents and contents[-1]["role"] == "user":
+                                    contents[-1]["parts"].extend(all_frs)
+                                else:
+                                    contents.append({"role": "user", "parts": all_frs})
+
+                                batch_overlay = _collect_turn_overlay_part(
+                                    loader, batch_turn_fc_pairs, seen_domains, seen_phases, anchored_paths,
+                                )
+                                if batch_overlay is not None:
+                                    contents[-1]["parts"].append(batch_overlay)
+
+                                _last_emitted_idx = idx
+                                continue
+
+                        fc_parts = extract_model_parts_fn(turn.response_parts)
                         if fc_parts:
-                            # Derive canonical FC names from head turn's response_parts order
-                            batch_fc_names = [
-                                p["functionCall"]["name"]
-                                for p in turn.response_parts
-                                if p.get("functionCall")
-                            ][:turn.batch_size]
-
-                            # Dedup: skip model:FC if preceding turn already emitted
+                            single_fc_part = next(
+                                (p for p in turn.response_parts if p.get("functionCall")),
+                                None,
+                            )
                             preceding_emitted = (
                                 _last_emitted_idx is not None
                                 and _last_emitted_idx in _fc_emitted_for_turn
+                                and bool(contents)
+                                and contents[-1]["role"] == "model"
                             )
-                            # Close any unclosed FC from prior turns before appending new model:FC
+
                             if not preceding_emitted:
-                                self._close_unanswered_fc(
+                                close_fc_fn(
                                     contents, event, _last_emitted_idx,
                                     context_label="Intermediate FC safety net",
                                 )
@@ -4467,196 +5268,82 @@ class Brain:
                                     contents.append({"role": "model", "parts": list(fc_parts)})
                             _fc_emitted_for_turn.add(idx)
 
-                            # Build FR for FC[0] (head turn)
-                            fc0_name = batch_fc_names[0] if batch_fc_names else None
-                            all_frs = [_cp_build_single_fr(turn, fc0_name, decay_evidence=decay, turn_index=turn_idx)]
-
-                            # Look-ahead for batch_index continuation turns (any action)
-                            for bi in range(1, turn.batch_size):
-                                found = False
-                                for scan_idx in range(idx + 1, len(event.conversation)):
-                                    scan_turn = event.conversation[scan_idx]
-                                    if (
-                                        scan_turn.batch_index == bi
-                                        and scan_turn.actor == "brain"
-                                    ):
-                                        fc_name_for_bi = (
-                                            batch_fc_names[bi]
-                                            if bi < len(batch_fc_names)
-                                            else None
-                                        )
-                                        scan_distance = len(event.conversation) - 1 - scan_idx
-                                        scan_decay = scan_distance > turn_decay_distance and not (
-                                            exempt_recall_from_decay
-                                            and scan_turn.waitingFor == "recall_pruned_turns"
-                                        )
-                                        scan_turn_idx = getattr(scan_turn, "turn", scan_idx)
-                                        all_frs.append(
-                                            _cp_build_single_fr(
-                                                scan_turn, fc_name_for_bi,
-                                                decay_evidence=scan_decay,
-                                                turn_index=scan_turn_idx,
-                                            )
-                                        )
-                                        _skip_set.add(scan_idx)
-                                        found = True
-                                        break
-                                if not found:
-                                    pad_name = (
-                                        batch_fc_names[bi]
-                                        if bi < len(batch_fc_names)
-                                        else "unknown_tool"
-                                    )
-                                    if pad_name in _NON_IDEMPOTENT_TOOLS:
-                                        pad_result = (
-                                            "unknown -- the process may have crashed after this "
-                                            "call's side effect already ran (e.g. an agent may "
-                                            "already be dispatched, or the event may already be "
-                                            "deferred). Do NOT blindly re-issue this exact call; "
-                                            "check current event state first."
-                                        )
-                                    else:
-                                        pad_result = "execution interrupted"
-                                    all_frs.append({
-                                        "functionResponse": {
-                                            "name": pad_name,
-                                            "response": {"result": pad_result},
-                                        }
-                                    })
-
-                            # Emit ONE user Content with all FRs
-                            if contents and contents[-1]["role"] == "user":
-                                contents[-1]["parts"].extend(all_frs)
-                            else:
-                                contents.append({"role": "user", "parts": all_frs})
-
-                            _last_emitted_idx = idx
-                            continue
-
-                    fc_parts = self._extract_model_parts(turn.response_parts)
-                    if fc_parts:
-                        # Skill injection check (before FC/FR emission)
-                        skill_prefix = ""
-                        if turn is target_skill_turn and self._skill_loader:
-                            skill_injected_by_v2 = True
-                            refs = self._skill_loader.build_skill_refs(
-                                turn.waitingFor, event.brain_phase, event.source,
-                                subject_type=getattr(event, "subject_type", None),
+                            parts = build_fr_fn(
+                                turn, "", decay_evidence=decay, turn_index=turn_idx
                             )
-                            if refs:
-                                skill_prefix = refs
-
-                        # Dedup: skip model:FC if the last turn that actually contributed
-                        # content already emitted it. Keyed off the last-emission index
-                        # rather than raw (idx - 1) adjacency, since filtered-out turns
-                        # (e.g. dispatcher acknowledge/connected) occupy an index without
-                        # contributing content and would otherwise defeat the dedup.
-                        preceding_emitted = (
-                            _last_emitted_idx is not None
-                            and _last_emitted_idx in _fc_emitted_for_turn
-                        )
-
-                        if not preceding_emitted:
-                            self._close_unanswered_fc(
-                                contents, event, _last_emitted_idx,
-                                context_label="Intermediate FC safety net",
-                            )
-                            # Case B: emit model:FC (inline merge-check)
-                            if contents and contents[-1]["role"] == "model":
-                                contents[-1]["parts"].extend(fc_parts)
-                            else:
-                                contents.append({"role": "model", "parts": list(fc_parts)})
-                        _fc_emitted_for_turn.add(idx)
-
-                        # Build user:FR — falls through to merge logic below
-                        parts = self._build_function_response(
-                            turn, skill_prefix, decay_evidence=decay, turn_index=turn_idx
-                        )
-                        role = "user"
+                            role = "user"
+                        else:
+                            parts = turn_to_parts_fn(turn, decay_evidence=decay, turn_index=turn_idx)
+                            if not parts:
+                                continue
                     else:
-                        # No valid FC extracted — text fallback
-                        parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
+                        parts = turn_to_parts_fn(turn, decay_evidence=decay, turn_index=turn_idx)
                         if not parts:
                             continue
                 else:
-                    # Grounding excluded — text fallback
-                    parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
+                    parts = turn_to_parts_fn(turn, decay_evidence=decay, turn_index=turn_idx)
                     if not parts:
                         continue
-            else:
-                parts = self._turn_to_parts(turn, decay_evidence=decay, turn_index=turn_idx)
-                if not parts:
-                    continue
 
-            # Skill injection (standard path — skipped only if v2 already injected it)
-            if turn is target_skill_turn and self._skill_loader and parts[0].get("text"):
-                if not skill_injected_by_v2:
-                    refs = self._skill_loader.build_skill_refs(
-                        turn.waitingFor, event.brain_phase, event.source,
-                        subject_type=getattr(event, "subject_type", None),
+                curr_has_fr = any(p.get("functionResponse") for p in parts)
+                if not curr_has_fr:
+                    close_fc_fn(
+                        contents, event, _last_emitted_idx,
+                        context_label="Intermediate FC safety net",
                     )
-                    if refs and parts[0].get("text"):
-                        parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
 
-            # Intermediate FC safety net: if history ends on an unanswered model:FC,
-            # ensure it is closed with user:FR before appending turns without FR.
-            curr_has_fr = any(p.get("functionResponse") for p in parts)
-            if not curr_has_fr:
-                self._close_unanswered_fc(
-                    contents, event, _last_emitted_idx,
-                    context_label="Intermediate FC safety net",
+                # Merge same-role neighbours, except never append a follow-up user turn onto a
+                # user message anchored with a trailing <skill_overlay> (preserves append-only prefix).
+                prev_ends_overlay = bool(
+                    contents
+                    and contents[-1]["role"] == "user"
+                    and contents[-1].get("parts")
+                    and _is_skill_overlay_part(contents[-1]["parts"][-1])
                 )
+                if contents and contents[-1]["role"] == role and not (role == "user" and prev_ends_overlay):
+                    if not header_separated and len(contents) == 1:
+                        contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
+                        header_separated = True
+                    contents[-1]["parts"].extend(parts)
+                else:
+                    contents.append({"role": role, "parts": parts})
 
-            # -- Merge into contents --
-            # Same-role neighbours always merge: Gemini allows functionResponse + text parts in one user
-            # Content and FRs only arrive right after their model FC turn. This deliberately drops the old
-            # FR/text separation guard (#310); alternation and FC/FR pairing are covered by the wire-invariant tests.
-            if contents and contents[-1]["role"] == role:
-                if not header_separated and len(contents) == 1:
-                    contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
-                    header_separated = True
-                if _is_participant_turn(turn):
-                    last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
-                contents[-1]["parts"].extend(parts)
-            else:
-                if _is_participant_turn(turn):
-                    last_non_brain_pos = (len(contents), 0)
-                contents.append({"role": role, "parts": parts})
+                # Post-FR turn-anchored <skill_overlay> (single-FC path; NEVER between FC and FR).
+                if turn.actor == "brain" and (curr_has_fr or not _THOUGHT_SIG_V2):
+                    single_overlay = _collect_turn_overlay_part(
+                        loader, [(turn, single_fc_part)], seen_domains, seen_phases, anchored_paths,
+                    )
+                    if single_overlay is not None:
+                        if contents[-1]["role"] == "user":
+                            contents[-1]["parts"].append(single_overlay)
+                        else:
+                            contents.append({"role": "user", "parts": [single_overlay]})
 
-            # Track FC emission from brain.response turns (for dedup)
-            if (
-                turn.actor == "brain"
-                and turn.action != "tool_result"
-                and turn.response_parts
-                and any(p.get("functionCall") for p in turn.response_parts)
-            ):
-                _fc_emitted_for_turn.add(idx)
+                if (
+                    turn.actor == "brain"
+                    and turn.action != "tool_result"
+                    and turn.response_parts
+                    and any(p.get("functionCall") for p in turn.response_parts)
+                ):
+                    _fc_emitted_for_turn.add(idx)
 
-            _last_emitted_idx = idx
+                _last_emitted_idx = idx
 
-        if last_non_brain_pos:
-            ci, pi = last_non_brain_pos
-            contents[ci]["parts"].insert(pi, {"text": "\n--- RESPOND TO THIS ---\n"})
+            close_fc_fn(
+                contents, event, _last_emitted_idx,
+                context_label="Trailing FC safety net",
+            )
 
-        # Trailing FC safety net: if history ends on a model turn with unanswered functionCall,
-        # Gemini protocol requires an immediate user:functionResponse before any plain text.
-        # Reaching this means a turn stored FC response_parts without its paired result turn
-        # (e.g. a V2-off handler persisting ungated parts) -- log it, and surface the turn's
-        # recorded result instead of a placeholder that hides an already-completed call.
-        self._close_unanswered_fc(
-            contents, event, _last_emitted_idx,
-            context_label="Trailing FC safety net",
+        # Dedicated final volatile <event_state> message (unified Turn 0 & Turn 1+; never merged into history).
+        event_state_text = await _build_event_state_tail_block(
+            self, event, context_cache=context_cache, contents=contents,
         )
-
-        if terminal_prompt:
-            action_prompt = {"text": terminal_prompt}
-            if contents[-1]["role"] == "user" and not any(p.get("functionResponse") for p in contents[-1]["parts"]):
-                contents[-1]["parts"].append(action_prompt)
-            else:
-                contents.append({"role": "user", "parts": [action_prompt]})
+        tail_text = f"{event_state_text}\n{terminal_prompt}" if terminal_prompt else event_state_text
+        contents.append({"role": "user", "parts": [{"text": tail_text}]})
 
         raw_tokens = _cp_estimate_tokens(contents)
-        compressed = self._compress_contents(contents)
+        active_overlay = _build_active_overlay(self, event, context_cache)
+        compressed, newly_pruned = compress_fn(contents, active_overlay=active_overlay)
         prompt_tokens = _cp_estimate_tokens(compressed)
 
         decayed_turns_count = 0
@@ -4673,9 +5360,11 @@ class Brain:
                         if "<blackboard_evidence_reference" in res_str:
                             decayed_turns_count += res_str.count("<blackboard_evidence_reference")
 
-        # Entries dropped by compression (messages, or parts for a single-message prompt). Computed from the
-        # structured result: the prune-notice text is never regex-scanned (that was quadratic on large Message 0).
-        pruned_turns_count = max(0, len(contents) - len(compressed))
+        pruned_turns_count = newly_pruned
+        if context_cache is not None:
+            context_cache["_decay_cutoff"] = cutoff
+            context_cache["_pruned_turns_count"] = pruned_turns_count
+            context_cache["_newly_pruned"] = newly_pruned
 
         brain_logger = logging.getLogger("darwin.brain")
         brain_logger.debug(
@@ -4736,9 +5425,12 @@ class Brain:
         contents: list[dict],
         max_tokens: int | None = None,
         tail_budget: int | None = None,
-    ) -> list[dict]:
+        active_overlay: str | None = None,
+    ) -> tuple[list[dict], int]:
         """Delegate to context_parts.compress_contents (None = that module's current budget)."""
-        return _cp_compress_contents(contents, max_tokens=max_tokens, tail_budget=tail_budget)
+        return _cp_compress_contents(
+            contents, max_tokens=max_tokens, tail_budget=tail_budget, active_overlay=active_overlay,
+        )
 
     # =========================================================================
     # Function Call Dispatcher
@@ -4971,58 +5663,6 @@ class Brain:
                 return target.__self__
         return None
 
-    async def _resolve_slack_user(
-        self, slack_channel, user_email: str, event_doc,
-    ) -> str | None:
-        """Resolve a user_email to a Slack user ID with maintainer fallback.
-
-        Resolution order:
-        1. Direct lookup if user_email contains @ or starts with U
-        2. On users_not_found: try each email from the maintainer list
-        3. Fall back to event.slack_user_id
-        """
-        if user_email.startswith("U") and user_email.isalnum():
-            return user_email
-
-        async def _lookup(email: str) -> str | None:
-            try:
-                info = await slack_channel._app.client.users_lookupByEmail(email=email)
-                return info["user"]["id"]
-            except Exception as exc:
-                logger.debug("Slack user lookup failed for '%s': %s", email, exc)
-                return None
-
-        if "@" in user_email:
-            uid = await _lookup(user_email)
-            if uid:
-                return uid
-            logger.warning(
-                "notify_user_slack: '%s' not found in Slack, trying maintainer fallback",
-                user_email,
-            )
-
-        maintainer_emails = self._resolve_maintainer_enum(event_doc) if event_doc else []
-        for fallback_email in maintainer_emails:
-            if "@" not in fallback_email:
-                continue
-            if fallback_email == user_email:
-                continue
-            uid = await _lookup(fallback_email)
-            if uid:
-                logger.info(
-                    "notify_user_slack: resolved via maintainer fallback '%s'",
-                    fallback_email,
-                )
-                return uid
-
-        if event_doc and event_doc.slack_user_id:
-            logger.warning(
-                "notify_user_slack: all lookups failed, using event slack_user_id %s",
-                event_doc.slack_user_id,
-            )
-            return event_doc.slack_user_id
-        return None
-
     @staticmethod
     def _resolve_maintainer_enum(event) -> list[str]:
         """Extract valid maintainer emails from event evidence + static config.
@@ -5034,25 +5674,6 @@ class Brain:
         handlers_integration.py's Slack-notify fallback).
         """
         return resolve_maintainer_emails(event)
-
-    @staticmethod
-    def _inject_maintainer_enum(tools: list[dict], emails: list[str]) -> list[dict]:
-        """Deep-copy notify_user_slack schema and constrain user_email to an enum."""
-        import copy
-        result = []
-        for tool in tools:
-            if tool["name"] != "notify_user_slack":
-                result.append(tool)
-                continue
-            patched = copy.deepcopy(tool)
-            props = patched["input_schema"]["properties"]["user_email"]
-            props["enum"] = emails
-            props["description"] = (
-                f"Maintainer to notify. MUST be one of: {', '.join(emails)}. "
-                "Do NOT invent or guess email addresses."
-            )
-            result.append(patched)
-        return result
 
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)
@@ -5995,6 +6616,70 @@ class Brain:
     # Broadcast Helpers
     # =========================================================================
 
+    async def _append_turns_and_broadcast(
+        self, event_id: str, turns: list[ConversationTurn], *, batch_ctx: Any = None
+    ) -> bool:
+        """Atomically persist and broadcast a batch of turns."""
+        if not turns:
+            return True
+
+        injected = False
+        if batch_ctx is not None and not getattr(batch_ctx, "_injected", False):
+            first = turns[0]
+            carries_fc = bool(first.response_parts) and any(
+                p.get("functionCall") for p in first.response_parts
+            )
+            is_pure_grounding = first.waitingFor == "google_web_search" and not carries_fc
+            if not is_pure_grounding and first.action != "triage":
+                if getattr(batch_ctx, "_batch_size", None) is not None:
+                    first.batch_size = batch_ctx._batch_size
+                if getattr(batch_ctx, "_batch_index", None) is not None:
+                    first.batch_index = batch_ctx._batch_index
+                injected = True
+
+        append_turns_fn = getattr(self.blackboard, "append_turns", None)
+        import inspect
+        can_batch = callable(append_turns_fn) and inspect.iscoroutinefunction(append_turns_fn)
+
+        if can_batch:
+            assigned = await append_turns_fn(event_id, turns)
+            if not assigned:
+                logger.warning("append_turns failed for %s", event_id)
+                return False
+            if injected:
+                batch_ctx._injected = True
+            for t in turns:
+                await self._broadcast_turn(event_id, t)
+            
+            try:
+                from ..dependencies import get_registry_and_bridge
+                registry, _ = get_registry_and_bridge()
+                if registry:
+                    agent_conn = await registry.get_by_event(event_id)
+                    if agent_conn and agent_conn.ws:
+                        for t in turns:
+                            if t.actor != agent_conn.current_role:
+                                await agent_conn.ws.send_json({
+                                    "type": "blackboard_update",
+                                    "event_id": event_id,
+                                    "turn": t.model_dump(),
+                                    "event_status": "active",
+                                    "total_turns": t.turn,
+                                })
+            except Exception:
+                pass
+            return True
+        else:
+            success = True
+            for t in turns:
+                assigned_turn = await self._append_and_broadcast(event_id, t)
+                if not assigned_turn:
+                    success = False
+                    break
+            if success and injected:
+                batch_ctx._injected = True
+            return success
+
     async def _append_and_broadcast(
         self, event_id: str, turn: ConversationTurn, event: "EventDocument | None" = None
     ) -> int:
@@ -6098,10 +6783,13 @@ class Brain:
         self._clear_jarvis_wait(event_id)
 
     def cleanup_jarvis_event_state(self, event_id: str) -> None:
-        """Release all in-memory JARVIS wait/stabilization state for a closing or stale event."""
+        """Release all in-memory JARVIS wait/stabilization state and cached anchor for a closing or stale event."""
         self._clear_jarvis_wait(event_id)
         self._jarvis_wait_count.pop(event_id, None)
         self._jarvis_recovery_rounds.pop(event_id, None)
+        anchors = getattr(self, "_frozen_anchors", None)
+        if isinstance(anchors, dict):
+            anchors.pop(event_id, None)
 
     # -- BrainIntrospectionPort methods --
 

@@ -7,13 +7,7 @@
 # 5. [Pattern]: TokenMeter is a lazy singleton via get_token_meter(). Unlike QuotaTracker, never returns None.
 # 6. [Pattern]: Exports QuotaExhaustedError (transient window timeout) AND RequestExceedsBurstError (its non-transient subclass:
 #    single request > whole bucket). Catch the subclass FIRST when the two need different handling.
-"""
-LLM adapter factory and re-exports.
-
-Usage:
-    from .llm import create_adapter, BRAIN_TOOL_SCHEMAS, LLMChunk
-    adapter = create_adapter("gemini", project, location, model)
-"""
+"""LLM adapter factory and re-exports (entry point: `from .llm import create_adapter, ...`)."""
 import logging
 import os
 
@@ -70,30 +64,37 @@ def get_token_meter() -> "TokenMeter":
 
 
 def record_token_usage(caller: str, usage: "TokenUsage | None", event_id: str | None = None) -> None:
-    """Best-effort token recording. Non-fatal on any failure."""
+    """Best-effort token recording and caller-aware cache telemetry logging. Non-fatal on any failure."""
     if not usage:
         return
     try:
         get_token_meter().record(caller, usage.model_version, usage, event_id)
+        in_tok = getattr(usage, "input_tokens", 0) or 0
+        cached_tok = getattr(usage, "cached_tokens", 0) or 0
+        think_tok = getattr(usage, "thinking_tokens", 0) or 0
+        out_tok = getattr(usage, "output_tokens", 0) or 0
+        hit_pct = round(cached_tok / in_tok * 100.0, 1) if in_tok > 0 else 0.0
+        fields = {
+            "caller": caller, "event_id": event_id, "input_tokens": in_tok, "cached_tokens": cached_tok,
+            "cache_hit_pct": hit_pct, "thinking_tokens": think_tok, "output_tokens": out_tok,
+        }
+        (_logger.info if caller == "brain" else _logger.debug)(
+            "LLM tokens caller=%(caller)s event_id=%(event_id)s input_tokens=%(input_tokens)d "
+            "cached_tokens=%(cached_tokens)d cache_hit_pct=%(cache_hit_pct).1f%% "
+            "thinking_tokens=%(thinking_tokens)d output_tokens=%(output_tokens)d",
+            fields, extra=fields,
+        )
     except Exception:
         _logger.debug("Token recording failed for %s", caller, exc_info=True)
 
 
 def create_adapter(provider: str, project: str, location: str, model_name: str) -> LLMPort:
-    """Factory: create the appropriate LLM adapter based on provider string.
-
-    For Gemini adapters, injects the shared QuotaTracker singleton (created
-    lazily on first call from LLM_TPM_LIMIT env var).
-    """
+    """Factory: create the appropriate LLM adapter (injects shared QuotaTracker singleton for Gemini)."""
     global _quota_tracker
-
     if provider == "claude":
         from .claude_client import ClaudeAdapter
         return ClaudeAdapter(project, location, model_name)
-
     if _quota_tracker is None:
-        tpm = _parse_tpm_limit()
-        _quota_tracker = QuotaTracker(tpm_limit=tpm)
-
+        _quota_tracker = QuotaTracker(tpm_limit=_parse_tpm_limit())
     from .gemini_client import GeminiAdapter
     return GeminiAdapter(project, location, model_name, quota_tracker=_quota_tracker)

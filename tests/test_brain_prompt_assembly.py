@@ -108,50 +108,41 @@ class TestWrappingFormat:
             brain, _make_event_stub(), ["triage"], context_flags=None
         )
 
-        assert "## EVENT STATE HEADER" in prompt
+        # Step 7 Option 1: Global Core SI never prepends dynamic Event State Header
+        assert "## EVENT STATE HEADER" not in prompt
         assert "<skill" not in prompt
 
     @pytest.mark.asyncio
-    async def test_kargo_none_guard(self, caplog):
-        brain = _make_brain_stub(
-            resolved_pairs=[],
+    async def test_kargo_context_does_not_mutate_static_global_core_si(self):
+        """Step 7 Option 1: evidence-driven kargo skills are NOT dynamically injected into Global Core SI."""
+        brain_no_kargo = _make_brain_stub(
+            resolved_pairs=[("always/identity.md", "# Identity")],
             kargo_paths=["context/kargo-environment.md"],
-            kargo_bodies={},
+            kargo_bodies={"context/kargo-environment.md": ("# Kargo Promotion Environment", {})},
         )
-
-        event = _make_event_stub(kargo_context=SimpleNamespace(promotion_id="p1"))
-
-        from src.agents.brain import Brain
-        with caplog.at_level(logging.DEBUG):
-            prompt = await Brain._build_system_prompt(
-                brain, event, ["triage"], context_flags=None
-            )
-
-        assert "kargo-environment.md" not in prompt
-        assert "resolved to None" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_kargo_positive_wrapping(self):
-        brain = _make_brain_stub(
+        brain_with_kargo = _make_brain_stub(
             resolved_pairs=[("always/identity.md", "# Identity")],
             kargo_paths=["context/kargo-environment.md"],
             kargo_bodies={"context/kargo-environment.md": ("# Kargo Promotion Environment", {})},
         )
 
-        event = _make_event_stub(kargo_context=SimpleNamespace(promotion_id="p1"))
+        ev_plain = _make_event_stub(kargo_context=None)
+        ev_kargo = _make_event_stub(kargo_context=SimpleNamespace(promotion_id="p1"))
 
         from src.agents.brain import Brain
-        prompt = await Brain._build_system_prompt(
-            brain, event, ["triage"], context_flags=None
-        )
+        prompt_plain = await Brain._build_system_prompt(brain_no_kargo, ev_plain, ["triage"], context_flags=None)
+        prompt_kargo = await Brain._build_system_prompt(brain_with_kargo, ev_kargo, ["triage"], context_flags=None)
 
-        assert '<context id="context/kargo-environment.md">' in prompt
-        assert "# Kargo Promotion Environment" in prompt
-        assert "</context>" in prompt
+        assert prompt_kargo == prompt_plain
+        assert "kargo-environment.md" not in prompt_kargo
+        assert '<rule id="always/identity.md">' in prompt_kargo
 
     @pytest.mark.asyncio
-    async def test_mixed_wrapped_unwrapped_join(self):
-        pairs = [("always/identity.md", "# Identity")]
+    async def test_global_core_sections_joined_with_separator_and_no_event_state_header(self):
+        pairs = [
+            ("always/identity.md", "# Identity"),
+            ("always/02-safety.md", "# Safety"),
+        ]
         brain = _make_brain_stub(pairs)
 
         event = _make_event_stub()
@@ -163,6 +154,8 @@ class TestWrappingFormat:
 
         assert "\n\n---\n\n" in prompt
         assert '<rule id="always/identity.md">' in prompt
+        assert '<rule id="always/02-safety.md">' in prompt
+        assert "## EVENT STATE HEADER" not in prompt
 
     @pytest.mark.asyncio
     async def test_semantic_tag_type_selection(self):
@@ -247,39 +240,41 @@ class TestFailClosed:
 
 
 class TestMaintainerEnvSelection:
-    """Regression coverage for the subject_type -> maintainer env var selection.
+    """Regression coverage for the subject_type -> maintainer env var selection + Step 6/7 static SI contract.
 
-    PR #210 codereview HIGH finding: subject_type was read off event.evidence
-    (wrong object -- EventDocument has no .evidence attr, EventEvidence has no
-    subject_type field), so it was always None and JENKINS_OBSERVER_MAINTAINERS
-    was never selected for ci_gating events.
+    Step 6 removed dead template_vars from _build_system_prompt; Step 7 locks Global Core SI
+    to be event-agnostic while Brain._resolve_maintainer_enum preserves subject_type env selection.
     """
 
     @pytest.mark.asyncio
-    async def test_ci_gating_selects_jenkins_observer_maintainers(self, monkeypatch):
+    async def test_ci_gating_selects_jenkins_observer_maintainers_without_mutating_si(self, monkeypatch):
         monkeypatch.setenv("JENKINS_OBSERVER_MAINTAINERS", "jenkins-maint@example.com")
         monkeypatch.setenv("HEADHUNTER_MAINTAINERS", "headhunter-maint@example.com")
-        brain = _make_brain_stub([])
+        brain = _make_brain_stub([("always/00-id.md", "# ID")])
         event = _make_event_stub(subject_type="ci_gating")
 
         from src.agents.brain import Brain
-        await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
+        prompt = await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
 
         _, kwargs = brain._skill_loader.resolve_dependencies_with_paths.call_args
-        assert kwargs["template_vars"]["maintainer_emails"] == "jenkins-maint@example.com"
+        assert "template_vars" not in kwargs
+        assert "jenkins-maint@example.com" not in prompt
+        assert Brain._resolve_maintainer_enum(event) == ["jenkins-maint@example.com"]
 
     @pytest.mark.asyncio
-    async def test_non_ci_gating_selects_headhunter_maintainers(self, monkeypatch):
+    async def test_non_ci_gating_selects_headhunter_maintainers_without_mutating_si(self, monkeypatch):
         monkeypatch.setenv("JENKINS_OBSERVER_MAINTAINERS", "jenkins-maint@example.com")
         monkeypatch.setenv("HEADHUNTER_MAINTAINERS", "headhunter-maint@example.com")
-        brain = _make_brain_stub([])
+        brain = _make_brain_stub([("always/00-id.md", "# ID")])
         event = _make_event_stub(subject_type="service")
 
         from src.agents.brain import Brain
-        await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
+        prompt = await Brain._build_system_prompt(brain, event, ["triage"], context_flags=None)
 
         _, kwargs = brain._skill_loader.resolve_dependencies_with_paths.call_args
-        assert kwargs["template_vars"]["maintainer_emails"] == "headhunter-maint@example.com"
+        assert "template_vars" not in kwargs
+        assert "headhunter-maint@example.com" not in prompt
+        assert Brain._resolve_maintainer_enum(event) == ["headhunter-maint@example.com"]
 
 
 # =========================================================================
@@ -293,11 +288,11 @@ class TestATDDT12BrainVcsParity:
     """Layer 1-4 ATDD scenarios for T-12 (src/agents/brain.py)."""
 
     @pytest.mark.asyncio
-    async def test_symmetric_gitlab_and_github_tag_injection_with_tag_keyed_side_effect(self):
-        """Given tag-keyed find_paths_by_tag side_effect
-        When _build_system_prompt runs for a gitlab_context event vs a github_context event
-        Then gitlab_context injects context/gitlab-environment.md ONLY, and
-        github_context injects gated/github-environment.md ONLY."""
+    async def test_gitlab_and_github_events_share_byte_identical_global_core_si(self):
+        """Step 7 Option 1: Given a gitlab_context event vs a github_context event
+        When _build_system_prompt runs
+        Then BOTH receive byte-identical Global Core SI with ZERO dynamic VCS env injection
+        (context/gitlab-environment.md and gated/github-environment.md stay out of static SI)."""
         from src.agents.brain import Brain
 
         tag_map = {
@@ -338,12 +333,12 @@ class TestATDDT12BrainVcsParity:
         )
 
         gl_prompt = await Brain._build_system_prompt(_make_tag_keyed_brain(), gl_ev, ["triage"], context_flags=None)
-        assert '<context id="context/gitlab-environment.md">' in gl_prompt
-        assert "gated/github-environment.md" not in gl_prompt
-
         gh_prompt = await Brain._build_system_prompt(_make_tag_keyed_brain(), gh_ev, ["triage"], context_flags=None)
-        assert '<context id="gated/github-environment.md">' in gh_prompt
-        assert "context/gitlab-environment.md" not in gh_prompt
+
+        assert gl_prompt == gh_prompt
+        assert "context/gitlab-environment.md" not in gl_prompt
+        assert "gated/github-environment.md" not in gh_prompt
+        assert '<rule id="always/id.md">' in gl_prompt
 
     def test_github_pr_differs_distinguishes_same_number_across_repos_with_legacy_fallback(self):
         """Given two GitHub PR events (or Issue events) with identical number #123 in different
@@ -512,10 +507,10 @@ class TestATDDT12BrainVcsParity:
         assert len(branch_lines) == 1
 
     @pytest.mark.asyncio
-    async def test_context_phase_excludes_gitlab_env_from_github_pr_and_dedups_on_gitlab_mr(self):
-        """F-03: When 'context' phase is active (e.g. has_related=True):
-        - GitHub PR event gets ZERO context/gitlab-environment.md
-        - GitLab MR event gets context/gitlab-environment.md EXACTLY ONCE (not duplicated)."""
+    async def test_global_core_si_dedups_transitive_requires_and_excludes_dynamic_gitlab_env(self):
+        """Step 7 Option 1: Real BrainSkillLoader Global Core SI is identical for GitHub PR and GitLab MR
+        events, excludes dynamic context/gitlab-environment.md, and deduplicates transitive requires:
+        (context/architecture.md and always/02-safety.md appear at most once)."""
         from pathlib import Path
         from src.agents.brain import Brain
         from src.agents.brain_skill_loader import BrainSkillLoader
@@ -572,8 +567,11 @@ class TestATDDT12BrainVcsParity:
             _make_stub_brain(), gl_ev, ["always", "context"], context_flags=context_flags, graph_recall="",
         )
 
+        assert gh_prompt == gl_prompt
         assert "context/gitlab-environment.md" not in gh_prompt
-        assert gl_prompt.count("context/gitlab-environment.md") == 1
+        assert "context/gitlab-environment.md" not in gl_prompt
+        assert gl_prompt.count('id="context/architecture.md"') == 1
+        assert gl_prompt.count('id="always/02-safety.md"') == 1
 
     @pytest.mark.asyncio
     async def test_build_contents_skips_k8s_get_service_for_github_context(self):

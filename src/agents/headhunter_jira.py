@@ -4,7 +4,7 @@
 # 2. [Pattern]: Two-phase poll: Planning -> analyze+comment (caches analysis in Redis), To Do -> Brain event (reuses Redis/bot-comment analysis or resolves label skill).
 # 3. [Pattern]: Re-eval gate: watchers @mentioning bot trigger re-analysis (ADF recursive walk).
 # 4. [Constraint]: All config from env vars. Label-driven skills (HEADHUNTER_JIRA_SKILL_<LABEL>, 5m cache, 10KB cap -> BA fallback).
-# 5. [Pattern]: Global WIP flow gate (MAX_ACTIVE_EVENTS) and Redis state (darwin:headhunter:jira:{key}, 7d TTL).
+# 5. [Pattern]: Global WIP flow gate (MAX_ACTIVE_EVENTS), Redis state (darwin:headhunter:jira:{key}, 7d TTL), and bounded 1-shot duplicate-close recovery (duplicate_retried: True).
 # 6. [Pattern]: Cold-start recovery anchors to latest bot comment (0 Jira calls, 10/cycle cap) and runs reeval check same cycle with per-issue try/except isolation.
 # 7. [Pattern]: Plan generation uses produce_execution_plan tool with tool_choice={"type": "auto"} (Claude 5.x rejects "tool"/"any"); both tool and YAML-fallback paths fail closed via _validate_plan_yaml().
 # 8. [Pattern]: ADF bodies render via utils.adf.adf_to_markdown().
@@ -12,16 +12,17 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Awaitable, Callable
 import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from ..utils.adf import adf_to_markdown
+from ..utils.jira_context import extract_jira_context
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -222,6 +223,7 @@ class HeadhunterJira:
 
     REDIS_PREFIX = "darwin:headhunter:jira:"
     REDIS_TTL = 604800  # 7 days
+    _MAX_RECOVERY_PLAN_FAILURES = 2
 
     def __init__(self, blackboard: BlackboardState):
         self.blackboard = blackboard
@@ -256,7 +258,12 @@ class HeadhunterJira:
     async def _get_issue_state(self, key: str) -> dict | None:
         """Get Redis-backed state for an issue. Returns None if expired or never set."""
         raw = await self.blackboard.redis.get(f"{self.REDIS_PREFIX}{key}")
-        return json.loads(raw) if raw else None
+        if not raw:
+            return None
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Expected dict Redis state for {key}, got {type(parsed).__name__}")
+        return parsed
 
     async def _set_issue_state(self, key: str, state: dict) -> None:
         """Persist issue state to Redis with 7-day TTL."""
@@ -713,18 +720,46 @@ class HeadhunterJira:
     # =========================================================================
 
     async def _get_active_jira_keys(self) -> set[str]:
-        """Get issue keys for all active/deferred Jira headhunter events."""
+        """Get issue keys for all active, deferred, or waiting_approval Jira headhunter events."""
         active_ids = await self.blackboard.get_active_events()
+        waiting_ids = await self.blackboard.get_waiting_approval_events()
+        all_ids = list(dict.fromkeys(list(active_ids) + list(waiting_ids)))
         keys: set[str] = set()
-        for eid in active_ids:
-            event = await self.blackboard.get_event(eid)
+        for eid in all_ids:
+            try:
+                event = await self.blackboard.get_event(eid)
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                logger.warning(f"Skipping unreadable event {eid} in active Jira key scan: {e}")
+                continue
             if (event and event.source == "headhunter"
-                    and getattr(event, "subject_type", "service") == "jira"
-                    and event.status.value in ("new", "active", "deferred")):
-                jira_ctx = getattr(event.event.evidence, "jira_context", None) if event.event and event.event.evidence else None
-                if jira_ctx and isinstance(jira_ctx, dict):
-                    keys.add(jira_ctx.get("issue_key", ""))
-        return keys - {""}
+                    and getattr(event.status, "value", event.status) in ("new", "active", "deferred", "waiting_approval")):
+                is_jira, jira_key = extract_jira_context(event)
+                if is_jira and jira_key:
+                    keys.add(jira_key)
+        return keys
+
+    async def _should_retry_duplicate_event(self, key: str, state: dict[str, Any]) -> bool:
+        """Allow a single bounded retry if the prior Brain event was closed as a false duplicate."""
+        if state.get("duplicate_retried"):
+            logger.debug(f"Jira {key}: duplicate recovery already retried once -- staying parked")
+            return False
+        event_id = state.get("event_id")
+        if not isinstance(event_id, str) or not event_id.strip():
+            return False
+        event_id = event_id.strip()
+        try:
+            evt = await self.blackboard.get_event(event_id)
+        except Exception as e:
+            logger.warning(f"Jira {key}: failed to inspect prior event {event_id} for duplicate recovery: {e}")
+            return False
+        if evt is None or getattr(evt.status, "value", evt.status) != "closed":
+            return False
+        for turn in reversed(evt.conversation or []):
+            action = turn.get("action") if isinstance(turn, dict) else getattr(turn, "action", None)
+            if action == "close":
+                evidence = turn.get("evidence") if isinstance(turn, dict) else getattr(turn, "evidence", None)
+                return evidence == "duplicate"
+        return False
 
     def set_wip_counter(self, counter: Callable[..., Awaitable[int]] | None) -> None:
         """Inject global WIP counter (e.g. Brain.count_global_wip)."""
@@ -805,11 +840,20 @@ class HeadhunterJira:
         body = comment.get("body", "")
         return adf_to_markdown(body).strip() if isinstance(body, dict) else str(body).strip()
 
-    async def _record_analysis(self, key: str, comment_id: str, analysis: str) -> None:
+    async def _record_analysis(
+        self,
+        key: str,
+        comment_id: str,
+        analysis: str,
+        *,
+        duplicate_retried: bool = False,
+    ) -> None:
         """Persist analyzed phase, comment anchor, and analysis text to Redis."""
         state: dict[str, Any] = {"phase": "analyzed", "last_comment_id": comment_id}
         if analysis:
             state["analysis"] = analysis
+        if duplicate_retried:
+            state["duplicate_retried"] = True
         await self._set_issue_state(key, state)
 
     async def poll_and_process(self) -> None:
@@ -856,34 +900,91 @@ class HeadhunterJira:
         if not await self.check_flow_gate():
             logger.debug("Jira flow gate closed -- skipping event creation")
             return
-        active_jira_keys = await self._get_active_jira_keys()
         todo_issues = await self.poll_todo()
         logger.debug(f"Jira To Do issues: {len(todo_issues)}")
+        if not todo_issues:
+            return
+        active_jira_keys = await self._get_active_jira_keys()
         for issue in todo_issues:
             key = issue["key"]
-            if key in active_jira_keys:
+            norm_key = key.strip().upper()
+            if norm_key in active_jira_keys:
                 continue
-            state = await self._get_issue_state(key)
-            if state and state.get("phase") == "event_created":
+            try:
+                state = await self._get_issue_state(key)
+                retrying_dup = bool(state and state.get("duplicate_retried"))
+                recovering_event_id: str | None = None
+                if state and state.get("phase") == "event_created":
+                    if not await self._should_retry_duplicate_event(key, state):
+                        continue
+                    retrying_dup = True
+                    recovering_event_id = state.get("event_id")
+                if (
+                    retrying_dup
+                    and state
+                    and state.get("phase") == "analyzed"
+                    and int(state.get("plan_failures", 0)) >= self._MAX_RECOVERY_PLAN_FAILURES
+                ):
+                    logger.debug(f"Jira {key}: duplicate recovery plan retries exhausted -- staying parked")
+                    continue
+            except Exception as e:
+                logger.warning(f"Jira {key}: failed to inspect Redis state: {e}")
                 continue
             if not await self.check_flow_gate():
                 logger.info("Jira flow gate closed mid-cycle -- stopping")
                 break
+            analyzed_state_written = bool(state and state.get("phase") == "analyzed")
+            current_analysis = state.get("analysis", "") if state else ""
+            event_created_claimed = False
             try:
+                if recovering_event_id:
+                    logger.info(
+                        f"Jira {key}: recovering from prior duplicate-closed event "
+                        f"{recovering_event_id} (1-shot retry)"
+                    )
+                    await self._set_issue_state(key, {**(state or {}), "duplicate_retried": True})
                 jira_content = format_jira_for_llm(issue)
-                analysis_text = state.get("analysis", "") if state else ""
+                analysis_text = current_analysis
                 if not analysis_text:
                     analysis_text = self._find_bot_comment_text(issue)
                 if not analysis_text:
                     system_prompt = await self._resolve_system_prompt(issue)
                     analysis_text = await self._run_claude_analysis(jira_content, system_prompt)
                     await self._record_analysis(
-                        key, state.get("last_comment_id", "") if state else "", analysis_text
+                        key,
+                        state.get("last_comment_id", "") if state else "",
+                        analysis_text,
+                        duplicate_retried=retrying_dup,
                     )
+                    analyzed_state_written = True
+                    current_analysis = analysis_text
                 plan_yaml = await self._run_brain_plan(jira_content, analysis_text)
                 mission_label = self._resolve_mission_label(issue)
+                if retrying_dup and analyzed_state_written:
+                    await self._set_issue_state(
+                        key,
+                        {"phase": "event_created", "event_id": "", "duplicate_retried": True},
+                    )
+                    event_created_claimed = True
                 event_id = await self.create_jira_event(issue, plan_yaml, mission_label=mission_label)
-                await self._set_issue_state(key, {"phase": "event_created", "event_id": event_id})
-                active_jira_keys.add(key)
+                new_state: dict[str, Any] = {"phase": "event_created", "event_id": event_id}
+                if retrying_dup:
+                    new_state["duplicate_retried"] = True
+                await self._set_issue_state(key, new_state)
+                active_jira_keys.add(norm_key)
             except Exception as e:
                 logger.warning(f"Jira event creation failed for {key}: {e}")
+                if retrying_dup and analyzed_state_written and not event_created_claimed:
+                    try:
+                        failures = int((state or {}).get("plan_failures", 0)) + 1
+                        failed_state: dict[str, Any] = {
+                            "phase": "analyzed",
+                            "last_comment_id": (state or {}).get("last_comment_id", ""),
+                            "duplicate_retried": True,
+                            "plan_failures": failures,
+                        }
+                        if current_analysis:
+                            failed_state["analysis"] = current_analysis
+                        await self._set_issue_state(key, failed_state)
+                    except Exception as state_err:
+                        logger.warning(f"Jira {key}: failed to record recovery plan failure count: {state_err}")

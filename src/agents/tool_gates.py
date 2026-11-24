@@ -25,9 +25,9 @@
 #     PRE_CLASSIFICATION, CHAOTIC, CASUAL) by ctx.has_pruned_or_decayed_turns. build_gate_context sets it
 #     from, in order: (a) the caller-supplied flag -- brain.py derives it from the BUILT contents
 #     (real prune notice or decay reference, incl. budget-only pruning), else (b) conversation_has_decayed_turns():
-#     a turn at distance len-1-idx > DEFAULT_TURN_DECAY_DISTANCE with a decay-eligible payload > DECAY_MIN_CHARS.
-#     A bare conversation length is NOT a signal (11 short turns have nothing to recall). The tri-state
-#     default in GateContext.__post_init__ (len > DEFAULT_TURN_DECAY_DISTANCE) only serves hand-built contexts;
+#     a turn before decay_cutoff_index(len(turns), decay_distance) with a decay-eligible payload > DECAY_MIN_CHARS.
+#     A bare conversation length is NOT a signal (short/within-epoch turns have nothing to recall). The tri-state
+#     default in GateContext.__post_init__ (decay_cutoff_index(len(conv)) > 0) only serves hand-built contexts;
 #     an explicit False is always respected.
 """
 Tool gate evaluation and rejection diagnostics.
@@ -45,7 +45,11 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment, is_stabilization_wake
-from src.utils.turn_decay import DECAY_MIN_CHARS, DEFAULT_TURN_DECAY_DISTANCE  # noqa: F401 (re-exported)
+from src.utils.turn_decay import (  # noqa: F401 (re-exported)
+    DECAY_MIN_CHARS,
+    DEFAULT_TURN_DECAY_DISTANCE,
+    decay_cutoff_index,
+)
 
 
 def _decay_payload_len(turn: object) -> int:
@@ -72,15 +76,10 @@ def _decay_payload_len(turn: object) -> int:
 def conversation_has_decayed_turns(
     conversation: list, decay_distance: int = DEFAULT_TURN_DECAY_DISTANCE,
 ) -> bool:
-    """True when some turn is far enough from the tail AND big enough to have decayed."""
+    """True when some turn before the decay cutoff is big enough to have decayed."""
     turns = conversation or []
-    last = len(turns) - 1
-    for idx, turn in enumerate(turns):
-        if last - idx <= decay_distance:
-            break  # distance only shrinks from here on
-        if _decay_payload_len(turn) > DECAY_MIN_CHARS:
-            return True
-    return False
+    cutoff = decay_cutoff_index(len(turns), decay_distance)
+    return any(_decay_payload_len(turn) > DECAY_MIN_CHARS for turn in turns[:cutoff])
 
 
 @dataclass(frozen=True)
@@ -108,7 +107,7 @@ class GateContext:
             object.__setattr__(
                 self,
                 "has_pruned_or_decayed_turns",
-                len(self.conversation or []) > DEFAULT_TURN_DECAY_DISTANCE,
+                decay_cutoff_index(len(self.conversation or [])) > 0,
             )
 
 
@@ -463,7 +462,12 @@ def _pred_hard_strip_defer(ctx: GateContext) -> bool:
     return ctx.brain_phase == "triage" or ctx.event_source == "jarvis"
 
 
-def _single_tool_survives_gates(tool_name: str, ctx: GateContext) -> bool:
+def _single_tool_survives_gates(
+    tool_name: str,
+    ctx: GateContext,
+    *,
+    exclude_gates: frozenset[str] = frozenset(),
+) -> bool:
     """Whether `tool_name` would remain in evaluate_gates()'s output for this
     context -- an order-independent projection of the full gate pipeline
     onto one tool.
@@ -478,6 +482,8 @@ def _single_tool_survives_gates(tool_name: str, ctx: GateContext) -> bool:
     fields (e.g. READ_STICKY's numeric comparison on ctx.unread_notes).
     """
     for gate in GATE_REGISTRY:
+        if gate.gate_id in exclude_gates:
+            continue
         affected = gate.tools_affected(ctx)
         excludes_if_fires = (
             tool_name not in affected if gate.mode == "allow" else tool_name in affected
@@ -487,6 +493,19 @@ def _single_tool_survives_gates(tool_name: str, ctx: GateContext) -> bool:
         if gate.predicate(ctx):
             return False
     return True
+
+
+def is_wait_for_user_admissible_after_response(ctx: GateContext) -> bool:
+    """Whether wait_for_user survives all gates EXCEPT SILENT_PARK.
+
+    Single source of truth for SILENT_PARK flush and re-admission guards:
+    flushing a brain.response satisfies SILENT_PARK, while HARD_STRIP_WAIT_USER,
+    INTERMEDIATE, DOMAIN_CHAOTIC, PRE_CLASSIFICATION, and all other gates in
+    GATE_REGISTRY remain strictly enforced.
+    """
+    return _single_tool_survives_gates(
+        "wait_for_user", ctx, exclude_gates=frozenset({"SILENT_PARK"}),
+    )
 
 
 def is_defer_event_available(ctx: GateContext) -> bool:
