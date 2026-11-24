@@ -46,8 +46,9 @@ export function TreeGroup({ icon, label, count, countColor, children, nested, fo
   );
 }
 
-export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onClick, onContextMenu, style }: {
+export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, badge, statusDot, onClick, onContextMenu, style }: {
   icon: ReactNode; label: string; labelColor?: string; sublabel?: string; sublabelColor?: string;
+  badge?: ReactNode; statusDot?: { color: string; title: string };
   onClick?: () => void; onContextMenu?: (e: React.MouseEvent) => void; style?: React.CSSProperties;
 }) {
   return (
@@ -56,7 +57,19 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
       onClick={onClick} onContextMenu={onContextMenu} style={style}
       onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}>
       <span className="flex-shrink-0">{icon}</span>
+      {statusDot && (
+        <span
+          className="w-2 h-2 rounded-full flex-shrink-0"
+          style={{ background: statusDot.color }}
+          title={statusDot.title}
+        />
+      )}
       <span className="truncate font-medium" style={labelColor ? { color: labelColor } : { color: 'var(--text-secondary)' }}>{label}</span>
+      {badge != null && badge !== '' && (
+        <span className="text-[10px] font-semibold px-1.5 py-0 rounded-full bg-bg-tertiary text-text-muted flex-shrink-0">
+          {badge}
+        </span>
+      )}
       {sublabel && (
         <span className="ml-auto text-[12px] truncate flex-shrink-0" style={{ color: sublabelColor || '#475569' }}>{sublabel}</span>
       )}

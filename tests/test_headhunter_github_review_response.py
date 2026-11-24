@@ -1168,7 +1168,8 @@ HELM_DIR = Path(__file__).parent.parent / "helm"
 def _render_review_env(*sets: str) -> dict[str, str]:
     import yaml
     cmd = ["helm", "template", "t", str(HELM_DIR), "--set", "headhunter.enabled=true",
-           "--set", "headhunter.github.enabled=true"]
+           "--set", "headhunter.github.enabled=true",
+           "--set", "github.existingSecret=test-gh-secret"]
     for item in sets:
         cmd += ["--set-string" if "=" in item and item.split("=", 1)[0].endswith(
             ("debounceSec", "trustedAssociations", "maxRounds")) else "--set", item]
@@ -1269,7 +1270,8 @@ def _render_review_env_raw(*sets: str) -> dict[str, str]:
     """Like _render_review_env but passes every item through numeric ``--set`` (never --set-string)."""
     import yaml
     cmd = ["helm", "template", "t", str(HELM_DIR), "--set", "headhunter.enabled=true",
-           "--set", "headhunter.github.enabled=true"]
+           "--set", "headhunter.github.enabled=true",
+           "--set", "github.existingSecret=test-gh-secret"]
     for item in sets:
         cmd += ["--set", item]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout

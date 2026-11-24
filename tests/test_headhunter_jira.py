@@ -317,6 +317,7 @@ class TestPollAndProcess:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "_resolve_system_prompt", new_callable=AsyncMock, return_value="skill prompt"),
             patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis text"),
             patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: test\n---"),
             patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-001") as mock_create,
@@ -553,6 +554,7 @@ class TestMissionLabelThreading:
         with (
             patch.object(jira, "poll_planning", new_callable=AsyncMock, return_value=[]),
             patch.object(jira, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira, "_resolve_system_prompt", new_callable=AsyncMock, return_value="skill prompt"),
             patch.object(jira, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis"),
             patch.object(jira, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: x\n---"),
             patch.object(jira, "create_jira_event", new_callable=AsyncMock, return_value="evt-lbl") as mock_create,
@@ -758,3 +760,295 @@ class TestPhase1ReevalFailureIsolation:
         healthy_state = await jira_head._get_issue_state("CNV-2")
         assert healthy_state["phase"] == "analyzed"
         assert healthy_state["last_comment_id"] == "c3"
+
+
+# =========================================================================
+# Regression: Claude 5.x tool_choice & Approved Analysis Preservation
+# =========================================================================
+
+class TestBrainPlanToolChoiceAndAnalysisReuse:
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_uses_auto_tool_choice(self, jira_head):
+        """Claude 5.x rejects tool_choice type 'tool'/'any' (400); _run_brain_plan must use 'auto'."""
+        from src.agents.llm.types import FunctionCall, LLMChunk
+
+        captured_kwargs: dict = {}
+
+        async def _fake_stream(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield LLMChunk(
+                done=True,
+                function_call=FunctionCall(
+                    name="produce_execution_plan",
+                    args={
+                        "plan": "Rebuild v4.12 images",
+                        "service": "vmer",
+                        "repository": "https://gitlab.cee.redhat.com/openshift-virtualization/konflux-builds/v4-12",
+                        "risk": "medium",
+                        "steps": [
+                            {"id": "audit", "agent": "sysadmin", "mode": "investigate", "summary": "Audit builds"}
+                        ],
+                    },
+                ),
+            )
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _fake_stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            plan_yaml = await jira_head._run_brain_plan("jira content", "approved rebuild plan")
+
+        assert captured_kwargs["tool_choice"] == {"type": "auto"}
+        assert "Rebuild v4.12 images" in plan_yaml
+        assert "agent: sysadmin" in plan_yaml
+
+    @pytest.mark.asyncio
+    async def test_planning_persists_analysis_and_todo_reuses_it(self, jira_head, stub_blackboard):
+        """Planning saves analysis text to Redis so To Do reuses it without re-running default BA prompt."""
+        planning_issue = _make_issue(key="VMER-2452", status="Planning", labels=["darwin", "darwin_rebuild"])
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        approved_plan = "## Scope & Baseline\nRebuild v4.12 with darwin_rebuild"
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[planning_issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("c-plan", approved_plan)),
+        ):
+            await jira_head.poll_and_process()
+
+        state = await jira_head._get_issue_state("VMER-2452")
+        assert state["analysis"] == approved_plan
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock) as mock_reanalyze,
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="plan: ok") as mock_plan,
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-rebuild"),
+        ):
+            await jira_head.poll_and_process()
+
+        mock_reanalyze.assert_not_called()
+        assert mock_plan.call_args[0][1] == approved_plan
+
+    @pytest.mark.asyncio
+    async def test_todo_recovers_bot_comment_when_redis_lacks_analysis(self, jira_head, stub_blackboard):
+        """If Redis state predates analysis caching (or cold-started), To Do extracts the bot's Jira comment."""
+        await jira_head._set_issue_state("VMER-2452", {"phase": "analyzed", "last_comment_id": "c-bot"})
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        todo_issue["fields"]["comment"]["comments"] = [
+            {
+                "id": "c-bot",
+                "author": {"accountId": "bot-acct-123", "displayName": "cnv-downstream-bot"},
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Approved darwin_rebuild plan"}]}
+                    ],
+                },
+            }
+        ]
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock) as mock_reanalyze,
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="plan: ok") as mock_plan,
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-recovered"),
+        ):
+            await jira_head.poll_and_process()
+
+        mock_reanalyze.assert_not_called()
+        assert "Approved darwin_rebuild plan" in mock_plan.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_todo_without_prior_analysis_resolves_skill_prompt(self, jira_head, stub_blackboard):
+        """Direct-to-To-Do issue with no bot comment must resolve label skill prompt, not default BA prompt."""
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        custom_skill = "# Headhunter Jira Skill: Konflux Version Rebuild"
+
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_resolve_system_prompt", new_callable=AsyncMock, return_value=custom_skill) as mock_skill,
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="fresh rebuild plan") as mock_analyze,
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="plan: ok"),
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-direct"),
+        ):
+            await jira_head.poll_and_process()
+
+        mock_skill.assert_called_once_with(todo_issue)
+        assert mock_analyze.call_args[0][1] == custom_skill
+
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_rejects_prose_without_tool_call(self, jira_head):
+        """Under tool_choice=auto, non-YAML prose without a tool call must fail closed (raise RuntimeError)."""
+        from src.agents.llm.types import LLMChunk
+
+        async def _prose_stream(**kwargs):
+            yield LLMChunk(text="I think we should rebuild v4.12 images first.", done=False)
+            yield LLMChunk(done=True)
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _prose_stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            with pytest.raises(RuntimeError, match="not a YAML mapping"):
+                await jira_head._run_brain_plan("jira content", "approved plan")
+
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_rejects_empty_stream_and_empty_tool_args(self, jira_head):
+        """Empty stream and incomplete tool args (missing plan/steps) both fail closed."""
+        from src.agents.llm.types import FunctionCall, LLMChunk
+
+        async def _empty_stream(**kwargs):
+            yield LLMChunk(done=True)
+
+        async def _empty_args_stream(**kwargs):
+            yield LLMChunk(done=True, function_call=FunctionCall(name="produce_execution_plan", args={}))
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _empty_stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            with pytest.raises(RuntimeError, match="empty output"):
+                await jira_head._run_brain_plan("jira content", "approved plan")
+
+        fake_adapter.generate_stream = _empty_args_stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            with pytest.raises(RuntimeError, match="missing non-empty 'plan'"):
+                await jira_head._run_brain_plan("jira content", "approved plan")
+
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_wrong_tool_name_falls_back_to_valid_yaml_and_ignores_thoughts(self, jira_head):
+        """Wrong tool name falls back to text extraction; thought chunks are excluded from YAML extraction."""
+        from src.agents.llm.types import FunctionCall, LLMChunk
+
+        valid_yaml = "```yaml\nplan: Rebuild v4.12\nsteps:\n  - id: s1\n    agent: sysadmin\n    summary: Audit\n```"
+
+        async def _fallback_stream(**kwargs):
+            yield LLMChunk(text="thinking: plan: bogus", is_thought=True, done=False)
+            yield LLMChunk(text=valid_yaml, done=False)
+            yield LLMChunk(done=True, function_call=FunctionCall(name="other_tool", args={"x": 1}))
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _fallback_stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            result = await jira_head._run_brain_plan("jira content", "approved plan")
+
+        assert "Rebuild v4.12" in result
+        assert "bogus" not in result
+
+    @pytest.mark.asyncio
+    async def test_todo_malformed_plan_fails_without_marking_event_created(self, jira_head, stub_blackboard):
+        """If _run_brain_plan raises RuntimeError on prose output, Redis must not advance to event_created."""
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        await jira_head._set_issue_state("VMER-2452", {"phase": "analyzed", "last_comment_id": "c1", "analysis": "plan"})
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, side_effect=RuntimeError("bad yaml")),
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock) as mock_create,
+        ):
+            await jira_head.poll_and_process()
+
+        mock_create.assert_not_called()
+        state = await jira_head._get_issue_state("VMER-2452")
+        assert state["phase"] == "analyzed"
+
+    def test_find_bot_comment_text_skips_reanalyze_and_bot_mention_comments(self, jira_head, caplog):
+        """_find_bot_comment_text skips re-analyze trigger comments and warns when comments are truncated."""
+        issue = _make_issue(key="VMER-2452")
+        issue["fields"]["comment"] = {
+            "total": 25,
+            "comments": [
+                {
+                    "id": "c-plan",
+                    "author": {"accountId": "bot-acct-123"},
+                    "body": "## Real Approved Plan\nStep 1: Audit",
+                },
+                {
+                    "id": "c-reanalyze",
+                    "author": {"accountId": "bot-acct-123"},
+                    "body": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [
+                                    {"type": "mention", "attrs": {"id": "bot-acct-123", "text": "@darwin"}},
+                                    {"type": "text", "text": " Please re-analyze this issue."},
+                                ],
+                            }
+                        ],
+                    },
+                },
+            ],
+        }
+        with caplog.at_level("WARNING"):
+            text = jira_head._find_bot_comment_text(issue)
+        assert text == "## Real Approved Plan\nStep 1: Audit"
+        assert "truncated" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_cold_start_and_reeval_persist_analysis_to_redis(self, jira_head, stub_blackboard):
+        """Cold-start recovery and Planning re-eval both persist analysis text in Redis."""
+        issue = _make_issue(key="VMER-2452", status="Planning")
+        issue["fields"]["comment"]["comments"] = [
+            {
+                "id": "c1",
+                "author": {"accountId": "bot-acct-123"},
+                "body": "Initial bot plan",
+            },
+            _make_adf_comment("c2", "watcher-1", mentions=["bot-acct-123"]),
+        ]
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "get_watchers", new_callable=AsyncMock, return_value={"watcher-1"}),
+            patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("c3", "Updated plan")),
+        ):
+            await jira_head.poll_and_process()
+
+        state = await jira_head._get_issue_state("VMER-2452")
+        assert state["phase"] == "analyzed"
+        assert state["last_comment_id"] == "c3"
+        assert state["analysis"] == "Updated plan"
+
+    @pytest.mark.asyncio
+    async def test_run_brain_plan_strips_yaml_document_delimiters(self, jira_head):
+        """Fallback YAML wrapped in '---' document markers must parse cleanly without ComposerError."""
+        from src.agents.llm.types import LLMChunk
+
+        delimited = "Here is the plan:\n---\nplan: Rebuild v4.12\nsteps:\n  - id: s1\n    agent: sysadmin\n    summary: Audit\n---"
+
+        async def _stream(**kwargs):
+            yield LLMChunk(text=delimited, done=False)
+            yield LLMChunk(done=True)
+
+        fake_adapter = MagicMock()
+        fake_adapter.generate_stream = _stream
+        with patch.object(jira_head, "_get_claude_adapter", return_value=fake_adapter):
+            result = await jira_head._run_brain_plan("jira content", "approved plan")
+
+        assert result.startswith("plan: Rebuild v4.12")
+        assert "---" not in result
+
+    @pytest.mark.asyncio
+    async def test_todo_caches_fresh_analysis_before_brain_plan(self, jira_head, stub_blackboard):
+        """Fresh To Do analysis is cached in Redis before _run_brain_plan so retries skip re-analyzing."""
+        todo_issue = _make_issue(key="VMER-2452", status="To Do", labels=["darwin", "darwin_rebuild"])
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[todo_issue]),
+            patch.object(jira_head, "_resolve_system_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="Fresh analysis") as mock_analyze,
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, side_effect=RuntimeError("transient")),
+        ):
+            await jira_head.poll_and_process()
+
+        mock_analyze.assert_called_once()
+        state = await jira_head._get_issue_state("VMER-2452")
+        assert state["phase"] == "analyzed"
+        assert state["analysis"] == "Fresh analysis"
+
+

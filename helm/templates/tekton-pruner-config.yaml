@@ -19,9 +19,19 @@ data:
       - selector:
         - matchLabels:
             app.kubernetes.io/component: ephemeral-agent
-    {{- if eq (.Values.ephemeralAgents.cleanup.strategy | default "keep-since") "keep-since" }}
-        ttlSecondsAfterFinished: {{ mul (.Values.ephemeralAgents.cleanup.keepSince | default 1440 | int) 60 }}
+    {{- $cleanup := .Values.ephemeralAgents.cleanup | default dict }}
+    {{- $strategy := trim (toString ($cleanup.strategy | default "")) | default "keep-since" }}
+    {{- if eq $strategy "keep-since" }}
+    {{- $keepSince := "1440" }}
+    {{- if and (hasKey $cleanup "keepSince") (not (kindIs "invalid" $cleanup.keepSince)) (ne (trim (toString $cleanup.keepSince)) "") }}
+    {{- $keepSince = trim (toString $cleanup.keepSince) }}
+    {{- end }}
+        ttlSecondsAfterFinished: {{ mul ($keepSince | int) 60 }}
     {{- else }}
-        historyLimit: {{ .Values.ephemeralAgents.cleanup.keep | default 5 }}
+    {{- $keep := "5" }}
+    {{- if and (hasKey $cleanup "keep") (not (kindIs "invalid" $cleanup.keep)) (ne (trim (toString $cleanup.keep)) "") }}
+    {{- $keep = trim (toString $cleanup.keep) }}
+    {{- end }}
+        historyLimit: {{ $keep | int }}
     {{- end }}
 {{- end }}

@@ -6,7 +6,7 @@
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 // 5. [Pattern]: alignerPendingMenuItems — Copy only (Create Event deferred to v2, needs full WS+Brain chain).
 // 6. [Pattern]: jenkinsQueueMenuItems — Open in Jenkins (safeOpen, XSS prevention) + Copy Job Name.
-// 7. [Pattern]: Exported Headhunter helpers shared with EventSidebar + HeadhunterQueuePanel:
+// 7. [Pattern]: Exported Headhunter helpers shared with EventSidebar:
 //    isGitHubTodo / isGitHubIssue (platform + PR-vs-Issue detection), formatHeadhunterLabel (label, optional
 //    { truncate: false }), getHeadhunterItemKey (React key; idx only used when no todo_id and no item number).
 // 8. [Constraint]: GitHub detection parses URLs (hostname === github.com). Never substring-match target_url.
@@ -16,7 +16,7 @@
 //    (gitlab_context > github_context.pr_url > github_issue_context.html_url > target_url host/path).
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
-  Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
+  Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw, ArrowUpCircle,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
 import { safeOpen } from '../../utils/safeOpen';
@@ -141,21 +141,70 @@ export function eventMenuItems(
   ];
 }
 
-export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
+export interface HeadhunterItemActionTarget {
+  platform: 'gitlab' | 'github';
+  project_path: string;
+  project_id?: number | string;
+  item_number: number;
+  is_issue: boolean;
+}
+
+export interface HeadhunterMenuHandlers {
+  promote?: (target: HeadhunterItemActionTarget) => void;
+  dismiss?: (target: HeadhunterItemActionTarget) => void;
+  requeue?: (target: HeadhunterItemActionTarget) => void;
+  disabled?: boolean;
+}
+
+export function hhMenuItems(todo: HeadhunterTodo, handlers?: HeadhunterMenuHandlers): ContextMenuItem[] {
   const isGitHub = isGitHubTodo(todo);
   const isIssue = isGitHubIssue(todo);
   const openLabel = isIssue ? 'Open Issue in GitHub' : isGitHub ? 'Open PR in GitHub' : 'Open MR in GitLab';
   const copyLabel = isGitHub ? (isIssue ? 'Copy Issue URL' : 'Copy PR URL') : 'Copy MR URL';
+  const itemNumber = isGitHub ? (todo.pr_number ?? todo.issue_number) : todo.mr_iid;
+  const isSnapshotItem = !todo.status || todo.status === 'queued' || todo.status === 'pending';
+  const hasHttpUrl = parseHttpUrl(todo.target_url) !== null;
+  const target: HeadhunterItemActionTarget | null =
+    itemNumber != null && (todo.project_path || todo.project_id != null)
+      ? {
+          platform: isGitHub ? 'github' : 'gitlab',
+          project_path: todo.project_path,
+          project_id: todo.project_id ?? undefined,
+          item_number: itemNumber,
+          is_issue: isIssue,
+        }
+      : null;
 
-  return [
-    { id: 'open', label: openLabel, icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
-    { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
-    { id: 'copy', label: copyLabel, icon: <Copy size={18} />, color: '#64748b', onClick: () => {
+  const items: ContextMenuItem[] = [
+    ...(hasHttpUrl ? [
+      { id: 'open', label: openLabel, icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
+      { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
+    ] : []),
+    { id: 'copy', label: copyLabel, icon: <Copy size={18} />, color: '#64748b', disabled: !todo.target_url, onClick: () => {
       if (todo.target_url && navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(todo.target_url).catch(() => {});
       }
     }},
   ];
+
+  if (isSnapshotItem && handlers && target && (handlers.promote || handlers.requeue || handlers.dismiss)) {
+    const disabled = Boolean(handlers.disabled);
+    items.push({ id: 'sep2', label: '', icon: null, separator: true, onClick: () => {} });
+    if (handlers.promote) {
+      const fn = handlers.promote;
+      items.push({ id: 'promote', label: 'Promote', icon: <ArrowUpCircle size={18} />, color: '#22c55e', disabled, onClick: () => fn(target) });
+    }
+    if (handlers.requeue) {
+      const fn = handlers.requeue;
+      items.push({ id: 'requeue', label: 'Requeue', icon: <RotateCcw size={18} />, color: '#6366f1', disabled, onClick: () => fn(target) });
+    }
+    if (handlers.dismiss) {
+      const fn = handlers.dismiss;
+      items.push({ id: 'dismiss', label: 'Dismiss', icon: <XCircle size={18} />, danger: true, disabled, onClick: () => fn(target) });
+    }
+  }
+
+  return items;
 }
 
 export function formatHeadhunterLabel(todo: HeadhunterTodo, opts: { truncate?: boolean } = {}): string {

@@ -366,14 +366,17 @@ export async function getKargoStages(): Promise<KargoStageStatus[]> {
 // =============================================================================
 
 export interface HeadhunterTodo {
-  todo_id?: number;
+  todo_id?: number | null;
   action: string;
   priority: number;
   mr_iid?: number;
   mr_title?: string;
   project_path: string;
+  project_id?: number | string | null;
   author: string;
   pipeline_status?: string;
+  check_status?: string;
+  status?: string;
   created_at: string;
   target_url: string;
   // Cross-platform extensions (optional for backward compat)
@@ -382,11 +385,107 @@ export interface HeadhunterTodo {
   pr_title?: string;
   issue_number?: number;
   issue_title?: string;
-  queue_position?: number;
+  queue_position?: number | null;
+}
+
+export interface HeadhunterBreakerStatus {
+  state: 'closed' | 'open' | 'half_open' | string;
+  consecutive_failures: number;
+  next_retry_at: number | null;
+  last_error: string | null;
+}
+
+export interface HeadhunterPlatformStatus {
+  enabled: boolean;
+  pending_count: number;
+  queued_count: number;
+  last_poll_at: number | null;
+  partial_error: string | null;
+  breaker: HeadhunterBreakerStatus;
+}
+
+export interface HeadhunterStatusResponse {
+  platforms: {
+    gitlab: HeadhunterPlatformStatus;
+    github: HeadhunterPlatformStatus;
+    [key: string]: HeadhunterPlatformStatus;
+  };
+}
+
+export interface HeadhunterItemActionPayload {
+  platform: 'gitlab' | 'github';
+  project_path?: string;
+  project_id?: number | string;
+  owner?: string;
+  repo?: string;
+  item_number: number;
+  is_issue?: boolean;
+}
+
+export interface HeadhunterPollResponse {
+  triggered: boolean;
+  debounced: boolean;
+}
+
+export interface HeadhunterBreakerResetResponse {
+  reset: boolean;
+  debounced: boolean;
+  platform: string;
+  state?: string;
+}
+
+export interface HeadhunterItemActionResponse {
+  status?: string;
+  ok?: boolean;
+  debounced?: boolean;
+  action?: string;
+  platform?: string;
+  item_number?: number;
 }
 
 export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {
   return fetchApi<HeadhunterTodo[]>('/queue/headhunter/pending');
+}
+
+export async function getHeadhunterStatus(): Promise<HeadhunterStatusResponse> {
+  return fetchApi<HeadhunterStatusResponse>('/queue/headhunter/status');
+}
+
+export async function triggerHeadhunterPoll(): Promise<HeadhunterPollResponse> {
+  return fetchApi<HeadhunterPollResponse>('/queue/headhunter/poll', { method: 'POST' });
+}
+
+export async function resetHeadhunterBreaker(
+  platform: 'gitlab' | 'github',
+): Promise<HeadhunterBreakerResetResponse> {
+  return fetchApi<HeadhunterBreakerResetResponse>(
+    `/queue/headhunter/breaker/${encodeURIComponent(platform)}/reset`,
+    { method: 'POST' },
+  );
+}
+
+export async function headhunterItemAction(
+  action: 'promote' | 'dismiss' | 'requeue',
+  payload: HeadhunterItemActionPayload,
+): Promise<HeadhunterItemActionResponse> {
+  const { project_path, ...rest } = payload;
+  const bodyPayload: Omit<HeadhunterItemActionPayload, 'project_path'> = { ...rest };
+  if (bodyPayload.platform === 'github' && (!bodyPayload.owner || !bodyPayload.repo) && project_path) {
+    const parts = project_path.split('/');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      bodyPayload.owner = bodyPayload.owner || parts[0];
+      bodyPayload.repo = bodyPayload.repo || parts[1];
+    }
+  } else if (bodyPayload.platform === 'gitlab' && rest.project_id == null && project_path) {
+    bodyPayload.project_id = rest.project_id ?? project_path;
+  }
+  return fetchApi<HeadhunterItemActionResponse>(
+    `/queue/headhunter/items/${encodeURIComponent(action)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(bodyPayload),
+    },
+  );
 }
 
 import type { AlignerPendingItem, JenkinsPendingItem } from './types';

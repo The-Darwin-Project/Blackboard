@@ -22,9 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from src.models import FlowSnapshot
 
 
-# =============================================================================
 # Layer 3: Protocol Drivers
-# =============================================================================
 class FlowCollectorProtocolDriver:
     """Adapts HTTP calls to /events/{id}/tamper and downsampling state."""
 
@@ -53,9 +51,7 @@ class FlowCollectorProtocolDriver:
         return bb._downsample_snapshots(snapshots, bucket_seconds=bucket_seconds)
 
 
-# =============================================================================
 # Layer 2: Domain DSL
-# =============================================================================
 class FlowCollectorDSL:
     """Domain DSL for verifying tampering strikes and ATDD cycle telemetry."""
 
@@ -111,9 +107,7 @@ class FlowCollectorDSL:
         )
 
 
-# =============================================================================
 # Layer 1: Domain Scenarios (Scenario T-8)
-# =============================================================================
 class TestFlowCollectorScenarioT8:
     """Scenario T-8: Farley ATDD closed-loop telemetry & downsampling invariants."""
 
@@ -326,10 +320,8 @@ class TestFlowCollectorScenarioT8:
             assert mock_adapter_cls.call_args.kwargs["quota_tracker"].get_stats()["tpm_limit"] == 3_000_000
 
 
-# =============================================================================
 # 4-Layer ATDD Specification: VMER-2450 Step 2 (Scenario T-4)
 # Per-Caller Cache Hit-Rate Telemetry (FlowCollector + GET /flow)
-# =============================================================================
 
 
 class SpyTokenMeter:
@@ -562,3 +554,188 @@ class TestFlowCollectorCacheTelemetryT4:
             cache_hit_rate_pct=0.0,
             brain_cache_hit_rate_pct=0.0,
         )
+# Slice 2C ATDD (Step 9 / T-15): Headhunter Per-Platform & Breaker Telemetry
+
+
+class HeadhunterTelemetryProtocolDriver:
+    """Layer 3 Protocol Driver for Headhunter properties, FlowCollector, GET /flow, and downsampler."""
+
+    async def get_flow_metrics(self, mock_bb: AsyncMock, mock_brain: MagicMock) -> tuple[int, dict]:
+        with patch("src.main.lifespan") as mock_lifespan:
+            mock_lifespan.return_value.__aenter__ = AsyncMock()
+            mock_lifespan.return_value.__aexit__ = AsyncMock()
+            from src import dependencies
+            from src.main import app
+
+            orig_bb = dependencies._blackboard
+            orig_brain = dependencies._brain
+            dependencies._blackboard = mock_bb
+            dependencies._brain = mock_brain
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.get("/flow")
+                    return resp.status_code, resp.json() if resp.is_success else {}
+            finally:
+                dependencies._blackboard = orig_bb
+                dependencies._brain = orig_brain
+
+
+class TestFlowCollectorHeadhunterParityT15:
+    """Layer 1-4 ATDD scenarios for T-15 (per-platform pending & breaker telemetry)."""
+
+    def test_t15a_headhunter_public_telemetry_properties_and_sum_invariant(self):
+        """Given Headhunter with GitLab/GitHub pending, queued, issue, and feedback sub-counters
+        When public telemetry properties are read
+        Then gitlab_pending_count, github_pending_count, gitlab_breaker_state, github_breaker_state
+        are exposed and pending_count == gitlab_pending_count + github_pending_count."""
+        from src.agents.headhunter import Headhunter
+
+        mock_bb = MagicMock()
+        hh = Headhunter(mock_bb, gitlab_enabled=False)
+        hh._gitlab_pending = 2
+        hh._gitlab_queued = 3
+        hh._github_pending = 4
+        hh._github_issue_pending = 1
+        hh._github_queued = 5
+        hh._github_issue_queued = 2
+        hh._github_feedback_pending = 6
+        hh._breakers["gitlab"].state = "open"
+        hh._breakers["github"].state = "half_open"
+
+        assert hh.gitlab_pending_count == 5
+        assert hh.github_pending_count == 18
+        assert hh.pending_count == hh.gitlab_pending_count + hh.github_pending_count
+        assert hh.gitlab_breaker_state == "open"
+        assert hh.github_breaker_state == "half_open"
+
+    @pytest.mark.asyncio
+    async def test_t15b_flow_collector_and_get_flow_populate_per_platform_and_breaker_fields(self):
+        """Given Headhunter exposing per-platform pending counts and breaker states
+        When FlowCollector._build_snapshot() and GET /flow execute
+        Then FlowSnapshot and FlowMetricsResponse both populate all 4 Headhunter telemetry fields."""
+        from src.agents.headhunter import Headhunter
+        from src.observers.flow_collector import FlowCollector
+
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(
+            return_value={"queue_depth": 1, "active_events": 2, "waiting_approval_events": 0}
+        )
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.get_latest_flow_snapshot = AsyncMock(return_value=None)
+        mock_bb.redis = None
+
+        hh = Headhunter(mock_bb, gitlab_enabled=False)
+        hh._gitlab_pending = 3
+        hh._gitlab_queued = 1
+        hh._github_pending = 2
+        hh._github_queued = 4
+        hh._breakers["gitlab"].state = "half_open"
+        hh._breakers["github"].state = "open"
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        collector = FlowCollector(scheduler=mock_scheduler, blackboard=mock_bb, headhunter=hh)
+        snap = await collector._build_snapshot()
+        assert snap.headhunter_pending == 10
+        assert snap.headhunter_gitlab_pending == 4
+        assert snap.headhunter_github_pending == 6
+        assert snap.headhunter_gitlab_breaker == "half_open"
+        assert snap.headhunter_github_breaker == "open"
+
+        mock_brain = MagicMock()
+        mock_brain.agents = {"_headhunter": hh}
+        mock_brain.get_staleness_guard_metrics = MagicMock(return_value=[])
+        mock_brain.get_active_subscription_count = MagicMock(return_value=0)
+        mock_brain.count_global_wip = AsyncMock(return_value=2)
+
+        driver = HeadhunterTelemetryProtocolDriver()
+        code, body = await driver.get_flow_metrics(mock_bb, mock_brain)
+        assert code == 200
+        assert body["headhunter_pending"] == 10
+        assert body["headhunter_gitlab_pending"] == 4
+        assert body["headhunter_github_pending"] == 6
+        assert body["headhunter_gitlab_breaker"] == "half_open"
+        assert body["headhunter_github_breaker"] == "open"
+
+    def test_t15c_legacy_flow_snapshot_deserialization_and_downsampler_worst_case_breaker(self):
+        """Given legacy pre-deploy Redis FlowSnapshot JSON missing new fields and snapshots with
+        mixed breaker states across a 300s bucket
+        When deserialized and aggregated via _downsample_snapshots()
+        Then legacy payloads default safely, pending gauges average via round(sum/n),
+        and breaker strings preserve worst-case open > half_open > closed."""
+        from types import SimpleNamespace
+        from src.state.blackboard import BlackboardState
+
+        legacy = FlowSnapshot.model_validate({"timestamp": 310.0, "headhunter_pending": 5})
+        assert legacy.headhunter_gitlab_pending == 0
+        assert legacy.headhunter_github_pending == 0
+        assert legacy.headhunter_gitlab_breaker == "closed"
+        assert legacy.headhunter_github_breaker == "closed"
+
+        # Legacy object missing attributes altogether (simulates getattr fallback requirement)
+        legacy_obj = SimpleNamespace(
+            timestamp=305.0,
+            queue_depth=0,
+            active_events=0,
+            deferred_events=0,
+            waiting_approval_events=0,
+            headhunter_pending=2,
+            aligner_pending=0,
+            jenkins_pending=0,
+            jenkins_breaker_open=False,
+            jenkins_view_unhealthy=False,
+            wip_used=0,
+            wip_cap=20,
+            wip_utilization_pct=0.0,
+            wip_available=20,
+            busy_agents=0,
+            idle_agents=0,
+            active_subscriptions=0,
+            avg_event_age_sec=0.0,
+            avg_reconcile_ms=0.0,
+            avg_spawn_latency_sec=0.0,
+            dispatch_success_rate_pct=100.0,
+            tpm_used=0,
+            tpm_limit=0,
+            tpm_utilization_pct=0.0,
+            reconcile_count_delta=0,
+            error_count_delta=0,
+            quota_throttle_delta=0,
+            token_input_delta=0,
+            token_output_delta=0,
+            token_thinking_delta=0,
+            token_cached_delta=0,
+            token_tool_use_delta=0,
+            token_total_delta=0,
+            token_calls_delta=0,
+            dispatch_total=0,
+            dispatch_infra_fails=0,
+            dispatch_circuit_breaks=0,
+            token_total_cumulative=0,
+        )
+        s1 = FlowSnapshot(
+            timestamp=310.0,
+            headhunter_pending=3,
+            headhunter_gitlab_pending=2,
+            headhunter_github_pending=1,
+            headhunter_gitlab_breaker="closed",
+            headhunter_github_breaker="half_open",
+        )
+        s2 = FlowSnapshot(
+            timestamp=320.0,
+            headhunter_pending=7,
+            headhunter_gitlab_pending=4,
+            headhunter_github_pending=5,
+            headhunter_gitlab_breaker="half_open",
+            headhunter_github_breaker="open",
+        )
+
+        bb = BlackboardState.__new__(BlackboardState)
+        buckets = bb._downsample_snapshots([legacy_obj, s1, s2], bucket_seconds=300)
+        assert len(buckets) == 1
+        agg = buckets[0]
+        assert agg.headhunter_gitlab_pending == round((0 + 2 + 4) / 3)
+        assert agg.headhunter_github_pending == round((0 + 1 + 5) / 3)
+        assert agg.headhunter_gitlab_breaker == "half_open"
+        assert agg.headhunter_github_breaker == "open"

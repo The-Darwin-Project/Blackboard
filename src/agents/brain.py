@@ -1229,7 +1229,7 @@ def _build_turn0_anchor(
                 init_paths.extend(_safe_loader_tag_paths(loader, "kargo"))
             if getattr(ev, "gitlab_context", None):
                 init_paths.extend(_safe_loader_tag_paths(loader, "gitlab"))
-            if getattr(ev, "github_context", None):
+            if getattr(ev, "github_context", None) or getattr(ev, "github_issue_context", None):
                 init_paths.extend(_safe_loader_tag_paths(loader, "github"))
             if getattr(ev, "ci_context", None):
                 init_paths.extend(_safe_loader_tag_paths(loader, "ci_gating"))

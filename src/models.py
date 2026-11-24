@@ -707,6 +707,10 @@ class FlowMetricsResponse(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    headhunter_gitlab_pending: int = 0
+    headhunter_github_pending: int = 0
+    headhunter_gitlab_breaker: str = "closed"
+    headhunter_github_breaker: str = "closed"
     aligner_pending: int = 0
     jenkins_pending: int = 0
     jenkins_breaker_open: bool = False
@@ -739,6 +743,10 @@ class FlowSnapshot(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    headhunter_gitlab_pending: int = 0
+    headhunter_github_pending: int = 0
+    headhunter_gitlab_breaker: str = "closed"
+    headhunter_github_breaker: str = "closed"
     aligner_pending: int = 0
     jenkins_pending: int = 0
     jenkins_breaker_open: bool = False

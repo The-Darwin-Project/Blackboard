@@ -1208,8 +1208,10 @@ def build_gate_context(
     has_github = bool(
         event.event
         and event.event.evidence
-        and hasattr(event.event.evidence, "github_context")
-        and event.event.evidence.github_context
+        and (
+            getattr(event.event.evidence, "github_context", None)
+            or getattr(event.event.evidence, "github_issue_context", None)
+        )
     )
     unread = getattr(event, "unread_notes", 0) or 0
 

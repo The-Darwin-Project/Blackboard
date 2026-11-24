@@ -1,41 +1,25 @@
 # src/agents/llm/claude_client.py
 # @ai-rules:
-# 1. [Constraint]: Only import anthropic inside this file. Never leak SDK types outside.
-# 2. [Pattern]: _build_kwargs() shared by generate() and generate_stream(). tools=None omits tool config.
-# 3. [Gotcha]: Claude rejects temperature + top_p together -- only pass temperature (normalized).
-# 4. [Pattern]: Temperature normalization: config range 0.0-2.0 -> Claude range 0.0-1.0 (divide by 2).
-# 5. [Pattern]: Uses AsyncAnthropicVertex for Vertex AI authentication (same SA key as Brain).
-# 6. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
-# 7. [Pattern]: Structured contents map: model->assistant, functionCall->tool_use, functionResponse->tool_result.
-# 8. [Pattern]: tool_choice flows through _build_kwargs -> API kwargs. Only sent when tools are present.
-# 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
-#    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
-#    cached_tokens = cache_read + cache_creation. total = all_input + output.
-# 10. [Gotcha]: `priority` and `thinking_level` on generate()/generate_stream() are INTENTIONAL no-ops. They exist only for
-#    LLMPort protocol conformance (Brain passes them to whichever adapter is active). ClaudeAdapter has no QuotaTracker
-#    gating (priority-aware reservation is Gemini-only) and does not map thinking_level. Do not 'wire them up' without a design.
-#    Callers must pass tool_choice/priority/thinking_level by keyword; their positional order is not a stable contract.
-# 11. [Constraint]: _build_kwargs() guards invalid max_output_tokens (bool/non-int/<=0 -> 65000) and clamps per Anthropic
-#    family ceiling (Claude 3.0 -> 4096, 3.5 -> 8192, Opus 4/4.1 -> 32000, 3.7 & Sonnet/Haiku 4 & Opus 4.5+ -> 64000,
-#    5.x unclamped). generate() additionally caps non-streaming messages.create at 21333 to avoid SDK ValueError.
-# 12. [Constraint]: generate_stream is a sync method delegating to _stream_chunks (LLMPort parity) and yields liveness
-#    LLMChunk heartbeats on raw SSE events (thinking_delta -> is_thought=True, input_json_delta/start -> empty chunk),
-#    falling back to stream.text_stream only for legacy mocks without __aiter__. _convert_structured filters thought=True
-#    and empty text="" carrier dicts so internal Gemini parts never leak to Anthropic.
-"""
-ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
-
-Supports both blocking generate() and streaming generate_stream() via
-messages.create / messages.stream.
-"""
+# 1. [Constraint]: Import anthropic only here; never leak SDK types.
+# 2. [Pattern]: _build_kwargs() shared by generate()/generate_stream(); tools=None omits tools.
+# 3. [Gotcha]: Never send temperature+top_p; normalize temperature (0-2 -> 0-1). Claude 5.x omits temperature and downgrades tool_choice "tool"/"any" -> "auto".
+# 4. [Pattern]: AsyncAnthropicVertex auth (Brain SA key). _convert_contents handles str | structured | multimodal.
+# 5. [Pattern]: _extract_usage sums input + cache_read + cache_creation + output.
+# 6. [Gotcha]: priority/thinking_level are LLMPort no-ops; pass tool_choice/priority/thinking_level by keyword.
+# 7. [Constraint]: _build_kwargs clamps max_tokens per model family (3.0:4096, 3.5:8192, Opus 4/4.1:32000, 3.7/4.x:64000, 5.x:unclamped); generate() caps unary at 21333.
+# 8. [Constraint]: generate_stream delegates to _stream_chunks with SSE liveness heartbeats; _convert_structured drops thought/empty dicts.
+"""ClaudeAdapter -- LLMPort implementation via Vertex AI."""
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator
 
 from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
 
 logger = logging.getLogger(__name__)
+
+_CLAUDE_5_RE = re.compile(r"(?:sonnet|opus|haiku|fable|mythos)[-.]?5(?!\d)|claude-5(?!\d)")
 
 
 class ClaudeAdapter:
@@ -129,15 +113,19 @@ class ClaudeAdapter:
             "max_tokens": clamped_tokens,
             "messages": messages,
         }
-        # Claude 5.x models (Sonnet 5, Sonnet 5.5, Opus 5, Opus 5.5, etc.) deprecate temperature (returns 400)
-        if not any(pat in model_lower for pat in ("sonnet-5", "opus-5", "haiku-5", "claude-5")):
+        is_claude_5 = bool(_CLAUDE_5_RE.search(model_lower))
+        if not is_claude_5:
             kwargs["temperature"] = temperature
         if system_prompt:
             kwargs["system"] = system_prompt
         if tools is not None:
             kwargs["tools"] = self._convert_tools(tools)
             if tool_choice:
-                kwargs["tool_choice"] = tool_choice
+                if is_claude_5 and isinstance(tool_choice, dict) and tool_choice.get("type") in ("tool", "any"):
+                    logger.warning("Downgrading tool_choice=%s to auto for %s", tool_choice, self._model_name)
+                    kwargs["tool_choice"] = {"type": "auto"}
+                else:
+                    kwargs["tool_choice"] = tool_choice
 
         return kwargs
 

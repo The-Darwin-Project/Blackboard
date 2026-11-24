@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "d7b829d" # Updated by CI to commit SHA
+  tag: "c05f23c" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -322,6 +322,7 @@ gitlab:
   #   Required scopes: api, read_repository, write_repository
   # - host: GitLab instance hostname (e.g., gitlab.example.com)
   existingSecret: "" # e.g., "darwin-gitlab-token"
+  sslVerify: "" # Optional path to custom CA bundle file (GITLAB_SSL_VERIFY). Disabling TLS ("false"/"0"/"no") is forbidden.
 # =============================================================================
 # OpenShift Trusted CA Bundle (injected corporate proxy / root certificates)
 # =============================================================================
@@ -544,15 +545,20 @@ headhunter:
   pollInterval: "300" # seconds between poll cycles
   startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
   commentLimit: "2000" # Max chars for aggregated comment/note text
-  maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
+  cortexUrl: "" # Shared Darwin UI URL for MR/PR tracking links (falls back to headhunter.github.cortexUrl)
+  gitlabBotUsername: "darwin-bot" # Bot username matched in GitLab @mention scanning (GITLAB_BOT_USERNAME)
+  allowedAuthors: "" # CSV of additional GitLab usernames allowed to trigger @mention instructions (HEADHUNTER_ALLOWED_AUTHORS)
+  descriptionCap: "100000" # Max chars for MR/PR description safety cap (HEADHUNTER_DESCRIPTION_CAP)
+  gitlabQueueMaxEntries: "500" # Max entries retained in Redis FIFO darwin:gitlab:queue (HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES)
+  gitlabShaMaxEntries: "500" # Max tracked MRs in darwin:gitlab:mr_sha sweep (HEADHUNTER_GITLAB_SHA_MAX_ENTRIES)
   # --- GitHub Platform (GitHub App-based PR polling) ---
   github:
     enabled: false # Set to true + configure github.existingSecret to activate
-    pollInterval: "300" # seconds between GitHub poll cycles
     repos: "" # CSV of owner/repo pairs to poll (e.g., "The-Darwin-Project/BlackBoard,org/repo2")
-    triggerReasons: "review_requested,review_feedback,mention" # CSV allowlist of PR actions that create events (review_feedback/mention also need reviewResponse.enabled)
-    cortexUrl: "" # e.g., https://darwin.example.com — used for PR tracking comment links
+    triggerReasons: "review_feedback,mention" # CSV allowlist of Phase D PR actions that create events (also requires reviewResponse.enabled)
+    cortexUrl: "" # e.g., https://darwin.example.com — legacy fallback for headhunter.cortexUrl
+    appSlug: "darwin-project-ai" # GitHub App slug for bot detection (GITHUB_APP_SLUG)
     labelReview: "darwin-review" # Label users add to trigger review
     labelActive: "darwin-active" # Label applied while event is in progress
     labelDone: "darwin-done" # Label applied after event closes

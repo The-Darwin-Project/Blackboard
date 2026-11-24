@@ -66,6 +66,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
+- **darwin-github-ops**: GitHub repository resolution, multi-org `gh` wrapper, MCP tools, merge guards, and check-runs API
 
 ## Automatic Blackboard Updates
 

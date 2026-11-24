@@ -1,5 +1,5 @@
 ---
-description: Headhunter agent -- GitLab todo poller, MR lifecycle automation, maintainer resolution
+description: Headhunter agent -- unified GitLab & GitHub VCS poller (VcsPlatformPort), Redis FIFO queue, active wake-up, maintainer resolution, and operator controls
 globs: "**/headhunter*.py,**/headhunter_skills/**"
 alwaysApply: false
 ---
@@ -9,114 +9,89 @@ alwaysApply: false
 ## Identity
 
 * **Type:** In-process Python daemon (same pattern as Aligner).
-* **Role:** GitLab MR lifecycle automation. Polls `/todos` API, classifies MRs, creates events for Brain.
-* **Behavior:** Autonomous, FIFO. Processes oldest todos first. Does NOT route to agents directly -- creates events for Brain.
+* **Role:** Unified VCS lifecycle automation (`GitLabPlatform` + `GitHubPlatform` implementing `VcsPlatformPort` in `src/agents/headhunter_port.py`). Polls GitLab `/todos` + bounded `darwin:gitlab:mr_sha` sweep and GitHub PRs/Issues/review-feedback, classifies items, and creates/wakes events for Brain.
+* **Behavior:** Autonomous, FIFO. Processes oldest queued/discovered items first via shared Phase A/B engine. Does NOT route to agents directly -- creates events or appends active-event wake-ups for Brain.
 
 ## Architecture
 
-* **File:** `src/agents/headhunter.py`
-* **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** gemini-4-argon via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
-* **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` queries the global WIP count via injected `Brain.count_global_wip(include_new=True)` (or local fallback), which subtracts `_waiting_for_user` events to free capacity for incoming work. Backs off when system is at capacity.
-* **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
+* **Core Files:** `src/agents/headhunter.py` (orchestrator), `src/agents/headhunter_port.py` (`VcsPlatformPort` Protocol), `src/agents/headhunter_models.py` (stdlib-only canonical dataclasses), `src/agents/headhunter_utils.py` (zero-import shared sanitizers/helpers), `src/agents/headhunter_gitlab.py`, `src/agents/headhunter_github.py`.
+* **Pattern:** Poll (GitLab + GitHub via `VcsPlatformPort`) -> Flow Gate -> Classify -> Create Event / Active Wake-Up -> Brain handles routing -> Three-Phase Close Feedback.
+* **LLM:** gemini-4-argon via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instructions loaded from `headhunter_skills/` (`gitlab-mr-triage.md`, `github-pr-triage.md`, `github-pr-review-response.md`, `github-issue-triage.md`).
+* **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` queries the global WIP count via injected `Brain.count_global_wip(include_new=True)` (or local fallback), which subtracts `_waiting_for_user` events to free capacity for incoming work. When full, `VcsPlatformPort.queue_item()` parks work items (GitLab atomic Redis FIFO `darwin:gitlab:queue`, GitHub `darwin-queued` label) instead of dropping them.
+* **Circuit Breaker:** Per-platform (`gitlab`, `github`) half-open circuit breaker in `headhunter.py`. 3 consecutive failures -> `open` (cooldown -> `half_open` probe -> `closed`). Exposed via `Headhunter.gitlab_breaker_state` / `github_breaker_state` and `GET /queue/headhunter/status`.
+* **Snapshot Persistence:** At end of every poll cycle, Headhunter persists redacted per-platform `PlatformSnapshot` JSON to Redis (`darwin:headhunter:snapshot:{platform}`, TTL `3 * poll_interval` / `900s`, errors redacted + capped `<= 200` chars).
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
 ## LLM Analysis
 
-All MRs go through gemini-4-argon analysis with the system instruction from `headhunter_skills/gitlab-mr-triage.md` (loaded via `_load_gitlab_si()`, externalized skill file pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules).
+All MRs/PRs go through gemini-4-argon analysis with system instructions from `headhunter_skills/`. The SI defines output format (YAML frontmatter matching `create_plan` schema, validated with `yaml.safe_load()`), domain classification, agent assignment, risk assessment, and downstream Brain awareness.
 
 | Path | Trigger | How |
 |---|---|---|
-| **LLM Analysis** | All MRs | gemini-4-argon reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. No input truncation — full description flows to gemini-4-argon (1M+ context). Bot Instructions in the description are included as prompt context. Output controlled by `LLM_MAX_TOKENS_HEADHUNTER`. |
-| **Emergency Fallback** | LLM unavailable | Inline `_emergency_plan()` produces COMPLICATED/developer plan. Safety net only. |
+| **LLM Analysis** | MRs / PRs / Issues | gemini-4-argon reads full context (description, pipeline/checks, changed files, comments) and generates a YAML plan. Description capped by `HEADHUNTER_DESCRIPTION_CAP` (default `100000`). Bot/DARWIN Instructions in the description are included as prompt context. Output controlled by `LLM_MAX_TOKENS_HEADHUNTER`. |
+| **Emergency Fallback** | LLM unavailable | Inline `_emergency_plan()` produces COMPLICATED/developer plan (with JSON-quoted scalars). Safety net only. |
 
 ## Maintainer Resolution
 
-Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR metadata fallback.
+Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab/GitHub email or metadata lookup -> fallback.
 
 * Static list is read at runtime (not import time) via `_get_static_maintainer_emails()`.
-* `HEADHUNTER_MAINTAINER_SOURCE`: `static` (default) or `smartsheet` (future).
-* Resolved maintainer stored in `evidence.gitlab_context.maintainer` at event creation.
+* Resolved maintainer stored in `evidence.gitlab_context.maintainer` / `evidence.github_context.maintainer` / `evidence.github_issue_context.maintainer` at event creation.
 
-## Security: @Mention Instruction Injection
+## Security: @Mention Instruction Injection & SHA Drift Hardening
 
-* MR comments tagging the configured bot account (`GITLAB_BOT_USERNAME` env) are passed as plan context.
-* Only authors in the allowed list can inject instructions (default-closed).
-* Allowed authors = email local parts from `HEADHUNTER_MAINTAINERS` + explicit `HEADHUNTER_ALLOWED_AUTHORS` CSV.
-* If both are empty, all @mentions are blocked (`_nobody_` sentinel).
+* MR/PR comments tagging the configured bot account (`GITLAB_BOT_USERNAME` on GitLab, `@{GITHUB_APP_SLUG}` on GitHub) are passed as plan context only after passing fail-closed trust checks.
+* **GitLab allowlist:** email local parts from `HEADHUNTER_MAINTAINERS` + explicit `HEADHUNTER_ALLOWED_AUTHORS` CSV. If both are empty, all `@mentions` are blocked (`_nobody_` sentinel); proven-unauthorized `@mention` todos are dismissed individually during poll without affecting authorized sibling todos.
+* **GitHub trust gate:** `author_association` in `HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS` (`OWNER,MEMBER,COLLABORATOR`), non-bot, not in `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS`, plus `/collaborators/{login}/permission` check (`write`/`maintain`/`admin`).
+* **3-Channel Approval SHA Drift Gate:** `WAITING_APPROVAL` approvals across REST (`POST /queue/{id}/approve`), WebSocket (`approve`), and Slack (`darwin_approve_sha`) verify `expected_sha` against live HEAD SHA (returning HTTP `409` / `sha_drift` WS error / Slack drift notice on mismatch).
 
-## Feedback Loop (Signal + Poll Hybrid)
+## Feedback Loop, Three-Phase Close & Active Wake-Up
 
 * Brain signals `_headhunter_close_signal.set()` in `_close_and_broadcast()`.
-* Headhunter feedback loop wakes on signal or every `poll_interval` (safety net) and relays wake signals to the poll loop via `_poll_wake_signal`.
-* For open MRs, `mark_as_done` runs on event close via two-phase `post_feedback()` (Phase 1 MR comment tracked by `feedback_note_sent` -> Phase 2 sibling `todo_ids` dismissal -> `feedback_sent`), so a Phase 2 transient failure retries dismissal without double-posting the MR note.
-* Terminal (`merged`/`closed`) MRs and proven-unauthorized `@mention` todos have no event lifecycle, so they are best-effort dismissed during poll/fetch via bounded `_dismiss_todos_best_effort()`; rejecting an unauthorized `@mention` dismisses ONLY its own todo ID (preserving any authorized sibling todo on the same MR), and `poll_work_items()` prefers authorized mention authors over unauthorized/bot authors on tie-break.
-* `directly_addressed` and `mentioned` bypass recently-processed dedup (explicit re-request).
+* Headhunter feedback loop wakes on signal or every `poll_interval` and relays wake signals to the poll loop via `_poll_wake_signal`.
+* **Three-phase `post_feedback()` (GitLab & GitHub):**
+  1. Phase 1: Post summary comment on MR/PR (tracked by `feedback_note_sent`); GitLab fetches live MR state first so stale/closed MRs don't receive redundant feedback.
+  2. Phase 2: Dismiss sibling `todo_ids` / swap `darwin-active` -> `darwin-done` and record head SHA (`darwin:gitlab:mr_sha` or `darwin:github:pr_sha`).
+  3. Phase 3: Mark `feedback_sent` on the event (supports synthetic `todo_id=None` sweep-triggered events). Transient failures resume cleanly at the incomplete phase without double-posting.
+* **Active Event Wake-Up:** When a new push SHA or review feedback arrives for an MR/PR that already has an active or `waiting_approval` event, Headhunter updates `evidence` / appends an `actor=headhunter` evidence turn and wakes Brain instead of creating a duplicate event.
 
-## Dedup Layers
+## Dedup & Queue Layers
 
 | Layer | Platform | What it catches | Crash-safe? |
 |---|---|---|---|
-| `get_active_keys()` (Blackboard active events) | GitLab `(project, mr)`, GitHub `(owner, repo, number)` | Second event for an MR/PR/Issue that already has an active/deferred headhunter event | Yes |
-| Flow gate (`MAX_ACTIVE_EVENTS`) | both | Concurrent events beyond the global WIP cap | Yes |
-| GitLab todo `mark_as_done` (two-phase close + best-effort terminal/unauthorized cleanup) | GitLab | Re-processing the same todo after event close, or stale terminal/unauthorized todos | Yes |
+| `get_active_keys()` (Blackboard active + `waiting_approval` events) | GitLab `(project, mr)`, GitHub `(owner, repo, number)` | Duplicate event for an MR/PR/Issue with an existing active/deferred/`waiting_approval` event | Yes |
+| Flow gate (`MAX_ACTIVE_EVENTS`) | both | Concurrent events beyond global WIP cap | Yes |
+| Redis FIFO `darwin:gitlab:queue` (+ `:meta`, bounded by `HEADHUNTER_GITLAB_QUEUE_MAX_ENTRIES`) | GitLab | Atomic FIFO persistence across pod restarts when flow gate is closed | Yes |
+| `darwin:gitlab:mr_sha` (bounded sweep via `HEADHUNTER_GITLAB_SHA_MAX_ENTRIES`) | GitLab | Re-trigger when a previously completed MR receives a new commit SHA (without `scope=all`) | Yes |
+| GitLab todo `mark_as_done` (three-phase close + best-effort terminal/unauthorized cleanup) | GitLab | Re-processing the same todo after event close, or stale terminal/unauthorized todos | Yes |
 | GitHub label truth table (`darwin-active` > `darwin-review` > `darwin-queued` > `darwin-done`) + `darwin:github:pr_sha` | GitHub PR | Re-trigger only on a new head SHA after `darwin-done` | Yes |
 | `darwin:github:issue:{o}:{r}:{n}` (7d) | GitHub Issue | Re-processing an Issue after a label API failure | Yes |
 | `darwin:github:pr_feedback_cursor` + per-item `darwin:github:pr_feedback:{o}:{r}:{pr}:{kind}:{id}` (SET NX, 7d) | GitHub review feedback | At-least-once handling of each review / inline / issue comment, deduped by seen ID | Yes |
 
-## GitHub Review-Response Trigger (flag: `HEADHUNTER_GITHUB_REVIEW_RESPONSE_ENABLED`, default off)
+## Pure-Redis Pending/Status & Authenticated Operator Controls
 
-* **Trigger A (`review_feedback`):** trusted `CHANGES_REQUESTED` / `COMMENTED` (non-empty body) reviews, inline `/pulls/{n}/comments`, and issue comments on open, non-draft PRs authored by `{GITHUB_APP_SLUG}[bot]`.
-* **Trigger B (`mention`):** a trusted comment/review containing `@darwin-project-ai` on an open, non-draft, non-fork PR in an installed repo. Drafts and fork PRs (`head.repo.fork`, or head/base repo `full_name` differ) are skipped so a fork head can never reach branch checkout/execution.
-* **Trust gate (fail-closed):** `author_association` in `HEADHUNTER_GITHUB_REVIEW_TRUSTED_ASSOCIATIONS` (default `OWNER,MEMBER,COLLABORATOR`) AND not `user.type == "Bot"` AND not `*[bot]` AND not in `HEADHUNTER_GITHUB_REVIEW_IGNORE_LOGINS` (default `openshift-ci-robot,openshift-merge-robot`), plus an in-memory TTL-cached (10 min) `/repos/{o}/{r}/collaborators/{login}/permission` check requiring `write`/`maintain`/`admin` on trigger items. Darwin's own login is always ignored (loop guard). The association/bot filter also filters `fetch_context().recent_comments`.
-* **Bootstrap & watermark:** a persistent Redis rollout watermark (`darwin:github:review_response_watermark`, `SET NX` on first enabled poll) separates pre-rollout history from post-rollout PRs. First sight of a PR marks only items older than the watermark as seen (no backfill on rollout), while post-watermark items on brand-new PRs are delivered normally through debounce + dedup. There is NO id floor afterwards: a pending (drafted) review's comments get their id at draft time, so a late-submitted one can be lower than the cursor. Delivery is at-least-once with seen-ID dedup: per-item SET NX seen keys (7d TTL) + a 6-day age cutoff; items are marked seen only after the event exists or the append to the owner event succeeded, so a crash in between can re-deliver but never drop. The cursor `ts` only drives `since` on issue comments and the `updated_at` rescan gate for non-Darwin PRs.
-* **Bounded batches:** at most 20 items / ~`HEADHUNTER_COMMENT_LIMIT`x10 chars per cycle, oldest first. Only delivered items are marked seen and the cursor `ts` does not advance while items remain, so the rest are appended to the active event next cycle (never dropped).
-* **Debounce / rounds:** event only when the newest item is >= `HEADHUNTER_GITHUB_REVIEW_DEBOUNCE_SEC` old; after `HEADHUNTER_GITHUB_REVIEW_MAX_ROUNDS` rounds one PR comment + one `review_round_cap` notification event (NX key rolled back on emission failure), then silence. Reset a PR: `HDEL darwin:github:pr_feedback_rounds {o}:{r}:{n}` and `DEL darwin:github:pr_feedback_cap:{o}:{r}:{n}`.
-* **Active event:** if any active OR `waiting_approval` event references the PR, feedback is appended to it as an `actor=headhunter/action=evidence` turn (sanitized `<review_feedback>` fence, labelled untrusted) instead of creating a second event. `source=headhunter` events always win ties over non-headhunter events, and `casual`-domain Slack/chat threads are excluded from hijacking PR feedback. If the owner is gone/`CLOSED` or the append fails, items stay unseen and the new-event path runs. Brain treats that turn like user input for `deferred` (early wake) and `active` + `waiting_for_user` (bypass) events, but it does NOT clear the `WAITING_APPROVAL` human gate (only a real `user` turn does), and it is consumed by the normal DELIVERED->PROCESSED path (no re-wake after Brain answers).
-* **No labels:** review-response events never apply `darwin-*` labels or write `pr_sha` (see `_NO_LABEL_ACTIONS`).
-* **Plan shape:** `headhunter_skills/github-pr-review-response.md` (developer fix -> qe verify -> developer reply). Merge safety (disable auto-merge before push, no Prow `/lgtm`/`/approve`) lives in that skill and `brain_skills/dispatch/mr-lifecycle.md`.
-* **Phase D** in `_github_poll_and_process` (after issues), only with the flow gate open. Any Phase D error is non-fatal (logged; never feeds the GitHub circuit breaker): one PR's 429/5xx keeps healthy PRs' items, and only a 2+ PR poll where every PR failed 429/5xx raises. API budget: <=3 GETs per polled PR per cycle when each endpoint has <=100 items; pagination is bounded to 5 pages per endpoint (<=15 GETs worst case); non-Darwin PRs are only rescanned when `updated_at` moved past the cursor.
+* `GET /queue/headhunter/pending`: Pure Redis read merging active + `waiting_approval` Blackboard headhunter events and persisted platform snapshots (`darwin:headhunter:snapshot:{platform}`) — zero live VCS HTTP calls on UI poll; preserves `list[dict]` shape.
+* `GET /queue/headhunter/status`: Returns per-platform `{enabled, pending_count, queued_count, last_poll_at, partial_error, breaker}` from Redis/Headhunter with PII-redacted error strings (`<= 200` chars).
+* **Operator controls** (guarded by `_require_headhunter_operator` RBAC normalizing `OBS_ADMIN_GROUPS` + `APPROVER_GROUPS`, non-blocking `hh._poll_lock` timeout `5s` -> `409`, 10s debounce, strict membership check in active snapshot):
+  * `POST /queue/headhunter/poll`: Debounced poll wake-up.
+  * `POST /queue/headhunter/breaker/{platform}/reset`: Reset circuit breaker (`gitlab` | `github`) and wake poll.
+  * `POST /queue/headhunter/items/{promote,dismiss,requeue}`: `promote` (`202` async FIFO head bump), `dismiss` (remove from queue / mark todo done / swap labels), `requeue` (clear SHA dedup + re-enqueue).
 
-## Brain Tool: `refresh_gitlab_context`
+## Brain Tools: `refresh_gitlab_context` & `refresh_github_context`
 
-The Headhunter equivalent of `re_trigger_aligner`. Closes the observe-and-react loop.
+Closes the observe-and-react loop (mirrors `re_trigger_aligner`):
 
-* **Mechanism:** Brain calls `refresh_gitlab_context` -> handler calls `headhunter.refresh_mr_state(event_id)` -> Headhunter fetches current MR + pipeline state from GitLab API -> updates `evidence.gitlab_context` + reclassifies `evidence.severity` -> returns snapshot to Brain conversation.
-* **Two patterns:**
-  * **Pre-dispatch triage:** Brain refreshes before `select_agent` to give agents precise instructions based on current state.
-  * **Post-defer verification:** After deferring for a running pipeline, Brain refreshes to check outcome.
-* **Error handling:** GitLab 5xx/429/404 return error dicts; evidence is NOT mutated on error.
-* **Headhunter disabled:** Handler returns graceful fallback message; Brain can use `select_agent` to check MR state manually.
-* **Registration:** `brain.agents["_headhunter"] = headhunter` in `main.py` (post-construction, follows `_aligner` pattern).
-
-## Severity Classification
-
-`_classify_severity(action_name, pipeline_status)` maps MR context to event severity at creation time and on refresh:
-
-| Action | Pipeline | Severity |
-|---|---|---|
-| `build_failed` | any | `warning` |
-| `unmergeable` | any | `warning` |
-| any | `failed` | `warning` |
-| `review_requested` | success/unknown | `info` |
-| `approval_required` | success/unknown | `info` |
-| `assigned` | success/unknown | `info` |
-
-Brain can override via `classify_event(severity=...)` -> stored in `brain_severity` (separate from source classification).
-
-## Key Invariants
-
-* Sidecar skills NEVER include GitLab usernames in Slack recommendations.
-* Brain ALWAYS uses `evidence.gitlab_context.maintainer.emails` for notifications.
-* `evidence.gitlab_context.mr_description` contains the original MR description (Bot Instructions visible to Brain).
-* `GITLAB_BOT_USERNAME` env var controls which account name to match in @mention scanning.
+* **`refresh_gitlab_context`**: calls `headhunter.refresh_mr_state(event_id)` -> updates `evidence.gitlab_context` + reclassifies `evidence.severity`.
+* **`refresh_github_context`**: refreshes live GitHub PR/checks, workflow run (`GitHubRunRef` via `run_id`), or GitHub Issue (`github_issue_context`) state -> updates `evidence.github_context` / `evidence.github_issue_context` + registers background `StateWatcher` subscription.
+* **Error handling:** 5xx/429/404 return error dicts; evidence is NOT mutated on error.
+* **Registration:** `brain.agents["_headhunter"] = headhunter` in `main.py`.
 
 ## Prompt Injection Defense
 
-* Shared untrusted-text sanitization via `sanitize_untrusted_block()` and `sanitize_untrusted_line()` in `src/utils/prompt_sanitize.py` (used by `headhunter.py`, `llm/prompt.py`, and `brain.py`): strips invisible/control characters, removes bounded linear XML prompt fences across Brain + all 6 Headhunter tags (`description`, `job_log`, `comments`, `mention_request`, `issue_body`, `review_feedback`), runs $O(n)$ PII/secret redaction (`src/utils/pii_redaction.py`), defangs case/whitespace-variant `[!call:` directives, and caps length LAST.
+* Shared untrusted-text sanitization via `sanitize_untrusted_block()` and `sanitize_untrusted_line()` in `src/utils/prompt_sanitize.py` (used by `headhunter.py`, `llm/prompt.py`, and `brain.py`): strips invisible/control characters, removes bounded linear XML prompt fences across Brain + all 7 Headhunter fence tags (`description`, `job_log`, `comments`, `mention_request`, `issue_body`, `review_feedback`, `pr_review_comments`), runs $O(n)$ PII/secret redaction (`src/utils/pii_redaction.py`), defangs case/whitespace-variant `[!call:` directives, and caps length LAST.
 * Zero-import `_sanitize_xml_fence()` in `src/agents/headhunter_utils.py` (re-exported by `headhunter.py`) remains for `issue_body` and `review_feedback` blocks.
-* `mention_author` and untrusted scalars (`title`, branches, `failed_checks`, `failed_job_names`, `labels`, `changed_files`) are sanitized via `sanitize_untrusted_line()` (plus quote stripping for XML attributes and JSON-quoting in `_emergency_plan()`).
-* `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default 100K) prevents degenerate descriptions from consuming excessive tokens while keeping full descriptions + trailing `### Bot Instructions` intact.
+* Untrusted scalars (`title`, branches, `failed_checks`, `failed_job_names`, `labels`, `changed_files`, `mention_author`) are sanitized via `sanitize_untrusted_line()` (plus quote stripping for XML attributes and JSON-quoting in `_emergency_plan()`).
+* `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default `100000`) bounds MR/PR descriptions while keeping trailing `### DARWIN Instructions` / `### Bot Instructions` intact.
 
 ## Helm Configuration
 
@@ -126,15 +101,17 @@ headhunter:
   pollInterval: "300"
   startupDelay: "180"
   commentLimit: "2000"
-  maintainerSource: "static"
-  maintainers: ""  # CSV of emails
-
-# LLM (under gcp.llm)
-gcp:
-  llm:
-    headhunter:
-      model: "gemini-4-argon"
-      temperature: "0.3"
-      thinkingLevel: "low"
-      maxOutputTokens: "10000"
+  maintainers: ""              # CSV of emails
+  cortexUrl: ""                # Shared Darwin UI URL for MR/PR links (falls back to headhunter.github.cortexUrl)
+  gitlabBotUsername: "darwin-bot"
+  allowedAuthors: ""           # CSV of additional usernames allowed for @mentions
+  descriptionCap: "100000"
+  gitlabQueueMaxEntries: "500"
+  gitlabShaMaxEntries: "500"
+  github:
+    enabled: false
+    repos: ""
+    triggerReasons: "review_feedback,mention"
+    cortexUrl: ""              # Legacy fallback for headhunter.cortexUrl
+    appSlug: "darwin-project-ai"
 ```
