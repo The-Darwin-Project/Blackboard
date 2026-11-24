@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from ..models import ConversationTurn
 from ..utils.jarvis_ack import safe_score as _safe_score
 from ..utils.pii_redaction import redact_pii
-from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
+from ..utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences, _CALL_TAG_RE
 from .handler_utils import _safe_int
 
 
@@ -336,12 +336,9 @@ def _format_bounded_journal(
     reverse_to_chronological: bool,
 ) -> str:
     """Fit newest entries within _JOURNAL_MAX_CHARS including header."""
-    safe_title = (
-        strip_xml_fences(sanitize_prompt_text(title, max_len=_JOURNAL_TITLE_MAX_LEN))
-        .replace("[!call:", "[call:")
-        .strip()
-        or "unknown"
-    )
+    safe_title = _CALL_TAG_RE.sub(
+        "[call:", strip_xml_fences(sanitize_prompt_text(title, max_len=_JOURNAL_TITLE_MAX_LEN))
+    ).strip() or "unknown"
     cap_note = f" ({_JOURNAL_MAX_CHARS}-char cap reached)"
     fitted: list[str] = []
     char_truncated = False
@@ -352,7 +349,7 @@ def _format_bounded_journal(
     used = 0
     for raw_entry in (selected_newest_first or ()):
         raw_str = str(raw_entry)[: _JOURNAL_MAX_CHARS * 2]
-        clean_entry = redact_pii(strip_xml_fences(raw_str)).replace("[!call:", "[call:")
+        clean_entry = _CALL_TAG_RE.sub("[call:", redact_pii(strip_xml_fences(raw_str)))
         line = f"- {clean_entry}"
         sep = 1 if fitted else 0
         if used + sep + len(line) <= budget:
@@ -380,8 +377,7 @@ async def handle_lookup_journal(
 ) -> bool:
     raw_svc = args.get("service_name")
     service_name = (
-        strip_xml_fences(sanitize_prompt_text(raw_svc, max_len=_JOURNAL_TITLE_MAX_LEN))
-        .replace("[!call:", "[call:")
+        _CALL_TAG_RE.sub("[call:", strip_xml_fences(sanitize_prompt_text(raw_svc, max_len=_JOURNAL_TITLE_MAX_LEN)))
         .strip()
         if isinstance(raw_svc, str)
         else ""

@@ -89,6 +89,7 @@
 #     on_change callback: transition deferred->active, inject system.notification turn (thoughts field),
 #     enqueue for immediate processing. Lifecycle tied to start_event_loop/stop_event_loop.
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
+#     VMER-2450 invariants: Redis write-once darwin:event:{id}:anchor, append-only contents, volatile <event_state> tail, K-quantized decay.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves full thought context (thought text + thought_signature)
@@ -337,7 +338,8 @@ from ..models import (
 )
 from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
-from ..utils.maintainers import resolve_maintainer_emails
+from ..utils.jira_context import extract_jira_context
+from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import (
     PROMPT_NAME_MAX_LEN,
@@ -354,7 +356,6 @@ from .prefix_builder import (
     GLOBAL_CORE_EXTRA_PATHS,
     build_global_core_si,
     canonical_wire_tools,
-    compute_prefix_hashes,
 )
 from .llm import (
     LLMChunk,
@@ -677,7 +678,7 @@ def _batch_is_terminal_for_flush(
     gate_ctx: "GateContext | None" = None,
 ) -> bool:
     """True when pre-batch text is a user-visible response (terminal FC or admissible close)."""
-    from .tool_gates import build_gate_context, is_wait_for_user_admissible_after_response
+    from .tool_gates import build_gate_context
 
     if gate_ctx is None and event is not None:
         ev_evidence = event.event.evidence if event.event else None
@@ -702,7 +703,7 @@ def _batch_is_terminal_for_flush(
             continue
         if fc_name == "wait_for_user":
             if fc_name in active_tool_names or (
-                gate_ctx is not None and is_wait_for_user_admissible_after_response(gate_ctx)
+                gate_ctx is not None and _wait_for_user_admissible(gate_ctx)
             ):
                 return True
         elif fc_name in active_tool_names:
@@ -1280,8 +1281,17 @@ async def _resolve_frozen_anchor(
             hydrated = _hydrate_anchor_dict(winner)
             if hydrated is not None:
                 candidate = hydrated
+                _l1_put_anchor(brain, event_id, candidate)
+        return candidate
     _l1_put_anchor(brain, event_id, candidate)
     return candidate
+
+
+def _wait_for_user_admissible(gate_ctx: Any | None) -> bool:
+    if gate_ctx is None:
+        return False
+    from .tool_gates import is_wait_for_user_admissible_after_response
+    return is_wait_for_user_admissible_after_response(gate_ctx)
 
 
 def _extract_accepted_domain(turn: Any, fc_part: dict | None) -> str | None:
@@ -2175,6 +2185,22 @@ class Brain:
         return a_num != b_num
 
     @staticmethod
+    def _extract_jira_context(doc: EventDocument) -> tuple[bool, str | None]:
+        """Return (is_jira_event, normalized_issue_key) from top-level subject_type and nested jira_context."""
+        return extract_jira_context(doc)
+
+    @classmethod
+    def _jira_issue_differs(cls, a: EventDocument, b: EventDocument) -> bool:
+        """Return True if Jira context distinguishes the two events as different work items."""
+        a_is_jira, a_key = cls._extract_jira_context(a)
+        b_is_jira, b_key = cls._extract_jira_context(b)
+        if not a_is_jira and not b_is_jira:
+            return False
+        if a_is_jira != b_is_jira:
+            return True
+        return a_key != b_key
+
+    @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
         """Extract normalized MR/PR/Issue URL from gitlab_context, kargo_context, github_context, or github_issue_context.
 
@@ -2439,13 +2465,17 @@ class Brain:
                         pass  # different GitLab MR
                     elif self._github_pr_differs(event, existing):
                         pass  # different GitHub PR or issue
+                    elif self._jira_issue_differs(event, existing):
+                        pass  # different Jira issue (or Jira vs non-Jira)
                     elif new_mr_url and self._extract_mr_url(existing) and new_mr_url != self._extract_mr_url(existing):
                         pass  # different PR/MR URL (catch-all)
                     else:
+                        _, ex_jira_key = self._extract_jira_context(existing)
                         logger.info(
                             f"Closing duplicate event {event_id} -- "
                             f"existing event {eid} already handling {event.service}"
                             f"{f' MR !{ex_mr}' if ex_mr else ''}"
+                            f"{f' Jira {ex_jira_key}' if ex_jira_key else ''}"
                         )
                         await self._close_and_broadcast(
                             event_id,
@@ -3539,8 +3569,8 @@ class Brain:
                             and "wait_for_user" not in valid_names
                             and event_id in self._response_emitted_for
                         ):
-                            from .tool_gates import is_wait_for_user_admissible_after_response
-                            if is_wait_for_user_admissible_after_response(gate_ctx):
+                            
+                            if _wait_for_user_admissible(gate_ctx):
                                 valid_names.add("wait_for_user")
                     else:
                         event = await self.blackboard.get_event(event_id)
@@ -3741,13 +3771,13 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             valid_tool_names = {t["name"] for t in active_tools}
-            from .tool_gates import is_wait_for_user_admissible_after_response
+            
             is_terminal = (
                 (
                     function_call.name == "wait_for_user"
                     and (
                         "wait_for_user" in valid_tool_names
-                        or is_wait_for_user_admissible_after_response(gate_ctx)
+                        or _wait_for_user_admissible(gate_ctx)
                     )
                 )
                 or (
@@ -3791,7 +3821,7 @@ class Brain:
                 function_call.name == "wait_for_user"
                 and "wait_for_user" not in valid_tool_names
                 and event_id in self._response_emitted_for
-                and is_wait_for_user_admissible_after_response(gate_ctx)
+                and _wait_for_user_admissible(gate_ctx)
             ):
                 valid_tool_names.add("wait_for_user")
 
@@ -6580,6 +6610,7 @@ class Brain:
         if not turns:
             return True
 
+        injected = False
         if batch_ctx is not None and not getattr(batch_ctx, "_injected", False):
             first = turns[0]
             carries_fc = bool(first.response_parts) and any(
@@ -6591,7 +6622,7 @@ class Brain:
                     first.batch_size = batch_ctx._batch_size
                 if getattr(batch_ctx, "_batch_index", None) is not None:
                     first.batch_index = batch_ctx._batch_index
-                batch_ctx._injected = True
+                injected = True
 
         append_turns_fn = getattr(self.blackboard, "append_turns", None)
         import inspect
@@ -6602,6 +6633,8 @@ class Brain:
             if not assigned:
                 logger.warning("append_turns failed for %s", event_id)
                 return False
+            if injected:
+                batch_ctx._injected = True
             for t in turns:
                 await self._broadcast_turn(event_id, t)
             
@@ -6624,9 +6657,15 @@ class Brain:
                 pass
             return True
         else:
+            success = True
             for t in turns:
-                await self._append_and_broadcast(event_id, t)
-            return True
+                assigned_turn = await self._append_and_broadcast(event_id, t)
+                if not assigned_turn:
+                    success = False
+                    break
+            if success and injected:
+                batch_ctx._injected = True
+            return success
 
     async def _append_and_broadcast(
         self, event_id: str, turn: ConversationTurn, event: "EventDocument | None" = None

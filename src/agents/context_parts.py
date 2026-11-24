@@ -545,7 +545,6 @@ def compress_contents(
     for rev_idx in range(len(conv_msgs) - 1, -1, -1):
         if rev_idx in kept_set:
             continue
-        msg = conv_msgs[rev_idx]
         msg_tokens = msg_token_counts[rev_idx]
 
         buddy_idx = pair_buddy.get(rev_idx)

@@ -508,3 +508,110 @@ class TestR2F3SlackAccessGateIntegration:
             assert turn.action == "notify"
             assert "sent to" in turn.thoughts
 
+
+class TestVMER2450Fixes:
+    def test_m1_email_regex_linear_no_redos(self):
+        import time
+        from unittest.mock import MagicMock
+        from src.utils.maintainers import is_slack_recipient_allowed
+        
+        adversarial1 = "a.b+" * 10000
+        adversarial2 = "x" * 40000
+        turn_mock = MagicMock()
+        turn_mock.actor = "user"
+        turn_mock.thoughts = adversarial1
+        turn_mock.result = adversarial2
+        ev = MagicMock()
+        ev.conversation = [turn_mock]
+
+        t0 = time.perf_counter()
+        ok, allowlist = is_slack_recipient_allowed("bob@redhat.com", ev)
+        t1 = time.perf_counter()
+        
+        assert not ok
+        assert t1 - t0 < 0.2
+
+    @pytest.mark.asyncio
+    async def test_m14_slack_access_gate_missing_email_and_real_gate_check(self):
+        from src.agents.handlers_integration import handle_notify_user_slack
+        from src.slack_gate import SlackAccessGate
+        from unittest.mock import AsyncMock, MagicMock, patch
+        
+        class MockSlackApp:
+            def __init__(self):
+                self.client = AsyncMock()
+                self.client.chat_postMessage = AsyncMock(return_value={"ts": "123.456"})
+                self.client.conversations_open = AsyncMock(return_value={"channel": {"id": "C123"}})
+
+        class MockSlackChannel:
+            def __init__(self, gate):
+                self._access_gate = gate
+                self._app = MockSlackApp()
+                self._infra_channel = None
+
+            async def send_event_message(self, *args, **kwargs):
+                return {"ts": "123.456"}
+
+        gate = SlackAccessGate(group_names=["authorized-group"], maintainer_emails=["maint@redhat.com"])
+        
+        # Test 1: missing email -> fail closed, 0 calls
+        slack_channel = MockSlackChannel(gate)
+        slack_channel._app.client.users_info.return_value = {"user": {"profile": {}}}
+        
+        event = MagicMock()
+        event.id = "evt-123"
+        event.slack_user_id = None
+        
+        ctx = MagicMock()
+        ctx.append_and_broadcast = AsyncMock()
+        ctx.emit_pulse = AsyncMock()
+        ctx.next_turn_number = AsyncMock(return_value=1)
+        ctx.get_slack_channel.return_value = slack_channel
+        
+        bb = MagicMock()
+        bb.get_event = AsyncMock(return_value=event)
+        ctx.get_blackboard.return_value = bb
+
+        with patch("src.agents.handlers_integration.is_slack_recipient_allowed", return_value=(True, ["U12345678"])):
+            await handle_notify_user_slack(
+                ctx, 
+                "evt-123", 
+                {"user_email": "U12345678", "message": "Hello!"}, 
+                None
+            )
+            
+            assert ctx.append_and_broadcast.call_count == 1
+            turn = ctx.append_and_broadcast.call_args[0][1]
+            assert turn.action == "tool_result"
+            assert "denied" in turn.thoughts
+            assert slack_channel._app.client.chat_postMessage.call_count == 0
+            
+            # Test 2: real gate check denies -> fail closed, 0 calls
+            slack_channel._app.client.users_info.return_value = {"user": {"profile": {"email": "outsider@redhat.com"}}}
+            ctx.append_and_broadcast.reset_mock()
+            await handle_notify_user_slack(
+                ctx, 
+                "evt-123", 
+                {"user_email": "U12345678", "message": "Hello!"}, 
+                None
+            )
+            assert ctx.append_and_broadcast.call_count == 1
+            turn = ctx.append_and_broadcast.call_args[0][1]
+            assert turn.action == "tool_result"
+            assert "denied" in turn.thoughts
+            assert slack_channel._app.client.chat_postMessage.call_count == 0
+            
+            # Test 3: real gate check allows -> sends DM
+            slack_channel._app.client.users_info.return_value = {"user": {"profile": {"email": "maint@redhat.com"}}}
+            ctx.append_and_broadcast.reset_mock()
+            await handle_notify_user_slack(
+                ctx, 
+                "evt-123", 
+                {"user_email": "U12345678", "message": "Hello!"}, 
+                None
+            )
+            # The rejection is a tool_result appended to context, if allowed it appends "notify" turn
+            assert ctx.append_and_broadcast.call_count == 1
+            turn = ctx.append_and_broadcast.call_args[0][1]
+            assert turn.action == "notify"
+            assert slack_channel._app.client.chat_postMessage.call_count == 1

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ..models import EventDocument
 
 _CONTEXT_ATTRS = ("gitlab_context", "github_context", "github_issue_context", "ci_context")
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9_.+-])[A-Za-z0-9_.+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}(?![A-Za-z0-9_-])")
 _SLACK_MENTION_RE = re.compile(r"<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>")
 
 
@@ -154,11 +154,13 @@ def is_slack_recipient_allowed(
             text = turn.get(field) if isinstance(turn, dict) else getattr(turn, field, None)
             if not isinstance(text, str) or not text:
                 continue
-            if allowed_domains:
-                for email_match in _EMAIL_RE.findall(text):
+            text_slice = text[:16_384]
+            if allowed_domains and "@" in text_slice:
+                for email_match in _EMAIL_RE.findall(text_slice):
                     if email_match.rsplit("@", 1)[1].lower() in allowed_domains:
                         candidates.append(email_match)
-            candidates.extend(_SLACK_MENTION_RE.findall(text))
+            if "<@U" in text_slice:
+                candidates.extend(_SLACK_MENTION_RE.findall(text_slice))
 
     allowlist = _dedupe(candidates, case_insensitive_emails=True)
     if "@" in target:

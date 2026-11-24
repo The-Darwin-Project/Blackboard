@@ -559,27 +559,32 @@ class TestATDDT29ImmutableEventAnchorAndRedisSSOT:
 
     @pytest.mark.asyncio
     async def test_t29_cleanup_evicts_l1_and_close_event_by_user_and_lru_cap_10000(self):
-        """Given Brain._frozen_anchors (OrderedDict, LRU cap 10_000),
-        When 10_001st anchor enters, oldest is evicted;
+        """Given Brain._frozen_anchors (OrderedDict, LRU cap 2_000),
+        When 2_001st anchor enters, oldest is evicted;
         When cleanup_jarvis_event_state or routes/queue.py close_event_by_user runs,
         Then L1 _frozen_anchors and Redis darwin:event:{id}:anchor are both evicted."""
         from src.routes.queue import CloseRequest, close_event_by_user
+        from src.agents.brain import _FROZEN_ANCHOR_MAX_ENTRIES
 
         bb, redis = _make_fakeredis_blackboard()
         brain = _make_real_brain(bb)
         assert isinstance(brain._frozen_anchors, OrderedDict)
 
-        # Fill L1 to exact cap 10_000
-        for i in range(10_000):
+        # Fill L1 to exact cap 2_000
+        for i in range(_FROZEN_ANCHOR_MAX_ENTRIES):
             brain._frozen_anchors[f"evt-lru-{i}"] = MagicMock()
-        assert len(brain._frozen_anchors) == 10_000
+        assert len(brain._frozen_anchors) == _FROZEN_ANCHOR_MAX_ENTRIES
 
-        # Insert 10_001st via _build_contents -> oldest ("evt-lru-0") evicted
+        # Touch "evt-lru-0" so it becomes most recently used
+        brain._frozen_anchors.move_to_end("evt-lru-0")
+
+        # Insert 2_001st via _build_contents -> oldest ("evt-lru-1") evicted (since 0 was touched)
         ev_new = _make_event(event_id="evt-lru-new")
         await brain._build_contents(ev_new)
-        assert len(brain._frozen_anchors) <= 10_000
+        assert len(brain._frozen_anchors) == _FROZEN_ANCHOR_MAX_ENTRIES
         assert "evt-lru-new" in brain._frozen_anchors
-        assert "evt-lru-0" not in brain._frozen_anchors
+        assert "evt-lru-0" in brain._frozen_anchors  # Recency preserved
+        assert "evt-lru-1" not in brain._frozen_anchors
 
         # Direct cleanup_jarvis_event_state evicts L1
         brain.cleanup_jarvis_event_state("evt-lru-new")
@@ -1430,3 +1435,21 @@ class TestR5F4andR6F4:
         assert anchor_val == {"valid": "json"}
         ttl = await redis.ttl("darwin:event:test3:anchor")
         assert ttl > 0
+
+    async def test_m2_resolve_frozen_anchor_nx_race_null_read_avoids_ghost_pin(self):
+        """[M2] Given SET NX race loss AND get_event_anchor re-read failure/null,
+        When _resolve_frozen_anchor executes,
+        Then the local candidate anchor is returned but NOT pinned to _frozen_anchors."""
+        from src.agents.brain import _resolve_frozen_anchor
+        
+        bb, _ = _make_fakeredis_blackboard()
+        brain = _make_real_brain(bb)
+        bb.get_event_anchor = AsyncMock(return_value=None)
+        bb.set_event_anchor_nx = AsyncMock(return_value=False)
+        
+        ev = _make_event(event_id="evt-m2-ghost")
+        anchor = await _resolve_frozen_anchor(brain, ev)
+        
+        assert anchor is not None
+        assert "evt-m2-ghost" not in brain._frozen_anchors
+
