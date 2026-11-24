@@ -1,11 +1,12 @@
 # BlackBoard/tests/test_brain_dedup.py
 # @ai-rules:
-# 1. [Constraint]: Tests Brain static methods only -- no Redis, no async, no adapter.
-# 2. [Pattern]: Uses MagicMock EventDocument stubs matching src/models.py schema.
+# 1. [Constraint]: Tests Brain static/class methods only -- no Redis, no async, no adapter.
+# 2. [Pattern]: Uses MagicMock or SimpleNamespace EventDocument stubs matching src/models.py schema.
 # 3. [Pattern]: Follows test_brain_progressive.py structure: class per method, _make_* helpers.
-"""Unit tests for Brain cross-source dedup: _extract_mr_url, _format_merge_evidence, phase gating."""
+"""Unit tests for Brain cross-source dedup: _extract_mr_url, _jira_issue_differs, _format_merge_evidence, phase gating."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -341,3 +342,138 @@ class TestLegacyThinkingExcludesHeadhunter:
         sa_turn.actor = "sysadmin"
         has_agent = sa_turn.actor not in ("brain", "user", "aligner", "headhunter")
         assert has_agent is True
+
+
+class TestJiraIssueDiffers:
+    """VMER-2483: Brain._jira_issue_differs distinguishes concurrent Jira missions."""
+
+    @staticmethod
+    def _make_doc(
+        *,
+        subject_type: str = "service",
+        service: str = "vmer",
+        jira_context: object = None,
+        raw_evidence: object = None,
+        use_raw_evidence: bool = False,
+    ) -> SimpleNamespace:
+        if use_raw_evidence:
+            evidence = raw_evidence
+        else:
+            evidence = SimpleNamespace(jira_context=jira_context)
+        return SimpleNamespace(
+            subject_type=subject_type,
+            service=service,
+            event=SimpleNamespace(evidence=evidence),
+        )
+
+    def test_distinct_jira_keys_differ(self):
+        """Given two Jira events with distinct issue_keys, _jira_issue_differs returns True."""
+        a = self._make_doc(subject_type="jira", jira_context={"issue_key": "VMER-2463"})
+        b = self._make_doc(subject_type="jira", jira_context={"issue_key": "VMER-2464"})
+        assert Brain._jira_issue_differs(a, b) is True
+
+    def test_same_jira_key_exact_and_case_whitespace_do_not_differ(self):
+        """Given two Jira events with identical or case/whitespace-equivalent keys, returns False."""
+        exact_a = self._make_doc(subject_type="jira", jira_context={"issue_key": "VMER-2464"})
+        exact_b = self._make_doc(subject_type="jira", jira_context={"issue_key": "VMER-2464"})
+        assert Brain._jira_issue_differs(exact_a, exact_b) is False
+
+        noisy_a = self._make_doc(subject_type="jira", jira_context={"issue_key": " vmer-2464 "})
+        assert Brain._jira_issue_differs(noisy_a, exact_b) is False
+
+    def test_one_jira_keyed_one_jira_unkeyed_differs(self):
+        """Given one keyed Jira event and one unkeyed/whitespace Jira event, returns True."""
+        keyed = self._make_doc(subject_type="jira", jira_context={"issue_key": "VMER-2464"})
+        unkeyed_none = self._make_doc(subject_type="jira", jira_context={"issue_key": None})
+        unkeyed_blank = self._make_doc(subject_type="jira", jira_context={"issue_key": "   "})
+        unkeyed_missing = self._make_doc(subject_type="jira", jira_context=None)
+
+        assert Brain._jira_issue_differs(keyed, unkeyed_none) is True
+        assert Brain._jira_issue_differs(unkeyed_none, keyed) is True
+        assert Brain._jira_issue_differs(keyed, unkeyed_blank) is True
+        assert Brain._jira_issue_differs(unkeyed_blank, keyed) is True
+        assert Brain._jira_issue_differs(keyed, unkeyed_missing) is True
+
+    def test_both_jira_events_missing_key_or_non_dict_context_do_not_differ(self):
+        """Given two Jira events lacking valid issue_key or having non-dict jira_context, returns False."""
+        missing_a = self._make_doc(subject_type="jira", jira_context=None)
+        missing_b = self._make_doc(subject_type="jira", jira_context={})
+        bad_ctx = self._make_doc(subject_type="jira", jira_context="bad")
+        non_str_key = self._make_doc(subject_type="jira", jira_context={"issue_key": 2464})
+
+        assert Brain._jira_issue_differs(missing_a, missing_b) is False
+        assert Brain._jira_issue_differs(bad_ctx, missing_a) is False
+        assert Brain._jira_issue_differs(non_str_key, bad_ctx) is False
+
+    def test_mixed_jira_vs_non_jira_same_service_differs_both_directions(self):
+        """Given a Jira event and a non-Jira event sharing service='vmer', returns True in both directions."""
+        jira_ev = self._make_doc(subject_type="jira", service="vmer", jira_context={"issue_key": "VMER-2464"})
+        non_jira_ev = self._make_doc(subject_type="service", service="vmer", jira_context=None)
+
+        assert Brain._jira_issue_differs(jira_ev, non_jira_ev) is True
+        assert Brain._jira_issue_differs(non_jira_ev, jira_ev) is True
+
+    def test_neither_event_is_jira_returns_false(self):
+        """Given two non-Jira events (None, str, dict evidence), _jira_issue_differs returns False."""
+        ev_none_a = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence=None)
+        ev_none_b = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence=None)
+        ev_str_a = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence="legacy string")
+        ev_str_b = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence="other string")
+        ev_dict_a = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence={"other": 1})
+        ev_dict_b = self._make_doc(subject_type="service", use_raw_evidence=True, raw_evidence={"other": 2})
+
+        assert Brain._jira_issue_differs(ev_none_a, ev_none_b) is False
+        assert Brain._jira_issue_differs(ev_str_a, ev_str_b) is False
+        assert Brain._jira_issue_differs(ev_dict_a, ev_dict_b) is False
+        assert Brain._jira_issue_differs(ev_none_a, ev_dict_a) is False
+
+    def test_dict_typed_evidence_with_jira_context(self):
+        """Given dict-typed evidence carrying jira_context.issue_key, differentiates keys accurately."""
+        a = self._make_doc(
+            subject_type="jira",
+            use_raw_evidence=True,
+            raw_evidence={"jira_context": {"issue_key": "VMER-2463"}},
+        )
+        b = self._make_doc(
+            subject_type="jira",
+            use_raw_evidence=True,
+            raw_evidence={"jira_context": {"issue_key": "VMER-2464"}},
+        )
+        b_same = self._make_doc(
+            subject_type="service",
+            use_raw_evidence=True,
+            raw_evidence={"jira_context": {"issue_key": " vmer-2464 "}},
+        )
+
+        assert Brain._jira_issue_differs(a, b) is True
+        assert Brain._jira_issue_differs(b, b_same) is False
+
+    def test_extract_mr_url_returns_none_for_jira_issue_url(self):
+        """Pins Pass 2 exclusion: Jira issue_url is never treated as an MR/PR URL."""
+        jira_doc = self._make_doc(
+            subject_type="jira",
+            jira_context={
+                "issue_key": "VMER-2464",
+                "issue_url": "https://issues.redhat.com/browse/VMER-2464",
+            },
+        )
+        assert Brain._extract_mr_url(jira_doc) is None
+
+    def test_extract_jira_context_strips_control_characters(self):
+        """Control characters in issue_key are stripped cleanly before normalization."""
+        ctrl_doc = self._make_doc(
+            subject_type="jira",
+            jira_context={"issue_key": "VMER-2464\r\nFAKE"},
+        )
+        whitespace_ctrl_doc = self._make_doc(
+            subject_type="jira",
+            jira_context={"issue_key": " vmer-2464\t\n "},
+        )
+        only_ctrl_doc = self._make_doc(
+            subject_type="jira",
+            jira_context={"issue_key": "\x00\r\n\t\x7f"},
+        )
+
+        assert Brain._extract_jira_context(ctrl_doc) == (True, "VMER-2464FAKE")
+        assert Brain._extract_jira_context(whitespace_ctrl_doc) == (True, "VMER-2464")
+        assert Brain._extract_jira_context(only_ctrl_doc) == (True, None)
