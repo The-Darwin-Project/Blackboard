@@ -5,6 +5,7 @@
 # 3. [Pattern]: Same httpx + Basic auth pattern as headhunter_jira.py.
 # 4. [Constraint]: No hardcoded org-specific values -- all from env vars.
 # 5. [Pattern]: Redis key format: darwin:headhunter:jira:{issue_key} (shared with headhunter_jira.py).
+# 6. [Security]: POST mutation routes enforce auth when DEX_ENABLED/TRUSTED_PROXY_ENABLED (401 if anonymous), validate {key} via is_valid_jira_key() (400), and emit [Audit] logs.
 """Jira Missions API -- exposes tracked Jira issues for the Operations Center UI."""
 from __future__ import annotations
 
@@ -13,17 +14,36 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..dependencies import get_blackboard
-from ..utils.adf import adf_to_markdown
-from ..state.blackboard import BlackboardState
+from .. import auth
 from ..agents.headhunter_jira import HeadhunterJira
+from ..auth import UserContext
+from ..dependencies import get_blackboard
+from ..state.blackboard import BlackboardState
+from ..utils.adf import adf_to_markdown
+from ..utils.jira_context import is_valid_jira_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jira", tags=["jira"])
 
 _REDIS_PREFIX = HeadhunterJira.REDIS_PREFIX
+
+
+def _require_jira_mutation_auth(request: Request) -> UserContext:
+    """Enforce authenticated identity on Jira mutation routes when auth is enabled."""
+    user = auth.get_user_from_request(request)
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if auth_enabled and not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def _validate_jira_key(key: str) -> str:
+    """Validate Jira issue key format before Redis or Jira REST URL interpolation."""
+    if not is_valid_jira_key(key):
+        raise HTTPException(status_code=400, detail="Invalid Jira issue key format")
+    return key
 
 
 def _jira_config() -> tuple[str, dict[str, str]] | None:
@@ -107,8 +127,10 @@ async def list_missions():
 
 
 @router.post("/missions/{key}/approve")
-async def approve_mission(key: str):
+async def approve_mission(key: str, user: UserContext = Depends(_require_jira_mutation_auth)):
     """Transition a Jira issue to 'To Do' status."""
+    _validate_jira_key(key)
+    logger.info("[Audit] Jira mission %s requested for %s by %s", "approve", key, user.email or user.label)
     cfg = _jira_config()
     if not cfg:
         raise HTTPException(503, "Jira not configured")
@@ -136,8 +158,14 @@ async def approve_mission(key: str):
 
 
 @router.post("/missions/{key}/reanalyze")
-async def reanalyze_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
+async def reanalyze_mission(
+    key: str,
+    blackboard: BlackboardState = Depends(get_blackboard),
+    user: UserContext = Depends(_require_jira_mutation_auth),
+):
     """Clear Redis state and post a comment requesting re-analysis."""
+    _validate_jira_key(key)
+    logger.info("[Audit] Jira mission %s requested for %s by %s", "reanalyze", key, user.email or user.label)
     await blackboard.clear_jira_mission_state(key)
 
     cfg = _jira_config()
@@ -168,8 +196,10 @@ async def reanalyze_mission(key: str, blackboard: BlackboardState = Depends(get_
 
 
 @router.post("/missions/{key}/dismiss")
-async def dismiss_mission(key: str):
+async def dismiss_mission(key: str, user: UserContext = Depends(_require_jira_mutation_auth)):
     """Remove the darwin label from the issue."""
+    _validate_jira_key(key)
+    logger.info("[Audit] Jira mission %s requested for %s by %s", "dismiss", key, user.email or user.label)
     cfg = _jira_config()
     if not cfg:
         raise HTTPException(503, "Jira not configured")
@@ -198,8 +228,14 @@ async def dismiss_mission(key: str):
 
 
 @router.post("/missions/{key}/retry")
-async def retry_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
+async def retry_mission(
+    key: str,
+    blackboard: BlackboardState = Depends(get_blackboard),
+    user: UserContext = Depends(_require_jira_mutation_auth),
+):
     """Clear Darwin state and re-trigger processing for a Jira issue."""
+    _validate_jira_key(key)
+    logger.info("[Audit] Jira mission %s requested for %s by %s", "retry", key, user.email or user.label)
     await blackboard.clear_jira_mission_state(key)
 
     cfg = _jira_config()

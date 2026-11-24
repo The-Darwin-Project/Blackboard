@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from redis.exceptions import ResponseError, WatchError
 
+from ..utils.jira_context import is_valid_jira_key
 from ..utils.vcs_approval import HEX_SHA_RE
 
 from ..models import (
@@ -4263,6 +4264,8 @@ return 1
 
     async def clear_jira_mission_state(self, issue_key: str) -> None:
         """Clear cached mission analysis state for a Jira issue."""
+        if not is_valid_jira_key(issue_key):
+            raise ValueError("Invalid Jira issue key format")
         await self.redis.delete(f"{self.JIRA_MISSION_PREFIX}{issue_key}")
 
     # =========================================================================

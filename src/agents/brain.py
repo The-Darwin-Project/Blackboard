@@ -335,6 +335,7 @@ from ..models import (
 )
 from ..ports import BroadcastPort, JarvisPeerPort
 from ..utils.event_markdown import event_to_markdown
+from ..utils.jira_context import extract_jira_context
 from ..utils.maintainers import maintainer_env_key, resolve_maintainer_emails
 from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import (
@@ -1482,6 +1483,22 @@ class Brain:
         return a_num != b_num
 
     @staticmethod
+    def _extract_jira_context(doc: EventDocument) -> tuple[bool, str | None]:
+        """Return (is_jira_event, normalized_issue_key) from top-level subject_type and nested jira_context."""
+        return extract_jira_context(doc)
+
+    @classmethod
+    def _jira_issue_differs(cls, a: EventDocument, b: EventDocument) -> bool:
+        """Return True if Jira context distinguishes the two events as different work items."""
+        a_is_jira, a_key = cls._extract_jira_context(a)
+        b_is_jira, b_key = cls._extract_jira_context(b)
+        if not a_is_jira and not b_is_jira:
+            return False
+        if a_is_jira != b_is_jira:
+            return True
+        return a_key != b_key
+
+    @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
         """Extract normalized MR/PR/Issue URL from gitlab_context, kargo_context, github_context, or github_issue_context.
 
@@ -1746,13 +1763,17 @@ class Brain:
                         pass  # different GitLab MR
                     elif self._github_pr_differs(event, existing):
                         pass  # different GitHub PR or issue
+                    elif self._jira_issue_differs(event, existing):
+                        pass  # different Jira issue (or Jira vs non-Jira)
                     elif new_mr_url and self._extract_mr_url(existing) and new_mr_url != self._extract_mr_url(existing):
                         pass  # different PR/MR URL (catch-all)
                     else:
+                        _, ex_jira_key = self._extract_jira_context(existing)
                         logger.info(
                             f"Closing duplicate event {event_id} -- "
                             f"existing event {eid} already handling {event.service}"
                             f"{f' MR !{ex_mr}' if ex_mr else ''}"
+                            f"{f' Jira {ex_jira_key}' if ex_jira_key else ''}"
                         )
                         await self._close_and_broadcast(
                             event_id,
