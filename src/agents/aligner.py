@@ -42,6 +42,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from ..models import ESCALATION_SCOPE_MAP
+from ..utils.prompt_sanitize import sanitize_untrusted_line
 
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
@@ -703,10 +704,12 @@ class Aligner:
         self, *, service: str, project: str, stage: str, promotion: str,
         freight: str, phase: str, message: str, failed_step: str,
         mr_url: str, started_at: str = "", finished_at: str = "",
+        failure_type: str = "promotion", verification_id: str = "",
+        analysis_run: str = "",
     ) -> Optional[str]:
-        """Create an event for a failed Kargo promotion (called by KargoObserver).
+        """Create an event for a failed Kargo promotion or verification (called by KargoObserver).
 
-        Returns the event_id on creation, None if skipped (active event or cooldown).
+        Returns the event_id on creation, None if skipped (active event, cooldown, or escalation gate).
         """
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
@@ -732,7 +735,7 @@ class Aligner:
             return None
 
         gitlab_context = None
-        if mr_url:
+        if mr_url and failure_type != "verification":
             from ..utils.vcs_approval import parse_mr_url
             parsed = parse_mr_url(mr_url)
             if parsed:
@@ -743,9 +746,26 @@ class Aligner:
                     "mr_iid": int(mr_iid),
                 }
 
+        is_verification = failure_type == "verification"
+        safe_msg = sanitize_untrusted_line(message, max_len=200, redact=False)
+        safe_stage = sanitize_untrusted_line(stage, max_len=120, redact=False)
+        safe_project = sanitize_untrusted_line(project, max_len=120, redact=False)
+        safe_analysis = sanitize_untrusted_line(analysis_run, max_len=120, redact=False)
+        safe_phase = sanitize_untrusted_line(phase, max_len=120, redact=False)
+        safe_failed_step = sanitize_untrusted_line(failed_step, max_len=120, redact=False)
+        safe_service = sanitize_untrusted_line(service, max_len=120, redact=False)
+        safe_verif_id = sanitize_untrusted_line(verification_id, max_len=120, redact=False)
+
+        if is_verification:
+            display_text = f"[kargo] Verification failed: {safe_stage}@{safe_project} -- {safe_msg}"
+            reason = f"kargo verification failed: {safe_analysis or safe_phase}"
+        else:
+            display_text = f"[kargo] Promotion failed: {safe_stage}@{safe_project} -- {safe_msg}"
+            reason = f"kargo promotion failed: {safe_failed_step or safe_phase}"
+
         from ..models import EventEvidence
         evidence = EventEvidence(
-            display_text=f"[kargo] Promotion failed: {stage}@{project} -- {message[:200]}",
+            display_text=display_text,
             source_type="aligner",
             triggered_by="system",
             domain="clear",
@@ -763,12 +783,15 @@ class Aligner:
                 "mr_url": mr_url,
                 "started_at": started_at,
                 "finished_at": finished_at,
+                "failure_type": failure_type,
+                "verification_id": verification_id,
+                "analysis_run": analysis_run,
             },
         )
         event_id = await self.blackboard.create_event(
             source="aligner",
-            service=service,
-            reason=f"kargo promotion failed: {failed_step or phase}",
+            service=safe_service,
+            reason=reason,
             evidence=evidence,
             subject_type="kargo_stage",
         )
@@ -776,14 +799,21 @@ class Aligner:
         await self.blackboard.redis.set(
             f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
         )
-        logger.info(f"Created Kargo event for {service} ({phase}: {failed_step})")
+        if is_verification:
+            logger.info(f"Created Kargo event for {safe_service} (verification {safe_phase}: {safe_analysis or safe_verif_id})")
+        else:
+            logger.info(f"Created Kargo event for {safe_service} ({safe_phase}: {safe_failed_step})")
         return event_id
 
     async def handle_promotion_recovery(
         self, *, service: str, project: str, stage: str, promotion: str,
+        failure_type: str = "promotion", verification_id: str = "",
     ) -> None:
-        """Notify active events that a newer promotion succeeded (called by KargoObserver)."""
-        msg = f"[kargo] Promotion succeeded: {stage}@{project} (promotion={promotion})"
+        """Notify active events that a newer promotion or verification succeeded (called by KargoObserver)."""
+        if failure_type == "verification":
+            msg = f"[kargo] Verification succeeded: {stage}@{project} (verification={verification_id or promotion})"
+        else:
+            msg = f"[kargo] Promotion succeeded: {stage}@{project} (promotion={promotion})"
         try:
             await self._notify_active_events(service, msg)
         finally:

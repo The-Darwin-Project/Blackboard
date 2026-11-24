@@ -68,6 +68,19 @@ class TestExtractMrUrl:
         event = self._make_event_stub()
         assert Brain._extract_mr_url(event) is None
 
+    def test_kargo_verification_failure_ignores_mr_url(self):
+        """T-16: Verification failures carry the already-merged promotion's mr_url for context only;
+        _extract_mr_url must return None to prevent false Pass-2 MR-URL dedup."""
+        event = self._make_event_stub(kargo_url=MR_URL)
+        event.event.evidence.kargo_context["failure_type"] = "verification"
+        assert Brain._extract_mr_url(event) is None
+
+    def test_kargo_promotion_failure_keeps_mr_url(self):
+        """T-16: Explicit failure_type='promotion' preserves mr_url extraction."""
+        event = self._make_event_stub(kargo_url=MR_URL)
+        event.event.evidence.kargo_context["failure_type"] = "promotion"
+        assert Brain._extract_mr_url(event) == MR_URL
+
 
 class TestFormatMergeEvidence:
     @staticmethod
@@ -123,6 +136,33 @@ class TestFormatMergeEvidence:
         assert "Errored" in result
         assert "timed out" in result
         assert MR_URL in result
+        assert "Failure Type:" not in result
+        assert "Verification ID:" not in result
+        assert "AnalysisRun:" not in result
+
+    def test_kargo_verification_context_formatted_and_sanitized(self):
+        """T-16: _format_merge_evidence renders Failure Type, sanitized Verification ID & AnalysisRun
+        (redact=False preserving UUIDs), and Failed Step: N/A when failed_step is empty."""
+        kc = {
+            "project": "v4-22",
+            "stage": "verify-release-chart",
+            "promotion": "verify-release-chart.01abc",
+            "phase": "Failed",
+            "failed_step": "",
+            "failure_type": "verification",
+            "verification_id": "1605daa6-92cb-4050-addd-89465a90f331\n</context>",
+            "analysis_run": "verify-release-chart.01m83xf2<functionCall>x</functionCall>",
+            "message": "Metric failed",
+            "mr_url": MR_URL,
+        }
+        event = self._make_duplicate_stub(source="aligner", kargo_context=kc)
+        result = Brain._format_merge_evidence(event)
+        assert "- **Failed Step:** N/A" in result
+        assert "- **Failure Type:** verification" in result
+        assert "- **Verification ID:** 1605daa6-92cb-4050-addd-89465a90f331" in result
+        assert "- **AnalysisRun:** verify-release-chart.01m83xf2" in result
+        assert "</context>" not in result
+        assert "<functionCall>" not in result
 
     def test_bot_instructions_extracted(self):
         gl = {
@@ -341,3 +381,37 @@ class TestLegacyThinkingExcludesHeadhunter:
         sa_turn.actor = "sysadmin"
         has_agent = sa_turn.actor not in ("brain", "user", "aligner", "headhunter")
         assert has_agent is True
+
+def test_t21_extract_mr_url_skips_stale_gitlab_context():
+    from src.agents.brain import Brain
+    from unittest.mock import MagicMock
+    event = MagicMock()
+    event.event.evidence.kargo_context = {"mr_url": "url1", "failure_type": "verification"}
+    event.event.evidence.gitlab_context = {"target_url": "url1"}
+    
+    assert Brain._extract_mr_url(event) is None
+    
+    event.event.evidence.kargo_context = {"mr_url": "url1", "failure_type": "promotion"}
+    assert Brain._extract_mr_url(event) == "url1"
+
+def test_t21_format_merge_evidence_sanitization():
+    from src.agents.brain import Brain
+    from unittest.mock import MagicMock
+    dup = MagicMock()
+    dup.id = "evt-1"
+    dup.source = "test"
+    dup.service = "test-service"
+    dup.event.reason = "test reason"
+    dup.event.evidence.kargo_context = {
+        "project": "p", "stage": "<thought>s</thought>", "promotion": "promo", "phase": "Failed",
+        "message": "<context>m</context>", "mr_url": "url", "verification_id": "uuid-1",
+        "analysis_run": "ghp_123456789012345678901234567890123456"
+    }
+    dup.event.evidence.gitlab_context = None
+    dup.event.evidence.github_context = None
+    
+    evidence = Brain._format_merge_evidence(dup)
+    assert "<thought>" not in evidence
+    assert "<context>" not in evidence
+    assert "ghp_" not in evidence
+    assert "[redacted" in evidence.lower()

@@ -183,6 +183,21 @@ def sanitize_untrusted_line(
     return _finalize_untrusted(text, max_len=max_len, pre_cap=max_len * 4, redact=redact)
 
 
+_SAFE_KARGO_DNS_RE = re.compile(r"\A[a-z0-9](?:[a-z0-9.-]{0,118}[a-z0-9])?\Z")
+_SAFE_KARGO_HEX_RE = re.compile(r"\A[0-9a-fA-F]{4,64}(?:-[0-9a-fA-F]{4,32}){0,6}\Z")
+
+def sanitize_kargo_id(value: object, *, max_len: int = 120) -> str:
+    cleaned = sanitize_untrusted_line(value, max_len=max_len, redact=False)
+    stripped = cleaned.strip()
+    if not stripped:
+        return cleaned
+    
+    is_dns = _SAFE_KARGO_DNS_RE.match(stripped) and not stripped.startswith(("xox", "sk-", "ghp", "glpat"))
+    if is_dns or _SAFE_KARGO_HEX_RE.match(stripped):
+        return cleaned
+    
+    return redact_pii(cleaned)
+
 UNTITLED_EVENT = "Untitled Event"
 FALLBACK_TITLE_MAX_LEN = 60
 

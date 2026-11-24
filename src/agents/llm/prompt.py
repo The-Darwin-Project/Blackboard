@@ -37,6 +37,7 @@ from src.utils.prompt_sanitize import (
     sanitize_prompt_text,
     sanitize_untrusted_block,
     sanitize_untrusted_line,
+    sanitize_kargo_id,
 )
 from ..headhunter_utils import _DESC_SAFETY_CAP
 
@@ -156,16 +157,22 @@ def _build_subject_block(
 
     if subject_type == "kargo_stage" and ev and ev.kargo_context:
         kc = ev.kargo_context
-        lines.append(f"Kargo Stage: {kc.get('stage', event.service)}")
-        lines.append(f"  Project: {kc.get('project', '')}")
+        lines.append(f"Kargo Stage: {_safe_prompt_field(kc.get('stage', event.service), max_len=120)}")
+        lines.append(f"  Project: {_safe_prompt_field(kc.get('project', ''), max_len=120)}")
         if kc.get("promotion"):
-            lines.append(f"  Promotion: {kc['promotion']}")
+            lines.append(f"  Promotion: {_safe_prompt_field(kc['promotion'], max_len=120)}")
         if kc.get("phase"):
-            lines.append(f"  Phase: {kc['phase']}")
+            lines.append(f"  Phase: {_safe_prompt_field(kc['phase'], max_len=120)}")
         if kc.get("failed_step"):
-            lines.append(f"  Failed Step: {kc['failed_step']}")
+            lines.append(f"  Failed Step: {_safe_prompt_field(kc['failed_step'], max_len=120)}")
+        if kc.get("failure_type") == "verification":
+            lines.append("  Failure Type: verification")
+        if kc.get("verification_id"):
+            lines.append(f"  Verification ID: {sanitize_kargo_id(kc['verification_id'], max_len=120)}")
+        if kc.get("analysis_run"):
+            lines.append(f"  AnalysisRun: {sanitize_kargo_id(kc['analysis_run'], max_len=120)}")
         if kc.get("mr_url"):
-            lines.append(f"  MR: {kc['mr_url']}")
+            lines.append(f"  MR: {_safe_prompt_field(kc['mr_url'], max_len=512)}")
 
     elif subject_type == "jira" and ev and ev.jira_context:
         jc = ev.jira_context

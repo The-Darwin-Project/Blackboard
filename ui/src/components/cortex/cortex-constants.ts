@@ -84,7 +84,7 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'tool:lookup_journal': 'Search system journal for recent log entries',
   'tool:consult_deep_memory': 'Query vector memory for lessons and past events',
   'tool:refresh_gitlab_context': 'Fetch latest GitLab MR and pipeline status',
-  'tool:refresh_kargo_context': 'Fetch latest Kargo promotion status',
+  'tool:refresh_kargo_context': 'Fetch latest Kargo promotion and verification status',
   'tool:take_note': 'Record a qualitative field note for long-term knowledge',
   'tool:review_notes': 'Review all accumulated field notes in the notebook',
   'tool:recall_pruned_turns': 'Retrieve historical conversation turns pruned from context window',

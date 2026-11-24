@@ -50,22 +50,58 @@ logger = logging.getLogger(__name__)
 HEX_SHA_RE = re.compile(r"\A[0-9a-fA-F]{7,64}\Z")
 
 
+def is_stale_verification_gitlab_mirror(event: Any) -> bool:
+    """True if gitlab_context is just a best-effort mirror of a Kargo verification failure."""
+    ev_obj = getattr(getattr(event, "event", None), "evidence", None)
+    if not ev_obj:
+        return False
+    kc = getattr(ev_obj, "kargo_context", None)
+    if not isinstance(kc, dict) or kc.get("failure_type") != "verification":
+        return False
+    
+    gl_ctx = getattr(ev_obj, "gitlab_context", None)
+    if not isinstance(gl_ctx, dict):
+        return False
+        
+    kc_url = kc.get("mr_url", "")
+    gl_url = gl_ctx.get("target_url", "")
+    
+    if kc_url and gl_url and kc_url == gl_url:
+        return True
+        
+    # Also check parsed
+    if kc_url:
+        kc_parsed = parse_mr_url(kc_url)
+        if kc_parsed:
+            kc_pid, kc_iid = kc_parsed
+            if str(gl_ctx.get("project_id")) == str(kc_pid) and str(gl_ctx.get("mr_iid")) == str(kc_iid):
+                return True
+
+    return False
+
+
 def extract_context_head_sha(event: Any) -> str | None:
     """Extract cached HEAD SHA from gitlab_context, github_context, or kargo_context."""
     ev_obj = getattr(getattr(event, "event", None), "evidence", None)
     if not ev_obj:
         return None
+    stale_mirror = is_stale_verification_gitlab_mirror(event)
     for attr, keys in (
         ("gitlab_context", ("head_sha", "sha")),
         ("github_context", ("head_sha",)),
         ("kargo_context", ("head_sha", "sha")),
     ):
         ctx = getattr(ev_obj, attr, None)
-        if isinstance(ctx, dict):
-            for k in keys:
-                val = ctx.get(k)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
+        if not isinstance(ctx, dict):
+            continue
+        if attr == "gitlab_context" and stale_mirror:
+            continue
+        if attr == "kargo_context" and ctx.get("failure_type") == "verification":
+            continue
+        for k in keys:
+            val = ctx.get(k)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
     return None
 
 
@@ -97,8 +133,10 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
     if not evidence:
         return None, None
 
+    stale_mirror = is_stale_verification_gitlab_mirror(event)
+
     gl_ctx = getattr(evidence, "gitlab_context", None)
-    if isinstance(gl_ctx, dict) and gl_ctx:
+    if not stale_mirror and isinstance(gl_ctx, dict) and gl_ctx:
         project_id = gl_ctx.get("project_id")
         mr_iid = str(gl_ctx.get("mr_iid") or gl_ctx.get("iid") or "")
         if project_id and mr_iid:
@@ -109,7 +147,7 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
         return await _resolve_github_head(gh_ctx)
 
     kargo_ctx = getattr(evidence, "kargo_context", None)
-    if isinstance(kargo_ctx, dict) and kargo_ctx.get("mr_url"):
+    if isinstance(kargo_ctx, dict) and kargo_ctx.get("mr_url") and kargo_ctx.get("failure_type") != "verification":
         parsed = parse_mr_url(kargo_ctx["mr_url"])
         if parsed:
             project_id, mr_iid = parsed
@@ -272,9 +310,16 @@ def _is_vcs_backed_event(event: Any) -> bool:
     ev_obj = getattr(getattr(event, "event", None), "evidence", None)
     if ev_obj is None:
         return False
+    stale_mirror = is_stale_verification_gitlab_mirror(event)
     for attr, keys in (("gitlab_context", ("mr_iid", "mr_id")), ("github_context", ("pr_number",)), ("kargo_context", ("mr_url",))):
         ctx = getattr(ev_obj, attr, None)
-        if isinstance(ctx, dict) and any(ctx.get(k) for k in keys):
+        if not isinstance(ctx, dict):
+            continue
+        if attr == "gitlab_context" and stale_mirror:
+            continue
+        if attr == "kargo_context" and ctx.get("failure_type") == "verification":
+            continue
+        if any(ctx.get(k) for k in keys):
             return True
     return False
 

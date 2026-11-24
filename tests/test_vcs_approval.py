@@ -342,6 +342,50 @@ class TestResolveLiveHeadShaDispatcher:
         assert result == ("265", "y")
 
     @pytest.mark.asyncio
+    async def test_kargo_verification_failure_ignores_mr_url_in_head_sha_and_vcs_backed(self):
+        """T-19: resolve_live_head_sha and _is_vcs_backed_event ignore kargo_context['mr_url']
+        when failure_type == 'verification'."""
+        from src.utils.vcs_approval import _is_vcs_backed_event
+
+        event = MagicMock()
+        event.event.evidence.gitlab_context = None
+        event.event.evidence.github_context = None
+        event.event.evidence.kargo_context = {
+            "project": "v4-22",
+            "stage": "verify-release-chart",
+            "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/42",
+            "failure_type": "verification",
+        }
+        assert _is_vcs_backed_event(event) is False
+        with patch("src.utils.vcs_approval._resolve_gitlab_head", AsyncMock()) as mock_gl:
+            result = await resolve_live_head_sha(event)
+        assert result == (None, None)
+        mock_gl.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kargo_promotion_failure_preserves_mr_url_resolution_and_vcs_backed(self):
+        """T-19: Promotion-failure kargo_context with mr_url remains VCS-backed and resolves live SHA."""
+        from src.utils.vcs_approval import _is_vcs_backed_event
+
+        event = MagicMock()
+        event.event.evidence.gitlab_context = None
+        event.event.evidence.github_context = None
+        event.event.evidence.kargo_context = {
+            "project": "v4-22",
+            "stage": "promote-stage",
+            "mr_url": "https://gitlab.example.com/org/repo/-/merge_requests/42",
+            "failure_type": "promotion",
+        }
+        assert _is_vcs_backed_event(event) is True
+        with patch(
+            "src.utils.vcs_approval._resolve_gitlab_head",
+            AsyncMock(return_value=("42", "live-sha-kargo")),
+        ) as mock_gl:
+            result = await resolve_live_head_sha(event)
+        assert result == ("42", "live-sha-kargo")
+        mock_gl.assert_awaited_once_with({"project_id": "org/repo", "mr_iid": 42})
+
+    @pytest.mark.asyncio
     async def test_resolve_live_head_sha_tls_verify_ca_bundle(self, monkeypatch):
         """T-11 / Step 5: resolve_live_head_sha passes CA bundle path and never verify=False."""
         from src.utils.vcs_approval import _resolve_gitlab_head
@@ -897,3 +941,26 @@ class TestATDDT9VcsApprovalGitHubAppAuth:
         _, get_kwargs = mock_http_cls.return_value.__aenter__.return_value.get.call_args
         assert get_kwargs["headers"]["Authorization"] == "Bearer ghp_timeout_pat"
 
+
+def test_t21_extract_context_head_sha_skips_verification_kargo_context():
+    from src.utils.vcs_approval import extract_context_head_sha
+    from unittest.mock import MagicMock
+    event = MagicMock()
+    event.event.evidence.gitlab_context = None
+    event.event.evidence.github_context = None
+    event.event.evidence.kargo_context = {"head_sha": "sha123", "failure_type": "verification"}
+    assert extract_context_head_sha(event) is None
+    
+    event.event.evidence.kargo_context = {"head_sha": "sha123", "failure_type": "promotion"}
+    assert extract_context_head_sha(event) == "sha123"
+
+def test_t21_stale_gitlab_context_mirror_ignored():
+    from src.utils.vcs_approval import extract_context_head_sha, _is_vcs_backed_event
+    from unittest.mock import MagicMock
+    event = MagicMock()
+    event.event.evidence.kargo_context = {"mr_url": "url1", "failure_type": "verification"}
+    event.event.evidence.gitlab_context = {"target_url": "url1", "head_sha": "sha123", "mr_iid": "1"}
+    event.event.evidence.github_context = None
+    
+    assert extract_context_head_sha(event) is None
+    assert _is_vcs_backed_event(event) is False
