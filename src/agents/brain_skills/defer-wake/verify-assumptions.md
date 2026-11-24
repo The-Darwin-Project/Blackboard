@@ -21,6 +21,7 @@ verify phase is the correct checkpoint for evaluating evidence.
    - The process has exceeded its expected duration (consult deep memory for typical timing)
    - An error condition persists across checks
    Do NOT escalate a healthy monitoring cycle just because the defer count is high.
+   Before diagnosing an anomaly, escalating, or re-deferring, re-check the shared field notes (see `always/10-observations.md`) -- peer events may have flagged a cross-event outage while you waited.
 4. **Snapshot for trajectory** -- Without a quantifiable snapshot before each deferral, you have no trajectory data on wake -- just "still running" with no way to tell if it's progressing or stalled. Call record_observation with the current quantifiable state (pipeline status code, queue depth, retry count) before deferring. When you wake, list_observations shows whether the number moved -- that is your progress signal.
 
 Re-defer after fresh measurement is the correct controller output when the

@@ -137,11 +137,16 @@ same mistake, or miss the same cross-event pattern every time.
 Field notes and deep memory capture knowledge at different time scales —
 notes hold recent, not-yet-digested observations that may not have been
 archived yet. Checking both during triage maximizes the knowledge available
-for classification.
+for classification. The notebook is shared: peer events record cross-event
+outages and environment changes in it while an older event is deferred, so a
+long deferral leaves your picture stale. Re-reading on wake prevents duplicate
+misdiagnoses, misleading `env-quirk` notes, and false escalations.
 
 Call `review_notes` during triage to check what knowledge has been captured.
 Notes complement deep memory — they capture recent, not-yet-digested knowledge
-that may not have been archived yet. Call `review_notes` before `take_note` as well:
+that may not have been archived yet. Call `review_notes` again on `defer_wake`,
+when it is available, before diagnosing an unexpected anomaly, escalating, or
+recording a new `env-quirk` note. Call `review_notes` before `take_note` as well:
 extending or correcting an existing note keeps the shared notebook compact, while a
 duplicate dilutes the signal loaded into every concurrent event.
 

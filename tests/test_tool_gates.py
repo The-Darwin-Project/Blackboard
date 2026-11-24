@@ -333,6 +333,42 @@ class TestDomainChaotic:
         assert {"wait_for_agent", "reply_to_agent", "message_agent"} <= names
 
 
+class TestReviewNotesAvailabilityIssue349:
+    """#349: the skill tells the Brain to call review_notes on defer_wake; the runtime must authorize it there."""
+
+    def test_authorized_on_defer_wake_iter0_in_verify_while_defer_event_stripped(self):
+        ctx = _ctx(is_defer_wake=True, iteration=0, brain_phase="verify")
+        names = _names(evaluate_gates(ALL_SCHEMAS, ctx))
+        assert "defer_event" not in names  # DEFER_WAKE_ITER0 really fired
+        assert "review_notes" in names
+
+    @pytest.mark.parametrize("phase", ["verify", "dispatch", "escalate"])
+    def test_authorized_in_phase(self, phase):
+        ctx = _ctx(brain_phase=phase)
+        assert "review_notes" in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    @pytest.mark.parametrize("phase", ["dispatch", "escalate"])
+    def test_authorized_on_defer_wake_iter0_in_phase(self, phase):
+        ctx = _ctx(is_defer_wake=True, iteration=0, brain_phase=phase)
+        assert "review_notes" in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_excluded_in_close(self):
+        ctx = _ctx(brain_phase="close")
+        assert "review_notes" not in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_excluded_when_intermediate(self):
+        ctx = _ctx(context_flags={"is_intermediate": True, "brain_has_classified": True})
+        assert "review_notes" not in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_excluded_pre_classification(self):
+        ctx = _ctx(context_flags={"brain_has_classified": False})
+        assert "review_notes" not in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+    def test_excluded_in_chaotic_domain(self):
+        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic"})
+        assert "review_notes" not in _names(evaluate_gates(ALL_SCHEMAS, ctx))
+
+
 class TestDomainCasual:
     def test_restricts_to_conversational_tools(self):
         ctx = _ctx(
