@@ -3,8 +3,10 @@
 # 1. [Pattern]: K8s Watch with exponential backoff (1s-30s). Matches KargoWatchAdapter in payloads service.
 # 2. [Pattern]: Initial sync on start() records promotion & verification failures into _reported_failures WITHOUT callbacks.
 # 3. [Pattern]: 410 Gone triggers full re-list with fresh resource_version.
-#    _initial_sync() clears-then-repopulates ONLY on success. Failed K8s API call preserves previous state.
-# 4. [Constraint]: Callbacks are async -- never raise into the watch loop. Wrap in try/except; set _active_watches inside try.
+#    _initial_sync() snapshots prev_* dicts, reconciles current stages in-place (preserving hold-phase
+#    watches and pruning deleted stages), and restores prev_* on exception.
+# 4. [Constraint]: Callbacks are async -- never raise into the watch loop. Wrap in try/except; rollback both
+#    _reported_failures and _failure_details on exception.
 # 5. [Pattern]: _process_stage() detects promotion failures (dedup: promo_name) and post-promotion verification failures
 #    (Failed/Error/Inconclusive, dedup: verification:<id>; Aborted/Pending/Running held); recovery is verification-gated.
 # 6. [Pattern]: _process_stage() evaluates terminal lastPromotion + freightHistory[0] (keeping failed stages in Ops sidebar during retries), while get_stage_status() and poll_kargo_stage_status() share project_stage_status() preferring active currentPromotion.
@@ -52,7 +54,7 @@ class KargoObserver:
     def __init__(
         self,
         blackboard: "BlackboardState",
-        failure_callback: Optional[Callable[..., Awaitable[None]]] = None,
+        failure_callback: Optional[Callable[..., Awaitable[Any]]] = None,
         recovery_callback: Optional[Callable[..., Awaitable[None]]] = None,
         broadcast_callback: Optional[Callable[..., Awaitable[None]]] = None,
     ):
@@ -151,10 +153,11 @@ class KargoObserver:
             return False
 
     async def _initial_sync(self) -> None:
-        """List all stages, record currently Errored ones without firing callbacks.
+        """List all stages, reconcile failure/watch state in-place without firing callbacks.
 
-        Builds new state in temporary dicts and swaps on success. A failed K8s API
-        call preserves the previous state instead of leaving _failure_details empty.
+        Snapshots prev_* dicts first and restores them on exception. Reconciles live stages
+        in-place (preserving _active_watches for stages in verification hold phases or mid-retry)
+        and prunes stages absent from the cluster list.
         """
         prev_failures = self._reported_failures.copy()
         prev_details = self._failure_details.copy()
@@ -167,12 +170,18 @@ class KargoObserver:
                 ),
             )
             new_rv = result.get("metadata", {}).get("resourceVersion", "")
-            self._reported_failures.clear()
-            self._failure_details.clear()
+            seen_keys: set[str] = set()
             for stage in result.get("items", []):
+                if isinstance(stage, dict):
+                    meta = stage.get("metadata") if isinstance(stage.get("metadata"), dict) else {}
+                    ns, name = _s(meta.get("namespace")), _s(meta.get("name"))
+                    if ns and name:
+                        seen_keys.add(f"{ns}/{name}")
                 await self._process_stage(stage, suppress_callbacks=True)
-            for sk in list(self._active_watches):
-                if sk not in self._reported_failures:
+            for sk in list(set(self._reported_failures) | set(self._failure_details) | set(self._active_watches)):
+                if sk not in seen_keys:
+                    self._reported_failures.pop(sk, None)
+                    self._failure_details.pop(sk, None)
                     self._active_watches.pop(sk, None)
             self._resource_version = new_rv
             logger.info(
@@ -188,23 +197,33 @@ class KargoObserver:
             self._active_watches.update(prev_watches)
             logger.error(f"KargoObserver initial sync failed (previous state preserved): {e}")
 
+    @staticmethod
+    def _put_bounded(q: Any, item: Any) -> bool:
+        """Enqueue item into bounded queue, evicting oldest with warning on overflow."""
+        import queue as _queue
+
+        try:
+            q.put_nowait(item)
+            return True
+        except _queue.Full:
+            try:
+                q.get_nowait()
+            except _queue.Empty:
+                pass
+            logger.warning(
+                "KargoObserver watch queue full (maxsize=%s); dropped oldest watch event",
+                getattr(q, "maxsize", "?"),
+            )
+            try:
+                q.put_nowait(item)
+            except _queue.Full:
+                pass
+            return False
+
     async def _watch_loop(self) -> None:
         from kubernetes import watch
         from kubernetes.client.exceptions import ApiException
         import queue as _queue
-
-        def _put_bounded(q: _queue.Queue, item: Any) -> None:
-            try:
-                q.put_nowait(item)
-            except _queue.Full:
-                try:
-                    q.get_nowait()
-                except _queue.Empty:
-                    pass
-                try:
-                    q.put_nowait(item)
-                except _queue.Full:
-                    pass
 
         retry_delay = 1
         while self._running:
@@ -227,11 +246,11 @@ class KargoObserver:
                         for event in w.stream(
                             self._custom_api.list_cluster_custom_object, **kwargs,
                         ):
-                            _put_bounded(event_q, event)
+                            self._put_bounded(event_q, event)
                     except Exception as e:
-                        _put_bounded(event_q, e)
+                        self._put_bounded(event_q, e)
                     finally:
-                        _put_bounded(event_q, None)
+                        self._put_bounded(event_q, None)
 
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(None, _run_watch)
@@ -312,12 +331,17 @@ class KargoObserver:
         self._failure_details[stage_key] = details
         if not suppress_callbacks and self.failure_callback:
             try:
-                await self.failure_callback(**details)
-                self._reported_failures[stage_key] = dedup_key
-                self._active_watches[stage_key] = details["service"]
+                cb_result = await self.failure_callback(**details)
             except Exception as e:
                 self._reported_failures.pop(stage_key, None)
+                self._failure_details.pop(stage_key, None)
                 logger.error(f"KargoObserver failure_callback error for {stage_key}: {e}")
+                return
+            self._active_watches[stage_key] = details["service"]
+            if cb_result is not None:
+                self._reported_failures[stage_key] = dedup_key
+            else:
+                self._reported_failures.pop(stage_key, None)
         else:
             self._reported_failures[stage_key] = dedup_key
         if not suppress_callbacks:
@@ -395,11 +419,15 @@ class KargoObserver:
         # Priority 4: Verification-gated recovery
         if stage_key in self._active_watches or stage_key in self._reported_failures:
             prev_key = self._reported_failures.get(stage_key, "")
-            was_verification = prev_key.startswith("verification:")
+            was_verification = (
+                prev_key.startswith("verification:")
+                or self._failure_details.get(stage_key, {}).get("failure_type") == "verification"
+            )
             if was_verification:
+                spec = stage.get("spec") if isinstance(stage.get("spec"), dict) else {}
                 recovered = (
-                    verif_phase == "Successful"
-                    and build_verification_dedup_key(verif, promo_name) != prev_key
+                    (verif_phase == "Successful" and build_verification_dedup_key(verif, promo_name) != prev_key)
+                    or (not verif and not spec.get("verification") and promo_phase == "Succeeded")
                 )
             else:
                 spec = stage.get("spec") if isinstance(stage.get("spec"), dict) else {}

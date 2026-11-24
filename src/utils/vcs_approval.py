@@ -50,6 +50,20 @@ logger = logging.getLogger(__name__)
 HEX_SHA_RE = re.compile(r"\A[0-9a-fA-F]{7,64}\Z")
 
 
+def _gitlab_ctx_matches_mr_url(gl_ctx: dict, mr_url: str) -> bool:
+    """Return True if gl_ctx points to the same MR as mr_url (URL or parsed project/iid)."""
+    if not mr_url:
+        return False
+    gl_url = gl_ctx.get("target_url", "")
+    if gl_url and gl_url == mr_url:
+        return True
+    parsed = parse_mr_url(mr_url)
+    if parsed:
+        kc_pid, kc_iid = parsed
+        return str(gl_ctx.get("project_id")) == str(kc_pid) and str(gl_ctx.get("mr_iid")) == str(kc_iid)
+    return False
+
+
 def is_stale_verification_gitlab_mirror(event: Any) -> bool:
     """True if gitlab_context is just a best-effort mirror of a Kargo verification failure."""
     ev_obj = getattr(getattr(event, "event", None), "evidence", None)
@@ -58,26 +72,35 @@ def is_stale_verification_gitlab_mirror(event: Any) -> bool:
     kc = getattr(ev_obj, "kargo_context", None)
     if not isinstance(kc, dict) or kc.get("failure_type") != "verification":
         return False
-    
-    gl_ctx = getattr(ev_obj, "gitlab_context", None)
-    if not isinstance(gl_ctx, dict):
-        return False
-        
-    kc_url = kc.get("mr_url", "")
-    gl_url = gl_ctx.get("target_url", "")
-    
-    if kc_url and gl_url and kc_url == gl_url:
-        return True
-        
-    # Also check parsed
-    if kc_url:
-        kc_parsed = parse_mr_url(kc_url)
-        if kc_parsed:
-            kc_pid, kc_iid = kc_parsed
-            if str(gl_ctx.get("project_id")) == str(kc_pid) and str(gl_ctx.get("mr_iid")) == str(kc_iid):
-                return True
 
-    return False
+    gl_ctx = getattr(ev_obj, "gitlab_context", None)
+    if not isinstance(gl_ctx, dict) or not gl_ctx:
+        return False
+
+    if gl_ctx.get("mirrored_from_kargo") is True:
+        return True
+    if gl_ctx.get("mirrored_from_kargo") is False:
+        return False
+
+    return _gitlab_ctx_matches_mr_url(gl_ctx, kc.get("mr_url", ""))
+
+
+def _effective_gitlab_context(evidence: Any, event: Any) -> dict | None:
+    """Return gitlab_context unless it is a stale mirror of a Kargo verification event."""
+    gl_ctx = getattr(evidence, "gitlab_context", None)
+    if not isinstance(gl_ctx, dict) or not gl_ctx:
+        return None
+    if is_stale_verification_gitlab_mirror(event):
+        return None
+    return gl_ctx
+
+
+def _effective_kargo_context(evidence: Any) -> dict | None:
+    """Return kargo_context unless it is a verification failure (whose promo MR is already merged)."""
+    kc = getattr(evidence, "kargo_context", None)
+    if not isinstance(kc, dict) or not kc or kc.get("failure_type") == "verification":
+        return None
+    return kc
 
 
 def extract_context_head_sha(event: Any) -> str | None:
@@ -85,18 +108,13 @@ def extract_context_head_sha(event: Any) -> str | None:
     ev_obj = getattr(getattr(event, "event", None), "evidence", None)
     if not ev_obj:
         return None
-    stale_mirror = is_stale_verification_gitlab_mirror(event)
-    for attr, keys in (
-        ("gitlab_context", ("head_sha", "sha")),
-        ("github_context", ("head_sha",)),
-        ("kargo_context", ("head_sha", "sha")),
-    ):
-        ctx = getattr(ev_obj, attr, None)
+    contexts = (
+        (_effective_gitlab_context(ev_obj, event), ("head_sha", "sha")),
+        (getattr(ev_obj, "github_context", None), ("head_sha",)),
+        (_effective_kargo_context(ev_obj), ("head_sha", "sha")),
+    )
+    for ctx, keys in contexts:
         if not isinstance(ctx, dict):
-            continue
-        if attr == "gitlab_context" and stale_mirror:
-            continue
-        if attr == "kargo_context" and ctx.get("failure_type") == "verification":
             continue
         for k in keys:
             val = ctx.get(k)
@@ -133,10 +151,8 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
     if not evidence:
         return None, None
 
-    stale_mirror = is_stale_verification_gitlab_mirror(event)
-
-    gl_ctx = getattr(evidence, "gitlab_context", None)
-    if not stale_mirror and isinstance(gl_ctx, dict) and gl_ctx:
+    gl_ctx = _effective_gitlab_context(evidence, event)
+    if gl_ctx:
         project_id = gl_ctx.get("project_id")
         mr_iid = str(gl_ctx.get("mr_iid") or gl_ctx.get("iid") or "")
         if project_id and mr_iid:
@@ -146,8 +162,8 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
     if isinstance(gh_ctx, dict) and gh_ctx:
         return await _resolve_github_head(gh_ctx)
 
-    kargo_ctx = getattr(evidence, "kargo_context", None)
-    if isinstance(kargo_ctx, dict) and kargo_ctx.get("mr_url") and kargo_ctx.get("failure_type") != "verification":
+    kargo_ctx = _effective_kargo_context(evidence)
+    if kargo_ctx and kargo_ctx.get("mr_url"):
         parsed = parse_mr_url(kargo_ctx["mr_url"])
         if parsed:
             project_id, mr_iid = parsed
@@ -156,7 +172,7 @@ async def resolve_live_head_sha(event: Any) -> tuple[str | None, str | None]:
                 "mr_iid": mr_iid,
             })
 
-    if isinstance(gl_ctx, dict) and gl_ctx:
+    if gl_ctx:
         return await _resolve_gitlab_head(gl_ctx)
 
     return None, None
@@ -307,19 +323,21 @@ class ApprovalDriftResult:
 
 
 def _is_vcs_backed_event(event: Any) -> bool:
+    """True when the event targets an active MR/PR whose live HEAD SHA gates approval.
+
+    Verification-only Kargo failures without an explicit fix MR/PR (neither GitHub PR nor
+    non-mirror GitLab MR) are operational rather than VCS-merge-backed, so they return False.
+    """
     ev_obj = getattr(getattr(event, "event", None), "evidence", None)
     if ev_obj is None:
         return False
-    stale_mirror = is_stale_verification_gitlab_mirror(event)
-    for attr, keys in (("gitlab_context", ("mr_iid", "mr_id")), ("github_context", ("pr_number",)), ("kargo_context", ("mr_url",))):
-        ctx = getattr(ev_obj, attr, None)
-        if not isinstance(ctx, dict):
-            continue
-        if attr == "gitlab_context" and stale_mirror:
-            continue
-        if attr == "kargo_context" and ctx.get("failure_type") == "verification":
-            continue
-        if any(ctx.get(k) for k in keys):
+    checks = (
+        (_effective_gitlab_context(ev_obj, event), ("mr_iid", "mr_id")),
+        (getattr(ev_obj, "github_context", None), ("pr_number",)),
+        (_effective_kargo_context(ev_obj), ("mr_url",)),
+    )
+    for ctx, keys in checks:
+        if isinstance(ctx, dict) and any(ctx.get(k) for k in keys):
             return True
     return False
 

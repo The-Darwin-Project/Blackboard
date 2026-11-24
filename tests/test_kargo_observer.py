@@ -1037,20 +1037,40 @@ async def test_t21_kargo_deleted_event_clears_state():
 
 @pytest.mark.asyncio
 async def test_t21_initial_sync_restores_state_on_exception():
+    """M8: Failed _initial_sync rolls back _reported_failures, _failure_details, and _active_watches
+    even after _process_stage mutates state on an earlier item in the list."""
     from src.observers.kargo import KargoObserver
     from unittest.mock import MagicMock
+
     obs = KargoObserver(blackboard=MagicMock())
-    obs._reported_failures["old"] = "old"
-    obs._failure_details["old"] = {}
-    obs._active_watches["old"] = 123
+    obs._reported_failures["old/stage"] = "old-promo"
+    obs._failure_details["old/stage"] = {"stage": "old", "phase": "Failed"}
+    obs._active_watches["old/stage"] = "stage@old"
     obs._k8s_available = True
     obs._custom_api = MagicMock()
-    obs._custom_api.list_cluster_custom_object = MagicMock(side_effect=Exception("boom"))
-    
+    obs._custom_api.list_cluster_custom_object = MagicMock(
+        return_value={
+            "metadata": {"resourceVersion": "500"},
+            "items": [
+                _make_verif_stage(namespace="new", name="s1", verif_id="v-new", verif_phase="Failed"),
+                "boom-trigger",
+            ],
+        }
+    )
+
+    orig_process = obs._process_stage
+
+    async def _process_with_boom(stage, suppress_callbacks=False):
+        if stage == "boom-trigger":
+            raise RuntimeError("mid-sync boom")
+        await orig_process(stage, suppress_callbacks=suppress_callbacks)
+
+    obs._process_stage = _process_with_boom  # type: ignore[method-assign]
     await obs._initial_sync()
-    
-    assert "old" in obs._reported_failures
-    assert "old" in obs._active_watches
+
+    assert obs._reported_failures == {"old/stage": "old-promo"}
+    assert obs._failure_details == {"old/stage": {"stage": "old", "phase": "Failed"}}
+    assert obs._active_watches == {"old/stage": "stage@old"}
 
 @pytest.mark.asyncio
 async def test_t21_watch_loop_invokes_stop_in_finally():
@@ -1086,12 +1106,9 @@ async def test_t21_failure_callback_exception_pops_reported_failures():
     obs._reported_failures["ns/name"] = "dedup"
     obs._failure_details["ns/name"] = {"phase": "Failed", "stage": "stg", "project": "prj", "promotion": "p", "freight": "f", "message": "m", "failed_step": "s", "mr_url": "u"}
     
-    try:
-        await obs._record_failure(stage_key="ns/name", dedup_key="dedup", details=obs._failure_details["ns/name"], suppress_callbacks=False)
-    except Exception:
-        pass
+    await obs._record_failure(stage_key="ns/name", dedup_key="dedup", details=obs._failure_details["ns/name"], suppress_callbacks=False)
     assert "ns/name" not in obs._reported_failures
-    assert "ns/name" in obs._failure_details
+    assert "ns/name" not in obs._failure_details
 
 def test_t21_is_verification_stale_freight_fallback():
     from src.observers import kargo_helpers
@@ -1110,3 +1127,148 @@ def test_t21_resolve_stage_freight_prefers_verif_id():
 def test_t21_build_verification_dedup_key_fallback():
     from src.observers import kargo_helpers
     assert kargo_helpers.build_verification_dedup_key({"start_time": "st"}, "promo") == "verification:promo:st"
+
+
+@pytest.mark.asyncio
+async def test_m3_m9_410_relist_preserves_hold_watch_and_positive_verification_recovery():
+    """M3 + M9: Verification failure -> 410 _initial_sync during hold (Running/Aborted) keeps
+    _active_watches intact -> subsequent Successful verification fires recovery_callback and clears state."""
+    from src.observers.kargo import KargoObserver
+    from unittest.mock import MagicMock
+
+    failure_cb = AsyncMock(return_value="evt-verif-1")
+    recovery_cb = AsyncMock()
+    broadcast_cb = AsyncMock()
+    obs = KargoObserver(
+        blackboard=AsyncMock(),
+        failure_callback=failure_cb,
+        recovery_callback=recovery_cb,
+        broadcast_callback=broadcast_cb,
+    )
+    obs._k8s_available = True
+    stage_key = "v4-22/verify-release-chart"
+
+    # 1. Verification v-1 fails
+    await obs._process_stage(_make_verif_stage(verif_id="v-1", verif_phase="Failed"))
+    failure_cb.assert_awaited_once()
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert obs._reported_failures[stage_key] == "verification:v-1"
+
+    # 2. 410 re-list occurs while retry verification v-2 is Running (hold phase)
+    hold_stage = _make_verif_stage(verif_id="v-2", verif_phase="Running")
+    obs._custom_api = MagicMock()
+    obs._custom_api.list_cluster_custom_object = MagicMock(
+        return_value={"metadata": {"resourceVersion": "1001"}, "items": [hold_stage]}
+    )
+    await obs._initial_sync()
+
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert obs._reported_failures[stage_key] == "verification:v-1"
+    assert stage_key in obs._failure_details
+
+    # 3. Retry verification v-2 succeeds -> positive recovery fires
+    await obs._process_stage(_make_verif_stage(verif_id="v-2", verif_phase="Successful"))
+    recovery_cb.assert_awaited_once_with(
+        service="verify-release-chart@v4-22",
+        project="v4-22",
+        stage="verify-release-chart",
+        promotion="verify-release-chart.01m83xf2.dae4bb2",
+        failure_type="verification",
+        verification_id="v-2",
+    )
+    assert stage_key not in obs._active_watches
+    assert stage_key not in obs._reported_failures
+    assert stage_key not in obs._failure_details
+
+
+@pytest.mark.asyncio
+async def test_m4_cooldown_none_return_does_not_consume_dedup_key():
+    """M4: When failure_callback returns None (e.g. cooldown), verification:<id> is not consumed
+    while _active_watches & _failure_details still track the failure for sidebar & recovery."""
+    failure_cb = AsyncMock(side_effect=[None, "evt-verif-2"])
+    obs = _make_observer(failure_cb=failure_cb)
+    stage_key = "v4-22/verify-release-chart"
+    stage = _make_verif_stage(verif_id="v-cooldown", verif_phase="Failed")
+
+    await obs._process_stage(stage)
+    assert stage_key not in obs._reported_failures
+    assert obs._active_watches[stage_key] == "verify-release-chart@v4-22"
+    assert stage_key in obs._failure_details
+
+    await obs._process_stage(stage)
+    assert failure_cb.await_count == 2
+    assert obs._reported_failures[stage_key] == "verification:v-cooldown"
+
+
+@pytest.mark.asyncio
+async def test_m12_failed_promotion_beats_stale_verification_in_snapshot_and_poll():
+    """M12: When lastPromotion failed, get_stage_status returns promotion failure and poll omits verification_phase."""
+    from unittest.mock import MagicMock
+
+    obs = _make_observer()
+    obs._k8s_available = True
+    failed_stage = _make_verif_stage(
+        promo_phase="Failed",
+        promo_name="promo-bad",
+        verif_id="v-old",
+        verif_phase="Failed",
+    )
+    obs._custom_api = MagicMock()
+    obs._custom_api.get_namespaced_custom_object = MagicMock(return_value=failed_stage)
+
+    snap = await obs.get_stage_status("v4-22", "verify-release-chart")
+    assert snap["failure_type"] == "promotion"
+    assert snap["phase"] == "Failed"
+    assert snap["verification_id"] == ""
+
+    polled = await obs.poll_kargo_stage_status("v4-22", "verify-release-chart")
+    assert polled == {"phase": "Failed", "failed_step": ""}
+
+
+def test_m7_m13_put_bounded_logs_warning_and_evicts_oldest(caplog):
+    """M7 / M13: _put_bounded drops oldest item with warning log when queue is full."""
+    import queue as _queue
+    from src.observers.kargo import KargoObserver
+
+    q: _queue.Queue = _queue.Queue(maxsize=2)
+    assert KargoObserver._put_bounded(q, "e1") is True
+    assert KargoObserver._put_bounded(q, "e2") is True
+    with caplog.at_level("WARNING"):
+        assert KargoObserver._put_bounded(q, "e3") is False
+    assert [q.get_nowait(), q.get_nowait()] == ["e2", "e3"]
+    assert any("dropped oldest watch event" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_m13_watch_loop_410_triggers_initial_sync_and_broadcast():
+    """M13: _watch_loop handles K8s 410 Gone by resetting rv, calling _initial_sync and _fire_broadcast."""
+    import asyncio
+    from kubernetes.client.exceptions import ApiException
+    from unittest.mock import MagicMock, patch
+    from src.observers.kargo import KargoObserver
+
+    obs = KargoObserver(blackboard=MagicMock(), broadcast_callback=AsyncMock())
+    obs._k8s_available = True
+    obs._running = True
+    obs._resource_version = "stale-rv"
+    obs._initial_sync = AsyncMock()  # type: ignore[method-assign]
+
+    def fake_run_in_executor(_executor, fn, *_args):
+        if getattr(fn, "__name__", "") == "_run_watch":
+            return MagicMock()
+        async def _get_item():
+            if obs._initial_sync.await_count == 0:
+                return ApiException(status=410, reason="Expired")
+            obs._running = False
+            raise asyncio.CancelledError()
+        return _get_item()
+
+    with patch("kubernetes.watch.Watch", return_value=MagicMock()), patch("asyncio.get_running_loop") as mock_loop:
+        loop_inst = MagicMock()
+        loop_inst.run_in_executor = fake_run_in_executor
+        mock_loop.return_value = loop_inst
+        await obs._watch_loop()
+
+    obs._initial_sync.assert_awaited_once()
+    obs.broadcast_callback.assert_awaited_once()
+    assert obs._resource_version == ""

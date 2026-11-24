@@ -2321,9 +2321,9 @@ class Brain:
                 lines.append(
                     f"- **AnalysisRun:** {sanitize_kargo_id(kc['analysis_run'], max_len=120)}"
                 )
-            lines.append(f"- **Error:** {sanitize_untrusted_line(kc.get('message', ''), max_len=200, redact=False)}")
+            lines.append(f"- **Error:** {sanitize_untrusted_line(kc.get('message', ''), max_len=200, redact=True)}")
             if kc.get("mr_url"):
-                lines.append(f"- **MR URL:** {sanitize_untrusted_line(kc['mr_url'], max_len=512, redact=False)}")
+                lines.append(f"- **MR URL:** {sanitize_untrusted_line(kc['mr_url'], max_len=512, redact=True)}")
         return "\n".join(lines)
 
     async def process_event(

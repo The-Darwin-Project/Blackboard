@@ -24,6 +24,11 @@
 #    strip_control_tokens is the shared bounded fixed-point stripper (_CONTROL_TOKEN_MAX_PASSES, early exit when
 #    unchanged); on non-convergence it deletes every "<" so nothing can reassemble. agents/llm/types.py and
 #    gemini_client.py reuse both -- never re-inline a fixed-count strip loop.
+# 8. [Security]: sanitize_kargo_id preserves bounded lowercase DNS-subdomain names (<= max_len, excluding
+#    secret prefixes xox, sk-, ghp, gho, ghu, ghs, ghr, glpat) and hex/UUID identifiers intact without running
+#    redact_pii after fence/control stripping so numeric Kargo segments (e.g. release.1.2.3.4 or 7-hex freight
+#    suffixes) are not false-positively redacted; all other or oversized inputs route through
+#    sanitize_untrusted_line(..., max_len=max_len, redact=True), preserving strip -> redact -> defang -> cap LAST.
 """Sanitize untrusted scalars (display names, CI fields) embedded in Brain/FRIDAY prompts."""
 from __future__ import annotations
 
@@ -187,18 +192,29 @@ def sanitize_untrusted_line(
 
 _SAFE_KARGO_DNS_RE = re.compile(r"\A[a-z0-9](?:[a-z0-9.-]{0,118}[a-z0-9])?\Z")
 _SAFE_KARGO_HEX_RE = re.compile(r"\A[0-9a-fA-F]{4,64}(?:-[0-9a-fA-F]{4,32}){0,6}\Z")
+_KARGO_SECRET_PREFIXES = ("xox", "sk-", "ghp", "gho", "ghu", "ghs", "ghr", "glpat")
+
 
 def sanitize_kargo_id(value: object, *, max_len: int = 120) -> str:
-    cleaned = sanitize_untrusted_line(value, max_len=max_len, redact=False)
-    stripped = cleaned.strip()
-    if not stripped:
-        return cleaned
-    
-    is_dns = _SAFE_KARGO_DNS_RE.match(stripped) and not stripped.startswith(("xox", "sk-", "ghp", "glpat"))
-    if is_dns or _SAFE_KARGO_HEX_RE.match(stripped):
-        return cleaned
-    
-    return redact_pii(cleaned)
+    """Sanitize Kargo CRD identifiers (AnalysisRun names, verification UUIDs).
+
+    Preserves bounded lowercase DNS-subdomain names and hex/UUID identifiers intact,
+    while routing secret-prefixed, oversized, or free-form inputs through full
+    strip -> redact_pii -> defang -> cap LAST via sanitize_untrusted_line(..., redact=True).
+    """
+    raw = "" if value is None else str(value)
+    if len(raw) <= max_len * 4:
+        candidate = sanitize_untrusted_line(raw, max_len=max_len * 4, redact=False).strip()
+        if not candidate:
+            return ""
+        if len(candidate) <= max_len:
+            is_dns = (
+                _SAFE_KARGO_DNS_RE.match(candidate) is not None
+                and not candidate.startswith(_KARGO_SECRET_PREFIXES)
+            )
+            if is_dns or _SAFE_KARGO_HEX_RE.match(candidate) is not None:
+                return candidate
+    return sanitize_untrusted_line(raw, max_len=max_len, redact=True)
 
 UNTITLED_EVENT = "Untitled Event"
 FALLBACK_TITLE_MAX_LEN = 60

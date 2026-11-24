@@ -5,26 +5,25 @@
 # 3. [Pattern]: project_stage_status() is shared by get_stage_status() and poll_kargo_stage_status().
 """Pure verification extraction, stale-freight guards, and stage status projection for KargoObserver."""
 from __future__ import annotations
-
 from datetime import datetime, timezone
 
 PROMOTION_FAILED_PHASES = frozenset({"Errored", "Failed"})
 VERIFICATION_FAILED_PHASES = frozenset({"Failed", "Error", "Inconclusive"})
 VERIFICATION_HOLD_PHASES = frozenset({"Pending", "Running", "Aborted"})
 
-
 def _s(val: object) -> str:
     """Coerce optional K8s JSON string fields to str."""
     return val if isinstance(val, str) else ""
 
-
 def _parse_ts(val: str) -> datetime | None:
     """Parse RFC3339 timestamp to UTC-aware datetime, or None on error."""
-    if not isinstance(val, str) or not val or len(val) > 64: return None
-    try: dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-    except ValueError: return None
+    if not isinstance(val, str) or not val or len(val) > 64:
+        return None
+    try:
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-
 
 def extract_latest_verification(status: dict) -> dict:
     """Extract newest freightHistory[0].verificationHistory[0] entry with null-safe strings."""
@@ -43,7 +42,6 @@ def extract_latest_verification(status: dict) -> dict:
         "freight_id": _s(fh[0].get("id")),
     }
 
-
 def is_verification_stale(promo: dict, verif: dict, *, promo_is_current: bool = False) -> bool:
     """Return True when freightHistory[0] verification belongs to an older/superseded freight."""
     if not verif or promo_is_current:
@@ -55,7 +53,10 @@ def is_verification_stale(promo: dict, verif: dict, *, promo_is_current: bool = 
         return True
     if phase == "Succeeded":
         fc, pf = ps.get("freightCollection"), p.get("freight")
-        promo_fc_id = (_s(fc.get("id")) if isinstance(fc, dict) else "") or (_s(pf.get("name")) if isinstance(pf, dict) else "")
+        promo_fc_id = (
+            (_s(fc.get("id")) if isinstance(fc, dict) else "")
+            or (_s(pf.get("name")) if isinstance(pf, dict) else "")
+        )
         fh0_id = _s(verif.get("freight_id"))
         return bool(promo_fc_id and fh0_id and promo_fc_id != fh0_id)
     if phase == "Aborted":
@@ -63,7 +64,6 @@ def is_verification_stale(promo: dict, verif: dict, *, promo_is_current: bool = 
         p_dt = _parse_ts(_s(ps.get("finishedAt")) or _s(ps.get("startedAt")) or _s(p.get("finishedAt")))
         return v_dt is not None and p_dt is not None and v_dt < p_dt
     return False
-
 
 def project_stage_status(status: dict) -> tuple[bool, dict, dict, dict]:
     """Project (promo_is_current, promo, promo_status, active_verif) for on-demand read/poll."""
@@ -77,7 +77,6 @@ def project_stage_status(status: dict) -> tuple[bool, dict, dict, dict]:
     active_verif = {} if is_verification_stale(promo, raw_verif, promo_is_current=promo_is_current) else raw_verif
     return promo_is_current, promo, ps, active_verif
 
-
 def resolve_stage_freight(status: dict, promo: dict, verif: dict) -> str:
     """Resolve freight identifier across promotion, freightSummary, and verification history."""
     pf = promo.get("freight") if isinstance(promo, dict) else None
@@ -85,7 +84,6 @@ def resolve_stage_freight(status: dict, promo: dict, verif: dict) -> str:
     summary = _s(status.get("freightSummary")) if isinstance(status, dict) else ""
     v_id = _s(verif.get("freight_id")) if isinstance(verif, dict) else ""
     return p_name or v_id or summary
-
 
 def build_verification_dedup_key(verif: dict, promo_name: str) -> str:
     """Build verification-prefixed dedup key keyed on verification UUID (or fallback tuple)."""

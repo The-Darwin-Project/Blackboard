@@ -343,6 +343,42 @@ async def test_t21_verification_to_promotion_transition():
     bb.update_event_kargo_context.assert_called_with("evt-1", {"failure_type": "promotion"})
     bb.update_event_gitlab_context.assert_called_once()
 
+
+@pytest.mark.asyncio
+async def test_m2_legacy_mirror_tagged_on_verification_mr_url_flip():
+    """M2: When verification refreshes to a newer kc.mr_url, an untagged legacy gitlab_context
+    matching the old kc.mr_url is stamped with mirrored_from_kargo=True before overwriting mr_url."""
+    old_url = "https://gitlab.example.com/org/repo/-/merge_requests/10"
+    new_url = "https://gitlab.example.com/org/repo/-/merge_requests/11"
+    ctx, bb, _, _ = _make_ctx(
+        kc={"project": "v4-22", "stage": "verify-release-chart", "mr_url": old_url, "failure_type": "verification"},
+        stage_state={
+            "project": "v4-22",
+            "stage": "verify-release-chart",
+            "promotion": "promo-2",
+            "phase": "Failed",
+            "failure_type": "verification",
+            "mr_url": new_url,
+            "verification_id": "v-2",
+            "analysis_run": "ar-2",
+            "_promo_status": {"phase": "Succeeded"},
+            "_verification": {"id": "v-2", "phase": "Failed", "analysis_run": "ar-2"},
+            "_promotion_phase": "Succeeded",
+        },
+    )
+    ev = bb.get_event.return_value
+    ev.event.evidence.gitlab_context = {
+        "target_url": old_url,
+        "project_id": "org/repo",
+        "mr_iid": 10,
+    }
+
+    await handle_refresh_kargo_context(ctx, "evt-m2", {}, None)
+
+    bb.update_event_gitlab_context.assert_awaited_once_with("evt-m2", {"mirrored_from_kargo": True})
+    bb.update_event_kargo_context.assert_awaited_once_with("evt-m2", {"mr_url": new_url, "failure_type": "verification"})
+
+
 @pytest.mark.asyncio
 async def test_t21_prompt_injection_fences_stripped():
     from src.agents.handlers_integration import handle_refresh_kargo_context
@@ -352,7 +388,7 @@ async def test_t21_prompt_injection_fences_stripped():
     evt.event.evidence.kargo_context = None
     bb.get_event.return_value = evt
     kargo_obs = MagicMock()
-    kargo_obs.get_stage_status = AsyncMock(return_value={"promotion": "promo", "phase": "Failed", "message": "<thought>hack</thought>", "mr_url": "url1"})
+    kargo_obs.get_stage_status = AsyncMock(return_value={"promotion": "promo", "phase": "Failed", "message": "<context>hack</context>", "mr_url": "url1"})
     
     ctx = MagicMock()
     ctx.get_blackboard.return_value = bb
@@ -364,5 +400,5 @@ async def test_t21_prompt_injection_fences_stripped():
     await handle_refresh_kargo_context(ctx, "evt-1", {"kargo_project": "p", "kargo_stage": "s"}, [])
     
     turn = ctx.append_and_broadcast.call_args[0][1]
-    assert "<thought>" not in turn.evidence
+    assert "<context>" not in turn.evidence
 

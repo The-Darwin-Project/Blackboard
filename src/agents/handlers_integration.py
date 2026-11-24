@@ -676,6 +676,7 @@ async def handle_refresh_gitlab_context(
                 "project_id": override_project_id,
                 "mr_iid": override_mr_iid,
                 "target_url": mr_url,
+                "mirrored_from_kargo": False,
             })
         if "error" in state:
             from datetime import datetime as _dt
@@ -832,6 +833,15 @@ async def handle_refresh_kargo_context(
         elif switched_to_promotion:
             kc_updates["failure_type"] = "promotion"
         effective_failure_type = kc_updates.get("failure_type", kc.get("failure_type"))
+        if effective_failure_type == "verification" and old_mr_url and new_mr_url != old_mr_url:
+            gl_ctx = getattr(getattr(getattr(event, "event", None), "evidence", None), "gitlab_context", None)
+            if isinstance(gl_ctx, dict) and gl_ctx and gl_ctx.get("mirrored_from_kargo") is None:
+                try:
+                    from ..utils.vcs_approval import _gitlab_ctx_matches_mr_url
+                    if _gitlab_ctx_matches_mr_url(gl_ctx, old_mr_url):
+                        await bb.update_event_gitlab_context(event_id, {"mirrored_from_kargo": True})
+                except Exception as e:
+                    logger.warning(f"Failed to tag legacy gitlab_context mirror for {event_id} (non-fatal): {e}")
         if kc_updates:
             await bb.update_event_kargo_context(event_id, kc_updates)
             if "mr_url" in kc_updates:
@@ -854,6 +864,7 @@ async def handle_refresh_kargo_context(
                         "target_url": new_mr_url,
                         "project_id": str(project_id),
                         "mr_iid": int(mr_iid),
+                        "mirrored_from_kargo": True,
                     })
                     if updated:
                         logger.info(f"Updated gitlab_context for {event_id}: project_id={project_id}, mr_iid={mr_iid}")
@@ -864,8 +875,8 @@ async def handle_refresh_kargo_context(
             f"Promotion: {sanitize_untrusted_line(state.get('promotion', '?'), max_len=120, redact=False)}",
             f"Phase: {sanitize_untrusted_line(state.get('phase', '?'), max_len=120, redact=False)}",
             f"Failed Step: {sanitize_untrusted_line(state.get('failed_step') or 'N/A', max_len=120, redact=False)}",
-            f"Message: {sanitize_untrusted_line(state.get('message', ''), max_len=200, redact=False)}",
-            f"MR URL: {sanitize_untrusted_line(new_mr_url or 'N/A', max_len=512, redact=False)}",
+            f"Message: {sanitize_untrusted_line(state.get('message', ''), max_len=200, redact=True)}",
+            f"MR URL: {sanitize_untrusted_line(new_mr_url or 'N/A', max_len=512, redact=True)}",
         ]
         verif = state.get("_verification") if isinstance(state.get("_verification"), dict) else {}
         if is_verif_state:
@@ -884,7 +895,7 @@ async def handle_refresh_kargo_context(
             if verif.get("analysis_run"):
                 lines.append(f"AnalysisRun: {sanitize_kargo_id(verif['analysis_run'], max_len=120)}")
             if verif.get("message"):
-                lines.append(f"Verification Message: {sanitize_untrusted_line(verif['message'], max_len=200, redact=False)}")
+                lines.append(f"Verification Message: {sanitize_untrusted_line(verif['message'], max_len=200, redact=True)}")
         result_text = "\n".join(lines)
 
     subscription_active = False

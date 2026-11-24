@@ -42,7 +42,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from ..models import ESCALATION_SCOPE_MAP
-from ..utils.prompt_sanitize import sanitize_untrusted_line
+from ..utils.prompt_sanitize import sanitize_kargo_id, sanitize_untrusted_line
 
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
@@ -711,27 +711,28 @@ class Aligner:
 
         Returns the event_id on creation, None if skipped (active event, cooldown, or escalation gate).
         """
+        safe_service = sanitize_untrusted_line(service, max_len=120, redact=False)
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
             existing = await self.blackboard.get_event(eid)
-            if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
-                logger.info(f"Skipping Kargo event for {service}: active event {eid} exists")
+            if existing and existing.service == safe_service and existing.status.value in ("new", "active", "deferred"):
+                logger.info(f"Skipping Kargo event for {safe_service}: active event {eid} exists")
                 return None
 
         COOLDOWN_SECONDS = 300
         now = time.time()
-        last_event_time = self._last_event_creation.get(service, 0)
+        last_event_time = self._last_event_creation.get(safe_service, 0)
         if not last_event_time:
-            redis_ts = await self.blackboard.redis.get(f"darwin:aligner:cooldown:{service}")
+            redis_ts = await self.blackboard.redis.get(f"darwin:aligner:cooldown:{safe_service}")
             if redis_ts:
                 last_event_time = float(redis_ts)
-                self._last_event_creation[service] = last_event_time
+                self._last_event_creation[safe_service] = last_event_time
         if now - last_event_time < COOLDOWN_SECONDS:
-            logger.info(f"Skipping Kargo event for {service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
+            logger.info(f"Skipping Kargo event for {safe_service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
             return None
 
         # Layer 3: escalation suppression (kargo scope)
-        if await self._check_escalation_gate(service, "kargo"):
+        if await self._check_escalation_gate(safe_service, "kargo"):
             return None
 
         gitlab_context = None
@@ -744,17 +745,17 @@ class Aligner:
                     "target_url": mr_url,
                     "project_id": str(project_id),
                     "mr_iid": int(mr_iid),
+                    "mirrored_from_kargo": True,
                 }
 
         is_verification = failure_type == "verification"
-        safe_msg = sanitize_untrusted_line(message, max_len=200, redact=False)
+        safe_msg = sanitize_untrusted_line(message, max_len=200, redact=True)
         safe_stage = sanitize_untrusted_line(stage, max_len=120, redact=False)
         safe_project = sanitize_untrusted_line(project, max_len=120, redact=False)
-        safe_analysis = sanitize_untrusted_line(analysis_run, max_len=120, redact=False)
+        safe_analysis = sanitize_kargo_id(analysis_run, max_len=120)
         safe_phase = sanitize_untrusted_line(phase, max_len=120, redact=False)
         safe_failed_step = sanitize_untrusted_line(failed_step, max_len=120, redact=False)
-        safe_service = sanitize_untrusted_line(service, max_len=120, redact=False)
-        safe_verif_id = sanitize_untrusted_line(verification_id, max_len=120, redact=False)
+        safe_verif_id = sanitize_kargo_id(verification_id, max_len=120)
 
         if is_verification:
             display_text = f"[kargo] Verification failed: {safe_stage}@{safe_project} -- {safe_msg}"
@@ -795,9 +796,9 @@ class Aligner:
             evidence=evidence,
             subject_type="kargo_stage",
         )
-        self._last_event_creation[service] = now
+        self._last_event_creation[safe_service] = now
         await self.blackboard.redis.set(
-            f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
+            f"darwin:aligner:cooldown:{safe_service}", str(now), ex=COOLDOWN_SECONDS + 60
         )
         if is_verification:
             logger.info(f"Created Kargo event for {safe_service} (verification {safe_phase}: {safe_analysis or safe_verif_id})")
@@ -810,17 +811,18 @@ class Aligner:
         failure_type: str = "promotion", verification_id: str = "",
     ) -> None:
         """Notify active events that a newer promotion or verification succeeded (called by KargoObserver)."""
+        safe_service = sanitize_untrusted_line(service, max_len=120, redact=False)
         if failure_type == "verification":
             msg = f"[kargo] Verification succeeded: {stage}@{project} (verification={verification_id or promotion})"
         else:
             msg = f"[kargo] Promotion succeeded: {stage}@{project} (promotion={promotion})"
         try:
-            await self._notify_active_events(service, msg)
+            await self._notify_active_events(safe_service, msg)
         finally:
             try:
-                await self.blackboard.clear_escalation_flag(service, scope="kargo")
+                await self.blackboard.clear_escalation_flag(safe_service, scope="kargo")
             except Exception as ce:
-                logger.warning(f"Failed to clear escalation flag on Kargo recovery for {service}: {ce}")
+                logger.warning(f"Failed to clear escalation flag on Kargo recovery for {safe_service}: {ce}")
 
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""
