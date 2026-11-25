@@ -15,7 +15,7 @@
 //    GitHub PR and GitHub Issue. eventMenuItems labels follow the evidence field the URL came from
 //    (gitlab_context > github_context.pr_url > github_issue_context.html_url > target_url host/path).
 import {
-  Focus, Info, Copy, MessageSquare, ListChecks, Check,
+  Focus, Info, Copy, MessageSquare, ListChecks,
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw, ArrowUpCircle,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
@@ -121,18 +121,6 @@ export function eventMenuItems(
       { id: 'copy-mr', label: 'Copy URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(mrUrl) },
       { id: 'sep-mr', label: '', icon: null, separator: true, onClick: () => {} },
     ] : []),
-    ...(evt.status === 'waiting_approval' ? [{
-      id: 'approve', label: 'Approve Plan', icon: <Check size={18} />, color: '#22c55e',
-      onClick: () => {
-        if (connected) {
-          send({
-            type: 'approve',
-            event_id: evt.id,
-            ...(evt.approval_requested_sha ? { expected_sha: evt.approval_requested_sha } : {}),
-          });
-        }
-      },
-    }] : []),
     { id: 'stop', label: 'Force Close', icon: <Square size={18} />, danger: true,
       onClick: () => { if (window.confirm(`Force close ${evt.id}?`)) send({ type: 'emergency_stop' }); },
       disabled: !connected },

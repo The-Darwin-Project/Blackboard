@@ -17,6 +17,13 @@ expect.extend({
       message: () => `expected element ${pass ? 'not ' : ''}to be in document`,
     };
   },
+  toBeDisabled(received: HTMLElement) {
+    const isNodeDisabled = received.hasAttribute('disabled') || ('disabled' in received && Boolean((received as HTMLButtonElement | HTMLInputElement).disabled));
+    return {
+      pass: isNodeDisabled,
+      message: () => `expected element to be disabled`,
+    };
+  },
   toHaveValue(received: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null | undefined, expected: unknown) {
     const actual = received ? (received as HTMLInputElement).value : undefined;
     const pass = String(actual) === String(expected);
@@ -26,3 +33,4 @@ expect.extend({
     };
   },
 });
+

@@ -66,6 +66,9 @@ requirements.txt
 requirements-dev.txt
 ui/index.html
 .github/**
+docs/deployment.md
+docs/api-reference.md
+docs/brain-skills.md
 
 # Tooling configs & sidecar shell/hook scripts (non-architectural)
 gemini-sidecar/hooks/**

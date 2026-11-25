@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from typing import List, Optional
 
     from ..models import (
+        ApprovalCommitResult,
+        ApprovalEffect,
+        ApprovalResolution,
         ArchitectureEvent,
         ConversationMessage,
         ConversationTurn,
@@ -29,6 +32,7 @@ if TYPE_CHECKING:
         EventType,
         GraphResponse,
         MessageStatus,
+        PendingApproval,
         ScheduledEvent,
         Service,
         Snapshot,
@@ -403,6 +407,8 @@ class EventRepository(Protocol):
     async def close_event(
         self, event_id: str, summary: str, close_reason: str = "resolved",
         token_usage: dict | None = None,
+        *,
+        swept_turns_out: Optional[list[ConversationTurn]] = None,
     ) -> None: ...
 
     async def stamp_event(self, event_id: str, **fields: object) -> bool: ...
@@ -426,12 +432,33 @@ class EventRepository(Protocol):
     # --- Approval parking ---
 
     async def park_for_approval(
-        self, event_id: str, approval_requested_sha: Optional[str] = None,
-    ) -> None: ...
+        self,
+        event_id: str,
+        approval_requested_sha: Optional[str] = None,
+        *,
+        pending_approval: Optional[PendingApproval] = None,
+    ) -> list[ConversationTurn]: ...
 
     async def clear_event_approval(self, event_id: str) -> None: ...
 
-    async def resume_from_approval(self, event_id: str) -> None: ...
+    async def resume_from_approval(
+        self, event_id: str,
+        *,
+        swept_turns_out: Optional[list[ConversationTurn]] = None,
+    ) -> None: ...
+
+    async def resolve_approval_decision(
+        self,
+        event_id: str,
+        approval_id: str = "",
+        effect: ApprovalEffect = "approve",
+        expected_sha: str | None = None,
+        user_turn: ConversationTurn | None = None,
+        resolution: ApprovalResolution | None = None,
+        approved_by: str | None = None,
+        approved_mr_id: str | None = None,
+        approved_mr_sha: str | None = None,
+    ) -> ApprovalCommitResult: ...
 
     async def get_waiting_approval_events(self) -> list[str]: ...
 

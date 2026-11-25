@@ -25,7 +25,7 @@ import type { ConversationTurn, MessageStatus } from '../api/types';
 // =============================================================================
 // Layer 3: Protocol Driver & Helpers
 // =============================================================================
-const { approveEvent, rejectEvent, submitFeedback, MockApiError } = vi.hoisted(() => {
+const { approveEvent, rejectEvent, submitFeedback, submitApprovalDecision, MockApiError } = vi.hoisted(() => {
   class MockApiError extends Error {
     readonly status: number;
     readonly statusText: string;
@@ -52,11 +52,13 @@ const { approveEvent, rejectEvent, submitFeedback, MockApiError } = vi.hoisted((
     approveEvent: vi.fn(),
     rejectEvent: vi.fn(),
     submitFeedback: vi.fn(),
+    submitApprovalDecision: vi.fn(),
     MockApiError,
   };
 });
 
-vi.mock('../api/client', () => ({ approveEvent, rejectEvent, submitFeedback, ApiError: MockApiError }));
+vi.mock('../utils/imageResize', () => ({ resizeImage: vi.fn().mockResolvedValue('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=') }));
+vi.mock('../api/client', () => ({ approveEvent, rejectEvent, submitFeedback, submitApprovalDecision, ApiError: MockApiError }));
 
 vi.mock('./MermaidBlock', () => ({
   default: ({ code }: { code: string }) => <div data-testid="mermaid-block">{code}</div>,
@@ -76,6 +78,7 @@ beforeEach(() => {
   approveEvent.mockReset().mockResolvedValue({});
   rejectEvent.mockReset().mockResolvedValue({});
   submitFeedback.mockReset().mockResolvedValue({});
+  submitApprovalDecision.mockReset().mockResolvedValue({});
 });
 
 function hexToRgb(hex: string): string {
@@ -522,78 +525,55 @@ describe('TurnBubble: floating viewer View button (T-16)', () => {
 });
 
 // =============================================================================
-// T-17+: Approve / Reject
+// T-17 / T-18: Multi-Option Approvals
 // =============================================================================
-describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
-  it('T-17a: Given pendingApproval with eventId, When rendered, Then Approve and Reject buttons are present', () => {
+describe('TurnBubble: pendingApproval Multi-Option (T-17/T-18)', () => {
+  it('T-17a: Given pendingApproval with eventId, When rendered, Then synthesized default options are present', () => {
     renderTurnBubble(
       { actor: 'brain', action: 'request_approval', pendingApproval: true },
       { eventId: 'evt-1' }
     );
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Approve plan/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Reject plan/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Write-in custom instruction/i)).toBeInTheDocument();
   });
 
-  it('T-17b: Given pendingApproval, When Approve is clicked, Then approveEvent("evt-1") is called and onStatusChange fires', async () => {
+  it('T-17b: Given pendingApproval, When "Approve plan" is selected and Submit is clicked, Then submitApprovalDecision("evt-1", { option_id: "approve" }) is called and onStatusChange fires', async () => {
     const onStatusChange = vi.fn();
     renderTurnBubble(
       { actor: 'brain', action: 'request_approval', pendingApproval: true },
       { eventId: 'evt-1', onStatusChange }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(approveEvent).toHaveBeenCalledTimes(1);
-    expect(approveEvent).toHaveBeenCalledWith('evt-1');
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+    expect(submitApprovalDecision).toHaveBeenCalledTimes(1);
+    expect(submitApprovalDecision).toHaveBeenCalledWith('evt-1', { option_id: 'approve' });
     await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
-    expect(rejectEvent).not.toHaveBeenCalled();
   });
 
-  it('T-17c: Given pendingApproval, When Reject is confirmed in the modal, Then rejectEvent("evt-1", default reason) is called and onStatusChange fires', async () => {
+  it('T-17c: Given pendingApproval, When "Reject plan" is selected and Submit is clicked, Then submitApprovalDecision("evt-1", { option_id: "reject" }) is called and onStatusChange fires', async () => {
     const onStatusChange = vi.fn();
     renderTurnBubble(
       { actor: 'brain', action: 'request_approval', pendingApproval: true },
       { eventId: 'evt-1', onStatusChange }
     );
 
-    // First Reject opens the modal; nothing is sent yet.
-    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
-    expect(rejectEvent).not.toHaveBeenCalled();
-    expect(screen.getByText('Reject Plan')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Reject plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
 
-    // The modal exposes a second Reject button (portal on document.body) that submits.
-    const rejectButtons = screen.getAllByRole('button', { name: 'Reject' });
-    expect(rejectButtons).toHaveLength(2);
-    fireEvent.click(rejectButtons[1]);
-
-    expect(rejectEvent).toHaveBeenCalledTimes(1);
-    expect(rejectEvent).toHaveBeenCalledWith('evt-1', 'User rejected the plan.', undefined);
+    expect(submitApprovalDecision).toHaveBeenCalledTimes(1);
+    expect(submitApprovalDecision).toHaveBeenCalledWith('evt-1', { option_id: 'reject' });
     await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
-    expect(approveEvent).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.queryByText('Reject Plan')).toBeNull());
-  });
-
-  it('T-17d: Given a typed rejection reason, When Reject is confirmed, Then the reason is forwarded to rejectEvent', async () => {
-    renderTurnBubble(
-      { actor: 'brain', action: 'request_approval', pendingApproval: true },
-      { eventId: 'evt-1' }
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
-    fireEvent.change(screen.getByPlaceholderText(/Reason for rejection/), { target: { value: '  too risky  ' } });
-    fireEvent.click(screen.getAllByRole('button', { name: 'Reject' })[1]);
-
-    expect(rejectEvent).toHaveBeenCalledWith('evt-1', 'too risky', undefined);
-    await waitFor(() => expect(screen.queryByText('Reject Plan')).toBeNull());
   });
 
   it.each([
     ['pendingApproval false', { pendingApproval: false }, { eventId: 'evt-1' }],
-    ['pendingApproval omitted', {}, { eventId: 'evt-1' }],
     ['eventId undefined', { pendingApproval: true }, {}],
-  ])('T-17e: Given %s, When rendered, Then Approve/Reject are absent', (_name, turnOverrides, propsOverrides) => {
+  ])('T-17e: Given %s, When rendered, Then radios are absent', (_name, turnOverrides, propsOverrides) => {
     renderTurnBubble({ actor: 'brain', action: 'request_approval', ...turnOverrides }, propsOverrides);
-    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.queryByRole('radio')).toBeNull();
   });
 
   it('T-17f: Given 409 SHA drift on Approve, When user confirms new SHA, Then inline diff (req[:8] -> live[:8]) renders and retry passes expectedSha', async () => {
@@ -601,9 +581,10 @@ describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
     const SHA_2 = '22222222bbbb0000000000000000000000000000';
     const onStatusChange = vi.fn();
 
-    approveEvent
+    submitApprovalDecision
       .mockRejectedValueOnce(
-        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed', {
+        new MockApiError(409, 'Conflict', '/queue/evt-1/decision', 'HEAD SHA changed', {
+          code: 'sha_drift',
           detail: 'HEAD SHA changed',
           approval_requested_sha: SHA_1,
           live_sha: SHA_2,
@@ -616,42 +597,36 @@ describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
       { eventId: 'evt-1', onStatusChange }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(approveEvent).toHaveBeenCalledWith('evt-1');
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
 
-    // Inline SHA drift confirmation displays 8-char prefixes
-    await waitFor(() => {
-      expect(screen.getByText(/11111111/)).toBeInTheDocument();
-      expect(screen.getByText(/22222222/)).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByText(/11111111/)).toBeInTheDocument());
+    expect(screen.getByText(/22222222/)).toBeInTheDocument();
     expect(onStatusChange).not.toHaveBeenCalled();
 
-    // Confirming retries with expectedSha=SHA_2
-    const confirmBtn = screen.getByRole('button', { name: /Approve New SHA|Confirm/i });
-    fireEvent.click(confirmBtn);
-
-    expect(approveEvent).toHaveBeenNthCalledWith(2, 'evt-1', SHA_2);
+    fireEvent.click(screen.getByRole('button', { name: /Approve New SHA|Confirm/i }));
+    expect(submitApprovalDecision).toHaveBeenNthCalledWith(2, 'evt-1', { option_id: 'approve', expected_sha: SHA_2 });
     await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
   });
 
-  it('T-17g: Given 2nd-order SHA drift (SHA_2 -> SHA_3) on confirm retry, Then inline prompt updates to SHA_3 and retries with SHA_3', async () => {
+  it('T-17g (H9): Cascading 409 SHA drifts update inline UI sequentially until successful', async () => {
     const SHA_1 = '11111111aaaa0000000000000000000000000000';
     const SHA_2 = '22222222bbbb0000000000000000000000000000';
     const SHA_3 = '33333333cccc0000000000000000000000000000';
     const onStatusChange = vi.fn();
 
-    approveEvent
+    submitApprovalDecision
       .mockRejectedValueOnce(
-        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed', {
-          detail: 'HEAD SHA changed',
+        new MockApiError(409, 'Conflict', '/queue/evt-1/decision', 'HEAD SHA changed', {
+          code: 'sha_drift',
           approval_requested_sha: SHA_1,
           live_sha: SHA_2,
         })
       )
       .mockRejectedValueOnce(
-        new MockApiError(409, 'Conflict', '/queue/evt-1/approve', 'HEAD SHA changed again', {
-          detail: 'HEAD SHA changed again',
-          approval_requested_sha: SHA_1,
+        new MockApiError(409, 'Conflict', '/queue/evt-1/decision', 'HEAD SHA changed again', {
+          code: 'sha_drift',
+          approval_requested_sha: SHA_2,
           live_sha: SHA_3,
         })
       )
@@ -662,91 +637,69 @@ describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
       { eventId: 'evt-1', onStatusChange }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
     await waitFor(() => expect(screen.getByText(/22222222/)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: /Approve New SHA|Confirm/i }));
-    expect(approveEvent).toHaveBeenNthCalledWith(2, 'evt-1', SHA_2);
+    expect(submitApprovalDecision).toHaveBeenNthCalledWith(2, 'evt-1', { option_id: 'approve', expected_sha: SHA_2 });
 
-    // Updates inline prompt to SHA_3 instead of firing onStatusChange
     await waitFor(() => expect(screen.getByText(/33333333/)).toBeInTheDocument());
     expect(onStatusChange).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /Approve New SHA|Confirm/i }));
-    expect(approveEvent).toHaveBeenNthCalledWith(3, 'evt-1', SHA_3);
+    expect(submitApprovalDecision).toHaveBeenNthCalledWith(3, 'evt-1', { option_id: 'approve', expected_sha: SHA_3 });
     await waitFor(() => expect(onStatusChange).toHaveBeenCalledTimes(1));
   });
 
-  it('T-17h (H9): Double-clicking Approve rapidly fires approveEvent only once (synchronous inFlightRef lock)', async () => {
-    let resolveApprove!: (val: unknown) => void;
-    approveEvent.mockReturnValueOnce(new Promise((res) => { resolveApprove = res; }));
-
+  it('T-17h (H9): Double-clicking Submit rapidly fires submitApprovalDecision only once (synchronous inFlightRef lock)', async () => {
     renderTurnBubble(
       { actor: 'brain', action: 'request_approval', pendingApproval: true },
-      { eventId: 'evt-dbl' }
+      { eventId: 'evt-1' }
     );
-
-    const btn = screen.getByRole('button', { name: 'Approve' });
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    const btn = screen.getByRole('button', { name: 'Submit' });
     fireEvent.click(btn);
     fireEvent.click(btn);
-    expect(approveEvent).toHaveBeenCalledTimes(1);
-
-    resolveApprove({ status: 'approved' });
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(submitApprovalDecision).toHaveBeenCalledTimes(1);
   });
 
   it('T-17i (H9): Changing eventId cancels in-flight approval side effects and clears stale drift/error state', async () => {
-    let resolveFirst!: (val: unknown) => void;
-    approveEvent.mockReturnValueOnce(new Promise((res) => { resolveFirst = res; }));
     const onStatusChange = vi.fn();
-    const approvalTurn = createMockTurn({ actor: 'brain', action: 'request_approval', pendingApproval: true });
+    submitApprovalDecision.mockImplementationOnce(() => new Promise(res => setTimeout(() => res({ status: 'approved' }), 50)));
 
     const { rerender } = render(
-      <TurnBubble turn={approvalTurn} eventId="evt-a" onStatusChange={onStatusChange} />
+      <TurnBubble turn={createMockTurn({ actor: 'brain', action: 'request_approval', pendingApproval: true })} eventId="evt-1" onStatusChange={onStatusChange} />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    rerender(<TurnBubble turn={approvalTurn} eventId="evt-b" onStatusChange={onStatusChange} />);
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
 
-    resolveFirst({ status: 'approved' });
-    await Promise.resolve();
+    rerender(
+      <TurnBubble turn={createMockTurn({ actor: 'brain', action: 'request_approval', pendingApproval: true })} eventId="evt-2" onStatusChange={onStatusChange} />
+    );
+
+    await waitFor(() => expect(submitApprovalDecision).toHaveBeenCalledTimes(1));
+    await new Promise(r => setTimeout(r, 100)); // wait past resolution
     expect(onStatusChange).not.toHaveBeenCalled();
   });
 
-  it('T-17j (H9): Non-409 error renders dismissible alert on both Approve and Approve New SHA', async () => {
-    const SHA_1 = '11111111aaaa0000000000000000000000000000';
-    const SHA_2 = '22222222bbbb0000000000000000000000000000';
-    approveEvent
-      .mockRejectedValueOnce(new MockApiError(500, 'Server Error', '/queue/evt-err/approve', 'Redis unavailable'))
-      .mockRejectedValueOnce(
-        new MockApiError(409, 'Conflict', '/queue/evt-err/approve', 'HEAD SHA changed', {
-          code: 'sha_drift',
-          approval_requested_sha: SHA_1,
-          live_sha: SHA_2,
-        })
-      )
-      .mockRejectedValueOnce(new MockApiError(403, 'Forbidden', '/queue/evt-err/approve', 'Not authorized'));
+  it('T-17j (H9): Non-409 error renders dismissible alert on both Submit and Confirm New SHA', async () => {
+    submitApprovalDecision.mockRejectedValueOnce(new MockApiError(500, 'Internal Server Error', '/queue/evt-1/decision', 'Not authorized'));
 
     renderTurnBubble(
       { actor: 'brain', action: 'request_approval', pendingApproval: true },
-      { eventId: 'evt-err' }
+      { eventId: 'evt-1' }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Redis unavailable'));
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss approval error' }));
-    expect(screen.queryByRole('alert')).toBeNull();
-
-    // Retry triggers 409 drift -> then Approve New SHA fails with 403 -> inline error alert shown
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve New SHA' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'Approve New SHA' }));
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
     await waitFor(() => expect(screen.getByText('Not authorized')).toBeInTheDocument());
   });
 
-  it('T-17k (H9): 409 closed/sha_unresolvable renders Approval blocked without Approve New SHA and Cancel dismisses', async () => {
-    approveEvent.mockRejectedValueOnce(
-      new MockApiError(409, 'Conflict', '/queue/evt-closed/approve', 'Event is already closed and cannot be approved.', {
+  it('T-17k (H9): 409 closed/sha_unresolvable renders Approval blocked without Confirm New SHA and Cancel dismisses', async () => {
+    submitApprovalDecision.mockRejectedValueOnce(
+      new MockApiError(409, 'Conflict', '/queue/evt-closed/decision', 'Event is already closed and cannot be approved.', {
         code: 'closed',
         detail: 'Event is already closed and cannot be approved.',
       })
@@ -757,18 +710,180 @@ describe('TurnBubble: pendingApproval Approve / Reject (T-17)', () => {
       { eventId: 'evt-closed' }
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(screen.getByLabelText(/Approve plan/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
     await waitFor(() =>
       expect(screen.getByRole('alert').textContent).toContain(
         'Approval blocked: Event is already closed and cannot be approved.'
       )
     );
-    expect(screen.queryByText(/HEAD SHA drifted/)).toBeNull();
-    expect(screen.queryByRole('button', { name: /Approve New SHA/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Confirm New SHA/i })).toBeNull();
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+  it('T-18a: Active 3-option request_approval turn renders 4 visible radio options with NO default checked radio and Submit disabled', () => {
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: true,
+      approval_id: 'apv-123',
+      approval_options: [
+        { id: 'opt1', label: 'Approve plan', effect: 'approve' },
+        { id: 'opt2', label: 'Rerun checks', effect: 'feedback' },
+        { id: 'opt3', label: 'Reject plan', effect: 'reject' }
+      ]
+    }, { eventId: 'evt-test' });
+
+    expect(screen.getByLabelText('Approve plan')).toBeInTheDocument();
+    expect(screen.getByLabelText('Rerun checks')).toBeInTheDocument();
+    expect(screen.getByLabelText('Reject plan')).toBeInTheDocument();
+    expect(screen.getByLabelText('Write-in custom instruction')).toBeInTheDocument();
+
+    const radios = screen.getAllByRole('radio');
+    expect(radios).toHaveLength(4);
+    radios.forEach(r => expect((r as HTMLInputElement).checked).toBe(false));
+
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled();
+  });
+
+  it('T-18b: Selecting Write-in..., typing instructions enables Submit and submits { approval_id, option_id: "__write_in__", write_in_text }', async () => {
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: true,
+      approval_id: 'apv-123',
+      approval_options: [
+        { id: 'opt1', label: 'Approve plan', effect: 'approve' }
+      ]
+    }, { eventId: 'evt-test' });
+
+    fireEvent.click(screen.getByLabelText('Write-in custom instruction'));
+    const textBox = screen.getByPlaceholderText(/Provide instructions/i);
+    expect(textBox).toBeInTheDocument();
+
+    fireEvent.change(textBox, { target: { value: 'Look at this' } });
+    const submitBtn = screen.getByRole('button', { name: 'Submit' });
+    await waitFor(() => expect(submitBtn).not.toBeDisabled());
+    
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(submitApprovalDecision).toHaveBeenCalledWith('evt-test', expect.objectContaining({
+        approval_id: 'apv-123',
+        option_id: '__write_in__',
+        write_in_text: 'Look at this',
+      }));
+    });
+  });
+
+  it('T-18b-image: Selecting Write-in..., pasting image enables Submit and submits { approval_id, option_id: "__write_in__", write_in_text, image }', async () => {
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: true,
+      approval_id: 'apv-123',
+      approval_options: [
+        { id: 'opt1', label: 'Approve plan', effect: 'approve' }
+      ]
+    }, { eventId: 'evt-test' });
+
+    fireEvent.click(screen.getByLabelText('Write-in custom instruction'));
+    const textBox = screen.getByPlaceholderText(/Provide instructions/i);
+    
+    const file = new File(['(⌐□_□)'], 'test.png', { type: 'image/png' });
+    fireEvent.paste(textBox, {
+      clipboardData: {
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+        files: [file]
+      }
+    });
+
+    const submitBtn = screen.getByRole('button', { name: 'Submit' });
+    await waitFor(() => expect(submitBtn).not.toBeDisabled());
+    
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(submitApprovalDecision).toHaveBeenCalledWith('evt-test', expect.objectContaining({
+        approval_id: 'apv-123',
+        option_id: '__write_in__',
+        write_in_text: '',
+        image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+      }));
+    });
+  });
+
+  it('T-18c: 409 sha_drift renders inline "Confirm New SHA" retry sending expected_sha', async () => {
+    submitApprovalDecision.mockRejectedValueOnce(
+      new MockApiError(409, 'Conflict', '/queue/evt-test/decision', 'HEAD SHA changed', {
+        code: 'sha_drift',
+        approval_requested_sha: '111111',
+        live_sha: '222222',
+      })
+    );
+
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: true,
+      approval_id: 'apv-123',
+      approval_options: [
+        { id: 'opt1', label: 'Approve plan', effect: 'approve' }
+      ]
+    }, { eventId: 'evt-test' });
+
+    fireEvent.click(screen.getByLabelText('Approve plan'));
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() => expect(screen.getByText(/HEAD SHA drifted/i)).toBeInTheDocument());
+    
+    const confirmBtn = screen.getByRole('button', { name: 'Confirm New SHA' });
+    expect(confirmBtn).toBeInTheDocument();
+    
+    fireEvent.click(confirmBtn);
+    await waitFor(() => {
+      expect(submitApprovalDecision).toHaveBeenLastCalledWith('evt-test', {
+        approval_id: 'apv-123',
+        option_id: 'opt1',
+        expected_sha: '222222'
+      });
+    });
+  });
+
+  it('T-18d: Legacy/empty approval_options synthesizes [Approve plan, Reject plan] + Write-in', () => {
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: true,
+      approval_id: 'apv-legacy',
+      approval_options: undefined
+    }, { eventId: 'evt-test' });
+
+    expect(screen.getByLabelText(/Approve plan/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Reject plan/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Write-in custom instruction/i)).toBeInTheDocument();
+    expect(screen.getAllByRole('radio')).toHaveLength(3);
+  });
+
+  it('T-18e: Resolved request_approval renders frozen summary highlighting chosen option/write-in and does NOT render radio buttons', () => {
+    renderTurnBubble({
+      actor: 'brain',
+      action: 'request_approval',
+      pendingApproval: false,
+      approval_id: 'apv-123',
+      approval_resolution: {
+        outcome: 'option',
+        option_id: 'opt2',
+        option_label: 'Rerun checks',
+        resolved_at: 1700000000,
+        resolved_by: 'alice@example.com'
+      }
+    }, { eventId: 'evt-test' });
+
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull();
+    expect(screen.getByText(/Rerun checks/i)).toBeInTheDocument();
+    expect(screen.getByText(/by alice@example\.com/i)).toBeInTheDocument();
+    expect(screen.queryByText(/by 1700000000/i)).toBeNull();
   });
 });
 

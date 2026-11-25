@@ -936,14 +936,15 @@ class TestT10ThreeChannelApprovalHardeningAndActiveDrift:
         with patch("src.utils.vcs_approval.resolve_live_head_sha", AsyncMock(return_value=("7", SHA_2))):
             await handle_request_user_approval(ctx, ev.id, {"plan_summary": "Merge plan"}, None)
 
-        bb.park_for_approval.assert_awaited_once_with(ev.id, approval_requested_sha=SHA_2)
+        from unittest.mock import ANY
+        bb.park_for_approval.assert_awaited_once_with(ev.id, approval_requested_sha=SHA_2, pending_approval=ANY)
 
         # Fallback to VCS context head_sha when live resolution returns None
         bb.park_for_approval.reset_mock()
         with patch("src.utils.vcs_approval.resolve_live_head_sha", AsyncMock(return_value=("7", None))):
             await handle_request_user_approval(ctx, ev.id, {"plan_summary": "Merge plan"}, None)
 
-        bb.park_for_approval.assert_awaited_once_with(ev.id, approval_requested_sha=SHA_1)
+        bb.park_for_approval.assert_awaited_once_with(ev.id, approval_requested_sha=SHA_1, pending_approval=ANY)
 
     def test_check_approval_sha_drift_contract_matrix(self):
         """Given check_approval_sha_drift(event, live_sha, expected_sha=None) in src/utils/vcs_approval.py

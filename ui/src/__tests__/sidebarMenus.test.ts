@@ -111,16 +111,13 @@ describe('eventMenuItems', () => {
     expect(issueItem?.label).toBe('Open Issue in GitHub');
   });
 
-  it('sends expected_sha on approve when approval_requested_sha is present', () => {
-    const send = vi.fn();
-    const pinned = { id: 'evt-pin', status: 'waiting_approval', source: 'headhunter', approval_requested_sha: 'abc12345' };
-    eventMenuItems(pinned, vi.fn(), send, true).find(i => i.id === 'approve')?.onClick();
-    expect(send).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-pin', expected_sha: 'abc12345' });
-
-    send.mockClear();
-    const unpinned = { id: 'evt-unpin', status: 'waiting_approval', source: 'headhunter' };
-    eventMenuItems(unpinned, vi.fn(), send, true).find(i => i.id === 'approve')?.onClick();
-    expect(send).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-unpin' });
+  it('removes Approve Plan and Reject Plan from eventMenuItems for multi-option UI', () => {
+    const evt = { id: 'evt-wait', status: 'waiting_approval', source: 'chat' };
+    const items = eventMenuItems(evt, vi.fn(), vi.fn(), true);
+    expect(items.find(i => i.id === 'approve')).toBeUndefined();
+    expect(items.find(i => i.id === 'reject')).toBeUndefined();
+    expect(items.find(i => i.label === 'Approve Plan')).toBeUndefined();
+    expect(items.find(i => i.label === 'Reject Plan')).toBeUndefined();
   });
 });
 
@@ -518,32 +515,6 @@ describe('kargoStageMenuItems', () => {
     const items = kargoStageMenuItems(stage, vi.fn(), true);
     const mrItem = items.find(i => i.id === 'open-mr');
     expect(mrItem).toBeDefined();
-  });
-});
-
-describe('eventMenuItems ActiveEvent approval_requested_sha parity (T-16)', () => {
-  it('Given an ActiveEvent with approval_requested_sha populated, When Approve Plan is clicked, Then WS approve includes expected_sha', () => {
-    const send = vi.fn();
-    const evt = {
-      id: 'evt-active-pin',
-      service: 'release-app',
-      status: 'waiting_approval',
-      source: 'headhunter',
-      reason: 'Approve fix',
-      turns: 3,
-      created: '2026-11-22T10:00:00Z',
-      evidence: { display_text: 'MR !12', source_type: 'headhunter', domain: 'complicated', severity: 'info' },
-      approval_requested_sha: 'cafebabe9876',
-    } as ActiveEvent & { approval_requested_sha: string };
-
-    const approveItem = eventMenuItems(evt, vi.fn(), send, true).find(i => i.id === 'approve');
-    expect(approveItem).toBeDefined();
-    approveItem?.onClick();
-    expect(send).toHaveBeenCalledWith({
-      type: 'approve',
-      event_id: 'evt-active-pin',
-      expected_sha: 'cafebabe9876',
-    });
   });
 });
 

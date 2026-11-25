@@ -49,7 +49,12 @@ from ..utils.jira_context import is_valid_jira_key
 from ..utils.vcs_approval import HEX_SHA_RE
 from .wip_meta import ActiveEventMeta
 
+from .approval_ops import sweep_dangling_approvals
 from ..models import (
+    ApprovalCommitResult,
+    ApprovalEffect,
+    ApprovalResolution,
+    PendingApproval,
     AppNode,
     ConversationMessage,
     ConversationTurn,
@@ -2620,8 +2625,10 @@ return 1
         return [f"[{svc}] {text}" for _, svc, text in entries[:limit]]
 
     async def close_event(
-        self, event_id: str, summary: str, close_reason: str = "resolved",
+        self, event_id: str, summary: str = "", close_reason: str = "resolved",
         token_usage: dict | None = None,
+        *,
+        swept_turns_out: Optional[list[ConversationTurn]] = None,
     ) -> None:
         """Close an event with summary. Move from active to closed.
 
@@ -2638,8 +2645,9 @@ return 1
         # exact #240 desync one step later. Set migration always runs (even if the doc
         # itself is missing) to match pre-existing cleanup behavior for a raced-away doc.
         key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, _WATCH_MAX_RETRIES)
         async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(retries):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
@@ -2648,6 +2656,8 @@ return 1
                         event = EventDocument(**json.loads(data))
                         event.closed_at = time.time()
                         event.status = EventStatus.CLOSED
+                        event.pending_approval = None
+                        event.approval_requested_sha = None
                         if token_usage:
                             event.token_usage = token_usage
                         close_turn = ConversationTurn(
@@ -2657,6 +2667,10 @@ return 1
                             thoughts=summary,
                             evidence=close_reason,
                         )
+                        swept = sweep_dangling_approvals(event, outcome="closed")
+                        if swept_turns_out is not None:
+                            swept_turns_out.clear()
+                            swept_turns_out.extend(swept)
                         event.conversation.append(close_turn)
                         pipe.set(key, json.dumps(event.model_dump()))
                     pipe.srem(self.EVENT_ACTIVE, event_id)
@@ -2666,7 +2680,9 @@ return 1
                     await pipe.execute()
                     break
                 except WatchError:
-                    continue
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
         logger.info(f"Closed event: {event_id}")
 
     # =========================================================================
@@ -2731,7 +2747,8 @@ return 1
         approval_requested_sha: Optional[str] = None,
         *,
         max_retries: int = _WATCH_MAX_RETRIES,
-    ) -> None:
+        pending_approval: Optional[PendingApproval] = None,
+    ) -> list[ConversationTurn]:
         """Move event to waiting_approval set, clear stale approval fields, and stamp requested SHA atomically."""
         key = f"{self.EVENT_PREFIX}{event_id}"
         retries = max(1, max_retries)
@@ -2743,17 +2760,19 @@ return 1
                     if not data:
                         await pipe.unwatch()
                         logger.warning(f"park_for_approval: {event_id} not found")
-                        return
+                        return []
                     event = EventDocument(**json.loads(data))
                     if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
                         await pipe.unwatch()
                         logger.warning(f"park_for_approval: {event_id} already closed, skipping park")
-                        return
+                        return []
                     event.status = EventStatus.WAITING_APPROVAL
                     event.approved_by = None
                     event.approved_mr_id = None
                     event.approved_mr_sha = None
                     event.approval_requested_sha = approval_requested_sha
+                    event.pending_approval = pending_approval
+                    swept_turns = sweep_dangling_approvals(event, "superseded")
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
                     pipe.srem(self.EVENT_ACTIVE, event_id)
@@ -2768,6 +2787,7 @@ return 1
                         raise
                     await asyncio.sleep(random.uniform(0.002, 0.015))
         logger.info(f"Parked event for approval: {event_id}")
+        return swept_turns
 
     async def clear_event_approval(self, event_id: str) -> None:
         """Atomically clear all approval fields on an event document (WATCH/MULTI/EXEC)."""
@@ -2779,11 +2799,12 @@ return 1
             approval_requested_sha=None,
         )
 
-    async def resume_from_approval(self, event_id: str) -> None:
+    async def resume_from_approval(self, event_id: str, *, swept_turns_out: Optional[list[ConversationTurn]] = None) -> None:
         """Move event from waiting_approval back to active set + update status atomically."""
         key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, _WATCH_MAX_RETRIES)
         async with self.redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(retries):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
@@ -2791,7 +2812,16 @@ return 1
                         logger.warning(f"resume_from_approval: {event_id} not found")
                         return
                     event = EventDocument(**json.loads(data))
+                    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+                        await pipe.unwatch()
+                        return
                     event.status = EventStatus.ACTIVE
+                    event.pending_approval = None
+                    event.approval_requested_sha = None
+                    swept = sweep_dangling_approvals(event, outcome="closed")
+                    if swept_turns_out is not None:
+                        swept_turns_out.clear()
+                        swept_turns_out.extend(swept)
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
                     pipe.srem(self.EVENT_WAITING_APPROVAL, event_id)
@@ -2799,8 +2829,112 @@ return 1
                     await pipe.execute()
                     break
                 except WatchError:
-                    continue
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
         logger.info(f"Resumed event from approval: {event_id}")
+
+
+    async def resolve_approval_decision(
+        self,
+        event_id: str,
+        approval_id: str = "",
+        effect: ApprovalEffect = "approve",
+        expected_sha: str | None = None,
+        user_turn: ConversationTurn | None = None,
+        resolution: ApprovalResolution | None = None,
+        approved_by: str | None = None,
+        approved_mr_id: str | None = None,
+        approved_mr_sha: str | None = None,
+    ) -> ApprovalCommitResult:
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        retries = max(1, _WATCH_MAX_RETRIES)
+        async with self.redis.pipeline(transaction=True) as pipe:
+            for attempt in range(retries):
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        await pipe.unwatch()
+                        return ApprovalCommitResult(code="not_found", request_turn=None, user_turn=user_turn, event_doc=None)
+                    event = EventDocument(**json.loads(data))
+                    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+                        await pipe.unwatch()
+                        return ApprovalCommitResult(code="closed", request_turn=None, user_turn=user_turn, event_doc=event)
+                    if event.status != EventStatus.WAITING_APPROVAL:
+                        await pipe.unwatch()
+                        return ApprovalCommitResult(code="not_waiting", request_turn=None, user_turn=user_turn, event_doc=event)
+
+                    req_turn = next(
+                        (t for t in reversed(event.conversation) if t.action == "request_approval" and getattr(t, "pendingApproval", False) is True),
+                        None,
+                    )
+                    if not req_turn:
+                        await pipe.unwatch()
+                        return ApprovalCommitResult(code="stale_approval", request_turn=None, user_turn=user_turn, event_doc=event)
+
+                    req_apv = getattr(req_turn, "approval_id", None)
+                    if approval_id and req_apv and approval_id != req_apv:
+                        await pipe.unwatch()
+                        return ApprovalCommitResult(code="stale_approval", request_turn=None, user_turn=user_turn, event_doc=event)
+
+                    eff_res = resolution or ApprovalResolution(
+                        approval_id=approval_id or req_apv,
+                        outcome="option",
+                        effect=effect,
+                        resolved_by=approved_by or "system",
+                        resolved_at=time.time(),
+                    )
+                    eff_turn = (
+                        user_turn.model_copy()
+                        if user_turn is not None
+                        else ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="user",
+                            action="approve" if effect == "approve" else ("reject" if effect == "reject" else "select_option"),
+                            thoughts=f"Decision: {effect}",
+                            approved_by=approved_by if effect == "approve" else None,
+                            approved_mr_id=approved_mr_id if effect == "approve" else None,
+                            approved_mr_sha=approved_mr_sha if effect == "approve" else None,
+                        )
+                    )
+                    eff_turn.turn = len(event.conversation) + 1
+                    if approval_id:
+                        eff_turn.approval_id = approval_id
+
+                    if effect == "approve":
+                        if expected_sha is not None:
+                            if not approved_mr_sha or expected_sha != approved_mr_sha:
+                                await pipe.unwatch()
+                                return ApprovalCommitResult(code="sha_conflict", request_turn=req_turn, user_turn=eff_turn, event_doc=event)
+                        elif approved_mr_sha and event.approval_requested_sha and event.approval_requested_sha != approved_mr_sha:
+                            await pipe.unwatch()
+                            return ApprovalCommitResult(code="sha_conflict", request_turn=req_turn, user_turn=eff_turn, event_doc=event)
+                        event.approved_by = approved_by
+                        event.approved_mr_id = approved_mr_id
+                        event.approved_mr_sha = approved_mr_sha
+                    else:
+                        event.approved_by = None
+                        event.approved_mr_id = None
+                        event.approved_mr_sha = None
+
+                    req_turn.pendingApproval = False
+                    req_turn.approval_resolution = eff_res
+                    event.pending_approval = None
+                    event.approval_requested_sha = None
+                    event.status = EventStatus.ACTIVE
+                    event.conversation.append(eff_turn)
+
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.srem(self.EVENT_WAITING_APPROVAL, event_id)
+                    pipe.sadd(self.EVENT_ACTIVE, event_id)
+                    await pipe.execute()
+                    return ApprovalCommitResult(code="ok", request_turn=req_turn, user_turn=eff_turn, event_doc=event)
+                except WatchError:
+                    if attempt + 1 >= retries:
+                        raise
+                    await asyncio.sleep(random.uniform(0.002, 0.015))
 
     async def get_waiting_approval_events(self) -> list[str]:
         """Return all event IDs in the waiting_approval set."""

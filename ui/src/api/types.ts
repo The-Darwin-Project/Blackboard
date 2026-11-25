@@ -273,6 +273,7 @@ export interface ActiveEvent {
   created_by_email?: string | null;
   current_agent?: string | null;
   approval_requested_sha?: string | null;
+  pending_approval?: PendingApproval | null;
 }
 
 // =============================================================================
@@ -305,6 +306,9 @@ export interface ConversationTurn {
   source?: string;
   user_name?: string;
   timestamp: number;
+  approval_id?: string;
+  approval_options?: ApprovalOption[];
+  approval_resolution?: ApprovalResolution;
 }
 
 export type EventSource = 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';
@@ -319,7 +323,38 @@ export interface TokenUsageDict {
   calls: number;
 }
 
-export type ApprovalErrorKind = 'sha_drift' | 'sha_unresolvable' | 'closed';
+export type ApprovalErrorKind = 'sha_drift' | 'sha_unresolvable' | 'closed' | 'stale_approval' | 'not_waiting' | 'invalid_option' | 'invalid_image' | 'image_too_large' | 'ambiguous_options';
+
+export type ApprovalEffect = 'approve' | 'steer' | 'reject';
+
+export interface ApprovalOption {
+  id: string;
+  label: string;
+  description?: string;
+  effect: ApprovalEffect;
+}
+
+export interface PendingApproval {
+  approval_id: string;
+  options: ApprovalOption[];
+}
+
+export interface ApprovalResolution {
+  outcome: 'option' | 'write_in' | 'error' | 'closed' | 'superseded';
+  option_id?: string;
+  option_label?: string;
+  write_in_text?: string;
+  resolved_at?: number;
+  resolved_by?: string;
+}
+
+export interface DecisionPayload {
+  approval_id?: string;
+  option_id: string;
+  write_in_text?: string;
+  image?: string;
+  expected_sha?: string;
+}
 
 export interface EventDocument {
   id: string;

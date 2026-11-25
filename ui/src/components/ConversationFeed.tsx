@@ -191,10 +191,11 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
           >Report</button>
           {selectedEvent.status === 'waiting_approval' && (
             <button
-              onClick={() => handleStatusChange()}
-              style={{ background: '#14532d', border: '1px solid #22c55e44', borderRadius: 4, color: '#86efac', fontSize: 12, padding: '3px 10px', cursor: 'pointer', fontWeight: 600 }}
-              title="Approve plan"
-            >Approve</button>
+              type="button"
+              onClick={() => document.querySelector('[data-pending-approval="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+              style={{ background: '#1e3a8a', border: '1px solid #3b82f644', borderRadius: 4, color: '#93c5fd', fontSize: 12, padding: '3px 10px', cursor: 'pointer', fontWeight: 600 }}
+              title="Scroll to pending decision"
+            >Pending Decision ↑</button>
           )}
           {selectedEvent.status !== 'closed' && (
             <button

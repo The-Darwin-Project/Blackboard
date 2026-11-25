@@ -23,7 +23,7 @@ import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContex
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
-import type { AgentRegistryEntry, ApprovalErrorKind, EventEvidence, KargoStageStatus } from '../api/types';
+import type { AgentRegistryEntry, ApprovalErrorKind, EventEvidence, KargoStageStatus, ConversationTurn } from '../api/types';
 
 const EVIDENCE_SEVERITIES: readonly string[] = ['info', 'warning', 'critical'];
 const isEvidenceSeverity = (v: unknown): v is EventEvidence['brain_severity'] =>
@@ -49,6 +49,8 @@ export interface ApprovalErrorState {
   kind: ApprovalErrorKind;
   message: string;
   liveSha?: string;
+  optionId?: string;
+  approvalId?: string;
 }
 
 export interface OpsControl {
@@ -158,10 +160,20 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   const dismissApprovalError = useCallback(() => setApprovalError(null), []);
   const confirmApprovalDrift = useCallback(() => {
     if (!approvalError?.eventId || !approvalError.liveSha) return;
-    send({ type: 'approve', event_id: approvalError.eventId, expected_sha: approvalError.liveSha });
+    if (approvalError.optionId) {
+      send({
+        type: 'approval_decision',
+        event_id: approvalError.eventId,
+        option_id: approvalError.optionId,
+        ...(approvalError.approvalId ? { approval_id: approvalError.approvalId } : {}),
+        expected_sha: approvalError.liveSha
+      });
+    } else {
+      send({ type: 'approve', event_id: approvalError.eventId, expected_sha: approvalError.liveSha });
+    }
     setApprovalError(null);
   }, [approvalError, send]);
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateWaitingApproval, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateWaitingApproval, invalidateHeadhunter, invalidateAligner, invalidateJenkins, optimisticRemoveEvent, optimisticPatchEvent, optimisticPatchTurn } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgents = useMemo(() => {
@@ -237,6 +249,13 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'subscription_changed') {
       invalidateActive();
+    } else if (msg.type === 'turn_updated') {
+      const event_id = typeof msg.event_id === 'string' ? msg.event_id : undefined;
+      const turn = msg.turn && typeof msg.turn === 'object' && !Array.isArray(msg.turn) ? (msg.turn as ConversationTurn) : undefined;
+      if (event_id && turn) {
+        optimisticPatchTurn(event_id, turn);
+        invalidateEvent(event_id);
+      }
     } else if (msg.type === 'event_title_updated') {
       if (typeof msg.event_id === 'string' && typeof msg.title === 'string') {
         optimisticPatchEvent(msg.event_id, {
@@ -263,14 +282,20 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
     } else if (msg.type === 'kargo_event_result') {
       setKargoEventResult({ status: msg.status as KargoEventResult['status'], detail: msg.detail as string });
     } else if (msg.type === 'error') {
-      const kind = msg.kind;
-      if (kind === 'sha_drift' || kind === 'sha_unresolvable' || kind === 'closed') {
+      const kind = msg.kind as string;
+      const validKinds: ApprovalErrorKind[] = [
+        'sha_drift', 'sha_unresolvable', 'closed', 'stale_approval', 'not_waiting',
+        'invalid_option', 'invalid_image', 'image_too_large', 'ambiguous_options'
+      ];
+      if (validKinds.includes(kind as ApprovalErrorKind)) {
         const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
         setApprovalError({
           eventId: str(msg.event_id),
-          kind,
+          kind: kind as ApprovalErrorKind,
           message: str(msg.message) ?? 'Approval rejected',
           liveSha: str(msg.live_sha),
+          optionId: str(msg.option_id),
+          approvalId: str(msg.approval_id),
         });
       }
     }

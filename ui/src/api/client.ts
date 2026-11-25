@@ -16,6 +16,7 @@
  * Typed API client for Darwin Brain backend.
  */
 import type {
+  DecisionPayload,
   ActiveEvent,
   AgentRegistryEntry,
   AppConfig,
@@ -1029,5 +1030,12 @@ export async function updateNote(
 export async function deleteNote(noteId: string): Promise<void> {
   await fetchApi<{ status: string }>(`/api/notebook/${encodeURIComponent(noteId)}`, {
     method: 'DELETE',
+  });
+}
+
+export async function submitApprovalDecision(eventId: string, payload: DecisionPayload): Promise<unknown> {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/decision`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }

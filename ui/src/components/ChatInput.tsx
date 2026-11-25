@@ -15,7 +15,8 @@
  */
 import { useState, useEffect, useRef, useCallback, type FormEvent, type KeyboardEvent } from 'react';
 import { Send, Loader2, AlertCircle, X } from 'lucide-react';
-import { useChat } from '../hooks';
+import { useChat, useEventDocument } from '../hooks';
+
 import { useResizablePanel } from '../hooks/useResizablePanel';
 import { resizeImage } from '../utils/imageResize';
 import { useWSMessage } from '../contexts/WebSocketContext';
@@ -42,6 +43,8 @@ const MAX_INPUT_HEIGHT = 400;
 const DEFAULT_INPUT_HEIGHT = 120;
 
 function ChatInput({ eventId, wsSend }: ChatInputProps) {
+  const { data: eventDoc } = useEventDocument(eventId ?? null);
+  const isWaitingApproval = Boolean(eventId) && eventDoc?.status === 'waiting_approval';
   const [message, setMessage] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -199,49 +202,62 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
             <span style={{ fontSize: 12, color: '#64748b', fontFamily: 'monospace' }}>{eventId.slice(0, 16)}</span>
           </div>
         )}
-        {/* Image preview */}
-        {pendingImage && (
-          <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            <img src={pendingImage} alt="Attached" style={{ maxHeight: 50, maxWidth: 120, borderRadius: 6, border: '1px solid #334155' }} />
-            <button type="button" onClick={() => setPendingImage(null)} aria-label="Remove image"
-              style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11 }}>
-              Remove
+        {isWaitingApproval && (
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={() => document.querySelector('[data-pending-approval="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+              style={{ padding: '8px 16px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}
+            >
+              Pending decision above — select an option or Write-in ↑
             </button>
           </div>
         )}
-        <div style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0 }}>
-          <textarea
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder={eventId ? 'Reply to event... (Ctrl+V to paste screenshot)' : 'Ask the Brain...'}
-            style={{
-              flex: 1, background: '#1e293b', border: '1px solid #334155',
-              borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
-              resize: 'none', overflow: 'auto',
-              fontFamily: 'inherit', lineHeight: '1.4',
-            }}
-            disabled={isPending}
-          />
-          <button
-            type="submit"
-            disabled={(!message.trim() && !pendingImage) || isPending}
-            style={{
-              background: '#3b82f6', color: '#fff', border: 'none',
-              padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
-              opacity: isPending ? 0.5 : 1, display: 'flex', alignItems: 'center',
-              justifyContent: 'center', alignSelf: 'flex-end',
-            }}
-            title="Send (Enter)"
-          >
-            {isPending ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <Send className="w-5 h-5" />
+        <>
+          {/* Image preview */}
+          {pendingImage && (
+              <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <img src={pendingImage} alt="Attached" style={{ maxHeight: 50, maxWidth: 120, borderRadius: 6, border: '1px solid #334155' }} />
+                <button type="button" onClick={() => setPendingImage(null)} aria-label="Remove image"
+                  style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11 }}>
+                  Remove
+                </button>
+              </div>
             )}
-          </button>
-        </div>
+            <div style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0 }}>
+              <textarea
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={eventId ? 'Reply to event... (Ctrl+V to paste screenshot)' : 'Ask the Brain...'}
+                style={{
+                  flex: 1, background: '#1e293b', border: '1px solid #334155',
+                  borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
+                  resize: 'none', overflow: 'auto',
+                  fontFamily: 'inherit', lineHeight: '1.4',
+                }}
+                disabled={isPending || isWaitingApproval}
+              />
+              <button
+                type="submit"
+                disabled={(!message.trim() && !pendingImage) || isPending || isWaitingApproval}
+                style={{
+                  background: '#3b82f6', color: '#fff', border: 'none',
+                  padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+                  opacity: isPending ? 0.5 : 1, display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', alignSelf: 'flex-end',
+                }}
+                title="Send (Enter)"
+              >
+                {isPending ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5" />
+                )}
+              </button>
+            </div>
+          </>
       </div>
     </form>
   );

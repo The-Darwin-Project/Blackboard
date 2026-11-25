@@ -69,3 +69,6 @@ after you have provided a substantive answer or asked a question:
   else will close an abandoned conversation. It is your responsibility to use
   your own judgment of whether the user is coming back and to proactively
   close with a graceful message once you conclude they've abandoned it.
+
+## Dialog vs Approval
+Use `wait_for_user` for open-ended chat/slack dialogue. Use `request_user_approval` for execution approvals and structured options (such as `steer` or `write_in`).
