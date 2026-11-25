@@ -692,6 +692,34 @@ class GitLabPlatform:
         allowed = _get_allowed_mention_authors()
         return author != bot and (not allowed or author in allowed)
 
+    async def _reject_unauthorized_mention(
+        self,
+        todo_id: Any,
+        project_id: int | str,
+        mr_iid: int,
+        log_msg: str,
+    ) -> None:
+        """Dismiss own unauthorized mention todo, prune snapshot cache, and log."""
+        own_ids = [todo_id] if todo_id is not None else []
+        await self._dismiss_todos_best_effort(
+            self._get_client(), self._headers(), own_ids, "unauthorized mention",
+        )
+        self.remove_from_snapshot_cache(project_id, mr_iid)
+        logger.info(log_msg)
+
+    async def _drop_stale_mr_from_queue_and_cache(
+        self,
+        project_id: int | str,
+        mr_iid: int,
+        log_msg: str | None = None,
+    ) -> None:
+        """Evict terminal/missing MR from Redis FIFO queue and snapshot cache."""
+        if hasattr(self.blackboard, "remove_gitlab_queue"):
+            await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
+        self.remove_from_snapshot_cache(project_id, mr_iid)
+        if log_msg:
+            logger.info(log_msg)
+
     async def queue_item(self, work_item: Any, position: int = 1) -> bool | _QueueResult:
         """Park a GitLab MR work item in Redis FIFO queue and post idempotent position comment."""
         wi = self._unwrap_work_item(work_item)
@@ -700,9 +728,11 @@ class GitLabPlatform:
             return False
 
         if not self._is_mention_authorized(wi):
-            own_ids = [wi["id"]] if wi.get("id") else []
-            await self._dismiss_todos_best_effort(
-                self._get_client(), self._headers(), own_ids, "unauthorized mention",
+            await self._reject_unauthorized_mention(
+                wi.get("id"),
+                pid,
+                iid,
+                f"GitLabPlatform: queue_item rejected unauthorized mention on !{iid}; dismissed todo [{wi.get('id')}]",
             )
             return _QueueResult(False, permanent=True)
 
@@ -1064,6 +1094,7 @@ class GitLabPlatform:
         live_by_key: dict[tuple[int, int], dict] = {}
         skipped_terminal = 0
         terminal_todo_ids: list[int] = []
+        unauthorized_todo_ids: list[int] = []
         for key, group in grouped.items():
             if key in active_mr_keys:
                 continue
@@ -1073,6 +1104,15 @@ class GitLabPlatform:
                 skipped_terminal += 1
                 terminal_todo_ids.extend(t["id"] for t in group if t.get("id"))
                 logger.debug(f"GitLabPlatform: skipping terminal MR {key} (state={mr_state})")
+                continue
+            if best.get("action_name") in ("directly_addressed", "mentioned") and not self._is_mention_authorized(best):
+                todo_author = ((best.get("author") or {}).get("username") or "").strip()
+                if best.get("id") is not None:
+                    unauthorized_todo_ids.append(best["id"])
+                logger.info(
+                    f"GitLabPlatform: dropping unauthorized @{os.getenv('GITLAB_BOT_USERNAME', 'darwin-bot')} "
+                    f"todo from {todo_author or 'unknown'} on {key}; queuing todo [{best.get('id')}] for dismissal"
+                )
                 continue
             best["_sibling_todo_ids"] = [t["id"] for t in group if t.get("id") is not None]
             live_by_key[key] = best
@@ -1084,6 +1124,14 @@ class GitLabPlatform:
                 )
             except Exception as exc:
                 logger.debug(f"GitLabPlatform: best-effort terminal todo cleanup failed: {exc}")
+
+        if unauthorized_todo_ids:
+            try:
+                await self._dismiss_todos_best_effort(
+                    self._get_client(), self._headers(), unauthorized_todo_ids, "unauthorized mention",
+                )
+            except Exception as exc:
+                logger.debug(f"GitLabPlatform: best-effort unauthorized todo cleanup failed: {exc}")
 
         # Reconcile Redis FIFO queue against live todos
         reconciled_queued: list[dict] = []
@@ -1616,12 +1664,12 @@ class GitLabPlatform:
 
         if not self._is_mention_authorized(work_item):
             todo_author = ((work_item.get("author") or {}).get("username") or "").strip()
-            await self._dismiss_todos_best_effort(
-                self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
-            )
-            logger.info(
+            await self._reject_unauthorized_mention(
+                work_item.get("id"),
+                project_id,
+                mr_iid,
                 f"GitLabPlatform: rejecting @{darwin_bot} todo from unauthorized author "
-                f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}"
+                f"{todo_author} on !{mr_iid}; dismissed todo {own_todo_ids}",
             )
             return None
 
@@ -1633,9 +1681,10 @@ class GitLabPlatform:
             )
             if mr_resp.status_code == 404:
                 if mr_resp.content:
-                    if hasattr(self.blackboard, "remove_gitlab_queue"):
-                        await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
-                    logger.info(f"GitLabPlatform: MR !{mr_iid} returned 404 during fetch_context; skipping")
+                    await self._drop_stale_mr_from_queue_and_cache(
+                        project_id, mr_iid,
+                        f"GitLabPlatform: MR !{mr_iid} returned 404 during fetch_context; skipping",
+                    )
                     return None
                 mr_404_empty = True
             elif mr_resp.is_success:
@@ -1643,10 +1692,9 @@ class GitLabPlatform:
                 if isinstance(mr_data, dict):
                     live_state = mr_data.get("state", "")
                     if live_state in ("merged", "closed"):
-                        if hasattr(self.blackboard, "remove_gitlab_queue"):
-                            await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
-                        logger.info(
-                            f"GitLabPlatform: MR !{mr_iid} became {live_state} mid-flight; skipping"
+                        await self._drop_stale_mr_from_queue_and_cache(
+                            project_id, mr_iid,
+                            f"GitLabPlatform: MR !{mr_iid} became {live_state} mid-flight; skipping",
                         )
                         return None
                     if live_state:
@@ -1664,8 +1712,7 @@ class GitLabPlatform:
             self._api_url(f"/projects/{enc_pid}/merge_requests/{mr_iid}/diffs"),
         )
         if mr_404_empty and diffs_resp.status_code == 404:
-            if hasattr(self.blackboard, "remove_gitlab_queue"):
-                await self.blackboard.remove_gitlab_queue(project_id, mr_iid)
+            await self._drop_stale_mr_from_queue_and_cache(project_id, mr_iid)
             return None
         if diffs_resp.is_success:
             diffs_data = diffs_resp.json()
@@ -1787,11 +1834,11 @@ class GitLabPlatform:
 
             if is_mention_action and not authorized_mention_found:
                 if unauthorized_mention_seen:
-                    await self._dismiss_todos_best_effort(
-                        self._get_client(), self._headers(), own_todo_ids, "unauthorized mention",
-                    )
-                    logger.info(
-                        f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todo {own_todo_ids} and skipping"
+                    await self._reject_unauthorized_mention(
+                        work_item.get("id"),
+                        project_id,
+                        mr_iid,
+                        f"GitLabPlatform: unauthorized @{darwin_bot} mention on !{mr_iid}; dismissed todo {own_todo_ids} and skipping",
                     )
                 else:
                     logger.warning(

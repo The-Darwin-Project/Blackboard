@@ -12,6 +12,12 @@ pipelines, and job logs; post comments; trigger retests via GitOps commands;
 merge MRs when conditions are met;
 and update reviewers/assignees.
 
+Because GitLab suppresses self-review todos and Headhunter blocks self-`@mentions`
+(`author == bot`) to prevent reply loops, bot-authored MRs do not generate
+Headhunter todos when the bot adds itself as reviewer or mentions itself; external
+Headhunter tracking depends on triggers from another actor (such as a maintainer
+review request or `@mention`), or direct monitoring within the originating event.
+
 ## Pipeline Verification
 
 An agent reporting "I triggered a retest" confirms the action was taken, not that the retest succeeded or that the pipeline passed. Actions and outcomes are different signals -- the action is a command, the outcome is a measurement.
