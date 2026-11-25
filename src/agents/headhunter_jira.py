@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..state.wip_meta import fetch_active_events_meta, is_automated_wip_event
 from ..utils.adf import adf_to_markdown
 from ..utils.jira_context import extract_jira_context
 
@@ -509,8 +510,8 @@ class HeadhunterJira:
             if chunk.text:
                 chunks.append(chunk.text)
             if chunk.usage:
-                from .llm import record_token_usage
-                record_token_usage("headhunter_jira", chunk.usage)
+                from .llm import PROVIDER_VERTEX_CLAUDE, record_token_usage
+                record_token_usage("headhunter_jira", chunk.usage, provider=PROVIDER_VERTEX_CLAUDE)
         return "".join(chunks)
 
     async def _run_brain_plan(self, jira_content: str, analysis: str) -> str:
@@ -537,8 +538,8 @@ class HeadhunterJira:
             if chunk.function_call:
                 function_call = chunk.function_call
             if chunk.usage:
-                from .llm import record_token_usage
-                record_token_usage("headhunter_jira", chunk.usage)
+                from .llm import PROVIDER_VERTEX_CLAUDE, record_token_usage
+                record_token_usage("headhunter_jira", chunk.usage, provider=PROVIDER_VERTEX_CLAUDE)
 
         if function_call and function_call.name == "produce_execution_plan":
             return self._validate_plan_yaml(self._plan_args_to_yaml(function_call.args or {}))
@@ -766,8 +767,8 @@ class HeadhunterJira:
         self._wip_counter = counter
 
     async def _local_count_wip(self) -> int:
-        status_map = await self.blackboard.get_active_events_with_status()
-        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        meta_map = await fetch_active_events_meta(self.blackboard)
+        return sum(1 for meta in meta_map.values() if is_automated_wip_event(meta, include_new=True))
 
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""

@@ -42,6 +42,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 from ..models import ESCALATION_SCOPE_MAP
+from ..state.wip_meta import fetch_active_events_meta, is_automated_wip_event
 from ..utils.prompt_sanitize import sanitize_kargo_id, sanitize_untrusted_line
 
 # AIR GAP ENFORCEMENT: Only these imports allowed
@@ -340,8 +341,8 @@ class Aligner:
         self._wip_counter = counter
 
     async def _local_count_wip(self) -> int:
-        status_map = await self.blackboard.get_active_events_with_status()
-        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        meta_map = await fetch_active_events_meta(self.blackboard)
+        return sum(1 for meta in meta_map.values() if is_automated_wip_event(meta, include_new=True))
 
     async def _get_wip_headroom(self) -> int:
         """Query current WIP usage and return available headroom for new events.
@@ -442,8 +443,8 @@ class Aligner:
                 max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ALIGNER", "10000")),
                 thinking_level=os.getenv("LLM_THINKING_ALIGNER") or "low",
             )
-            from .llm import record_token_usage
-            record_token_usage("aligner", response.usage)
+            from .llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+            record_token_usage("aligner", response.usage, provider=PROVIDER_VERTEX_GEMINI)
             
             import json
             raw = (response.text or "").strip()

@@ -34,6 +34,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -46,6 +47,7 @@ from redis.exceptions import ResponseError, WatchError
 
 from ..utils.jira_context import is_valid_jira_key
 from ..utils.vcs_approval import HEX_SHA_RE
+from .wip_meta import ActiveEventMeta
 
 from ..models import (
     AppNode,
@@ -1620,6 +1622,69 @@ return 1
                 continue
         return status_map
 
+    async def get_active_events_metadata(self) -> dict[str, ActiveEventMeta]:
+        """Get active event metadata projections in a single 2-RTT Redis pipeline.
+
+        Computes is_waiting_user from the final conversation turn's waitingFor/action
+        so Brain, observers, and FlowCollector share consistent automated-WIP views.
+        """
+        raw_members = list(await self.redis.smembers(self.EVENT_ACTIVE))
+        if not raw_members:
+            return {}
+        members = [
+            eid.decode("utf-8", errors="replace") if isinstance(eid, bytes) else str(eid)
+            for eid in raw_members
+        ]
+        pipe = self.redis.pipeline(transaction=False)
+        for eid in members:
+            pipe.get(f"{self.EVENT_PREFIX}{eid}")
+        results = await pipe.execute()
+        meta_map: dict[str, ActiveEventMeta] = {}
+        for eid, raw in zip(members, results):
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                continue
+            conv = data.get("conversation")
+            conv = conv if isinstance(conv, list) else []
+            last_turn = conv[-1] if conv and isinstance(conv[-1], dict) else None
+            is_waiting_user = bool(
+                last_turn is not None
+                and last_turn.get("waitingFor") == "user"
+                and last_turn.get("action") in ("wait", "response")
+            )
+            raw_status = data.get("status")
+            status = raw_status if isinstance(raw_status, str) and raw_status else "active"
+            raw_source = data.get("source")
+            source = raw_source if isinstance(raw_source, str) else ""
+            raw_q = data.get("queued_at")
+            queued_at = (
+                raw_q
+                if isinstance(raw_q, (int, float)) and not isinstance(raw_q, bool) and math.isfinite(raw_q)
+                else None
+            )
+            raw_a = data.get("atdd_cycle_sec")
+            atdd_cycle_sec = (
+                raw_a
+                if isinstance(raw_a, (int, float)) and not isinstance(raw_a, bool) and math.isfinite(raw_a)
+                else None
+            )
+            raw_t = data.get("team_id")
+            team_id = (raw_t.strip()[:64] or None) if isinstance(raw_t, str) else None
+            meta_map[eid] = ActiveEventMeta(
+                status=status,
+                source=source,
+                is_waiting_user=is_waiting_user,
+                queued_at=queued_at,
+                atdd_cycle_sec=atdd_cycle_sec,
+                team_id=team_id,
+            )
+        return meta_map
+
     async def find_active_event_by_source(self, source: str) -> str | None:
         """Find an active event by source. Returns event_id or None."""
         for eid in await self.redis.smembers(self.EVENT_ACTIVE):
@@ -1770,6 +1835,14 @@ return 1
                 tpm_used=round(sum(s.tpm_used for s in group) / n),
                 tpm_limit=max(s.tpm_limit for s in group),
                 tpm_utilization_pct=round(sum(s.tpm_utilization_pct for s in group) / n, 1),
+                active_user_sessions=round(sum(getattr(s, "active_user_sessions", 0) for s in group) / n),
+                peak_pool_utilization_pct=max((getattr(s, "peak_pool_utilization_pct", 0.0) for s in group), default=0.0),
+                gemini_tpm_used=round(sum(getattr(s, "gemini_tpm_used", 0) for s in group) / n),
+                gemini_tpm_limit=max((getattr(s, "gemini_tpm_limit", 0) for s in group), default=0),
+                claude_tpm_used=round(sum(getattr(s, "claude_tpm_used", 0) for s in group) / n),
+                claude_tpm_limit=max((getattr(s, "claude_tpm_limit", 0) for s in group), default=0),
+                enmaas_tpm_used=round(sum(getattr(s, "enmaas_tpm_used", 0) for s in group) / n),
+                enmaas_tpm_limit=max((getattr(s, "enmaas_tpm_limit", 0) for s in group), default=0),
                 # Deltas: sum()
                 reconcile_count_delta=sum(s.reconcile_count_delta for s in group),
                 error_count_delta=sum(s.error_count_delta for s in group),
@@ -1783,6 +1856,8 @@ return 1
                 token_calls_delta=sum(s.token_calls_delta for s in group),
                 brain_token_input_delta=sum(getattr(s, "brain_token_input_delta", 0) for s in group),
                 brain_token_cached_delta=sum(getattr(s, "brain_token_cached_delta", 0) for s in group),
+                claude_token_total_delta=sum(getattr(s, "claude_token_total_delta", 0) for s in group),
+                sidecar_token_total_delta=sum(getattr(s, "sidecar_token_total_delta", 0) for s in group),
                 # Cumulative counters: max()
                 dispatch_total=max(s.dispatch_total for s in group),
                 dispatch_infra_fails=max(s.dispatch_infra_fails for s in group),

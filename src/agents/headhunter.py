@@ -104,6 +104,7 @@ from .headhunter_models import (
     redact_error_text,
 )
 from .headhunter_port import VcsPlatformPort
+from ..state.wip_meta import fetch_active_events_meta, is_automated_wip_event
 from ..utils.pii_redaction import redact_pii
 from ..utils.prompt_sanitize import sanitize_untrusted_block, sanitize_untrusted_line
 
@@ -422,8 +423,8 @@ class Headhunter:
                 max_output_tokens=self._max_output_tokens,
                 thinking_level=self._thinking_level,
             )
-            from .llm import record_token_usage
-            record_token_usage("headhunter", response.usage)
+            from .llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+            record_token_usage("headhunter", response.usage, provider=PROVIDER_VERTEX_GEMINI)
             plan_text = (response.text or "").strip()
             validated_plan = _validate_plan_yaml(plan_text)
             logger.info(f"LLM analysis for {title_for_log}")
@@ -897,8 +898,8 @@ class Headhunter:
             self._jira.set_wip_counter(counter)
 
     async def _local_count_wip(self) -> int:
-        status_map = await self.blackboard.get_active_events_with_status()
-        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        meta_map = await fetch_active_events_meta(self.blackboard)
+        return sum(1 for meta in meta_map.values() if is_automated_wip_event(meta, include_new=True))
 
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""

@@ -325,6 +325,8 @@ from .llm_error_classifier import (
     is_transient_llm_error_turn as _classify_transient_llm_error_turn,
 )
 
+from ..event_types import AUTOMATED_WIP_EXCLUDED_SOURCES, USER_INTERACTIVE_SOURCES
+from ..state.wip_meta import fetch_active_events_meta, is_automated_wip_event
 from ..models import (
     FLOW_QUOTA_SHED_TIER1_KEY,
     FLOW_QUOTA_SHED_TIER2_KEY,
@@ -371,6 +373,7 @@ from .llm import (
     resolve_stream_timeouts,
     sanitize_call_syntax,
 )
+from .llm import get_default_role_cli_map
 
 
 def _contents_have_pruned_or_decayed(contents: list[dict]) -> bool:
@@ -1930,18 +1933,16 @@ _ROLE_EFFORT_MAP = {
     "code_reviewer": os.getenv("EPHEMERAL_EFFORT_CODE_REVIEWER", "high"),
     "explorer": os.getenv("EPHEMERAL_EFFORT_EXPLORER", "low"),
 }
-_ROLE_CLI_MAP = {
-    "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "claude"),
-}
+_ROLE_CLI_MAP = get_default_role_cli_map()
 
-_USER_FACING_SOURCES: frozenset[str] = frozenset({"chat", "slack", "workspace", "agent_workspace"})
+_USER_FACING_SOURCES: frozenset[str] = USER_INTERACTIVE_SOURCES
 _SQUAD_ROSTER_ROLES: frozenset[str] = frozenset({"architect", "developer", "sysadmin", "qe"})
 
 
 def _select_dispatch_tier(source: str, role: str) -> str:
     """Select ephemeral dispatch tier: 'squad' (4-agent team) vs 'single' (shapeshifter/specialist).
 
-    User-facing events (chat, slack, workspace) get the full 4-agent squad for core roles,
+    User-facing events (chat, slack) get the full 4-agent squad for core roles,
     ensuring workload separation and capacity. Specialized roles (code_reviewer,
     security_analyst, explorer) and sensor events (aligner, headhunter, timekeeper)
     dispatch as single-agent pods.
@@ -1975,6 +1976,7 @@ class Brain:
         self._running = False
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
+        self._active_event_sources: dict[str, str] = {}  # event_id -> source for sync stability WIP
         self._graph_enrich_tasks: set[asyncio.Task] = set()  # strong refs -- event loop only holds weak refs
         self._enriched_turns: set[tuple[str, int]] = set()  # (event_id, turn_idx) -- pruned on event close
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
@@ -2115,22 +2117,22 @@ class Brain:
     # Sources that bypass the global WIP cap entirely (admitted immediately).
     # User-initiated + meta-cognitive events don't queue behind automated work.
     # The 1.3x headroom in cap sizing accounts for bypass-event overhead.
-    _BYPASS_SOURCES = frozenset({"chat", "slack", "jarvis"})
+    _BYPASS_SOURCES = AUTOMATED_WIP_EXCLUDED_SOURCES
 
     # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
     EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst", "code_reviewer", "explorer"})
 
     async def _count_global_wip(self, include_new: bool = False) -> int:
-        """Count all events in WIP (active + deferred, optionally new), minus _waiting_for_user.
+        """Count automated WIP events (active + deferred, optionally new), excluding interactive & user-parked.
 
-        Uses pipeline-based get_active_events_with_status() for O(1) Redis
-        round trips. NEW events are input buffer and excluded from WIP count unless include_new=True.
+        Uses 2-RTT pipeline metadata (or status-map fallback) and also excludes
+        in-flight self._waiting_for_user entries not yet flushed to Redis.
         """
-        status_map = await self.blackboard.get_active_events_with_status()
-        valid_statuses = ("new", "active", "deferred") if include_new else ("active", "deferred")
+        meta_map = await fetch_active_events_meta(self.blackboard)
         return sum(
-            1 for eid, s in status_map.items()
-            if s in valid_statuses and eid not in self._waiting_for_user
+            1 for eid, meta in meta_map.items()
+            if is_automated_wip_event(meta, include_new=include_new)
+            and eid not in self._waiting_for_user
         )
 
     async def _get_adapter(self):
@@ -3243,7 +3245,14 @@ class Brain:
                             if chunk.grounding_metadata:
                                 last_grounding = chunk.grounding_metadata
                             if chunk.usage:
-                                _llm_pkg.record_token_usage("brain", chunk.usage, event_id)
+                                _kw: dict[str, object] = {}
+                                _prov = getattr(self._adapter, "_provider_name", None)
+                                _team = getattr(event, "team_id", None)
+                                if isinstance(_prov, str) and _prov:
+                                    _kw["provider"] = _prov
+                                if isinstance(_team, str) and _team:
+                                    _kw["team_id"] = _team
+                                _llm_pkg.record_token_usage("brain", chunk.usage, event_id, **_kw)
                             if chunk.done:
                                 done_seen = True
                             if collapse:
@@ -5682,6 +5691,8 @@ class Brain:
     def _release_task_state(self, event_id: str) -> None:
         """Clear active task tracking for an event. Used before re-entry and in finally."""
         self._active_tasks.pop(event_id, None)
+        if hasattr(self, "_active_event_sources"):
+            self._active_event_sources.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._routing_turn_for_event.pop(event_id, None)
         self._waiting_for_agent.pop(event_id, None)
@@ -5765,6 +5776,8 @@ class Brain:
 
         current_task = asyncio.current_task()
         self._active_tasks[event_id] = current_task
+        if hasattr(self, "_active_event_sources") and self._active_tasks.get(event_id) is current_task:
+            self._active_event_sources[event_id] = event_source
         self._active_agent_for_event[event_id] = role
 
         try:
@@ -5782,6 +5795,7 @@ class Brain:
                 agent_id=agent_id, task_id=task_id,
                 event_id=event_id, role=role,
                 on_progress=on_progress, on_huddle=on_huddle,
+                team_id=getattr(evt, "team_id", None),
             )
 
             if result == RETRYABLE_SENTINEL:
@@ -6017,14 +6031,17 @@ class Brain:
         current_task = asyncio.current_task()
         sema_acquired = False
         try:
-            if self._dispatch_semaphore:
+            evt = await self.blackboard.get_event(event_id)
+            event_source = evt.source if evt else ""
+            subject_type = getattr(evt, "subject_type", "service") if evt else "service"
+            if not parallel and hasattr(self, "_active_event_sources") and self._active_tasks.get(event_id) is current_task:
+                self._active_event_sources[event_id] = event_source
+            is_interactive = bool(evt and evt.source in AUTOMATED_WIP_EXCLUDED_SOURCES)
+            if self._dispatch_semaphore and not is_interactive:
                 await self._dispatch_semaphore.acquire()
                 sema_acquired = True
 
             agent_acked = False  # Track first progress (= agent received task)
-            evt = await self.blackboard.get_event(event_id)
-            event_source = evt.source if evt else ""
-            subject_type = getattr(evt, "subject_type", "service") if evt else "service"
 
             async def on_progress(progress_data: dict) -> None:
                 """Broadcast agent progress to UI in real-time."""
@@ -6082,12 +6099,11 @@ class Brain:
             # This lets the UI route immediately without waiting for registry polling.
             is_ephemeral_dispatch = False
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
-                event_doc_early = await self.blackboard.get_event(event_id)
                 if self._ephemeral_provisioner and (
                     agent_name in self.EPHEMERAL_ONLY_ROLES
-                    or (event_doc_early and (
-                        event_doc_early.source in ("headhunter", "timekeeper")
-                        or getattr(event_doc_early, "subject_type", "service") == "kargo_stage"
+                    or (evt and (
+                        evt.source in ("headhunter", "timekeeper")
+                        or getattr(evt, "subject_type", "service") == "kargo_stage"
                     ))
                 ):
                     is_ephemeral_dispatch = True
@@ -6119,7 +6135,7 @@ class Brain:
                         await self._append_and_broadcast(event_id, turn)
 
                     agent_id_override = None
-                    event_doc = await self.blackboard.get_event(event_id)
+                    event_doc = evt
 
                     use_ephemeral = False
                     ephemeral_is_overflow = False
@@ -6333,6 +6349,7 @@ class Brain:
                         model=dispatch_model,
                         effort=dispatch_effort,
                         work_style=work_style,
+                        team_id=getattr(evt, "team_id", None),
                     )
                 else:
                     logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")
@@ -6803,18 +6820,35 @@ class Brain:
         return self._last_processed.get(event_id, time.time())
 
     def get_system_stability_snapshot(self) -> dict:
-        """Return hexagonal system stability metrics (Step 4)."""
-        from .llm import get_quota_tracker
-        tracker = get_quota_tracker()
-        stats = tracker.get_stats() if tracker else {}
-        active_wip = len([t for t in self._active_tasks.values() if not t.done()]) if hasattr(self, "_active_tasks") else 0
+        """Return hexagonal system stability metrics (strictly synchronous for BrainIntrospectionPort)."""
+        from .llm import get_quota_registry
+        all_stats = get_quota_registry().get_all_stats()
+        g_stats = all_stats["global"]
+        active_tasks = getattr(self, "_active_tasks", {})
+        sources = getattr(self, "_active_event_sources", {})
+        waiting_user = getattr(self, "_waiting_for_user", {})
+        active_wip = sum(
+            1 for eid, t in active_tasks.items()
+            if not t.done()
+            and sources.get(eid, "") not in AUTOMATED_WIP_EXCLUDED_SOURCES
+            and eid not in waiting_user
+        )
         return {
-            "tokens_used_60s": stats.get("tokens_used_60s", 0),
-            "tpm_limit": stats.get("tpm_limit", 0),
-            "tokens_remaining": stats.get("tokens_remaining", 0),
-            "utilization_pct": stats.get("utilization_pct", 0.0),
-            "active_reservations": stats.get("active_reservations", 0),
-            "high_priority_waiters": stats.get("high_priority_waiters", 0),
+            "tokens_used_60s": g_stats.get("tokens_used_60s", 0),
+            "tpm_limit": g_stats.get("tpm_limit", 0),
+            "tokens_remaining": g_stats.get("tokens_remaining", 0),
+            "utilization_pct": g_stats.get("utilization_pct", 0.0),
+            "peak_pool_utilization_pct": g_stats.get("peak_pool_utilization_pct", 0.0),
+            "active_reservations": g_stats.get("active_reservations", 0),
+            "high_priority_waiters": g_stats.get("high_priority_waiters", 0),
+            "pools": {
+                k: {
+                    "tokens_used_60s": v["tokens_used_60s"],
+                    "tpm_limit": v["tpm_limit"],
+                    "utilization_pct": v["utilization_pct"],
+                }
+                for k, v in all_stats["pools"].items()
+            },
             "pending_jarvis_events": self.pending_jarvis_event_ids(),
             "pending_stabilization_events": self.pending_stabilization_event_ids(),
             "active_wip": active_wip,
@@ -7623,21 +7657,54 @@ class Brain:
         On restart, active events may be orphaned (agent tasks were in-flight,
         WebSocket connections dropped). Close them so they don't block the system.
         """
-        # --- Migrate pre-MessageStatus events: mark all existing turns as EVALUATED ---
-        # Prevents mass re-processing on first deploy with the new unread-message scan.
+        # --- Migrate pre-MessageStatus events: mark evaluated turns while preserving trailing unread user replies ---
+        unread_cutoff_by_eid: dict[str, int] = {}
+        exempted_unread_eids: list[str] = []
         try:
             migrate_ids = await self.blackboard.get_active_events()
-            for eid in migrate_ids:
-                await self.blackboard.mark_turns_evaluated(eid)
-            if migrate_ids:
-                logger.info(f"Startup migration: marked turns EVALUATED for {len(migrate_ids)} active events")
         except Exception as e:
             logger.warning(f"Startup migration failed (non-fatal): {e}")
+            migrate_ids = []
+        migrated_count = 0
+        for eid in migrate_ids:
+            try:
+                ev = await self.blackboard.get_event(eid)
+                if ev and getattr(ev, "conversation", None):
+                    trailing_unread_count = 0
+                    for t in reversed(ev.conversation):
+                        if t.actor == "user" and t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
+                            trailing_unread_count += 1
+                        else:
+                            break
+                    cutoff_idx = max(0, len(ev.conversation) - trailing_unread_count)
+                    if cutoff_idx > 0:
+                        await self.blackboard.mark_turns_evaluated(eid, up_to_turn=cutoff_idx)
+                    if trailing_unread_count > 0:
+                        unread_cutoff_by_eid[eid] = cutoff_idx
+                else:
+                    await self.blackboard.mark_turns_evaluated(eid)
+                migrated_count += 1
+            except Exception as e:
+                logger.warning(f"Startup migration failed for {eid} (non-fatal): {e}")
+        if migrated_count:
+            logger.info(f"Startup migration: marked turns EVALUATED for {migrated_count} active events")
 
         # --- Clean up stale active events ---
         active_ids = await self.blackboard.get_active_events()
         if not active_ids:
             return
+
+        async def _requeue_atomic(requeue_eid: str, label: str) -> None:
+            try:
+                lrem = getattr(self.blackboard.redis, "lrem", None)
+                if callable(lrem):
+                    rem_res = lrem(self.blackboard.EVENT_QUEUE, 0, requeue_eid)
+                    if hasattr(rem_res, "__await__"):
+                        await rem_res
+                await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, requeue_eid)
+                logger.info(f"Re-queued {label} event {requeue_eid} for fresh processing")
+            except Exception as exc:
+                logger.warning(f"Failed to re-queue {label} event {requeue_eid}: {exc}")
 
         stale_count = 0
         for eid in active_ids:
@@ -7667,16 +7734,42 @@ class Brain:
                 if event.status.value == "waiting_approval":
                     logger.info(f"Exempting waiting_approval event from stale cleanup: {eid}")
                     continue
-                # Exempt wait_for_user parks: must never auto-close, regardless of
-                # duration (see @ai-rules #50). These stay status=ACTIVE, so they're
-                # identified by their last turn's shape (waitingFor="user"), which is
-                # produced by three call sites that must all survive restart the same
-                # way: handle_wait_for_user and the _escalate_to_human nudge-cascade
-                # fallback (action="wait"), and _process_with_llm's terminal
-                # text-only-response branch (action="response") -- the implicit
-                # wait_for_user-equivalent park for a plain chat/slack reply.
+                # Exempt interactive or parked events that received an unread user reply pre-restart
+                prev_cutoff = unread_cutoff_by_eid.get(eid)
+                if prev_cutoff is None:
+                    trailing_unread_count = 0
+                    for t in reversed(event.conversation):
+                        if t.actor == "user" and t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
+                            trailing_unread_count += 1
+                        else:
+                            break
+                    if trailing_unread_count > 0:
+                        cutoff_idx = max(0, len(event.conversation) - trailing_unread_count)
+                        if cutoff_idx > 0:
+                            try:
+                                await self.blackboard.mark_turns_evaluated(eid, up_to_turn=cutoff_idx)
+                            except Exception as exc:
+                                logger.warning(f"mark_turns_evaluated failed for {eid} (non-fatal): {exc}")
+                        prev_cutoff = cutoff_idx
+                if prev_cutoff is not None:
+                    prev_turn = event.conversation[prev_cutoff - 1] if prev_cutoff > 0 else None
+                    if (
+                        (
+                            prev_turn is not None
+                            and prev_turn.waitingFor == "user"
+                            and prev_turn.action in ("wait", "response")
+                        )
+                        or event.source in AUTOMATED_WIP_EXCLUDED_SOURCES
+                    ):
+                        exempted_unread_eids.append(eid)
+                        logger.info(f"Exempting unread-user-turn event from stale cleanup: {eid}")
+                        continue
+                # Exempt wait_for_user parks and restore in-memory _waiting_for_user + _last_processed
                 last_turn = event.conversation[-1]
                 if last_turn.waitingFor == "user" and last_turn.action in ("wait", "response"):
+                    wait_ts = last_turn.timestamp or time.time()
+                    self._waiting_for_user[eid] = wait_ts
+                    self._last_processed[eid] = wait_ts
                     logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
                     continue
                 self.cleanup_jarvis_event_state(eid)
@@ -7722,8 +7815,10 @@ class Brain:
                 stale_count += 1
             else:
                 # Never processed by the Brain (blank, or only seeded user turns) -- re-queue
-                await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, eid)
-                logger.info(f"Re-queued untouched event {eid} for fresh processing")
+                await _requeue_atomic(eid, "untouched")
+
+        for eid in exempted_unread_eids:
+            await _requeue_atomic(eid, "unread-user-turn")
 
         if stale_count:
             logger.info(f"Startup cleanup: closed {stale_count} stale events from previous instance")
@@ -7837,7 +7932,7 @@ class Brain:
             pass
         hh = self.agents.get("_headhunter")
         aligner_ref = self.agents.get("_aligner")
-        from .llm import get_quota_tracker, get_token_meter
+        from .llm import get_quota_registry, get_quota_tracker, get_token_meter
         self._flow_collector = FlowCollector(
             scheduler=self._scheduler,
             blackboard=self.blackboard,
@@ -7848,6 +7943,7 @@ class Brain:
             provisioner=self._ephemeral_provisioner,
             token_meter=get_token_meter(),
             quota_tracker=get_quota_tracker,
+            quota_registry=get_quota_registry,
             interval=60.0,
         )
         await self._flow_collector.start()
