@@ -1053,7 +1053,6 @@ class TestATDDVmer2450ThinkingLevelAndSkillCleanup:
         )
 
 
-
 class TestPhase4AMultiOptionApprovals:
     """Phase 4A: VMER-2501 Multi-option approvals skill probes (T-14)."""
 
@@ -1084,3 +1083,54 @@ class TestPhase4AMultiOptionApprovals:
         raw_deep = _skill_text("dispatch", "deep-memory-fixes.md")
         assert len(raw_00.splitlines()) <= 100
         assert len(raw_deep.splitlines()) <= 100
+
+
+class TestIssue349ReviewNotesOnDeferWake:
+    """#349: wake-from-defer must re-read the shared field notes before diagnosing, escalating or noting.
+
+    Section-scoped so the guidance cannot be satisfied by an unrelated paragraph elsewhere in the file.
+    """
+
+    _OBS = "always/10-observations.md"
+    _VERIFY = "defer-wake/verify-assumptions.md"
+
+    def test_observations_review_section_prescribes_review_notes_on_defer_wake(self, loader):
+        body = _skill(loader, self._OBS)
+        sec = _section(body, "### Review Before Decisions")
+        low = sec.lower()
+        assert "`review_notes` again on `defer_wake`" in sec
+        assert "before diagnosing an unexpected anomaly, escalating, or recording a new `env-quirk` note" in sec
+        assert "peer events record cross-event outages and environment changes" in low
+        assert "while an older event is deferred" in low
+        assert "duplicate misdiagnoses, misleading `env-quirk` notes, and false escalations" in low
+        # Pre-existing contracts are preserved.
+        assert "during triage" in low
+        assert "`review_notes` before `take_note`" in sec
+        assert not body.split("### Review Before Decisions")[1].startswith("\nUse review_notes")
+        TestVmer2409KargoSystemicConsolidationAndTsGuardProbe._assert_no_hardcoded_timing(
+            "10-observations Review Before Decisions", sec
+        )
+
+    def test_defer_wake_verify_section_cross_references_field_notes(self, loader):
+        body = _skill(loader, self._VERIFY)
+        sec = _section(body, "## Before deferring again, you MUST")
+        low = sec.lower()
+        assert "re-check the shared field notes (see `always/10-observations.md`)" in low
+        assert "before diagnosing an anomaly, escalating, or re-deferring" in low
+        assert "cross-event outage" in low
+        # Cross-reference only: no tool-name dump in the new sentence.
+        added = sec.split("Before diagnosing an anomaly", 1)[1].split("4.", 1)[0]
+        assert TestVmer2409KargoSystemicConsolidationAndTsGuardProbe._TOOL_RE.findall(added) == []
+        TestVmer2409KargoSystemicConsolidationAndTsGuardProbe._assert_no_hardcoded_timing(
+            "verify-assumptions Before deferring again", sec
+        )
+
+    def test_touched_headings_have_leading_blank_line(self):
+        for rel in (("always", "10-observations.md"), ("defer-wake", "verify-assumptions.md")):
+            lines = _skill_text(*rel).splitlines()
+            headings = _headings_outside_fences("\n".join(lines))
+            assert headings, f"{rel[-1]} has no headings"
+            for n, heading in headings:
+                assert n == 0 or lines[n - 1].strip() in ("", "---"), (
+                    f"{rel[-1]}:{n + 1} heading lacks a blank line before: {heading!r}"
+                )
