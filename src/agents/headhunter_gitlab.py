@@ -64,7 +64,6 @@ ACTION_PRIORITY = {
     "new_commits": 6,
 }
 
-_QUEUE_POS_MARKER = "<!-- darwin-queue-pos -->"
 _SHA_SWEEP_MAX_AGE_S = 30 * 86400
 _SHA_SWEEP_CONCURRENCY = 5
 _WAKEUP_CURSOR_TTL = 7 * 86400
@@ -721,7 +720,7 @@ class GitLabPlatform:
             logger.info(log_msg)
 
     async def queue_item(self, work_item: Any, position: int = 1) -> bool | _QueueResult:
-        """Park a GitLab MR work item in Redis FIFO queue and post idempotent position comment."""
+        """Park a GitLab MR work item in Redis FIFO queue and snapshot cache (no MR note to avoid auto-resolving GitLab todos)."""
         wi = self._unwrap_work_item(work_item)
         pid, iid = self._extract_work_item_key(wi)
         if not pid or not iid:
@@ -758,7 +757,6 @@ class GitLabPlatform:
                         break
             except Exception:
                 pass
-        existing_comment_posted = bool(existing_entry.get("comment_posted", False)) if isinstance(existing_entry, dict) else False
 
         stored_wi = self._truncate_work_item_for_queue(wi)
         meta = {
@@ -768,58 +766,11 @@ class GitLabPlatform:
             "head_sha": self._extract_work_item_sha(wi),
             "_sibling_todo_ids": sibs,
             "work_item": stored_wi,
-            "comment_posted": existing_comment_posted,
         }
         enqueued = await self._enqueue_gitlab_mr(pid, iid, meta)
         if existing_entry is None and not enqueued:
             return _QueueResult(False, permanent=True)
 
-        if not existing_comment_posted:
-            enc_pid = self._enc_project_id(pid)
-            already_has_marker = False
-            try:
-                notes_resp = await self._get(
-                    self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}/notes"),
-                    params={"sort": "desc", "per_page": "20"},
-                )
-                if notes_resp.is_success:
-                    notes_data = notes_resp.json()
-                    if isinstance(notes_data, list):
-                        already_has_marker = any(
-                            _QUEUE_POS_MARKER in (n.get("body") or "")
-                            for n in notes_data
-                            if isinstance(n, dict)
-                        )
-            except Exception as exc:
-                logger.debug(f"GitLabPlatform: queue marker check failed for !{iid}: {exc}")
-
-            comment_ok = already_has_marker
-            if not already_has_marker:
-                try:
-                    post_resp = await self._get_client().post(
-                        self._api_url(f"/projects/{enc_pid}/merge_requests/{iid}/notes"),
-                        headers=self._headers(),
-                        json={
-                            "body": (
-                                f"{_QUEUE_POS_MARKER} Darwin has queued this MR "
-                                f"(position #{position}) while active capacity frees up."
-                            )
-                        },
-                    )
-                    if post_resp.is_success:
-                        comment_ok = True
-                    elif post_resp.status_code == 403:
-                        logger.debug(f"GitLabPlatform: queue comment 403 on !{iid} (best-effort skip)")
-                        comment_ok = True
-                except Exception as exc:
-                    logger.debug(f"GitLabPlatform: queue comment post failed for !{iid}: {exc}")
-
-            if comment_ok:
-                meta["comment_posted"] = True
-                try:
-                    await self._enqueue_gitlab_mr(pid, iid, meta)
-                except Exception:
-                    pass
         snap_item = self._work_item_to_snapshot_item(wi, status="queued", queue_position=position)
         if snap_item is not None:
             existing = list(getattr(self, "_last_snapshot_items", []))
