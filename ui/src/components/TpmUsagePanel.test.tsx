@@ -15,7 +15,7 @@ vi.mock('recharts', async (importOriginal) => {
     ...actual,
     ResponsiveContainer: ({ children }: { children: ReactNode }) => <div style={{ width: 600, height: 120 }}>{children}</div>,
     LineChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-    ReferenceLine: ({ y }: { y?: number }) => <div data-testid="tpm-limit-ref-line" data-y={y} />,
+    ReferenceLine: ({ y, label }: { y?: number; label?: string }) => <div data-testid={label === '85% reserve' ? 'tpm-reserve-ref-line' : 'tpm-limit-ref-line'} data-y={y} />,
   };
 });
 
@@ -46,10 +46,11 @@ describe('TpmUsagePanel', () => {
     ];
     render(<TpmUsagePanel snapshots={snapshots} />);
 
-    expect(screen.getByText('Gemini TPM Usage')).toBeInTheDocument();
+    expect(screen.getByText('Global TPM Usage')).toBeInTheDocument();
     expect(screen.getByText('1.5M')).toBeInTheDocument();
     expect(screen.getByText('/ 3.0M limit')).toBeInTheDocument();
     expect(screen.getByTestId('tpm-limit-ref-line').getAttribute('data-y')).toBe('3000000');
+    expect(screen.getByTestId('tpm-reserve-ref-line').getAttribute('data-y')).toBe('2550000');
     expect(screen.getByText('50.0%').style.color).toBe('rgb(34, 197, 94)');
     expect(screen.getByText('3')).toBeInTheDocument();
     expect(screen.getByText('Latest: 2')).toBeInTheDocument();
@@ -64,20 +65,57 @@ describe('TpmUsagePanel', () => {
 
     expect(screen.getByText('/ 3.0M limit')).toBeInTheDocument();
     expect(screen.getByTestId('tpm-limit-ref-line').getAttribute('data-y')).toBe('3000000');
+    expect(screen.getByTestId('tpm-reserve-ref-line').getAttribute('data-y')).toBe('2550000');
     expect(screen.getByText('85.0%').style.color).toBe('rgb(245, 158, 11)');
+  });
+
+  it('drives bottleneck badge & color from peak_pool_utilization_pct across multi-pool snapshots', () => {
+    const amberPeak = [
+      makeSnapshot({
+        timestamp: 1_700_000_060,
+        tpm_used: 2_750_000,
+        tpm_limit: 5_500_000,
+        tpm_utilization_pct: 50.0,
+        peak_pool_utilization_pct: 88.0,
+        gemini_tpm_used: 990_000,
+        gemini_tpm_limit: 3_500_000,
+        claude_tpm_used: 1_760_000,
+        claude_tpm_limit: 2_000_000,
+      } as Partial<FlowSnapshot>),
+    ];
+    const { rerender } = render(<TpmUsagePanel snapshots={amberPeak} />);
+    expect(screen.getByText('88.0%').style.color).toBe('rgb(245, 158, 11)');
+
+    const redPeak = [
+      makeSnapshot({
+        timestamp: 1_700_000_120,
+        tpm_used: 3_000_000,
+        tpm_limit: 5_500_000,
+        tpm_utilization_pct: 54.5,
+        peak_pool_utilization_pct: 102.0,
+      } as Partial<FlowSnapshot>),
+    ];
+    rerender(<TpmUsagePanel snapshots={redPeak} />);
+    expect(screen.getByText('102.0%').style.color).toBe('rgb(239, 68, 68)');
   });
 
   it('tolerates legacy Redis snapshots without TPM fields', () => {
     render(<TpmUsagePanel snapshots={[makeSnapshot()]} />);
-    expect(screen.getByText('Gemini TPM Usage')).toBeInTheDocument();
+    expect(screen.getByText('Global TPM Usage')).toBeInTheDocument();
     expect(screen.getByText('0.0%')).toBeInTheDocument();
     expect(screen.queryByText(/limit$/)).toBeNull();
     expect(screen.queryByTestId('tpm-limit-ref-line')).toBeNull();
   });
 
-  it('mounts inside a scrollable FlowHistoryPage (WIP tab)', () => {
+  it('mounts inside a scrollable FlowHistoryPage (WIP tab) and renders Interactive Sessions card', () => {
     vi.mocked(useFlowHistory).mockReturnValue({
-      data: [makeSnapshot({ tpm_used: 600_000, tpm_limit: 3_000_000, tpm_utilization_pct: 20.0, quota_throttle_delta: 0 })],
+      data: [makeSnapshot({
+        tpm_used: 600_000,
+        tpm_limit: 3_000_000,
+        tpm_utilization_pct: 20.0,
+        quota_throttle_delta: 0,
+        active_user_sessions: 4,
+      } as Partial<FlowSnapshot>)],
       isLoading: false, error: null,
     } as unknown as ReturnType<typeof useFlowHistory>);
     const { container } = render(<FlowHistoryPage />);
@@ -87,6 +125,7 @@ describe('TpmUsagePanel', () => {
     expect(container.firstElementChild?.className).toContain('h-full');
     expect(container.firstElementChild?.className).toContain('overflow-y-auto');
     expect(screen.getByText('Flow Health')).toBeInTheDocument();
+    expect(screen.getByText('Interactive Sessions')).toBeInTheDocument();
     expect(panel).toBeInTheDocument();
     expect(panel.compareDocumentPosition(queueCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText('600.0K')).toBeInTheDocument();

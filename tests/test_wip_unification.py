@@ -301,3 +301,102 @@ class TestObserversRequestIncludeNew:
 
         brain_stub._waiting_for_user = {"e3": 1.0}
         assert await hh.check_flow_gate() is True  # 3 < 4 (waiting event frees a slot)
+
+
+class TestWipMetaAndInteractiveExclusion:
+    """VMER-2505 T-1 & T-5: ActiveEventMeta projection, blank-source fail-safe, MagicMock fallback, and interactive exclusion."""
+
+    def test_t5_is_automated_wip_event_rules_and_blank_source_failsafe(self):
+        from src.state.wip_meta import ActiveEventMeta, is_automated_wip_event
+
+        # Blank/unknown source MUST fail-safe count as automated WIP
+        assert is_automated_wip_event(ActiveEventMeta(status="active", source="")) is True
+        assert is_automated_wip_event(ActiveEventMeta(status="deferred", source="aligner")) is True
+        assert is_automated_wip_event(ActiveEventMeta(status="new", source="headhunter"), include_new=False) is False
+        assert is_automated_wip_event(ActiveEventMeta(status="new", source="headhunter"), include_new=True) is True
+
+        # Interactive/excluded sources and waiting_user parks MUST be excluded
+        for src in ("chat", "slack", "jarvis"):
+            assert is_automated_wip_event(ActiveEventMeta(status="active", source=src), include_new=True) is False
+        assert is_automated_wip_event(ActiveEventMeta(status="active", source="aligner", is_waiting_user=True)) is False
+
+    @pytest.mark.asyncio
+    async def test_t5_fetch_active_events_meta_uses_2rtt_metadata_dict_path(self):
+        from src.state.wip_meta import ActiveEventMeta, fetch_active_events_meta
+
+        expected = {
+            "evt-a": ActiveEventMeta(status="active", source="aligner"),
+            "evt-c": ActiveEventMeta(status="active", source="chat"),
+        }
+        bb = MagicMock()
+        bb.get_active_events_metadata = AsyncMock(return_value=expected)
+        bb.get_active_events_with_status = AsyncMock(side_effect=AssertionError("legacy fallback should not run"))
+
+        meta = await fetch_active_events_meta(bb)
+        assert meta == expected
+        bb.get_active_events_metadata.assert_awaited_once()
+        bb.get_active_events_with_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_t5_fetch_active_events_meta_magicmock_fallback(self):
+        from src.state.wip_meta import ActiveEventMeta, fetch_active_events_meta, is_automated_wip_event
+
+        bb = MagicMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={"evt-1": "active", "evt-2": "new"})
+
+        meta = await fetch_active_events_meta(bb)
+        assert set(meta.keys()) == {"evt-1", "evt-2"}
+        assert meta["evt-1"] == ActiveEventMeta(status="active", source="")
+        assert meta["evt-2"] == ActiveEventMeta(status="new", source="")
+        assert is_automated_wip_event(meta["evt-1"]) is True
+        bb.get_active_events_with_status.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_t1_brain_and_all_four_observers_exclude_interactive_and_waiting_wip(self, brain_stub, monkeypatch):
+        from src.state.wip_meta import ActiveEventMeta
+
+        monkeypatch.setenv("MAX_ACTIVE_EVENTS", "2")
+        meta = {
+            "evt-chat": ActiveEventMeta(status="active", source="chat"),
+            "evt-slack": ActiveEventMeta(status="active", source="slack"),
+            "evt-jarvis": ActiveEventMeta(status="active", source="jarvis"),
+            "evt-parked": ActiveEventMeta(status="active", source="aligner", is_waiting_user=True),
+            "evt-inflight": ActiveEventMeta(status="active", source="headhunter", is_waiting_user=False),
+        }
+        bb = MagicMock()
+        bb.get_active_events_metadata = AsyncMock(return_value=meta)
+        brain_stub.blackboard = bb
+        brain_stub._waiting_for_user = {"evt-inflight": 1000.0}
+
+        assert await brain_stub.count_global_wip(include_new=False) == 0
+        assert await brain_stub.count_global_wip(include_new=True) == 0
+
+        # Observers share same metadata exclusion (excluding evt-inflight only via Redis metadata;
+        # use purely Redis-parked + interactive metadata for observer tests)
+        obs_meta = {k: v for k, v in meta.items() if k != "evt-inflight"}
+        obs_bb = MagicMock()
+        obs_bb.get_active_events_metadata = AsyncMock(return_value=obs_meta)
+
+        aligner = Aligner(obs_bb)
+        aligner._wip_cap = 2
+        aligner._wip_counter = None
+        assert await aligner._local_count_wip() == 0
+        assert await aligner._get_wip_headroom() == 2
+
+        jenkins = JenkinsObserver(obs_bb)
+        jenkins._wip_cap = 2
+        jenkins._wip_counter = None
+        assert await jenkins._local_count_wip() == 0
+        assert await jenkins._get_wip_headroom() == 2
+
+        hh = Headhunter(obs_bb)
+        hh._wip_cap = 2
+        hh._wip_counter = None
+        assert await hh._local_count_wip() == 0
+        assert await hh.check_flow_gate() is True
+
+        hh_jira = HeadhunterJira(obs_bb)
+        hh_jira._wip_cap = 2
+        hh_jira._wip_counter = None
+        assert await hh_jira._local_count_wip() == 0
+        assert await hh_jira.check_flow_gate() is True

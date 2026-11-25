@@ -120,13 +120,16 @@ async def test_t3_multi_agent_fan_out_termination(registry: AgentRegistry):
 
 @pytest.mark.asyncio
 async def test_t4_t5_brain_tier_selection():
-    """T-4 & T-5: User-facing events dispatch roster='squad'; sensor events dispatch roster='single'."""
-    from src.agents.brain import _select_dispatch_tier
+    """T-4 & T-5: User-facing events dispatch roster='squad'; sensor & jarvis events dispatch roster='single'."""
+    from src.agents.brain import _USER_FACING_SOURCES, _select_dispatch_tier
+    from src.event_types import USER_INTERACTIVE_SOURCES
 
-    # T-4: chat / slack / dashboard -> squad for core roles
+    assert _USER_FACING_SOURCES == USER_INTERACTIVE_SOURCES
+
+    # T-4: chat / slack -> squad for core roles; jarvis -> single (excluded from squad tier)
     assert _select_dispatch_tier(source="chat", role="developer") == "squad"
     assert _select_dispatch_tier(source="slack", role="architect") == "squad"
-    assert _select_dispatch_tier(source="workspace", role="sysadmin") == "squad"
+    assert _select_dispatch_tier(source="jarvis", role="sysadmin") == "single"
 
     # T-5: sensor events -> single
     assert _select_dispatch_tier(source="aligner", role="developer") == "single"

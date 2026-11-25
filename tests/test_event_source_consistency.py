@@ -93,3 +93,28 @@ class TestEventSourceConsistency:
                 f"Tag pair mismatch at position {i}: "
                 f"opening <{o_type} id=\"{o_id}\"> but closing </{closing_types[i]}>"
             )
+
+    def test_t2_canonical_event_source_partitions(self):
+        """T-2: EventSource partitions in src/event_types.py & Brain must be disjoint and complete."""
+        from src.agents.brain import Brain
+        from src.event_types import (
+            AUTOMATED_SOURCES,
+            AUTOMATED_WIP_EXCLUDED_SOURCES,
+            USER_INTERACTIVE_SOURCES,
+        )
+        import src.agents.brain as brain_mod
+
+        assert USER_INTERACTIVE_SOURCES == frozenset({"chat", "slack"})
+        assert AUTOMATED_WIP_EXCLUDED_SOURCES == frozenset({"chat", "slack", "jarvis"})
+        assert AUTOMATED_SOURCES == frozenset({"aligner", "headhunter", "timekeeper"})
+        assert USER_INTERACTIVE_SOURCES <= AUTOMATED_WIP_EXCLUDED_SOURCES
+        assert (AUTOMATED_WIP_EXCLUDED_SOURCES & AUTOMATED_SOURCES) == set()
+        assert (AUTOMATED_WIP_EXCLUDED_SOURCES | AUTOMATED_SOURCES) == set(get_args(EventSource))
+
+        event_types_text = (Path(__file__).parent.parent / "src" / "event_types.py").read_text()
+        assert "workspace" not in event_types_text
+        assert "agent_workspace" not in event_types_text
+        assert "workspace" not in brain_mod._USER_FACING_SOURCES
+        assert "agent_workspace" not in brain_mod._USER_FACING_SOURCES
+        assert brain_mod._USER_FACING_SOURCES == USER_INTERACTIVE_SOURCES
+        assert Brain._BYPASS_SOURCES == AUTOMATED_WIP_EXCLUDED_SOURCES

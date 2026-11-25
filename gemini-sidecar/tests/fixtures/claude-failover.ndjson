@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"s-failover-1","model":"zai-org/glm-5"}
+{"type":"assistant","message":{"id":"f1","model":"zai-org/glm-5","content":[{"type":"text","text":"Starting on enmaas..."}],"usage":{"input_tokens":60,"output_tokens":20}}}
+{"type":"system","subtype":"init","session_id":"s-failover-2","model":"claude-sonnet-5"}
+{"type":"assistant","message":{"id":"f2","model":"claude-sonnet-5","content":[{"type":"text","text":"Recovered on vertex_claude."}],"usage":{"input_tokens":30,"output_tokens":10}}}
+{"type":"result","subtype":"success","session_id":"s-failover-2","result":"Recovered on vertex_claude.","usage":{"input_tokens":90,"output_tokens":30},"modelUsage":{"claude-sonnet-5":{"inputTokens":90,"outputTokens":30}}}
