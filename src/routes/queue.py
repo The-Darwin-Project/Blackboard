@@ -485,8 +485,6 @@ def _map_decision_error_response(outcome: ApprovalDecisionOutcome):
         )
     if outcome.kind == "auth_rejected":
         return JSONResponse(status_code=403, content={"code": outcome.kind, "detail": outcome.message})
-    if outcome.kind == "invalid_image":
-        raise HTTPException(status_code=422, detail=f"invalid_image: {outcome.message}")
     return JSONResponse(status_code=400, content={"code": outcome.kind, "detail": outcome.message})
 
 
@@ -771,7 +769,13 @@ async def close_event_by_user(
         token_usage = get_token_meter().drain_event(event_id)
     except Exception:
         pass
-    await blackboard.close_event(event_id, close_summary, close_reason="user_closed", token_usage=token_usage)
+    try:
+        await blackboard.close_event(event_id, close_summary, close_reason="user_closed", token_usage=token_usage)
+    except WatchError:
+        raise HTTPException(status_code=409, detail="Concurrent queue modification; retry")
+    except RedisError as exc:
+        logger.warning("close_event Redis mutation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Blackboard state temporarily unavailable")
     # Clean up Slack thread mapping if event had Slack context
     if event.slack_channel_id and event.slack_thread_ts:
         await blackboard.delete_slack_mapping(event.slack_channel_id, event.slack_thread_ts)

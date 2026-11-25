@@ -6756,14 +6756,20 @@ class Brain:
         event = await self.blackboard.get_event(event_id)
         if not event or event.status != EventStatus.WAITING_APPROVAL:
             return False
-        had_pending = any(getattr(t, "pendingApproval", False) for t in event.conversation)
-        await self.blackboard.resume_from_approval(event_id)
-        if had_pending:
+        pending_turn_nums = {
+            t.turn for t in event.conversation if getattr(t, "pendingApproval", False)
+        }
+        try:
+            await self.blackboard.resume_from_approval(event_id)
+        except Exception as exc:
+            logger.warning("resume_if_parked: resume_from_approval failed for %s: %s", event_id, exc)
+            return False
+        if pending_turn_nums:
             try:
                 updated = await self.blackboard.get_event(event_id)
                 if updated:
                     for t in updated.conversation:
-                        if getattr(t, "approval_resolution", None) and not getattr(t, "pendingApproval", False):
+                        if t.turn in pending_turn_nums:
                             await self._broadcast({"type": "turn_updated", "event_id": event_id, "turn": t.model_dump()})
             except Exception as e:
                 logger.error(f"Failed to broadcast swept turns in resume_if_parked: {e}")
@@ -6777,34 +6783,31 @@ class Brain:
         logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
 
-
     async def complete_approval_resume(self, event_id: str, updated_request_turn, user_turn) -> None:
         self.clear_waiting(event_id)
         self.clear_jarvis_wait(event_id)
         self.clear_hold_watch(event_id)
 
-        if hasattr(self, "dashboard_adapter") and self.dashboard_adapter:
-            try:
-                if updated_request_turn:
-                    await self.dashboard_adapter.broadcast_event(event_id, {
-                        "type": "turn_updated",
-                        "event_id": event_id,
-                        "turn": updated_request_turn.model_dump(),
-                    })
-                if user_turn:
-                    await self.dashboard_adapter.broadcast_event(event_id, {
-                        "type": "turn",
-                        "event_id": event_id,
-                        "turn": user_turn.model_dump(),
-                    })
-                from ..models import EventStatus
-                await self.dashboard_adapter.broadcast_event(event_id, {
-                    "type": "event_status_changed",
+        try:
+            if updated_request_turn:
+                await self._broadcast({
+                    "type": "turn_updated",
                     "event_id": event_id,
-                    "status": EventStatus.ACTIVE.value,
+                    "turn": updated_request_turn.model_dump(),
                 })
-            except Exception as exc:
-                logger.warning("complete_approval_resume broadcast failed for %s: %s", event_id, exc)
+            if user_turn:
+                await self._broadcast({
+                    "type": "turn",
+                    "event_id": event_id,
+                    "turn": user_turn.model_dump(),
+                })
+            await self._broadcast({
+                "type": "event_status_changed",
+                "event_id": event_id,
+                "status": EventStatus.ACTIVE.value,
+            })
+        except Exception as exc:
+            logger.warning("complete_approval_resume broadcast failed for %s: %s", event_id, exc)
 
         self.enqueue_for_processing(event_id)
 
@@ -7269,20 +7272,28 @@ class Brain:
             pass
         # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
         # System-driven closes (duplicate, timeout, error, force_closed) bypass.
+        latest = None
         if close_reason == "resolved":
             from .tool_gates import has_unevaluated_close_blocker
             latest = await self.blackboard.get_event(event_id)
             if latest and has_unevaluated_close_blocker(latest.conversation):
                 logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
                 return
-        had_pending = event and any(getattr(t, "pendingApproval", False) for t in event.conversation)
-        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
-        if had_pending:
+        source_event = latest or event
+        pending_turn_nums = {
+            t.turn for t in source_event.conversation if getattr(t, "pendingApproval", False)
+        } if source_event else set()
+        try:
+            await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        except Exception as exc:
+            logger.warning("_close_and_broadcast: close_event failed for %s: %s", event_id, exc)
+            return
+        if pending_turn_nums:
             try:
                 updated = await self.blackboard.get_event(event_id)
                 if updated:
                     for t in updated.conversation:
-                        if getattr(t, "approval_resolution", None) and not getattr(t, "pendingApproval", False):
+                        if t.turn in pending_turn_nums:
                             await self._broadcast({"type": "turn_updated", "event_id": event_id, "turn": t.model_dump()})
             except Exception as e:
                 logger.error(f"Failed to broadcast swept turns in _close_and_broadcast: {e}")
@@ -7742,7 +7753,11 @@ class Brain:
                     stale_token_usage = get_token_meter().drain_event(eid)
                 except Exception:
                     pass
-                await self.blackboard.close_event(eid, stale_summary, close_reason="stale", token_usage=stale_token_usage)
+                try:
+                    await self.blackboard.close_event(eid, stale_summary, close_reason="stale", token_usage=stale_token_usage)
+                except Exception as exc:
+                    logger.warning("Stale close_event failed for %s: %s", eid, exc)
+                    continue
                 # Persist report snapshot (non-fatal)
                 try:
                     await self.blackboard.persist_report(eid)

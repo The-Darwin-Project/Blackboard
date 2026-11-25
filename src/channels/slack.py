@@ -426,7 +426,6 @@ class SlackChannel:
     def _extract_action_fields(body: Any) -> tuple[str, str, str, str]:
         val, user, chan, thread, _ = SlackChannel._extract_action_context(body)
         return val, user, chan, thread
-        return val, user, channel, thread_ts
 
     async def _complete_slack_approve(
         self,
@@ -561,7 +560,14 @@ class SlackChannel:
             try:
                 from .approval_blocks import format_frozen_approval_blocks
                 from ..models import ApprovalResolution
-                res = ApprovalResolution(outcome="closed", effect="approve", resolved_by=clean_name_str)
+                res = ApprovalResolution(
+                    outcome="closed",
+                    effect="approve",
+                    resolved_by=clean_name_str,
+                    resolved_at=time.time(),
+                    option_id="approve",
+                    option_label="Approve plan",
+                )
                 plan_text = "Plan ready for review."
                 if fresh_doc.conversation:
                     req_turn = next((t for t in reversed(fresh_doc.conversation) if t.action == "request_approval"), None)
@@ -933,6 +939,8 @@ class SlackChannel:
                 channel=channel,
                 thread_ts=thread_ts,
                 expected_sha=None,
+                message_ts=msg_ts,
+                decision=decision,
             )
 
         @self._app.action("darwin_approve_sha")
@@ -987,6 +995,8 @@ class SlackChannel:
                 channel=channel,
                 thread_ts=thread_ts,
                 expected_sha=expected_sha,
+                message_ts=msg_ts,
+                decision=decision,
             )
 
         @self._app.action("darwin_reject")

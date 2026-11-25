@@ -3,20 +3,24 @@
 # 1. [Constraint]: Pure Slack UI block generation for approval decisions.
 # 2. [Constraint]: <= 100 lines.
 from __future__ import annotations
-import base64
-import hashlib
-import hmac
-import json
-import os
-import time
+import base64, hashlib, hmac, json, os, time
 from typing import Any
 from ..models import ConversationTurn, WRITE_IN_OPTION_ID
 
-_WRITEIN_HMAC_KEY: bytes = os.environ.get("SLACK_SIGNING_SECRET", "").encode("utf-8") or os.urandom(32)
+def _derive_writein_hmac_key() -> bytes:
+    for var in ("DARWIN_WRITEIN_HMAC_SECRET", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNING_SECRET"):
+        val = os.environ.get(var, "").strip()
+        if val: return hmac.new(val.encode("utf-8"), b"darwin-slack-writein-v1", hashlib.sha256).digest()
+    return hmac.new(os.urandom(32), b"darwin-slack-writein-v1", hashlib.sha256).digest()
+
+_WRITEIN_HMAC_KEY: bytes = _derive_writein_hmac_key()
 
 def _safe_text(text: str, max_len: int) -> str:
     cleaned = text.replace("\n", " ").strip()
     return cleaned[:max_len-3] + "..." if len(cleaned) > max_len else cleaned
+
+def _escape_mrkdwn(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def sign_writein_metadata(payload: dict[str, Any], ttl_sec: int = 900) -> str:
     ts = int(time.time())
@@ -41,10 +45,16 @@ def format_frozen_approval_blocks(plan_text: str, options: list, resolution: Any
     md_to_mrkdwn = md_to_mrkdwn or (lambda x: x)
     truncate = truncate or (lambda x: x)
     icon = ":white_check_mark:" if resolution.effect == "approve" else (":x:" if resolution.effect == "reject" else ":compass:")
-    label = getattr(resolution, "write_in_text", None) or getattr(resolution, "option_label", None) or getattr(resolution, "option_id", "")
-    res_text = f"{icon} *{label}* (by {getattr(resolution, 'resolved_by', 'system')})"
+    raw_label = getattr(resolution, "write_in_text", None) or getattr(resolution, "option_label", None) or getattr(resolution, "option_id", "") or ""
+    raw_actor = getattr(resolution, "resolved_by", None) or "system"
+    label = _escape_mrkdwn(_safe_text(str(raw_label), 280))
+    actor = _escape_mrkdwn(_safe_text(str(raw_actor), 280))
+    rendered_plan = truncate(md_to_mrkdwn(plan_text))
+    if len(rendered_plan) > 2500:
+        rendered_plan = rendered_plan[:2497] + "..."
+    res_text = f"{icon} *{label}* (by {actor})"
     return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*:clipboard: Plan ready:*\n{truncate(md_to_mrkdwn(plan_text))}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*:clipboard: Plan ready:*\n{rendered_plan}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": res_text}}
     ]
 
@@ -72,7 +82,8 @@ def build_approval_blocks(turn: ConversationTurn, event_id: str, md_to_mrkdwn=No
         slack_options.append(slack_opt)
         
     slack_options.append({"text": {"type": "plain_text", "text": "Write-in", "emoji": True}, "value": WRITE_IN_OPTION_ID})
-    blocks.append({"type": "actions", "elements": [{"type": "radio_buttons", "action_id": "darwin_approval_radio", "options": slack_options}, {"type": "button", "text": {"type": "plain_text", "text": "Submit"}, "style": "primary", "action_id": "darwin_approval_submit", "value": event_id}]})
+    submit_val = f"{event_id}|{turn.approval_id}" if getattr(turn, "approval_id", None) else event_id
+    blocks.append({"type": "actions", "elements": [{"type": "radio_buttons", "action_id": "darwin_approval_radio", "options": slack_options}, {"type": "button", "text": {"type": "plain_text", "text": "Submit"}, "style": "primary", "action_id": "darwin_approval_submit", "value": submit_val}]})
     return blocks
 
 def build_writein_modal(event_id: str, chan_id: str = "", thread_ts: str = "", message_ts: str = "", approval_id: str = "") -> dict[str, Any]:

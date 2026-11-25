@@ -26,11 +26,15 @@ import logging
 import asyncio
 import json
 import os
+import re
 import time
 from typing import TYPE_CHECKING
 
-from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
+from ..models import ConversationTurn, EventStatus, EventType, WRITE_IN_OPTION_ID, _resolve_domain, _resolve_phase
+from ..utils.prompt_sanitize import strip_xml_fences
 from .tool_gates import count_agent_waits_in_dispatch_epoch, has_unevaluated_close_blocker
+
+_OPTION_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]{1,64}\Z")
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -93,7 +97,6 @@ async def handle_request_user_approval(
         try:
             _, live_sha = await resolve_live_head_sha(pre_park_event)
         except Exception as exc:
-            logger = logging.getLogger(__name__)
             logger.warning(
                 "handle_request_user_approval: resolve_live_head_sha failed for %s (%s)",
                 event_id,
@@ -102,7 +105,6 @@ async def handle_request_user_approval(
         if not live_sha:
             fallback_sha = extract_context_head_sha(pre_park_event)
             if fallback_sha:
-                logger = logging.getLogger(__name__)
                 logger.warning(
                     "handle_request_user_approval: falling back to cached context HEAD SHA %s for %s",
                     fallback_sha[:8],
@@ -120,23 +122,30 @@ async def handle_request_user_approval(
         try:
             for opt in raw_options:
                 parsed_options.append(ApprovalOption(**opt))
+            if not (2 <= len(parsed_options) <= 5):
+                raise ValueError("Options array must contain between 2 and 5 items.")
+            seen_ids: set[str] = set()
+            for opt in parsed_options:
+                if not _OPTION_ID_RE.match(opt.id) or opt.id == WRITE_IN_OPTION_ID:
+                    raise ValueError(f"Invalid option id: {opt.id!r}")
+                if opt.id in seen_ids:
+                    raise ValueError(f"Duplicate option id: {opt.id!r}")
+                seen_ids.add(opt.id)
+                opt.label = strip_xml_fences(opt.label).strip()
+                if not opt.label or len(opt.label) > 75:
+                    raise ValueError(f"Invalid option label length for {opt.id!r}")
+                if opt.description is not None:
+                    opt.description = strip_xml_fences(opt.description).strip()
+                    if len(opt.description) > 75:
+                        raise ValueError(f"Option description exceeds 75 chars for {opt.id!r}")
+                    if not opt.description:
+                        opt.description = None
         except Exception as exc:
             turn = ConversationTurn(
                 turn=0,
                 actor="brain",
                 action="tool_result",
                 thoughts=f"Invalid options provided: {exc}",
-                waitingFor="request_user_approval"
-            )
-            await ctx.append_and_broadcast(event_id, turn)
-            return True
-            
-        if not (2 <= len(parsed_options) <= 5):
-            turn = ConversationTurn(
-                turn=0,
-                actor="brain",
-                action="tool_result",
-                thoughts="Options array must contain between 2 and 5 items.",
                 waitingFor="request_user_approval"
             )
             await ctx.append_and_broadcast(event_id, turn)

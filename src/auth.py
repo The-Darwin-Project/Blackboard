@@ -191,7 +191,9 @@ def get_user_from_request(request) -> UserContext:
         email = request.headers.get("x-forwarded-email", "")
         token = request.headers.get("x-bff-token", "")
         if email and token and TRUSTED_PROXY_SECRET:
-            if hmac.compare_digest(token, TRUSTED_PROXY_SECRET):
+            if isinstance(token, str) and isinstance(TRUSTED_PROXY_SECRET, str) and hmac.compare_digest(
+                token.encode("utf-8"), TRUSTED_PROXY_SECRET.encode("utf-8")
+            ):
                 return UserContext(
                     user_id=email,
                     display_name=email.split("@")[0] if "@" in email else email,

@@ -16,7 +16,6 @@ from ..models import ConversationTurn, WRITE_IN_OPTION_ID
 class DecisionRequest(BaseModel):
     """Payload for POST /queue/{event_id}/decision."""
     approval_id: Optional[str] = None
-    source: Optional[str] = None
     option_id: str = ""
     message: Optional[str] = Field(None, description="Required if option_id is __write_in__")
     write_in_text: Optional[str] = Field(None, description="Legacy write in text")
@@ -31,6 +30,7 @@ class ApprovalDecisionOutcome:
     kind: str  # "ok", "auth_rejected", "not_waiting", "invalid_option", "invalid_image", "sha_drift"
     message: str
     turn: Optional[ConversationTurn] = None
+    request_turn: Optional[ConversationTurn] = None
     expected_sha: Optional[str] = None
     actual_sha: Optional[str] = None
 
@@ -72,20 +72,19 @@ def validate_image_attachment(image: str | None) -> str | None:
 
 
 def resolve_selected_option(
-    options: list, option_id: str | None, legacy_mode: str | None, msg: str | None,
+    options: list, option_id: str | None, legacy_mode: str | None, msg: str | None, has_image: bool = False,
 ) -> tuple[dict | None, ApprovalDecisionOutcome | None]:
     """Resolve and validate the selected option or write-in payload."""
     if option_id == WRITE_IN_OPTION_ID:
-        if not msg or not msg.strip():
+        if not ((msg and msg.strip()) or has_image):
             return None, ApprovalDecisionOutcome(kind="invalid_option", message="Write-in requires a message")
         return {"id": WRITE_IN_OPTION_ID, "label": "Write-in", "effect": "steer"}, None
-    matches = [
-        o for o in options
-        if (o.get("id") if isinstance(o, dict) else o.id) == option_id
-        or (legacy_mode and (o.get("effect") if isinstance(o, dict) else o.effect) == legacy_mode)
-    ]
-    if legacy_mode and len(matches) > 1:
-        return None, ApprovalDecisionOutcome(kind="ambiguous_options", message="Multiple options match this effect")
+    if legacy_mode:
+        matches = [o for o in options if (o.get("effect") if isinstance(o, dict) else o.effect) == legacy_mode]
+        if len(matches) > 1:
+            return None, ApprovalDecisionOutcome(kind="ambiguous_options", message="Multiple options match this effect")
+    else:
+        matches = [o for o in options if (o.get("id") if isinstance(o, dict) else o.id) == option_id]
     if not matches:
         return None, ApprovalDecisionOutcome(kind="invalid_option", message="Invalid option selected")
     o = matches[0]

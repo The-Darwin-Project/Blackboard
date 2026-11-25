@@ -1442,6 +1442,8 @@ class LiveAPIAdapter:
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,
         )
         await self._write_shadow(event_id, "send_event_message", {"message": message})
+        if event.status == EventStatus.WAITING_APPROVAL:
+            return f"Note recorded on {event_id} as turn {current_turn + 1} (event remains parked waiting_approval for user decision)"
         return f"Message delivered to {event_id} (source={source}) as turn {current_turn + 1}"
 
     # -------------------------------------------------------------------------

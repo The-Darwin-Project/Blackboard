@@ -342,54 +342,72 @@ class DashboardWSAdapter:
         event_id = data.get("event_id", "")
         if not event_id:
             return
+        from pydantic import ValidationError
         from ..routes.approval_decision import execute_approval_decision
         from ..routes.approval_decision_helpers import DecisionRequest
 
-        req = DecisionRequest(
-            approval_id=data.get("approval_id"),
-            option_id=str(data.get("option_id") or ""),
-            message=data.get("message"),
-            write_in_text=data.get("write_in_text"),
-            image=data.get("image"),
-            reject_reason=data.get("reject_reason"),
-            expected_sha=data.get("expected_sha"),
-        )
-        outcome = await execute_approval_decision(
-            blackboard=self._blackboard,
-            brain=self._brain,
-            event_id=event_id,
-            user=user,
-            auth_enabled=self._auth_enabled,
-            req=req,
-            source="dashboard",
-            head_sha_resolver=None,
-        )
-        if outcome.kind != "ok":
-            kind = outcome.kind
-            if kind in ("unauthenticated", "forbidden"):
-                kind = "auth_rejected"
-            payload = {
-                "type": "error",
-                "kind": kind,
-                "event_id": event_id,
-                "message": outcome.message,
-            }
-            if outcome.expected_sha is not None:
-                payload["approval_requested_sha"] = outcome.expected_sha
-            if outcome.actual_sha is not None:
-                payload["live_sha"] = outcome.actual_sha
-            if kind == "sha_drift":
-                if req.option_id:
-                    payload["option_id"] = req.option_id
-                if req.approval_id:
-                    payload["approval_id"] = req.approval_id
-            await ws.send_json(payload)
-            return
-        if outcome.turn is not None:
+        try:
+            req = DecisionRequest(
+                approval_id=data.get("approval_id"),
+                option_id=str(data.get("option_id") or ""),
+                message=data.get("message"),
+                write_in_text=data.get("write_in_text"),
+                image=data.get("image"),
+                reject_reason=data.get("reject_reason"),
+                expected_sha=data.get("expected_sha"),
+            )
+            outcome = await execute_approval_decision(
+                blackboard=self._blackboard,
+                brain=self._brain,
+                event_id=event_id,
+                user=user,
+                auth_enabled=self._auth_enabled,
+                req=req,
+                source="dashboard",
+                head_sha_resolver=None,
+            )
+            if outcome.kind != "ok":
+                kind = outcome.kind
+                if kind in ("unauthenticated", "forbidden"):
+                    kind = "auth_rejected"
+                payload = {
+                    "type": "error",
+                    "kind": kind,
+                    "event_id": event_id,
+                    "message": outcome.message,
+                }
+                if outcome.expected_sha is not None:
+                    payload["approval_requested_sha"] = outcome.expected_sha
+                if outcome.actual_sha is not None:
+                    payload["live_sha"] = outcome.actual_sha
+                if kind == "sha_drift":
+                    if req.option_id:
+                        payload["option_id"] = req.option_id
+                    if req.approval_id:
+                        payload["approval_id"] = req.approval_id
+                await ws.send_json(payload)
+                return
+            if outcome.turn is not None:
+                await ws.send_json({
+                    "type": "turn",
+                    "event_id": event_id,
+                    "turn": outcome.turn.model_dump(),
+                })
+        except ValidationError as exc:
+            logger.warning("WS approval_decision validation error on %s: %s", event_id, exc)
             await ws.send_json({
-                "type": "turn",
+                "type": "error",
+                "kind": "invalid_option",
                 "event_id": event_id,
-                "turn": outcome.turn.model_dump(),
+                "message": "Invalid approval decision payload",
+            })
+        except Exception as exc:
+            logger.exception("WS approval_decision failed on %s: %s", event_id, exc)
+            await ws.send_json({
+                "type": "error",
+                "kind": "internal_error",
+                "event_id": event_id,
+                "message": "Internal error processing approval decision",
             })
 
     async def _handle_emergency_stop(self, ws: WebSocket) -> None:

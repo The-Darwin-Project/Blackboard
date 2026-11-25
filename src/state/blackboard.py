@@ -1172,9 +1172,9 @@ return 1
     async def create_event(
         self,
         source: str,
-        service: str = "",
-        reason: str = "",
-        evidence: "str | EventEvidence" = "",
+        service: str,
+        reason: str,
+        evidence: "str | EventEvidence",
         subject_type: str = "service",
         created_by_email: Optional[str] = None,
         slack_channel_id: Optional[str] = None,

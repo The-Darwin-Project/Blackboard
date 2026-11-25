@@ -554,7 +554,9 @@ async def test_t17_register_slack_handlers():
     app.action = lambda aid: (lambda fn: handlers.__setitem__(f"action:{aid}", fn) or fn)
     app.view = lambda vid: (lambda fn: handlers.__setitem__(f"view:{vid}", fn) or fn)
     
-    register_approval_handlers(app, MagicMock())
+    mock_ch = MagicMock()
+    mock_ch._authorize_plan_decision = None
+    register_approval_handlers(app, mock_ch)
     
     assert "action:darwin_approval_radio" in handlers
     assert "action:darwin_approval_submit" in handlers
@@ -636,5 +638,122 @@ async def test_t17_register_slack_handlers():
         await handlers["view:darwin_approval_writein_modal"](ack4, body_good, client, MagicMock())
         m_exec_modal.assert_awaited_once()
         client.chat_update.assert_awaited()
-        # client.chat_update is not directly called here because we return it, wait, modal updating chat depends on the implementation. Just ensuring execute_approval_decision is called.
+
+
+@pytest.mark.asyncio
+async def test_complete_approval_resume_broadcasts():
+    from src.agents.brain import Brain
+    from src.models import ApprovalResolution
+
+    brain = MagicMock()
+    brain.clear_waiting = MagicMock()
+    brain.clear_jarvis_wait = MagicMock()
+    brain.clear_hold_watch = MagicMock()
+    brain.enqueue_for_processing = MagicMock()
+    brain._broadcast = AsyncMock()
+
+    req_turn = ConversationTurn(
+        turn=1, actor="brain", action="request_approval", pendingApproval=False,
+        approval_resolution=ApprovalResolution(
+            outcome="option", option_id="o1", option_label="Ship", effect="approve",
+            resolved_by="alice", resolved_at=1700000000.0,
+        ),
+    )
+    user_turn = ConversationTurn(turn=2, actor="user", action="approve", selected_option_id="o1")
+
+    await Brain.complete_approval_resume(brain, "evt-bc-1", req_turn, user_turn)
+
+    assert brain._broadcast.await_count == 3
+    calls = [c.args[0] for c in brain._broadcast.await_args_list]
+    assert calls[0]["type"] == "turn_updated"
+    assert calls[0]["turn"]["turn"] == 1
+    assert calls[1]["type"] == "turn"
+    assert calls[1]["turn"]["turn"] == 2
+    assert calls[2] == {"type": "event_status_changed", "event_id": "evt-bc-1", "status": "active"}
+    brain.enqueue_for_processing.assert_called_once_with("evt-bc-1")
+
+
+@pytest.mark.asyncio
+async def test_slack_submit_composite_value_and_freeze():
+    from src.channels.slack_approvals import register_approval_handlers
+    from src.models import ApprovalResolution
+    from src.routes.approval_decision_helpers import ApprovalDecisionOutcome
+
+    app = MagicMock()
+    handlers = {}
+    app.action = lambda aid: (lambda fn: handlers.__setitem__(f"action:{aid}", fn) or fn)
+    app.view = lambda vid: (lambda fn: handlers.__setitem__(f"view:{vid}", fn) or fn)
+
+    mock_ch = MagicMock()
+    mock_ch._authorize_plan_decision = None
+    register_approval_handlers(app, mock_ch)
+
+    ack = AsyncMock()
+    client = MagicMock()
+    client.chat_update = AsyncMock()
+
+    req_turn = ConversationTurn(
+        turn=1, actor="brain", action="request_approval",
+        plan="Detailed deployment plan",
+        approval_resolution=ApprovalResolution(
+            approval_id="apv-1", outcome="option", option_id="o1",
+            option_label="Deploy Canary", effect="approve", resolved_by="alice", resolved_at=1700000000.0,
+        ),
+    )
+    user_turn = ConversationTurn(turn=2, actor="user", action="approve", selected_option_id="o1")
+
+    body = {
+        "actions": [{"action_id": "darwin_approval_submit", "value": "evt-1|apv-1"}],
+        "state": {"values": {"b1": {"a1": {"selected_option": {"value": "o1"}}}}},
+        "user": {"id": "U1"},
+        "container": {"message_ts": "100.200", "channel_id": "C1"},
+        "message": {"ts": "100.200", "thread_ts": "100.100"},
+        "channel": {"id": "C1"},
+    }
+
+    with patch("src.channels.slack_approvals.execute_approval_decision", new_callable=AsyncMock) as m_exec:
+        m_exec.return_value = ApprovalDecisionOutcome(
+            kind="ok", message="Decision applied", turn=user_turn, request_turn=req_turn,
+        )
+        await handlers["action:darwin_approval_submit"](ack, body, client, AsyncMock())
+
+        m_exec.assert_awaited_once()
+        passed_req = m_exec.call_args.kwargs["req"]
+        assert passed_req.approval_id == "apv-1"
+        assert passed_req.option_id == "o1"
+        client.chat_update.assert_awaited_once()
+        blocks_str = json.dumps(client.chat_update.call_args.kwargs["blocks"])
+        assert "Detailed deployment plan" in blocks_str
+        assert "Deploy Canary" in blocks_str
+
+
+@pytest.mark.asyncio
+async def test_image_only_write_in_succeeds(async_client, blackboard):
+    import base64
+    from src.models import PendingApproval, ApprovalOption
+
+    options = [ApprovalOption(id="o1", label="O1", effect="approve").model_dump()]
+    evt = _make_event("evt-img-only", status=EventStatus.WAITING_APPROVAL)
+    turn = ConversationTurn(turn=1, actor="brain", action="request_approval")
+    setattr(turn, "pendingApproval", True)
+    setattr(turn, "approval_id", "apv-img")
+    setattr(turn, "approval_options", options)
+    evt.conversation = [turn]
+    setattr(evt, "pending_approval", PendingApproval(
+        approval_id="apv-img", summary="Test", options=options,
+    ))
+    await _seed_event(blackboard, evt)
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    data_uri = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+
+    response = await async_client.post(
+        "/queue/evt-img-only/decision",
+        json={"approval_id": "apv-img", "option_id": "__write_in__", "image": data_uri},
+    )
+    assert response.status_code == 200
+    assert response.json()["code"] == "ok"
+    updated = await blackboard.get_event("evt-img-only")
+    assert updated.conversation[-1].action == "write_in"
+    assert updated.conversation[-1].image == data_uri
 

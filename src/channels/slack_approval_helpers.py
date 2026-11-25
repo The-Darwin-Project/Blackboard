@@ -81,6 +81,11 @@ async def post_slack_ephemeral_error(client: Any, channel: str, user: str, threa
         pass
 
 
+def split_approval_value(val: str) -> tuple[str, str]:
+    """Split a Slack button value of form 'event_id|approval_id' into (event_id, approval_id)."""
+    return (val.split("|", 1)[0], val.split("|", 1)[1]) if "|" in val else (val, "")
+
+
 def extract_selected_option(body: dict[str, Any]) -> dict[str, Any] | None:
     """Return selected radio option dict from a Slack block state payload."""
     state = body.get("state", {}).get("values", {})

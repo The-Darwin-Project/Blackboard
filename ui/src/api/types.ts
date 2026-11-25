@@ -325,11 +325,12 @@ export interface TokenUsageDict {
 
 export type ApprovalErrorKind = 'sha_drift' | 'sha_unresolvable' | 'closed' | 'stale_approval' | 'not_waiting' | 'invalid_option' | 'invalid_image' | 'image_too_large' | 'ambiguous_options';
 
-export type ApprovalEffect = 'approve' | 'reject' | 'steer' | 'escalate';
+export type ApprovalEffect = 'approve' | 'steer' | 'reject';
 
 export interface ApprovalOption {
   id: string;
   label: string;
+  description?: string;
   effect: ApprovalEffect;
 }
 
