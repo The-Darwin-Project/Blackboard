@@ -202,6 +202,10 @@ gcp:
   enmaasTpmLimit: "2000000" # EnMaaS TPM quota (dormant until ENMAAS_ENABLED=true).
   enmaasEnabled: false # Set true to enable EnMaaS TPM pool in global denominator.
   tpmNormalCeilingRatio: "0.85" # 85% normal sustained ceiling / 15% PRIORITY_HIGH burst reserve.
+  tpmPriorityAgingSec: "15.0" # Aging threshold (s) before PRIORITY_NORMAL yields to queued PRIORITY_HIGH waiters.
+  sidecarMaxFrameTokens: "500000" # Per-WS-frame sidecar token clamp ceiling.
+  sidecarMaxTaskTokens: "1500000" # Cumulative per-task sidecar token metering cap.
+  sidecarTpmMaxDefers: "5" # Max consecutive TPM-reserve deferrals per event before fail-open dispatch.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
   existingSecret: "" # e.g., "gcp-sa-key"

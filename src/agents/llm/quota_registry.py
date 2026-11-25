@@ -64,10 +64,11 @@ class QuotaPoolRegistry:
         _logger.warning("Unknown quota provider %r; falling back to %s", provider, PROVIDER_VERTEX_GEMINI)
         return self._pools[PROVIDER_VERTEX_GEMINI]
 
-    def is_normal_saturated(self, provider: str = PROVIDER_VERTEX_GEMINI) -> bool:
+    def is_normal_saturated(self, provider: str = PROVIDER_VERTEX_GEMINI, *, already_deferred: bool = False) -> bool:
         stats = self.get(provider).get_stats()
         sustained = stats.get("sustained_limit", 0)
-        return True if sustained <= 0 else stats["tokens_used_60s"] >= sustained
+        threshold = int(sustained * 0.94) if already_deferred else sustained
+        return True if sustained <= 0 else stats["tokens_used_60s"] >= threshold
 
     def get_all_stats(self, enmaas_enabled: bool | None = None) -> dict:
         enmaas_on = is_enmaas_enabled() if enmaas_enabled is None else enmaas_enabled

@@ -330,6 +330,95 @@ class TestInteractiveEventAndRestartDurability:
         assert await redis.llen(bb.EVENT_QUEUE) == 1
         assert await redis.lrange(bb.EVENT_QUEUE, 0, -1) == ["evt-loop1-fail"]
 
+    @pytest.mark.asyncio
+    async def test_t4c_requeue_atomic_uses_pipeline_transaction_and_deduplicates_queue(self):
+        bb, redis = _make_fakeredis_bb()
+        old_ts = time.time() - 3600.0
+
+        await admit_interactive_event(
+            bb,
+            eid="evt-dup",
+            source="slack",
+            turns=[
+                ConversationTurn(turn=1, actor="user", action="message", thoughts="fresh", status=MessageStatus.SENT, timestamp=old_ts),
+            ],
+        )
+        await redis.lpush(bb.EVENT_QUEUE, "evt-dup", "evt-dup")
+
+        orig_pipeline = redis.pipeline
+        tx_calls: list[bool] = []
+
+        def _spy_pipeline(transaction: bool = True, **kwargs):
+            tx_calls.append(transaction)
+            return orig_pipeline(transaction=transaction, **kwargs)
+
+        brain = simulate_brain_restart(bb)
+        with patch.object(redis, "pipeline", side_effect=_spy_pipeline):
+            await brain._cleanup_stale_events()
+
+        assert tx_calls == [True]
+        assert await redis.lrange(bb.EVENT_QUEUE, 0, -1) == ["evt-dup"]
+
+    @pytest.mark.asyncio
+    async def test_t4d_loop2_per_event_exception_isolation_and_finally_requeue(self):
+        bb, redis = _make_fakeredis_bb()
+        old_ts = time.time() - 3600.0
+
+        await admit_interactive_event(
+            bb,
+            eid="evt-chat-unread",
+            source="chat",
+            turns=[
+                ConversationTurn(turn=1, actor="brain", action="wait", waitingFor="user", thoughts="q?", status=MessageStatus.EVALUATED, timestamp=old_ts),
+                ConversationTurn(turn=2, actor="user", action="message", thoughts="reply", status=MessageStatus.DELIVERED, timestamp=old_ts + 5),
+            ],
+        )
+        await admit_interactive_event(
+            bb,
+            eid="evt-broken",
+            source="headhunter",
+            turns=[
+                ConversationTurn(turn=1, actor="brain", action="thoughts", thoughts="working", status=MessageStatus.EVALUATED, timestamp=old_ts),
+            ],
+        )
+        await admit_interactive_event(
+            bb,
+            eid="evt-good-stale",
+            source="headhunter",
+            turns=[
+                ConversationTurn(turn=1, actor="brain", action="thoughts", thoughts="working", status=MessageStatus.EVALUATED, timestamp=old_ts),
+            ],
+        )
+
+        orig_get_event = bb.get_event
+        broken_calls = {"count": 0}
+
+        async def _flaky_get_event(eid: str):
+            if eid == "evt-broken":
+                broken_calls["count"] += 1
+                if broken_calls["count"] == 2:
+                    raise RuntimeError("boom")
+            return await orig_get_event(eid)
+
+        bb.get_event = _flaky_get_event  # type: ignore[method-assign]
+        brain = simulate_brain_restart(bb)
+        await brain._cleanup_stale_events()
+
+        assert broken_calls["count"] == 2
+        stale_doc = await orig_get_event("evt-good-stale")
+        assert stale_doc is not None
+        assert stale_doc.status == EventStatus.CLOSED
+        assert stale_doc.conversation[-1].action == "close"
+        assert stale_doc.conversation[-1].evidence == "stale"
+
+        unread_doc = await orig_get_event("evt-chat-unread")
+        assert unread_doc is not None
+        assert unread_doc.status == EventStatus.ACTIVE
+
+        queued = await redis.lrange(bb.EVENT_QUEUE, 0, -1)
+        assert queued.count("evt-chat-unread") == 1
+        assert "evt-good-stale" not in queued
+
 
 class TestDispatchSemaphoreBypassAndFix:
     """T-6 & T-7: handlers_dispatch.py:138 scalar log fix and pure interactive semaphore bypass."""

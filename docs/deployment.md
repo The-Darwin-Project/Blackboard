@@ -83,7 +83,15 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `GCP_LOCATION` | Vertex AI location | `global` |
 | `LLM_MODEL_BRAIN` | Brain model | `gemini-4-neon` (rollback: `gemini-4-carbon`; reverts Brain's model selection only -- the `google-genai>=3.6.1` SDK bump is shared by every `GeminiAdapter` caller and is only reverted by rolling back the image tag) |
 | `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-4-argon` |
-| `LLM_TPM_LIMIT` | Tokens-per-minute quota limit | `3000000` |
+| `LLM_TPM_LIMIT` | Vertex AI Gemini pool tokens-per-minute quota limit | `3500000` |
+| `LLM_TPM_LIMIT_CLAUDE` | Vertex AI Claude pool tokens-per-minute quota limit (in-process Claude + `claude` sidecars) | `2000000` |
+| `LLM_TPM_LIMIT_ENMAAS` | EnMaaS pool tokens-per-minute quota limit (dormant until `ENMAAS_ENABLED=true`) | `2000000` |
+| `ENMAAS_ENABLED` | Enable EnMaaS TPM pool in global denominator and default `claude` sidecar routing | `false` |
+| `LLM_TPM_NORMAL_CEILING_RATIO` | Sustained TPM fraction reserved for `PRIORITY_NORMAL` callers (remainder reserved for `PRIORITY_HIGH` bursts) | `0.85` |
+| `LLM_TPM_PRIORITY_AGING_SEC` | Aging threshold (seconds) before `PRIORITY_NORMAL` callers yield to queued `PRIORITY_HIGH` waiters | `15.0` |
+| `SIDECAR_MAX_FRAME_TOKENS` | Per-WS-frame token clamp ceiling for sidecar usage reporting | `500000` |
+| `SIDECAR_MAX_TASK_TOKENS` | Cumulative per-task token metering cap for sidecar dispatches | `1500000` |
+| `SIDECAR_TPM_MAX_DEFERS` | Max consecutive TPM-reserve deferrals per event before failing open to avoid starvation | `5` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
 | `BRAIN_GOOGLE_SEARCH_ENABLED` | Enable web search grounding | `false` |
 | `BRAIN_CONTENT_BUDGET_TOKENS` | Sliding-window prompt budget in estimated tokens before pruning older conversation turns (clamped to `[2000, 1000000]`) | `60000` |

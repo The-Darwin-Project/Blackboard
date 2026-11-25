@@ -7744,139 +7744,170 @@ class Brain:
             logger.info(f"Startup migration: marked turns EVALUATED for {migrated_count} active events")
 
         # --- Clean up stale active events ---
-        active_ids = await self.blackboard.get_active_events()
+        try:
+            active_ids = await self.blackboard.get_active_events()
+        except Exception as e:
+            logger.warning(f"Startup stale-event scan failed (non-fatal): {e}")
+            return
         if not active_ids:
             return
 
         async def _requeue_atomic(requeue_eid: str, label: str) -> None:
             try:
-                lrem = getattr(self.blackboard.redis, "lrem", None)
-                if callable(lrem):
-                    rem_res = lrem(self.blackboard.EVENT_QUEUE, 0, requeue_eid)
-                    if hasattr(rem_res, "__await__"):
-                        await rem_res
-                await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, requeue_eid)
+                used_tx = False
+                pipeline_fn = getattr(self.blackboard.redis, "pipeline", None)
+                if callable(pipeline_fn):
+                    pipe = pipeline_fn(transaction=True)
+                    rem_call = pipe.lrem(self.blackboard.EVENT_QUEUE, 0, requeue_eid)
+                    if inspect.isawaitable(rem_call):
+                        await rem_call
+                    push_call = pipe.lpush(self.blackboard.EVENT_QUEUE, requeue_eid)
+                    if inspect.isawaitable(push_call):
+                        await push_call
+                    exec_call = pipe.execute()
+                    if inspect.isawaitable(exec_call):
+                        await exec_call
+                        used_tx = True
+                if not used_tx:
+                    lrem = getattr(self.blackboard.redis, "lrem", None)
+                    if callable(lrem):
+                        rem_res = lrem(self.blackboard.EVENT_QUEUE, 0, requeue_eid)
+                        if inspect.isawaitable(rem_res):
+                            await rem_res
+                    lpush_res = self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, requeue_eid)
+                    if inspect.isawaitable(lpush_res):
+                        await lpush_res
                 logger.info(f"Re-queued {label} event {requeue_eid} for fresh processing")
             except Exception as exc:
                 logger.warning(f"Failed to re-queue {label} event {requeue_eid}: {exc}")
 
         stale_count = 0
-        for eid in active_ids:
-            event = await self.blackboard.get_event(eid)
-            if not event:
-                # Orphaned ID in active set -- remove it
-                await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
-                stale_count += 1
-                continue
-
-            # Close only ACTIVE events that had in-flight agent work. Deferred events
-            # survive restart — their timer will wake them naturally. Events in
-            # waiting_approval also survive — the human hasn't responded yet.
-            if _has_non_user_turns(event.conversation):  # Brain/agents touched it
-                # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
-                if (
-                    event.source == "jarvis"
-                    and event.conversation[-1].waitingFor == "hold_watch"
-                ):
-                    logger.info(f"Exempting hold_watch orphan from stale cleanup: {eid}")
-                    continue
-                # Exempt deferred events: they're waiting on a timer or subscription, not stale
-                if event.status.value == "deferred":
-                    logger.info(f"Exempting deferred event from stale cleanup: {eid}")
-                    continue
-                # Exempt events waiting for user approval
-                if event.status.value == "waiting_approval":
-                    logger.info(f"Exempting waiting_approval event from stale cleanup: {eid}")
-                    continue
-                # Exempt interactive or parked events that received an unread user reply pre-restart
-                prev_cutoff = unread_cutoff_by_eid.get(eid)
-                if prev_cutoff is None:
-                    trailing_unread_count = 0
-                    for t in reversed(event.conversation):
-                        if t.actor == "user" and t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
-                            trailing_unread_count += 1
-                        else:
-                            break
-                    if trailing_unread_count > 0:
-                        cutoff_idx = max(0, len(event.conversation) - trailing_unread_count)
-                        if cutoff_idx > 0:
-                            try:
-                                await self.blackboard.mark_turns_evaluated(eid, up_to_turn=cutoff_idx)
-                            except Exception as exc:
-                                logger.warning(f"mark_turns_evaluated failed for {eid} (non-fatal): {exc}")
-                        prev_cutoff = cutoff_idx
-                if prev_cutoff is not None:
-                    prev_turn = event.conversation[prev_cutoff - 1] if prev_cutoff > 0 else None
-                    if (
-                        (
-                            prev_turn is not None
-                            and prev_turn.waitingFor == "user"
-                            and prev_turn.action in ("wait", "response")
-                        )
-                        or event.source in AUTOMATED_WIP_EXCLUDED_SOURCES
-                    ):
-                        exempted_unread_eids.append(eid)
-                        logger.info(f"Exempting unread-user-turn event from stale cleanup: {eid}")
+        try:
+            for eid in active_ids:
+                try:
+                    event = await self.blackboard.get_event(eid)
+                    if not event:
+                        # Orphaned ID in active set -- remove it
+                        await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
+                        stale_count += 1
                         continue
-                # Exempt wait_for_user parks and restore in-memory _waiting_for_user + _last_processed
-                last_turn = event.conversation[-1]
-                if last_turn.waitingFor == "user" and last_turn.action in ("wait", "response"):
-                    wait_ts = last_turn.timestamp or time.time()
-                    self._waiting_for_user[eid] = wait_ts
-                    self._last_processed[eid] = wait_ts
-                    logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
-                    continue
-                self.cleanup_jarvis_event_state(eid)
-                self._recall_lessons.pop(eid, None)
-                stale_summary = (
-                    f"Stale: closed on Brain restart. Previous instance was processing this event. "
-                    f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
-                )
-                stale_token_usage = None
-                try:
-                    from .llm import get_token_meter
-                    stale_token_usage = get_token_meter().drain_event(eid)
-                except Exception:
-                    pass
-                try:
-                    await self.blackboard.close_event(eid, stale_summary, close_reason="stale", token_usage=stale_token_usage)
-                except Exception as exc:
-                    logger.warning("Stale close_event failed for %s: %s", eid, exc)
-                    continue
-                # Persist report snapshot (non-fatal)
-                try:
-                    await self.blackboard.persist_report(eid)
-                except Exception as e:
-                    logger.warning(f"Report persistence failed for {eid} (non-fatal): {e}")
-                # Write to ops journal so Brain has temporal context for stale closures
-                await self.blackboard.append_journal(
-                    event.service,
-                    f"{event.event.reason} -- stale closure on restart ({len(event.conversation)} turns)"
-                )
-                # Broadcast closure to UI + Slack (notifies active threads)
-                await self._broadcast({
-                    "type": "event_closed",
-                    "event_id": eid,
-                    "summary": stale_summary,
-                })
-                if event.source == "headhunter":
-                    hh = self.agents.get("_headhunter")
-                    if hh and hasattr(hh, "process_event_feedback"):
-                        try:
-                            await hh.process_event_feedback(eid)
-                        except Exception as e:
-                            logger.warning(f"Headhunter stale-close feedback failed (non-fatal): {e}")
-                # Archive to deep memory (same as _close_and_broadcast path)
-                archivist = self.agents.get("_archivist_memory")
-                if archivist and hasattr(archivist, "archive_event"):
-                    asyncio.create_task(archivist.archive_event(event))
-                stale_count += 1
-            else:
-                # Never processed by the Brain (blank, or only seeded user turns) -- re-queue
-                await _requeue_atomic(eid, "untouched")
 
-        for eid in exempted_unread_eids:
-            await _requeue_atomic(eid, "unread-user-turn")
+                    # Close only ACTIVE events that had in-flight agent work. Deferred events
+                    # survive restart — their timer will wake them naturally. Events in
+                    # waiting_approval also survive — the human hasn't responded yet.
+                    if _has_non_user_turns(event.conversation):  # Brain/agents touched it
+                        # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
+                        if (
+                            event.source == "jarvis"
+                            and event.conversation[-1].waitingFor == "hold_watch"
+                        ):
+                            logger.info(f"Exempting hold_watch orphan from stale cleanup: {eid}")
+                            continue
+                        # Exempt deferred events: they're waiting on a timer or subscription, not stale
+                        if event.status.value == "deferred":
+                            logger.info(f"Exempting deferred event from stale cleanup: {eid}")
+                            continue
+                        # Exempt events waiting for user approval
+                        if event.status.value == "waiting_approval":
+                            logger.info(f"Exempting waiting_approval event from stale cleanup: {eid}")
+                            continue
+                        # Exempt interactive or parked events that received an unread user reply pre-restart
+                        prev_cutoff = unread_cutoff_by_eid.get(eid)
+                        if prev_cutoff is None:
+                            trailing_unread_count = 0
+                            for t in reversed(event.conversation):
+                                if t.actor == "user" and t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
+                                    trailing_unread_count += 1
+                                else:
+                                    break
+                            if trailing_unread_count > 0:
+                                cutoff_idx = max(0, len(event.conversation) - trailing_unread_count)
+                                if cutoff_idx > 0:
+                                    try:
+                                        await self.blackboard.mark_turns_evaluated(eid, up_to_turn=cutoff_idx)
+                                    except Exception as exc:
+                                        logger.warning(f"mark_turns_evaluated failed for {eid} (non-fatal): {exc}")
+                                prev_cutoff = cutoff_idx
+                        if prev_cutoff is not None:
+                            prev_turn = event.conversation[prev_cutoff - 1] if prev_cutoff > 0 else None
+                            if (
+                                (
+                                    prev_turn is not None
+                                    and prev_turn.waitingFor == "user"
+                                    and prev_turn.action in ("wait", "response")
+                                )
+                                or event.source in AUTOMATED_WIP_EXCLUDED_SOURCES
+                            ):
+                                exempted_unread_eids.append(eid)
+                                logger.info(f"Exempting unread-user-turn event from stale cleanup: {eid}")
+                                continue
+                        # Exempt wait_for_user parks and restore in-memory _waiting_for_user + _last_processed
+                        last_turn = event.conversation[-1]
+                        if last_turn.waitingFor == "user" and last_turn.action in ("wait", "response"):
+                            wait_ts = last_turn.timestamp or time.time()
+                            self._waiting_for_user[eid] = wait_ts
+                            self._last_processed[eid] = wait_ts
+                            logger.info(f"Exempting wait_for_user park from stale cleanup: {eid}")
+                            continue
+                        self.cleanup_jarvis_event_state(eid)
+                        self._recall_lessons.pop(eid, None)
+                        stale_summary = (
+                            f"Stale: closed on Brain restart. Previous instance was processing this event. "
+                            f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
+                        )
+                        stale_token_usage = None
+                        try:
+                            from .llm import get_token_meter
+                            stale_token_usage = get_token_meter().drain_event(eid)
+                        except Exception:
+                            pass
+                        try:
+                            await self.blackboard.close_event(eid, stale_summary, close_reason="stale", token_usage=stale_token_usage)
+                        except Exception as exc:
+                            logger.warning("Stale close_event failed for %s: %s", eid, exc)
+                            continue
+                        # Persist report snapshot (non-fatal)
+                        try:
+                            await self.blackboard.persist_report(eid)
+                        except Exception as e:
+                            logger.warning(f"Report persistence failed for {eid} (non-fatal): {e}")
+                        # Write to ops journal so Brain has temporal context for stale closures
+                        try:
+                            await self.blackboard.append_journal(
+                                event.service,
+                                f"{event.event.reason} -- stale closure on restart ({len(event.conversation)} turns)"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Startup journal append failed for {eid} (non-fatal): {e}")
+                        # Broadcast closure to UI + Slack (notifies active threads)
+                        try:
+                            await self._broadcast({
+                                "type": "event_closed",
+                                "event_id": eid,
+                                "summary": stale_summary,
+                            })
+                        except Exception as e:
+                            logger.warning(f"Startup stale-close broadcast failed for {eid} (non-fatal): {e}")
+                        if event.source == "headhunter":
+                            hh = self.agents.get("_headhunter")
+                            if hh and hasattr(hh, "process_event_feedback"):
+                                try:
+                                    await hh.process_event_feedback(eid)
+                                except Exception as e:
+                                    logger.warning(f"Headhunter stale-close feedback failed (non-fatal): {e}")
+                        # Archive to deep memory (same as _close_and_broadcast path)
+                        archivist = self.agents.get("_archivist_memory")
+                        if archivist and hasattr(archivist, "archive_event"):
+                            asyncio.create_task(archivist.archive_event(event))
+                        stale_count += 1
+                    else:
+                        # Never processed by the Brain (blank, or only seeded user turns) -- re-queue
+                        await _requeue_atomic(eid, "untouched")
+                except Exception as exc:
+                    logger.warning(f"Startup stale cleanup failed for {eid} (non-fatal): {exc}")
+        finally:
+            for eid in exempted_unread_eids:
+                await _requeue_atomic(eid, "unread-user-turn")
 
         if stale_count:
             logger.info(f"Startup cleanup: closed {stale_count} stale events from previous instance")

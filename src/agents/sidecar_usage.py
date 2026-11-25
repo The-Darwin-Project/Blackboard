@@ -14,7 +14,7 @@ from .llm.quota_registry import parse_tpm_limit
 from .llm.types import DEFAULT_SIDECAR_CLI, PROVIDER_ENMAAS, PROVIDER_VERTEX_CLAUDE, PROVIDER_VERTEX_GEMINI, TokenUsage, get_default_role_cli_map
 
 logger = logging.getLogger(__name__)
-SIDECAR_MAX_FRAME_TOKENS = parse_tpm_limit("SIDECAR_MAX_FRAME_TOKENS", 2_000_000)
+SIDECAR_MAX_FRAME_TOKENS = parse_tpm_limit("SIDECAR_MAX_FRAME_TOKENS", 500_000)
 _ALLOWED_CLIS = frozenset({"agy", "claude"})
 _VALID_PROVIDERS = frozenset({PROVIDER_VERTEX_GEMINI, PROVIDER_VERTEX_CLAUDE, PROVIDER_ENMAAS})
 _USAGE_KEYS = ("input_tokens", "output_tokens", "thinking_tokens", "cached_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "total_tokens")
@@ -89,6 +89,9 @@ async def resolve_sidecar_provider(
                 return normalize_sidecar_provider(conn_cli, raw_prov)
     return normalize_sidecar_provider((role_cli_map or get_default_role_cli_map()).get(agent_name, DEFAULT_SIDECAR_CLI), "")
 
-async def is_sidecar_pool_saturated(agent_name: str, registry: Any, *, event_id: str = "") -> bool:
+async def is_sidecar_pool_saturated(agent_name: str, registry: Any, *, event_id: str = "", already_deferred: bool = False) -> bool:
     """Return True if the target sidecar pool has reached its 85% normal sustained ceiling."""
-    return get_quota_registry().is_normal_saturated(await resolve_sidecar_provider(agent_name, registry, event_id=event_id))
+    return get_quota_registry().is_normal_saturated(
+        await resolve_sidecar_provider(agent_name, registry, event_id=event_id),
+        already_deferred=already_deferred,
+    )

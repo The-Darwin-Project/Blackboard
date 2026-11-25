@@ -286,6 +286,26 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TPM_NORMAL_CEILING_RATIO
+            - name: LLM_TPM_PRIORITY_AGING_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TPM_PRIORITY_AGING_SEC
+            - name: SIDECAR_MAX_FRAME_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: SIDECAR_MAX_FRAME_TOKENS
+            - name: SIDECAR_MAX_TASK_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: SIDECAR_MAX_TASK_TOKENS
+            - name: SIDECAR_TPM_MAX_DEFERS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: SIDECAR_TPM_MAX_DEFERS
             # ArgoCD Application Observer (sole discovery, health, and sync source)
             {{- if .Values.argocdObserver.enabled }}
             - name: ARGOCD_OBSERVER_ENABLED

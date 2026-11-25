@@ -336,18 +336,25 @@ class TestSidecarUsageIngestionT16:
 
     def test_t16_invalid_sidecar_max_frame_tokens_env_fallback(self, monkeypatch):
         import importlib
+        import src.agents.dispatch as dispatch_mod
         import src.agents.sidecar_usage as sidecar_usage_mod
         from src.agents.llm.quota_registry import parse_tpm_limit
 
         try:
             for bad_val in ("-1", "0", "bad"):
                 monkeypatch.setenv("SIDECAR_MAX_FRAME_TOKENS", bad_val)
-                assert parse_tpm_limit("SIDECAR_MAX_FRAME_TOKENS", 2_000_000) == 2_000_000
+                assert parse_tpm_limit("SIDECAR_MAX_FRAME_TOKENS", 500_000) == 500_000
                 reloaded = importlib.reload(sidecar_usage_mod)
-                assert reloaded.SIDECAR_MAX_FRAME_TOKENS == 2_000_000
+                assert reloaded.SIDECAR_MAX_FRAME_TOKENS == 500_000
+
+            monkeypatch.delenv("SIDECAR_MAX_TASK_TOKENS", raising=False)
+            reloaded_dispatch = importlib.reload(dispatch_mod)
+            assert reloaded_dispatch.SIDECAR_MAX_TASK_TOKENS == 1_500_000
         finally:
             monkeypatch.delenv("SIDECAR_MAX_FRAME_TOKENS", raising=False)
+            monkeypatch.delenv("SIDECAR_MAX_TASK_TOKENS", raising=False)
             importlib.reload(sidecar_usage_mod)
+            importlib.reload(dispatch_mod)
 
     @pytest.mark.asyncio
     async def test_t16_usage_by_provider_dedup_unknown_ignored_and_task_token_cap(self, monkeypatch):
@@ -363,8 +370,8 @@ class TestSidecarUsageIngestionT16:
             before_pool = reg.get(PROVIDER_VERTEX_CLAUDE).get_stats()["tokens_used_60s"]
 
             # 1. Multi-key / unknown key usage_by_provider dedup:
-            #    "unknown_provider" ignored; "enmaas" + "vertex_claude" under ENMAAS_ENABLED=false
-            #    both normalize to PROVIDER_VERTEX_CLAUDE so second is deduplicated against streamed_by_provider.
+            #    "unknown_provider" ignored; "enmaas" (250) + "vertex_claude" (400) under ENMAAS_ENABLED=false
+            #    both normalize to PROVIDER_VERTEX_CLAUDE -> 250 + 150 residual = 400 (no identical-value masking).
             streamed: dict[str, dict[str, int]] = {}
             _reconcile_terminal_token_usage(
                 {
@@ -374,7 +381,7 @@ class TestSidecarUsageIngestionT16:
                     "usage_by_provider": {
                         "unknown_provider": {"input_tokens": 900, "output_tokens": 100, "total_tokens": 1000},
                         "enmaas": {"input_tokens": 200, "output_tokens": 50, "total_tokens": 250},
-                        "vertex_claude": {"input_tokens": 200, "output_tokens": 50, "total_tokens": 250},
+                        "vertex_claude": {"input_tokens": 300, "output_tokens": 100, "total_tokens": 400},
                     },
                 },
                 streamed,
@@ -382,7 +389,7 @@ class TestSidecarUsageIngestionT16:
                 default_cli="claude",
                 default_provider="vertex_claude",
             )
-            assert reg.get(PROVIDER_VERTEX_CLAUDE).get_stats()["tokens_used_60s"] == before_pool + 250
+            assert reg.get(PROVIDER_VERTEX_CLAUDE).get_stats()["tokens_used_60s"] == before_pool + 400
 
             # 2. SIDECAR_MAX_TASK_TOKENS cumulative task cap across live + terminal frames
             monkeypatch.setattr(dispatch_mod, "SIDECAR_MAX_TASK_TOKENS", 1000)
@@ -416,7 +423,7 @@ class TestSidecarUsageIngestionT16:
                 team_id="team-cap",
             )
             assert out == "capped ok"
-            assert reg.get(PROVIDER_VERTEX_CLAUDE).get_stats()["tokens_used_60s"] == before_pool + 250 + 1000
+            assert reg.get(PROVIDER_VERTEX_CLAUDE).get_stats()["tokens_used_60s"] == before_pool + 400 + 1000
             assert get_token_meter().get_team_totals()["team-cap"]["total_tokens"] == 1000
         finally:
             reset_quota_registry()
@@ -520,6 +527,47 @@ class TestSidecarUsageIngestionT16:
 class TestSidecarPreDispatchGateT17:
     """T-17: 85% pre-dispatch gate defers PRIORITY_NORMAL while letting chat & approved events into 15% reserve."""
 
+    @staticmethod
+    def _make_ctx(event_doc: EventDocument):
+        ctx = MagicMock()
+        ctx.is_task_running = MagicMock(return_value=False)
+        ctx.is_dispatch_locked = MagicMock(return_value=False)
+        ctx.increment_routing_depth = MagicMock(return_value=1)
+        ctx.stamp_event = AsyncMock()
+        ctx.next_turn_number = AsyncMock(return_value=2)
+        ctx.append_and_broadcast = AsyncMock()
+        ctx.emit_pulse = AsyncMock()
+        ctx.record_event = AsyncMock()
+        ctx.broadcast = AsyncMock()
+        ctx.get_agent_instance = MagicMock(return_value=MagicMock())
+        ctx.get_ws_mode = MagicMock(return_value="reverse")
+        ctx.run_agent_task = AsyncMock()
+        ctx.dispatch_handler = AsyncMock(return_value=False)
+        bb = AsyncMock()
+        bb.get_event = AsyncMock(return_value=event_doc)
+        bb.get_service = AsyncMock(return_value=None)
+        ctx.get_blackboard = MagicMock(return_value=bb)
+        return ctx
+
+    @staticmethod
+    def _event_with_tpm_defers(eid: str, count: int) -> EventDocument:
+        turns = [
+            ConversationTurn(
+                turn=idx + 1,
+                actor="brain",
+                action="defer",
+                thoughts="Deferring event for 30s: Provider TPM reserve reached (PRIORITY_NORMAL deferred)",
+            )
+            for idx in range(count)
+        ]
+        return EventDocument(
+            id=eid,
+            source="headhunter",
+            service="svc",
+            event=EventInput(reason="pr check", evidence="e"),
+            conversation=turns,
+        )
+
     @pytest.mark.asyncio
     async def test_t17_85_pct_gate_defers_unapproved_headhunter_admits_chat_and_approved(self, monkeypatch):
         from src.agents.handlers_dispatch import handle_select_agent
@@ -541,27 +589,6 @@ class TestSidecarPreDispatchGateT17:
                 provider="vertex_claude",
             )
 
-            def _make_ctx(event_doc: EventDocument):
-                ctx = MagicMock()
-                ctx.is_task_running = MagicMock(return_value=False)
-                ctx.is_dispatch_locked = MagicMock(return_value=False)
-                ctx.increment_routing_depth = MagicMock(return_value=1)
-                ctx.stamp_event = AsyncMock()
-                ctx.next_turn_number = AsyncMock(return_value=2)
-                ctx.append_and_broadcast = AsyncMock()
-                ctx.emit_pulse = AsyncMock()
-                ctx.record_event = AsyncMock()
-                ctx.broadcast = AsyncMock()
-                ctx.get_agent_instance = MagicMock(return_value=MagicMock())
-                ctx.get_ws_mode = MagicMock(return_value="reverse")
-                ctx.run_agent_task = AsyncMock()
-                ctx.dispatch_handler = AsyncMock(return_value=False)
-                bb = AsyncMock()
-                bb.get_event = AsyncMock(return_value=event_doc)
-                bb.get_service = AsyncMock(return_value=None)
-                ctx.get_blackboard = MagicMock(return_value=bb)
-                return ctx
-
             hh_normal = EventDocument(
                 id="evt-hh-norm", source="headhunter", service="svc",
                 event=EventInput(reason="pr check", evidence="e"),
@@ -578,21 +605,139 @@ class TestSidecarPreDispatchGateT17:
             )
 
             with patch("src.agents.handlers_dispatch.get_registry_and_bridge", return_value=(ws_reg, None)):
-                ctx_norm = _make_ctx(hh_normal)
+                ctx_norm = self._make_ctx(hh_normal)
                 await handle_select_agent(ctx_norm, hh_normal.id, {"agent_name": "developer", "task_instruction": "run"}, None)
                 ctx_norm.dispatch_handler.assert_awaited_once()
                 assert ctx_norm.dispatch_handler.call_args[0][0] == "defer_event"
                 assert ctx_norm.dispatch_handler.call_args[0][2]["delay_seconds"] == 30
                 ctx_norm.run_agent_task.assert_not_awaited()
 
-                ctx_appr = _make_ctx(hh_approved)
+                ctx_appr = self._make_ctx(hh_approved)
                 await handle_select_agent(ctx_appr, hh_approved.id, {"agent_name": "developer", "task_instruction": "run"}, None)
                 ctx_appr.dispatch_handler.assert_not_awaited()
                 ctx_appr.run_agent_task.assert_awaited_once()
 
-                ctx_chat = _make_ctx(chat_evt)
+                ctx_chat = self._make_ctx(chat_evt)
                 await handle_select_agent(ctx_chat, chat_evt.id, {"agent_name": "developer", "task_instruction": "run"}, None)
                 ctx_chat.dispatch_handler.assert_not_awaited()
                 ctx_chat.run_agent_task.assert_awaited_once()
+        finally:
+            reset_quota_registry()
+
+    @pytest.mark.asyncio
+    async def test_t17_pre_dispatch_gate_fails_open_on_saturation_check_error(self, caplog):
+        import logging
+        from src.agents.handlers_dispatch import handle_select_agent
+
+        hh_normal = self._event_with_tpm_defers("evt-hh-sat-err", 0)
+        ctx = self._make_ctx(hh_normal)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="darwin.brain"),
+            patch("src.agents.handlers_dispatch.get_registry_and_bridge", return_value=(AgentRegistry(), None)),
+            patch("src.agents.handlers_dispatch.is_sidecar_pool_saturated", AsyncMock(side_effect=RuntimeError("registry probe boom"))),
+        ):
+            await handle_select_agent(ctx, hh_normal.id, {"agent_name": "developer", "task_instruction": "run"}, None)
+
+        ctx.run_agent_task.assert_awaited_once()
+        ctx.dispatch_handler.assert_not_awaited()
+        assert any("failing open" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_t17_pre_dispatch_gate_exponential_backoff_and_max_defers_cap(self, monkeypatch):
+        from src.agents.handlers_dispatch import handle_select_agent
+        from src.agents.llm.quota_registry import get_quota_registry, reset_quota_registry
+        from src.agents.llm.types import PROVIDER_VERTEX_CLAUDE
+
+        monkeypatch.setenv("ENMAAS_ENABLED", "false")
+        monkeypatch.setenv("LLM_TPM_LIMIT_CLAUDE", "100000")
+        monkeypatch.setenv("LLM_TPM_NORMAL_CEILING_RATIO", "0.85")
+        reset_quota_registry()
+
+        try:
+            get_quota_registry().get(PROVIDER_VERTEX_CLAUDE).record_post_hoc(86_000)
+
+            ws_reg = AgentRegistry()
+            await ws_reg.register(
+                "dev-1", "developer", AsyncMock(), [], cli="claude", model="claude-sonnet-5",
+                provider="vertex_claude",
+            )
+
+            with patch("src.agents.handlers_dispatch.get_registry_and_bridge", return_value=(ws_reg, None)):
+                monkeypatch.setenv("SIDECAR_TPM_MAX_DEFERS", "2")
+
+                ctx_0 = self._make_ctx(self._event_with_tpm_defers("evt-backoff-0", 0))
+                await handle_select_agent(ctx_0, "evt-backoff-0", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_0.dispatch_handler.assert_awaited_once()
+                assert ctx_0.dispatch_handler.call_args[0][0] == "defer_event"
+                assert ctx_0.dispatch_handler.call_args[0][2]["delay_seconds"] == 30
+                ctx_0.run_agent_task.assert_not_awaited()
+
+                ctx_1 = self._make_ctx(self._event_with_tpm_defers("evt-backoff-1", 1))
+                await handle_select_agent(ctx_1, "evt-backoff-1", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_1.dispatch_handler.assert_awaited_once()
+                assert ctx_1.dispatch_handler.call_args[0][0] == "defer_event"
+                assert ctx_1.dispatch_handler.call_args[0][2]["delay_seconds"] == 60
+                ctx_1.run_agent_task.assert_not_awaited()
+
+                ctx_2_cap = self._make_ctx(self._event_with_tpm_defers("evt-backoff-2-cap", 2))
+                await handle_select_agent(ctx_2_cap, "evt-backoff-2-cap", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_2_cap.run_agent_task.assert_awaited_once()
+                ctx_2_cap.dispatch_handler.assert_not_awaited()
+
+                monkeypatch.setenv("SIDECAR_TPM_MAX_DEFERS", "5")
+                ctx_2 = self._make_ctx(self._event_with_tpm_defers("evt-backoff-2", 2))
+                await handle_select_agent(ctx_2, "evt-backoff-2", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_2.dispatch_handler.assert_awaited_once()
+                assert ctx_2.dispatch_handler.call_args[0][0] == "defer_event"
+                assert ctx_2.dispatch_handler.call_args[0][2]["delay_seconds"] == 120
+                ctx_2.run_agent_task.assert_not_awaited()
+        finally:
+            reset_quota_registry()
+
+    @pytest.mark.asyncio
+    async def test_t17_pre_dispatch_gate_schmitt_trigger_hysteresis(self, monkeypatch):
+        from src.agents.handlers_dispatch import handle_select_agent
+        from src.agents.llm.quota_registry import get_quota_registry, reset_quota_registry
+        from src.agents.llm.types import PROVIDER_VERTEX_CLAUDE
+
+        monkeypatch.setenv("ENMAAS_ENABLED", "false")
+        monkeypatch.setenv("LLM_TPM_LIMIT_CLAUDE", "100000")
+        monkeypatch.setenv("LLM_TPM_NORMAL_CEILING_RATIO", "0.85")
+        reset_quota_registry()
+
+        try:
+            ws_reg = AgentRegistry()
+            await ws_reg.register(
+                "dev-1", "developer", AsyncMock(), [], cli="claude", model="claude-sonnet-5",
+                provider="vertex_claude",
+            )
+
+            # sustained=85,000; hysteresis threshold=int(85000*0.94)=79,900.
+            # At 82,000 (between 79,900 and 85,000): fresh event dispatches, deferred event stays deferred.
+            get_quota_registry().get(PROVIDER_VERTEX_CLAUDE).record_post_hoc(82_000)
+
+            with patch("src.agents.handlers_dispatch.get_registry_and_bridge", return_value=(ws_reg, None)):
+                ctx_fresh = self._make_ctx(self._event_with_tpm_defers("evt-hyst-fresh", 0))
+                await handle_select_agent(ctx_fresh, "evt-hyst-fresh", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_fresh.run_agent_task.assert_awaited_once()
+                ctx_fresh.dispatch_handler.assert_not_awaited()
+
+                ctx_deferred = self._make_ctx(self._event_with_tpm_defers("evt-hyst-def", 1))
+                await handle_select_agent(ctx_deferred, "evt-hyst-def", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_deferred.dispatch_handler.assert_awaited_once()
+                assert ctx_deferred.dispatch_handler.call_args[0][0] == "defer_event"
+                assert ctx_deferred.dispatch_handler.call_args[0][2]["delay_seconds"] == 60
+                ctx_deferred.run_agent_task.assert_not_awaited()
+
+            # At 79,000 (below 79,900): previously deferred event proceeds with dispatch.
+            reset_quota_registry()
+            get_quota_registry().get(PROVIDER_VERTEX_CLAUDE).record_post_hoc(79_000)
+
+            with patch("src.agents.handlers_dispatch.get_registry_and_bridge", return_value=(ws_reg, None)):
+                ctx_below = self._make_ctx(self._event_with_tpm_defers("evt-hyst-below", 1))
+                await handle_select_agent(ctx_below, "evt-hyst-below", {"agent_name": "developer", "task_instruction": "run"}, None)
+                ctx_below.run_agent_task.assert_awaited_once()
+                ctx_below.dispatch_handler.assert_not_awaited()
         finally:
             reset_quota_registry()

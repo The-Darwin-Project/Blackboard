@@ -50,7 +50,7 @@ from .security import FORBIDDEN_PATTERNS, SecurityError
 logger = logging.getLogger(__name__)
 
 RETRYABLE_SENTINEL = "__RETRYABLE__"
-SIDECAR_MAX_TASK_TOKENS = parse_tpm_limit("SIDECAR_MAX_TASK_TOKENS", 10_000_000)
+SIDECAR_MAX_TASK_TOKENS = parse_tpm_limit("SIDECAR_MAX_TASK_TOKENS", 1_500_000)
 
 _TOOL_MARKER_RE = re.compile(r'\[tool\]\s*\S+', re.IGNORECASE)
 

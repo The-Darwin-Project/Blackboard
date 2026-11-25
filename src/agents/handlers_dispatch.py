@@ -37,6 +37,28 @@ def get_registry_and_bridge():
 # @ai-rules forbid importing Brain). With V2 off, notify turns must not persist
 # response_parts: FC-bearing parts would replay as an unanswered model functionCall.
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
+_TPM_RESERVE_DEFER_PREFIX = "Provider TPM reserve reached"
+
+
+def _max_tpm_reserve_defers() -> int:
+    """Read SIDECAR_TPM_MAX_DEFERS (>=1, default 5)."""
+    try:
+        return max(1, int(os.environ.get("SIDECAR_TPM_MAX_DEFERS", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _consecutive_tpm_defers(event: EventDocument | None) -> int:
+    """Count consecutive trailing TPM-reserve deferrals since the last route or user turn."""
+    if event is None or not event.conversation:
+        return 0
+    count = 0
+    for turn in reversed(event.conversation):
+        if turn.action == "route" or turn.actor == "user":
+            break
+        if turn.action == "defer" and _TPM_RESERVE_DEFER_PREFIX in (turn.thoughts or ""):
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -157,18 +179,40 @@ async def handle_select_agent(
         return False
 
     if event is None or derive_llm_priority(event) == PRIORITY_NORMAL:
-        registry, _ = get_registry_and_bridge()
-        if await is_sidecar_pool_saturated(agent_name, registry, event_id=event_id):
+        prior_defers = _consecutive_tpm_defers(event)
+        max_defers = _max_tpm_reserve_defers()
+        try:
+            registry, _ = get_registry_and_bridge()
+            saturated = await is_sidecar_pool_saturated(
+                agent_name, registry, event_id=event_id, already_deferred=(prior_defers > 0),
+            )
+        except Exception as exc:
             logger.warning(
-                "Provider TPM reserve reached for %s (agent=%s), deferring PRIORITY_NORMAL dispatch",
-                event_id, agent_name,
+                "Sidecar pool saturation check failed for %s (agent=%s); failing open: %s",
+                event_id, agent_name, exc,
             )
-            await ctx.dispatch_handler(
-                "defer_event", event_id,
-                {"delay_seconds": 30, "reason": "Provider TPM reserve reached (PRIORITY_NORMAL deferred)"},
-                None,
-            )
-            return False
+            saturated = False
+        if saturated:
+            if prior_defers >= max_defers:
+                logger.warning(
+                    "TPM reserve defer cap (%d) reached for %s (agent=%s); proceeding fail-open to avoid starvation",
+                    max_defers, event_id, agent_name,
+                )
+            else:
+                delay_s = min(300, 30 * (2 ** prior_defers))
+                logger.warning(
+                    "Provider TPM reserve reached for %s (agent=%s), deferring PRIORITY_NORMAL dispatch (attempt %d/%d, delay=%ds)",
+                    event_id, agent_name, prior_defers + 1, max_defers, delay_s,
+                )
+                await ctx.dispatch_handler(
+                    "defer_event", event_id,
+                    {
+                        "delay_seconds": delay_s,
+                        "reason": f"Provider TPM reserve reached (PRIORITY_NORMAL deferred, attempt {prior_defers + 1}/{max_defers})",
+                    },
+                    None,
+                )
+                return False
 
     depth = ctx.increment_routing_depth(event_id)
     if depth > 30:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -119,26 +120,68 @@ class TestFlowAndTelemetryRoutes:
         """
         Scenario T-19b:
         Given Helm values.yaml, configmap.yaml, and deployment.yaml
-        When inspected for LLM TPM quota governance keys
-        Then all 4 keys (LLM_TPM_LIMIT=3500000, LLM_TPM_LIMIT_CLAUDE=2000000,
-        LLM_TPM_LIMIT_ENMAAS=2000000, LLM_TPM_NORMAL_CEILING_RATIO=0.85) are wired via configMapKeyRef.
+        When `helm template darwin helm/` is rendered and parsed with yaml.safe_load_all
+        Then all 9 TPM/sidecar quota governance keys are defaulted in values.yaml, rendered in ConfigMap data,
+        and wired into the Brain Deployment main container env via configMapKeyRef.
         """
         values = yaml.safe_load((REPO_ROOT / "helm" / "values.yaml").read_text())
-        assert str(values["gcp"]["tpmLimit"]) == "3500000"
-        assert str(values["gcp"]["claudeTpmLimit"]) == "2000000"
-        assert str(values["gcp"]["enmaasTpmLimit"]) == "2000000"
-        assert str(values["gcp"]["tpmNormalCeilingRatio"]) == "0.85"
+        gcp_vals = values["gcp"]
+        assert str(gcp_vals["tpmLimit"]) == "3500000"
+        assert str(gcp_vals["claudeTpmLimit"]) == "2000000"
+        assert str(gcp_vals["enmaasTpmLimit"]) == "2000000"
+        assert gcp_vals["enmaasEnabled"] is False
+        assert str(gcp_vals["tpmNormalCeilingRatio"]) == "0.85"
+        assert str(gcp_vals["tpmPriorityAgingSec"]) == "15.0"
+        assert str(gcp_vals["sidecarMaxFrameTokens"]) == "500000"
+        assert str(gcp_vals["sidecarMaxTaskTokens"]) == "1500000"
+        assert str(gcp_vals["sidecarTpmMaxDefers"]) == "5"
 
-        cfg_text = (REPO_ROOT / "helm" / "templates" / "configmap.yaml").read_text()
-        dep_text = (REPO_ROOT / "helm" / "templates" / "deployment.yaml").read_text()
-        for key in (
-            "LLM_TPM_LIMIT",
-            "LLM_TPM_LIMIT_CLAUDE",
-            "LLM_TPM_LIMIT_ENMAAS",
-            "LLM_TPM_NORMAL_CEILING_RATIO",
-        ):
-            assert f"{key}:" in cfg_text, f"configmap.yaml missing {key}"
-            assert f"key: {key}" in dep_text, f"deployment.yaml missing configMapKeyRef key {key}"
+        proc = subprocess.run(
+            ["helm", "template", "darwin", "helm/"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        docs = [doc for doc in yaml.safe_load_all(proc.stdout) if isinstance(doc, dict)]
+
+        configmap = next(
+            (d for d in docs if d.get("kind") == "ConfigMap" and d.get("metadata", {}).get("name") == "darwin-config"),
+            None,
+        )
+        assert configmap is not None, "Rendered manifests missing ConfigMap darwin-config"
+
+        deployment = next(
+            (d for d in docs if d.get("kind") == "Deployment" and d.get("metadata", {}).get("name") == "darwin-brain"),
+            None,
+        )
+        assert deployment is not None, "Rendered manifests missing Deployment darwin-brain"
+
+        brain_container = next(
+            (c for c in deployment["spec"]["template"]["spec"]["containers"] if c.get("name") == "brain"),
+            None,
+        )
+        assert brain_container is not None, "Brain Deployment missing main container 'brain'"
+        env_by_name = {entry["name"]: entry for entry in brain_container["env"]}
+
+        expected_keys = {
+            "LLM_TPM_LIMIT": "3500000",
+            "LLM_TPM_LIMIT_CLAUDE": "2000000",
+            "LLM_TPM_LIMIT_ENMAAS": "2000000",
+            "ENMAAS_ENABLED": "false",
+            "LLM_TPM_NORMAL_CEILING_RATIO": "0.85",
+            "LLM_TPM_PRIORITY_AGING_SEC": "15.0",
+            "SIDECAR_MAX_FRAME_TOKENS": "500000",
+            "SIDECAR_MAX_TASK_TOKENS": "1500000",
+            "SIDECAR_TPM_MAX_DEFERS": "5",
+        }
+        for key, expected_val in expected_keys.items():
+            assert configmap["data"].get(key) == expected_val, f"ConfigMap darwin-config data[{key}] mismatch"
+            assert key in env_by_name, f"Brain Deployment env missing {key}"
+            assert env_by_name[key].get("valueFrom", {}).get("configMapKeyRef") == {
+                "name": "darwin-config",
+                "key": key,
+            }, f"Brain Deployment env[{key}] configMapKeyRef mismatch"
 
     @pytest.mark.asyncio
     async def test_t21_telemetry_llm_returns_200_cold_start_with_flat_and_nested_keys(self, monkeypatch):
