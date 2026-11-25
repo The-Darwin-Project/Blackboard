@@ -558,6 +558,7 @@ class GeminiAdapter:
         )
         self._model_name = model_name
         self._tracker = quota_tracker
+        self._provider_name = "vertex_gemini"
         logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
 
     # -----------------------------------------------------------------

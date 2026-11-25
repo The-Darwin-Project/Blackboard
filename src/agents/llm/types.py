@@ -38,6 +38,8 @@ import asyncio
 import logging
 import math
 import os
+
+from ...event_types import AUTOMATED_WIP_EXCLUDED_SOURCES
 import re
 import sys
 from collections.abc import AsyncIterator
@@ -117,8 +119,22 @@ class LLMChunk:
 PRIORITY_HIGH: int = 0
 PRIORITY_NORMAL: int = 1
 
+PROVIDER_VERTEX_GEMINI: str = "vertex_gemini"
+PROVIDER_VERTEX_CLAUDE: str = "vertex_claude"
+PROVIDER_ENMAAS: str = "enmaas"
+
+DEFAULT_SIDECAR_CLI: str = "claude"
+
+
+def get_default_role_cli_map() -> dict[str, str]:
+    """Return default role -> sidecar CLI mapping (reads EPHEMERAL_CLI_EXPLORER)."""
+    return {"explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "claude")}
+
+
+ROLE_CLI_MAP: dict[str, str] = get_default_role_cli_map()
+
 # Event sources that are interactive (a human is waiting on the response).
-_HIGH_PRIORITY_SOURCES: frozenset[str] = frozenset({"chat", "slack", "jarvis"})
+_HIGH_PRIORITY_SOURCES: frozenset[str] = AUTOMATED_WIP_EXCLUDED_SOURCES
 # User turn actions that signal an event is resuming from human interaction.
 _HIGH_PRIORITY_USER_ACTIONS: frozenset[str] = frozenset({"approve", "reject", "message"})
 # Only the most recent N conversation turns are inspected for a user action.

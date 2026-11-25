@@ -419,6 +419,7 @@ class Archivist:
                 await self._archive_event_fallback(event, conversation_text, duration)
                 return
 
+            from .llm import PROVIDER_VERTEX_CLAUDE, QuotaExhaustedError, record_token_usage
             claude_timeout = float(os.getenv("CLAUDE_TIMEOUT_SEC", "120"))
             try:
                 response = await asyncio.wait_for(
@@ -432,12 +433,11 @@ class Archivist:
                     ),
                     timeout=claude_timeout,
                 )
-            except asyncio.TimeoutError:
-                logger.warning(f"Claude archive timed out after {claude_timeout}s for {event.id}, falling back to Gemini")
+            except (asyncio.TimeoutError, QuotaExhaustedError) as exc:
+                logger.warning(f"Claude archive unavailable ({type(exc).__name__}) for {event.id}, falling back to Gemini")
                 await self._archive_event_fallback(event, conversation_text, duration)
                 return
-            from .llm import record_token_usage
-            record_token_usage("archivist", response.usage)
+            record_token_usage("archivist", response.usage, event.id, provider=PROVIDER_VERTEX_CLAUDE, team_id=getattr(event, "team_id", None))
 
             if response.function_call and response.function_call.args is not None:
                 summary = response.function_call.args
@@ -522,8 +522,8 @@ class Archivist:
             max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "32000")),
             thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
         )
-        from .llm import record_token_usage
-        record_token_usage("archivist", response.usage)
+        from .llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+        record_token_usage("archivist", response.usage, event.id, provider=PROVIDER_VERTEX_GEMINI, team_id=getattr(event, "team_id", None))
 
         summary_text = (response.text or "").strip()
         if summary_text.startswith("```"):
@@ -1687,6 +1687,7 @@ class Archivist:
                 contents += f"\n\n## Additional Context\n{context_notes}"
 
             claude_timeout = float(os.getenv("CLAUDE_TIMEOUT_SEC", "120"))
+            from .llm import PROVIDER_VERTEX_CLAUDE, QuotaExhaustedError, record_token_usage
             try:
                 response = await asyncio.wait_for(
                     adapter.generate(
@@ -1699,8 +1700,9 @@ class Archivist:
                     ),
                     timeout=claude_timeout,
                 )
-            except asyncio.TimeoutError:
-                return {"error": f"Claude extraction timed out after {claude_timeout}s", "lessons": [], "corrections": []}
+            except (asyncio.TimeoutError, QuotaExhaustedError) as exc:
+                return {"error": f"Claude extraction unavailable ({type(exc).__name__}): {exc}", "lessons": [], "corrections": []}
+            record_token_usage("archivist", response.usage, provider=PROVIDER_VERTEX_CLAUDE)
 
             if response.function_call and response.function_call.args is not None:
                 result = response.function_call.args
@@ -1712,17 +1714,21 @@ class Archivist:
                     result = json.loads(text)
                 except json.JSONDecodeError:
                     logger.warning("Claude extraction returned invalid JSON, retrying once")
-                    retry = await asyncio.wait_for(
-                        adapter.generate(
-                            system_prompt=self.EXTRACTION_PROMPT,
-                            contents=contents,
-                            tools=[self.EXTRACTION_TOOL_SCHEMA],
-                            tool_choice={"type": "auto"},
-                            temperature=0.3,
-                            max_output_tokens=_ARCHIVIST_CLAUDE_MAX_TOKENS,
-                        ),
-                        timeout=claude_timeout,
-                    )
+                    try:
+                        retry = await asyncio.wait_for(
+                            adapter.generate(
+                                system_prompt=self.EXTRACTION_PROMPT,
+                                contents=contents,
+                                tools=[self.EXTRACTION_TOOL_SCHEMA],
+                                tool_choice={"type": "auto"},
+                                temperature=0.3,
+                                max_output_tokens=_ARCHIVIST_CLAUDE_MAX_TOKENS,
+                            ),
+                            timeout=claude_timeout,
+                        )
+                    except (asyncio.TimeoutError, QuotaExhaustedError) as exc:
+                        return {"error": f"Claude extraction retry unavailable ({type(exc).__name__}): {exc}", "lessons": [], "corrections": []}
+                    record_token_usage("archivist", retry.usage, provider=PROVIDER_VERTEX_CLAUDE)
                     if retry.function_call and retry.function_call.args:
                         result = retry.function_call.args
                     else:
@@ -1846,8 +1852,8 @@ class Archivist:
             thinking_level=os.getenv("LLM_THINKING_ARCHIVIST_DIGEST") or "low",
         )
         if response.usage:
-            from .llm import record_token_usage
-            record_token_usage("archivist", response.usage)
+            from .llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+            record_token_usage("archivist", response.usage, provider=PROVIDER_VERTEX_GEMINI)
 
         raw = (response.text or "").strip()
         if raw.startswith("```"):

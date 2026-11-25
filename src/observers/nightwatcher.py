@@ -588,8 +588,8 @@ class NightwatcherObserver:
                 tools=tools, temperature=temperature,
                 max_output_tokens=analysis_max_tokens, thinking_level=thinking,
             )
-            from ..agents.llm import record_token_usage
-            record_token_usage("nightwatcher", response.usage)
+            from ..agents.llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+            record_token_usage("nightwatcher", response.usage, provider=PROVIDER_VERTEX_GEMINI)
             if response.function_call:
                 name = response.function_call.name
                 args = response.function_call.args
@@ -644,7 +644,7 @@ class NightwatcherObserver:
         """
         from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
         from .nightwatcher_tools import _handle_declare_clusters, reconcile_cluster_plan, salvage_cluster_plan
-        from ..agents.llm import record_token_usage
+        from ..agents.llm import PROVIDER_VERTEX_GEMINI, record_token_usage
         last_clusters = None
         for attempt in range(MAX_DECLARE_RETRIES + 1):
             response = await adapter.generate(
@@ -652,7 +652,7 @@ class NightwatcherObserver:
                 tools=NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA, temperature=temperature,
                 max_output_tokens=max_tokens, thinking_level=thinking,
             )
-            record_token_usage("nightwatcher", response.usage)
+            record_token_usage("nightwatcher", response.usage, provider=PROVIDER_VERTEX_GEMINI)
             if response.function_call and response.function_call.name == "declare_clusters":
                 call_args = response.function_call.args or {}
                 if isinstance(call_args, dict) and isinstance(call_args.get("clusters"), list):
@@ -788,8 +788,8 @@ class NightwatcherObserver:
                     tools=report_tools, temperature=temperature,
                     max_output_tokens=max_tokens, thinking_level=thinking,
                 )
-                from ..agents.llm import record_token_usage
-                record_token_usage("nightwatcher", response.usage)
+                from ..agents.llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+                record_token_usage("nightwatcher", response.usage, provider=PROVIDER_VERTEX_GEMINI)
                 if response.function_call and response.function_call.name == expected_tool:
                     if is_extend:
                         result = await _handle_extend_incident(response.function_call.args, ctx, cluster)
@@ -846,8 +846,8 @@ class NightwatcherObserver:
             tools=summary_tools, temperature=temperature,
             max_output_tokens=max_tokens, thinking_level=thinking,
         )
-        from ..agents.llm import record_token_usage
-        record_token_usage("nightwatcher", response.usage)
+        from ..agents.llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+        record_token_usage("nightwatcher", response.usage, provider=PROVIDER_VERTEX_GEMINI)
         if response.function_call and response.function_call.name == "post_shift_summary":
             from .nightwatcher_tools import _handle_post_shift_summary
             await _handle_post_shift_summary(response.function_call.args, ctx)

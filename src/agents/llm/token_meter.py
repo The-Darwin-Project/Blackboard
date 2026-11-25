@@ -19,6 +19,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING, TypedDict
 
+from .token_attribution import BoundedTeamCounter
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -56,6 +58,10 @@ class TokenMeter:
         self._cumulative: dict[str, int] = dict(_ZERO_USAGE)
         self._interval_by_caller: dict[str, TokenUsageDict] = {}
         self._cumulative_by_caller: dict[str, TokenUsageDict] = {}
+        self._interval_by_provider: dict[str, TokenUsageDict] = {}
+        self._cumulative_by_provider: dict[str, TokenUsageDict] = {}
+        self._last_interval_by_provider: dict[str, TokenUsageDict] = {}
+        self._team_counter = BoundedTeamCounter()
         self._per_event: dict[str, dict[str, int]] = {}
 
     def record(
@@ -64,17 +70,28 @@ class TokenMeter:
         model: str,
         usage: "TokenUsage",
         event_id: str | None = None,
+        *,
+        provider: str = "",
+        team_id: str | None = None,
     ) -> None:
-        """Accumulate a single LLM call's token usage (aggregate, per-caller, and per-event).
+        """Accumulate a single LLM call's token usage (aggregate, per-caller, per-provider, per-team, and per-event).
 
         model: reserved for future per-model breakdown.
         """
         evicted_event_id: str | None = None
+        total_raw = getattr(usage, "total_tokens", 0)
+        if not isinstance(total_raw, int) or isinstance(total_raw, bool) or total_raw < 0:
+            return
+        usage_delta: dict[str, int] = {}
+        for field in _TOKEN_FIELDS:
+            raw_val = getattr(usage, field, 0)
+            usage_delta[field] = max(0, raw_val) if isinstance(raw_val, int) and not isinstance(raw_val, bool) else 0
+        usage_delta["calls"] = 1
         with self._lock:
             c_int = self._interval_by_caller.setdefault(caller, dict(_ZERO_USAGE))
             c_cum = self._cumulative_by_caller.setdefault(caller, dict(_ZERO_USAGE))
             for field in _TOKEN_FIELDS:
-                val = getattr(usage, field, 0)
+                val = usage_delta[field]
                 self._interval[field] += val
                 self._cumulative[field] += val
                 c_int[field] += val
@@ -84,24 +101,37 @@ class TokenMeter:
             c_int["calls"] += 1
             c_cum["calls"] += 1
 
+            if provider:
+                p_int = self._interval_by_provider.setdefault(provider, dict(_ZERO_USAGE))
+                p_cum = self._cumulative_by_provider.setdefault(provider, dict(_ZERO_USAGE))
+                for field in _TOKEN_FIELDS:
+                    p_int[field] += usage_delta[field]
+                    p_cum[field] += usage_delta[field]
+                p_int["calls"] += 1
+                p_cum["calls"] += 1
+
+            self._team_counter.add(team_id, usage_delta)
+
             if event_id:
                 if event_id not in self._per_event and len(self._per_event) >= _MAX_EVENTS:
                     evicted_event_id = next(iter(self._per_event))
                     del self._per_event[evicted_event_id]
                 ev = self._per_event.setdefault(event_id, dict(_ZERO_USAGE))
                 for field in _TOKEN_FIELDS:
-                    ev[field] += getattr(usage, field, 0)
+                    ev[field] += usage_delta[field]
                 ev["calls"] += 1
 
         if event_id and evicted_event_id is not None:
             logger.warning("TokenMeter: evicting %s (cap %d reached)", evicted_event_id, _MAX_EVENTS)
 
     def snapshot(self) -> dict[str, int]:
-        """Return interval deltas since last snapshot, then reset aggregate and per-caller intervals."""
+        """Return interval deltas since last snapshot, then reset aggregate, per-caller, and per-provider intervals."""
         with self._lock:
             result = dict(self._interval)
+            self._last_interval_by_provider = {k: dict(v) for k, v in self._interval_by_provider.items()}
             self._interval = dict(_ZERO_USAGE)
             self._interval_by_caller = {}
+            self._interval_by_provider = {}
             return result
 
     def snapshot_with_callers(self) -> tuple[TokenUsageDict, dict[str, TokenUsageDict]]:
@@ -109,9 +139,16 @@ class TokenMeter:
         with self._lock:
             agg = dict(self._interval)
             by_caller = {k: dict(v) for k, v in self._interval_by_caller.items()}
+            self._last_interval_by_provider = {k: dict(v) for k, v in self._interval_by_provider.items()}
             self._interval = dict(_ZERO_USAGE)
             self._interval_by_caller = {}
+            self._interval_by_provider = {}
             return agg, by_caller
+
+    def last_interval_by_provider(self) -> dict[str, TokenUsageDict]:
+        """Return the per-provider deltas captured during the most recent snapshot drain."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._last_interval_by_provider.items()}
 
     def get_platform_totals(self) -> dict[str, int]:
         """Return cumulative totals since boot (never resets)."""
@@ -122,6 +159,16 @@ class TokenMeter:
         """Return non-destructive cumulative per-caller totals since boot (never resets)."""
         with self._lock:
             return {k: dict(v) for k, v in self._cumulative_by_caller.items()}
+
+    def get_provider_totals(self) -> dict[str, TokenUsageDict]:
+        """Return non-destructive cumulative per-provider totals since boot."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._cumulative_by_provider.items()}
+
+    def get_team_totals(self) -> dict[str, dict[str, int]]:
+        """Return bounded cumulative per-team totals since boot."""
+        with self._lock:
+            return self._team_counter.totals()
 
     def peek_event(self, event_id: str) -> dict[str, int] | None:
         """Non-destructive read of per-event totals. None if event not tracked."""

@@ -163,14 +163,30 @@ async def extract_entities(
         if "gemini-4" in (KG_EXTRACTOR_MODEL or "").lower():
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
 
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=KG_EXTRACTOR_MODEL,
-                contents=f"{_EXTRACTION_PROMPT}\n\n---\n{summary_text}",
-                config=types.GenerateContentConfig(**config_kwargs),
-            ),
-            timeout=KG_EXTRACTOR_TIMEOUT,
-        )
+        from .llm.raw_genai_meter import acquire_raw_genai, finalize_raw_genai, rollback_raw_genai
+        full_prompt = f"{_EXTRACTION_PROMPT}\n\n---\n{summary_text}"
+        res_state = await acquire_raw_genai(full_prompt)
+        finalized = False
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=KG_EXTRACTOR_MODEL,
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                ),
+                timeout=KG_EXTRACTOR_TIMEOUT,
+            )
+            finalize_raw_genai(
+                "entity_extractor",
+                KG_EXTRACTOR_MODEL,
+                getattr(response, "usage_metadata", None),
+                res_state,
+                event_id=eid,
+            )
+            finalized = True
+        finally:
+            if not finalized:
+                rollback_raw_genai(res_state)
 
         result = json.loads(response.text)
 
