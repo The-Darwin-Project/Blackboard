@@ -2164,3 +2164,73 @@ class TestRemediationGitLabSecurityAndResilience:
         await hh._gitlab._dismiss_todos_best_effort(client, {}, [1, 2, 3, 4], "terminal MR")
         assert len(dismiss_attempts) == 1, f"expected early break on 429, got {dismiss_attempts}"
 
+
+class TestPollAndPhaseBSnapshotPruning:
+    """Regression tests preventing unauthorized mentions and skipped Phase B items from
+    flashing in Redis/snapshot queues or leaving stale _gitlab_pending counts."""
+
+    @pytest.mark.asyncio
+    async def test_poll_work_items_drops_unauthorized_mentions_before_snapshot_without_dismissing_siblings(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HEADHUNTER_ALLOWED_AUTHORS", "trusted-maint")
+        monkeypatch.setenv("GITLAB_BOT_USERNAME", "cnv-downstream-bot")
+        hh = _make_headhunter()
+
+        self_mention = _make_todo(action_name="directly_addressed", todo_id=911, project_id=100, mr_iid=41)
+        self_mention["author"] = {"username": "cnv-downstream-bot"}
+        unauth_only = _make_todo(action_name="directly_addressed", todo_id=912, project_id=100, mr_iid=42)
+        unauth_only["author"] = {"username": "stranger"}
+        valid_rev = _make_todo(action_name="review_requested", todo_id=913, project_id=100, mr_iid=43)
+
+        dismissed: list[str] = []
+
+        async def _post_rec(url, **kwargs):
+            dismissed.append(str(url))
+            return _ok_response({})
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(
+                get=lambda *a, **k: _ok_response([self_mention, unauth_only, valid_rev]),
+                post=_post_rec,
+            )
+            items = await hh._gitlab.poll_work_items()
+
+        assert [i["target"]["iid"] for i in items] == [43]
+        assert sorted(dismissed) == [
+            "https://gitlab.example.com/api/v4/todos/911/mark_as_done",
+            "https://gitlab.example.com/api/v4/todos/912/mark_as_done",
+        ]
+        snap = hh._gitlab.get_platform_snapshot()
+        assert [it.item_id for it in snap.items] == [43]
+
+    @pytest.mark.asyncio
+    async def test_phase_b_skip_and_fetch_context_rejection_prune_snapshot_and_decrement_pending(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HEADHUNTER_ALLOWED_AUTHORS", "trusted-maint")
+        monkeypatch.setenv("GITLAB_BOT_USERNAME", "cnv-downstream-bot")
+        hh = _make_headhunter()
+
+        bad_todo = _make_todo(action_name="directly_addressed", todo_id=921, project_id=100, mr_iid=44)
+        bad_todo["author"] = {"username": "cnv-downstream-bot"}
+        snap_item = hh._gitlab._work_item_to_snapshot_item(bad_todo, status="pending")
+        assert snap_item is not None
+        hh._gitlab._last_snapshot_items = [snap_item]
+
+        hh._gitlab.poll_work_items = AsyncMock(return_value=[bad_todo])
+        hh.check_flow_gate = AsyncMock(return_value=True)
+        hh._github.enabled = MagicMock(return_value=False)
+        hh._jira.enabled = MagicMock(return_value=False)
+
+        async def _post_rec(url, **kwargs):
+            return _ok_response({})
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value = _patched_client(post=_post_rec)
+            await hh._run_platform_head("gitlab", "GitLab", True, hh._poll_and_process)
+
+        assert hh._gitlab_pending == 0
+        assert hh._gitlab.get_platform_snapshot().items == []
+
+

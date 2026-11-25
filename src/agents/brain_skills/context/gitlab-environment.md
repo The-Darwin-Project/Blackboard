@@ -12,6 +12,12 @@ pipelines, and job logs; post comments; trigger retests via GitOps commands;
 merge MRs when conditions are met;
 and update reviewers/assignees.
 
+When the Darwin bot account itself opens a new MR and needs Headhunter tracking,
+adding itself as reviewer generates no GitLab `review_requested` todo (self-action
+suppression) and self-`@mentions` are intentionally rejected by Headhunter to avoid
+infinite reply loops. Ask a maintainer to request review / `@mention` the bot, or
+continue monitoring within the creating event when appropriate.
+
 ## Pipeline Verification
 
 An agent reporting "I triggered a retest" confirms the action was taken, not that the retest succeeded or that the pipeline passed. Actions and outcomes are different signals -- the action is a command, the outcome is a measurement.

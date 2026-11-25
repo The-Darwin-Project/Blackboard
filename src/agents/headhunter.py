@@ -1103,6 +1103,7 @@ class Headhunter:
         queue_fn: Callable[[Any, int], Awaitable[Any]] | None = None,
         on_queue_update: Callable[[list[Any]], None] | None = None,
         on_phase_b_created: Callable[[Any], Any] | None = None,
+        on_phase_b_skipped: Callable[[Any], Any] | None = None,
         gate_closed_initial: bool = False,
     ) -> tuple[list[Any], int]:
         """Unified Phase A (promote queued FIFO) + Phase B (process new / queue on gate close).
@@ -1177,20 +1178,27 @@ class Headhunter:
         attempted_b = 0
         failed_b = 0
         errors_b: list[BaseException] = []
+        async def _notify_phase_b(cb: Callable[[Any], Any] | None, target: Any) -> None:
+            if cb is None:
+                return
+            res = cb(target)
+            if inspect.isawaitable(res):
+                await res
+
         for item in new_items:
             if self._is_dismissed(plat_key, item):
+                await _notify_phase_b(on_phase_b_skipped, item)
                 continue
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 if queue_fn is None:
                     logger.info(f"Headhunter flow gate closed mid-cycle ({platform_label}) -- stopping")
                     break
-                if self._is_dismissed(plat_key, item):
-                    continue
                 position = len(remaining_queued) + 1
                 try:
                     queued_ok = await queue_fn(item, position)
                     if not queued_ok and getattr(queued_ok, "permanent", False):
+                        await _notify_phase_b(on_phase_b_skipped, item)
                         logger.info(
                             f"{platform_label} queue item permanently rejected for "
                             f"{self._item_label(item)} (not counting toward systemic failure)"
@@ -1219,16 +1227,15 @@ class Headhunter:
             try:
                 context = await platform.fetch_context(item)
                 if context is None:
+                    await _notify_phase_b(on_phase_b_skipped, item)
                     continue
                 plan_text = await self.analyze_and_plan(context, si)
                 if self._is_dismissed(plat_key, item):
+                    await _notify_phase_b(on_phase_b_skipped, item)
                     continue
                 await platform.create_platform_event(item, plan_text, context)
                 self._consume_promoted_key(plat_key, item)
-                if on_phase_b_created is not None:
-                    cb_res = on_phase_b_created(item)
-                    if inspect.isawaitable(cb_res):
-                        await cb_res
+                await _notify_phase_b(on_phase_b_created, item)
             except Exception as e:
                 failed_b += 1
                 errors_b.append(e)
@@ -1291,6 +1298,7 @@ class Headhunter:
             queue_fn=self._gitlab.queue_item,
             on_queue_update=_sync_gitlab_queued,
             on_phase_b_created=_on_gl_phase_b_created,
+            on_phase_b_skipped=_on_gl_phase_b_created,
             gate_closed_initial=not gate_open,
         )
         async with self._with_poll_lock():
@@ -1347,6 +1355,7 @@ class Headhunter:
             queue_fn=self._github.queue_item,
             on_queue_update=_sync_github_queued,
             on_phase_b_created=_on_gh_phase_b_created,
+            on_phase_b_skipped=_on_gh_phase_b_created,
             gate_closed_initial=not gate_open,
         )
 
