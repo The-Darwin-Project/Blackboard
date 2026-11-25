@@ -266,6 +266,26 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TPM_LIMIT
+            - name: LLM_TPM_LIMIT_CLAUDE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TPM_LIMIT_CLAUDE
+            - name: LLM_TPM_LIMIT_ENMAAS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TPM_LIMIT_ENMAAS
+            - name: ENMAAS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: ENMAAS_ENABLED
+            - name: LLM_TPM_NORMAL_CEILING_RATIO
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TPM_NORMAL_CEILING_RATIO
             # ArgoCD Application Observer (sole discovery, health, and sync source)
             {{- if .Values.argocdObserver.enabled }}
             - name: ARGOCD_OBSERVER_ENABLED

@@ -52,6 +52,10 @@ data:
   LLM_MAX_TOKENS_JENKINS_OBSERVER: "{{ .Values.gcp.llm.jenkinsObserver.maxOutputTokens }}"
   # Quota rate limiter
   LLM_TPM_LIMIT: "{{ .Values.gcp.tpmLimit }}"
+  LLM_TPM_LIMIT_CLAUDE: "{{ .Values.gcp.claudeTpmLimit }}"
+  LLM_TPM_LIMIT_ENMAAS: "{{ .Values.gcp.enmaasTpmLimit }}"
+  ENMAAS_ENABLED: {{ .Values.gcp.enmaasEnabled | quote }}
+  LLM_TPM_NORMAL_CEILING_RATIO: "{{ .Values.gcp.tpmNormalCeilingRatio }}"
   
   # Archivist Lesson Quality Thresholds
   LESSON_DEDUP_THRESHOLD: "{{ .Values.archivist.lessonDedupThreshold }}"

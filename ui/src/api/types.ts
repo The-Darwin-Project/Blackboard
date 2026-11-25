@@ -336,7 +336,39 @@ export interface EventDocument {
   unread_notes?: number;
   token_usage?: TokenUsageDict;
   created_by_email?: string | null;
+  team_id?: string | null;
   approval_requested_sha?: string | null;
+}
+
+export interface LlmTelemetryPoolStats {
+  tokens_used_60s?: number;
+  tpm_limit?: number;
+  sustained_limit?: number;
+  reserve_tokens?: number;
+  tokens_remaining?: number;
+  utilization_pct?: number;
+  total_requests?: number;
+  total_tokens?: number;
+  throttle_events?: number;
+  active_reservations?: number;
+  high_priority_waiters?: number;
+}
+
+export interface LlmTelemetryBucket {
+  input_tokens?: number;
+  output_tokens?: number;
+  thinking_tokens?: number;
+  cached_tokens?: number;
+  tool_use_tokens?: number;
+  total_tokens?: number;
+  calls?: number;
+}
+
+export interface LlmTelemetryBreakdown {
+  global?: LlmTelemetryPoolStats;
+  pools?: Record<string, LlmTelemetryPoolStats>;
+  callers?: Record<string, LlmTelemetryBucket>;
+  teams?: Record<string, LlmTelemetryBucket>;
 }
 
 // =============================================================================
@@ -409,6 +441,14 @@ export interface FlowMetrics {
   snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
   staleness_guards: Array<Record<string, unknown>>;
+  active_user_sessions?: number;
+  peak_pool_utilization_pct?: number;
+  gemini_tpm_used?: number;
+  gemini_tpm_limit?: number;
+  claude_tpm_used?: number;
+  claude_tpm_limit?: number;
+  enmaas_tpm_used?: number;
+  enmaas_tpm_limit?: number;
 }
 
 export interface FlowSnapshot {
@@ -460,6 +500,16 @@ export interface FlowSnapshot {
   quota_shed_tier1_total?: number;
   quota_shed_tier2_total?: number;
   atdd_cycle_sec?: number | null;
+  active_user_sessions?: number;
+  peak_pool_utilization_pct?: number;
+  gemini_tpm_used?: number;
+  gemini_tpm_limit?: number;
+  claude_tpm_used?: number;
+  claude_tpm_limit?: number;
+  enmaas_tpm_used?: number;
+  enmaas_tpm_limit?: number;
+  claude_token_total_delta?: number;
+  sidecar_token_total_delta?: number;
 }
 
 export interface AlignerPendingItem {

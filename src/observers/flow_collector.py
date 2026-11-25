@@ -6,7 +6,7 @@
 # 4. [Pattern]: Maintains _prev_* counters for delta computation across snapshots.
 # 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence. TokenMeter / QuotaTracker via DI is permitted (counters, not LLM code).
 # 6. [Pattern]: aligner.pending_count is a sync property (in-memory counter) read unawaited — mirrors headhunter.pending_count pattern.
-# 7. [Pattern]: quota_tracker supports either an instance or lazy getter callable so FlowCollector sees QuotaTracker once initialized.
+# 7. [Pattern]: quota_tracker / quota_registry support either an instance or lazy getter callable so FlowCollector sees QuotaTracker / QuotaPoolRegistry once initialized.
 """FlowCollector: periodic snapshot of system flow health, persisted to Redis."""
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
     from ..agents.jenkins_observer import JenkinsObserver
+    from ..agents.llm.quota_registry import QuotaPoolRegistry
     from ..agents.llm.quota_tracker import QuotaTracker
     from ..agents.llm.token_meter import TokenMeter
     from ..scheduling.reconciler import ReconcileScheduler
@@ -32,6 +33,7 @@ from ..models import (
     FLOW_QUOTA_SHED_TIER2_KEY,
     FlowSnapshot,
 )
+from ..state.wip_meta import count_interactive_sessions, fetch_active_events_meta, is_automated_wip_event
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,7 @@ class FlowCollector:
         provisioner: "EphemeralProvisioner | None" = None,
         token_meter: "TokenMeter | None" = None,
         quota_tracker: "QuotaTracker | Callable[[], QuotaTracker | None] | None" = None,
+        quota_registry: "QuotaPoolRegistry | Callable[[], QuotaPoolRegistry | None] | None" = None,
         interval: float = 60.0,
     ):
         self._scheduler = scheduler
@@ -61,6 +64,7 @@ class FlowCollector:
         self._provisioner = provisioner
         self._token_meter = token_meter
         self._quota_tracker = quota_tracker
+        self._quota_registry = quota_registry
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._running = False
@@ -116,21 +120,15 @@ class FlowCollector:
         # Queue depth + active event count from blackboard (O(1) Redis ops)
         flow = await self._blackboard.get_flow_metrics()
 
-        # Event status + age + WIP computation
-        status_map = await self._blackboard.get_active_events_with_status()
-        deferred_count = sum(1 for s in status_map.values() if s == "deferred")
-        # RAW wip_used (no _waiting_for_user subtraction — FlowCollector has no Brain ref)
-        wip_used_raw = sum(1 for s in status_map.values() if s in ("active", "deferred"))
+        # Event status + age + WIP computation (single 2-RTT pipeline metadata, zero get_event fan-out)
+        meta_map = await fetch_active_events_meta(self._blackboard)
+        deferred_count = sum(1 for m in meta_map.values() if m.status == "deferred")
+        wip_used_raw = sum(1 for m in meta_map.values() if is_automated_wip_event(m, include_new=False))
+        active_user_sessions = count_interactive_sessions(meta_map)
         wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
 
-        ages: list[float] = []
-        cycles: list[float] = []
-        if status_map:
-            events = await asyncio.gather(*[
-                self._blackboard.get_event(eid) for eid in status_map
-            ])
-            ages = [now - e.queued_at for e in events if e and e.queued_at is not None]
-            cycles = [e.atdd_cycle_sec for e in events if e and getattr(e, "atdd_cycle_sec", None) is not None]
+        ages = [now - m.queued_at for m in meta_map.values() if m.queued_at is not None]
+        cycles = [m.atdd_cycle_sec for m in meta_map.values() if m.atdd_cycle_sec is not None]
 
         avg_age = sum(ages) / len(ages) if ages else 0.0
         avg_cycle = sum(cycles) / len(cycles) if cycles else None
@@ -213,7 +211,11 @@ class FlowCollector:
         except Exception:
             pass
 
-        tpm_used, tpm_limit, tpm_util, quota_throttle_delta = self._collect_quota_stats()
+        q_stats = self._collect_quota_stats()
+        (
+            tpm_used, tpm_limit, tpm_util, quota_throttle_delta,
+            peak_pool_util, gem_used, gem_lim, claude_used, claude_lim, enmaas_used, enmaas_lim,
+        ) = q_stats
 
         # Quota shedding telemetry counters
         quota_shed_tier1 = 0
@@ -249,14 +251,35 @@ class FlowCollector:
         if self._token_meter:
             token_snap, by_caller = self._token_meter.snapshot_with_callers()
             platform_totals = self._token_meter.get_platform_totals()
+            by_provider = (
+                self._token_meter.last_interval_by_provider()
+                if hasattr(self._token_meter, "last_interval_by_provider")
+                else {}
+            )
         else:
-            token_snap, by_caller, platform_totals = {}, {}, {}
+            token_snap, by_caller, platform_totals, by_provider = {}, {}, {}, {}
         brain_snap = by_caller.get("brain", {})
+        if by_provider:
+            claude_token_total_delta = (
+                int(by_provider.get("vertex_claude", {}).get("total_tokens", 0) or 0)
+                + int(by_provider.get("enmaas", {}).get("total_tokens", 0) or 0)
+            )
+        else:
+            claude_token_total_delta = sum(
+                int(v.get("total_tokens", 0) or 0)
+                for k, v in by_caller.items()
+                if k in ("archivist", "headhunter_jira", "sidecar:claude")
+            )
+        sidecar_token_total_delta = sum(
+            int(v.get("total_tokens", 0) or 0)
+            for k, v in by_caller.items()
+            if k.startswith("sidecar:")
+        )
 
         return FlowSnapshot(
             timestamp=now,
             queue_depth=flow["queue_depth"],
-            active_events=len(status_map),
+            active_events=len(meta_map),
             deferred_events=deferred_count,
             waiting_approval_events=flow.get("waiting_approval_events", 0),
             headhunter_pending=hh_pending,
@@ -302,23 +325,68 @@ class FlowCollector:
             quota_shed_tier1_total=quota_shed_tier1,
             quota_shed_tier2_total=quota_shed_tier2,
             atdd_cycle_sec=avg_cycle,
+            active_user_sessions=active_user_sessions,
+            peak_pool_utilization_pct=peak_pool_util,
+            gemini_tpm_used=gem_used,
+            gemini_tpm_limit=gem_lim,
+            claude_tpm_used=claude_used,
+            claude_tpm_limit=claude_lim,
+            enmaas_tpm_used=enmaas_used,
+            enmaas_tpm_limit=enmaas_lim,
+            claude_token_total_delta=claude_token_total_delta,
+            sidecar_token_total_delta=sidecar_token_total_delta,
         )
 
-    def _collect_quota_stats(self) -> tuple[int, int, float, int]:
-        """Read QuotaTracker rolling 60s usage, limit, utilization %, and interval throttles."""
-        if self._quota_tracker is None:
-            return (0, 0, 0.0, 0)
+    def _collect_quota_stats(self) -> tuple[int, int, float, int, float, int, int, int, int, int, int]:
+        """Read QuotaPoolRegistry (or legacy QuotaTracker) rolling 60s usage, limits, and throttles."""
+        zero = (0, 0, 0.0, 0, 0.0, 0, 0, 0, 0, 0, 0)
         try:
+            reg = None
+            if self._quota_registry is not None:
+                reg = (
+                    self._quota_registry
+                    if hasattr(self._quota_registry, "get_all_stats")
+                    else (self._quota_registry() if callable(self._quota_registry) else None)
+                )
+            if reg is not None:
+                all_stats = reg.get_all_stats()
+                g = all_stats["global"]
+                pools = all_stats["pools"]
+                enmaas_active = bool(all_stats.get("enmaas_active", False))
+                gem = pools.get("vertex_gemini", {})
+                cld = pools.get("vertex_claude", {})
+                enm = pools.get("enmaas", {})
+                current_throttles = int(g.get("throttle_events", 0) or 0)
+                if current_throttles < self._prev_quota_throttles:
+                    self._prev_quota_throttles = 0
+                throttle_delta = current_throttles - self._prev_quota_throttles
+                self._prev_quota_throttles = current_throttles
+                return (
+                    int(g.get("tokens_used_60s", 0) or 0),
+                    int(g.get("tpm_limit", 0) or 0),
+                    float(g.get("utilization_pct", 0.0) or 0.0),
+                    throttle_delta,
+                    float(g.get("peak_pool_utilization_pct", 0.0) or 0.0),
+                    int(gem.get("tokens_used_60s", 0) or 0),
+                    int(gem.get("tpm_limit", 0) or 0),
+                    int(cld.get("tokens_used_60s", 0) or 0),
+                    int(cld.get("tpm_limit", 0) or 0),
+                    int(enm.get("tokens_used_60s", 0) or 0),
+                    int(enm.get("tpm_limit", 0) or 0) if enmaas_active else 0,
+                )
+
+            if self._quota_tracker is None:
+                return zero
             tracker = (
                 self._quota_tracker
                 if hasattr(self._quota_tracker, "get_stats")
                 else (self._quota_tracker() if callable(self._quota_tracker) else None)
             )
             if tracker is None:
-                return (0, 0, 0.0, 0)
+                return zero
             stats = tracker.get_stats()
             if not isinstance(stats, dict):
-                return (0, 0, 0.0, 0)
+                return zero
             tokens_used = int(stats.get("tokens_used_60s", 0) or 0)
             tpm_limit = int(stats.get("tpm_limit", 0) or 0)
             utilization_pct = float(stats.get("utilization_pct", 0.0) or 0.0)
@@ -327,7 +395,7 @@ class FlowCollector:
                 self._prev_quota_throttles = 0
             throttle_delta = current_throttles - self._prev_quota_throttles
             self._prev_quota_throttles = current_throttles
-            return (tokens_used, tpm_limit, utilization_pct, throttle_delta)
+            return (tokens_used, tpm_limit, utilization_pct, throttle_delta, utilization_pct, tokens_used, tpm_limit, 0, 0, 0, 0)
         except Exception as e:
             logger.debug("FlowCollector: quota stats unavailable: %s", e)
-            return (0, 0, 0.0, 0)
+            return zero
