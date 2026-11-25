@@ -13,7 +13,7 @@
 #    ASGI close() before accept() is treated as a rejected handshake -> browser gets HTTP 403 / code 1006, never 4001.
 # 10. [Pattern]: _handle_user_message uses auth.can_append_message for ownership checks. Structured [Audit]
 #     logs emitted at call site, not inside auth.py.
-# 11. [Pattern]: WS error envelope schema: {"type": "error", "kind": "auth_rejected"|"rate_limited"|"invalid_payload"|"sha_drift"|"sha_unresolvable"|"closed"|"error", "event_id": str, "message": str}.
+# 11. [Pattern]: WS error envelope schema: {"type": "error", "kind": "auth_rejected"|"rate_limited"|"invalid_payload"|"invalid_option"|"invalid_image"|"image_too_large"|"stale_approval"|"not_waiting"|"sha_drift"|"sha_unresolvable"|"closed"|"error", "event_id": str, "message": str}.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -120,6 +120,8 @@ class DashboardWSAdapter:
                     await self._handle_user_message(websocket, data, user)
                 elif msg_type == "approve":
                     await self._handle_approve(websocket, data, user)
+                elif msg_type == "approval_decision":
+                    await self._handle_approval_decision(websocket, data, user)
                 elif msg_type == "emergency_stop":
                     await self._handle_emergency_stop(websocket)
                 elif msg_type == "create_kargo_event":
@@ -335,6 +337,60 @@ class DashboardWSAdapter:
             "turn": turn.model_dump(),
         })
         logger.info("WS approval for event: %s by %s (mr_id=%s, sha=%s)", event_id, user.label, mr_id, mr_sha)
+
+    async def _handle_approval_decision(self, ws: WebSocket, data: dict, user) -> None:
+        event_id = data.get("event_id", "")
+        if not event_id:
+            return
+        from ..routes.approval_decision import execute_approval_decision
+        from ..routes.approval_decision_helpers import DecisionRequest
+
+        req = DecisionRequest(
+            approval_id=data.get("approval_id"),
+            option_id=str(data.get("option_id") or ""),
+            message=data.get("message"),
+            write_in_text=data.get("write_in_text"),
+            image=data.get("image"),
+            reject_reason=data.get("reject_reason"),
+            expected_sha=data.get("expected_sha"),
+        )
+        outcome = await execute_approval_decision(
+            blackboard=self._blackboard,
+            brain=self._brain,
+            event_id=event_id,
+            user=user,
+            auth_enabled=self._auth_enabled,
+            req=req,
+            source="dashboard",
+            head_sha_resolver=None,
+        )
+        if outcome.kind != "ok":
+            kind = outcome.kind
+            if kind in ("unauthenticated", "forbidden"):
+                kind = "auth_rejected"
+            payload = {
+                "type": "error",
+                "kind": kind,
+                "event_id": event_id,
+                "message": outcome.message,
+            }
+            if outcome.expected_sha is not None:
+                payload["approval_requested_sha"] = outcome.expected_sha
+            if outcome.actual_sha is not None:
+                payload["live_sha"] = outcome.actual_sha
+            if kind == "sha_drift":
+                if req.option_id:
+                    payload["option_id"] = req.option_id
+                if req.approval_id:
+                    payload["approval_id"] = req.approval_id
+            await ws.send_json(payload)
+            return
+        if outcome.turn is not None:
+            await ws.send_json({
+                "type": "turn",
+                "event_id": event_id,
+                "turn": outcome.turn.model_dump(),
+            })
 
     async def _handle_emergency_stop(self, ws: WebSocket) -> None:
         cancelled = await self._brain.emergency_stop()

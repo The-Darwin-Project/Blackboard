@@ -53,7 +53,7 @@ import time
 
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from redis.exceptions import RedisError, WatchError
@@ -68,7 +68,7 @@ from ..auth import (
     get_user_from_request,
     resolve_approval_identity,
 )
-from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly
+from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, JenkinsPendingItem, PendingAnomaly, PendingApproval
 from ..state.blackboard import BlackboardState
 from ..agents.headhunter_models import HeadhunterOperationError, redact_error_text
 from ..utils.pii_redaction import redact_pii
@@ -459,6 +459,37 @@ async def get_event_approval(
     }
 
 
+from .approval_decision_helpers import ApprovalDecisionOutcome, DecisionRequest, validate_image_attachment
+from .approval_decision import execute_approval_decision
+
+
+def _map_decision_error_response(outcome: ApprovalDecisionOutcome):
+    """Map non-ok ApprovalDecisionOutcome to HTTP status / JSONResponse."""
+    if outcome.kind == "image_too_large":
+        return JSONResponse(status_code=413, content={"code": outcome.kind, "detail": outcome.message})
+    if outcome.kind == "invalid_image":
+        return JSONResponse(status_code=422, content={"code": outcome.kind, "detail": f"invalid_image: {outcome.message}"})
+    if outcome.kind == "not_found":
+        return JSONResponse(status_code=404, content={"code": outcome.kind, "detail": outcome.message})
+    if outcome.kind in ("closed", "not_waiting", "stale_approval", "ambiguous_options"):
+        return JSONResponse(status_code=409, content={"code": outcome.kind, "detail": outcome.message})
+    if outcome.kind in ("sha_drift", "sha_unresolvable"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": outcome.kind,
+                "detail": outcome.message,
+                "approval_requested_sha": outcome.expected_sha,
+                "live_sha": outcome.actual_sha,
+            },
+        )
+    if outcome.kind == "auth_rejected":
+        return JSONResponse(status_code=403, content={"code": outcome.kind, "detail": outcome.message})
+    if outcome.kind == "invalid_image":
+        raise HTTPException(status_code=422, detail=f"invalid_image: {outcome.message}")
+    return JSONResponse(status_code=400, content={"code": outcome.kind, "detail": outcome.message})
+
+
 @router.post("/{event_id}/approve")
 async def approve_event(
     event_id: str,
@@ -495,6 +526,34 @@ async def approve_event(
         )
         raise HTTPException(status_code=403, detail="Forbidden: User not authorized to approve this event")
 
+    expected_sha = body.expected_sha if isinstance(body, ApproveRequest) else None
+    if isinstance(getattr(event, "pending_approval", None), PendingApproval):
+        try:
+            brain = await get_brain()
+        except RuntimeError:
+            brain = None
+        _resolver = resolve_live_head_sha if resolve_live_head_sha is not _ORIG_RESOLVE_LIVE_HEAD_SHA else None
+        outcome = await execute_approval_decision(
+            blackboard=blackboard,
+            brain=brain,
+            event_id=event_id,
+            user=user,
+            auth_enabled=auth_enabled,
+            req=DecisionRequest(expected_sha=expected_sha),
+            legacy_mode="approve",
+            head_sha_resolver=_resolver,
+        )
+        if outcome.kind != "ok":
+            return _map_decision_error_response(outcome)
+        updated = await blackboard.get_event(event_id)
+        return {
+            "status": "approved",
+            "event_id": event_id,
+            "approved_by": user.email or user.label,
+            "approved_mr_id": getattr(updated, "approved_mr_id", None) if updated else None,
+            "approved_mr_sha": getattr(updated, "approved_mr_sha", None) if updated else None,
+        }
+
     try:
         _resolver = resolve_live_head_sha if resolve_live_head_sha is not _ORIG_RESOLVE_LIVE_HEAD_SHA else _vcs_approval.resolve_live_head_sha
         mr_id, mr_sha = await _resolver(event)
@@ -504,7 +563,6 @@ async def approve_event(
     fresh_event = await blackboard.get_event(event_id)
     if not fresh_event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
-    expected_sha = body.expected_sha if isinstance(body, ApproveRequest) else None
     drift = check_approval_sha_drift(fresh_event, mr_sha, expected_sha=expected_sha)
     if not drift.allowed:
         return JSONResponse(
@@ -610,9 +668,31 @@ async def reject_event(
         )
         raise HTTPException(status_code=403, detail="Forbidden: User not authorized to reject this event")
 
-    # Server-side image size guard (~1MB)
-    if body.image and len(body.image) > 1_400_000:
-        raise HTTPException(status_code=413, detail="Image too large (max 1MB)")
+    if body.image:
+        img_err = validate_image_attachment(body.image)
+        if img_err == "image_too_large":
+            raise HTTPException(status_code=413, detail="Image too large (max 1MB)")
+        elif img_err:
+            raise HTTPException(status_code=422, detail=f"invalid_image: {img_err}")
+
+    if isinstance(getattr(event, "pending_approval", None), PendingApproval):
+        try:
+            brain = await get_brain()
+        except RuntimeError:
+            brain = None
+        outcome = await execute_approval_decision(
+            blackboard=blackboard,
+            brain=brain,
+            event_id=event_id,
+            user=user,
+            auth_enabled=auth_enabled,
+            req=DecisionRequest(reject_reason=body.reason, image=body.image),
+            legacy_mode="reject",
+            head_sha_resolver=None,
+        )
+        if outcome.kind != "ok":
+            return _map_decision_error_response(outcome)
+        return {"status": "rejected", "event_id": event_id}
 
     # A rejection supersedes any prior approval stamp on this event -- otherwise
     # GET /{event_id}/approval keeps reporting approved=true with a stale approved_mr_sha
@@ -1992,3 +2072,32 @@ async def headhunter_item_action(
     if action == "promote":
         return JSONResponse(status_code=202, content=result)
     return result
+
+@router.post("/{event_id}/decision")
+async def post_approval_decision(
+    request: Request,
+    decision: DecisionRequest,
+    event_id: str = Path(..., description="Event ID"),
+    blackboard: BlackboardState = Depends(get_blackboard),
+    brain = Depends(get_brain),
+):
+    """Submit a structured multi-option approval decision or write-in."""
+    from .. import auth
+
+    user = auth.get_user_from_request(request)
+    auth_enabled = bool(auth.DEX_ENABLED or auth.TRUSTED_PROXY_ENABLED)
+    if auth_enabled and not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    outcome = await execute_approval_decision(
+        blackboard=blackboard,
+        brain=brain,
+        event_id=event_id,
+        user=user,
+        auth_enabled=auth_enabled,
+        req=decision,
+        head_sha_resolver=None,
+    )
+    if outcome.kind != "ok":
+        return _map_decision_error_response(outcome)
+    return {"code": "ok"}

@@ -66,3 +66,7 @@ requirements.txt
 requirements-dev.txt
 ui/index.html
 .github/**
+
+# Non-architectural guides & repo metadata
+docs/deployment.md
+docs/api-reference.md

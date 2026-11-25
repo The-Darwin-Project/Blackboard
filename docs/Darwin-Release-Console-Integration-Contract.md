@@ -242,3 +242,9 @@ Key `action` values: `triage`, `investigate`, `plan`, `execute`, `approve`, `rej
 2. Pre-existing active `source="chat"` events will have `created_by_email=null`. The BFF filter will hide these. In practice, chat events are short-lived and the active queue will cycle before the BFF goes live.
 
 3. The Darwin Dashboard (ops UI) is unaffected. It shows all events from all sources and does not use `created_by_email` filtering.
+
+## Multi-Option Approvals (VMER-2501)
+- `POST /queue/{id}/decision`: Submit a decision with `effect` (approve, steer, reject), `option_id`, `option_label`.
+- WebSocket broadcasts `turn_updated` for swept `pendingApproval` turns.
+- Legacy `/approve` and `/reject` shims are routed to `/decision`.
+- Event status transitions and approvals atomic via Redis MULTI/EXEC.

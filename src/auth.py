@@ -187,6 +187,18 @@ def get_user_from_request(request) -> UserContext:
     When DEX_ENABLED=false: returns anonymous stub.
     When DEX_ENABLED=true: validates JWT, returns named UserContext.
     """
+    if TRUSTED_PROXY_ENABLED:
+        email = request.headers.get("x-forwarded-email", "")
+        token = request.headers.get("x-bff-token", "")
+        if email and token and TRUSTED_PROXY_SECRET:
+            if hmac.compare_digest(token, TRUSTED_PROXY_SECRET):
+                return UserContext(
+                    user_id=email,
+                    display_name=email.split("@")[0] if "@" in email else email,
+                    email=email,
+                    source="trusted_proxy",
+                )
+
     if not DEX_ENABLED:
         return UserContext()
 

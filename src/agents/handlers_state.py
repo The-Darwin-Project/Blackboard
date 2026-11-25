@@ -21,10 +21,10 @@
 #     request_user_approval parks get an idle timer.
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
+import logging
 
 import asyncio
 import json
-import logging
 import os
 import time
 from typing import TYPE_CHECKING
@@ -93,6 +93,7 @@ async def handle_request_user_approval(
         try:
             _, live_sha = await resolve_live_head_sha(pre_park_event)
         except Exception as exc:
+            logger = logging.getLogger(__name__)
             logger.warning(
                 "handle_request_user_approval: resolve_live_head_sha failed for %s (%s)",
                 event_id,
@@ -101,29 +102,82 @@ async def handle_request_user_approval(
         if not live_sha:
             fallback_sha = extract_context_head_sha(pre_park_event)
             if fallback_sha:
+                logger = logging.getLogger(__name__)
                 logger.warning(
                     "handle_request_user_approval: falling back to cached context HEAD SHA %s for %s",
                     fallback_sha[:8],
                     event_id,
                 )
                 live_sha = fallback_sha
-    await bb.park_for_approval(event_id, approval_requested_sha=live_sha)
+
+    from ..models import ApprovalOption, PendingApproval, ConversationTurn
+    from ..state.approval_ops import synthesize_default_options
+    import uuid
+
+    raw_options = args.get("options")
+    parsed_options = []
+    if raw_options:
+        try:
+            for opt in raw_options:
+                parsed_options.append(ApprovalOption(**opt))
+        except Exception as exc:
+            turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                thoughts=f"Invalid options provided: {exc}",
+                waitingFor="request_user_approval"
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+            
+        if not (2 <= len(parsed_options) <= 5):
+            turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                thoughts="Options array must contain between 2 and 5 items.",
+                waitingFor="request_user_approval"
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+    else:
+        parsed_options = synthesize_default_options()
+
+    approval_id = str(uuid.uuid4())
+    pending = PendingApproval(
+        approval_id=approval_id,
+        summary=plan_summary,
+        options=parsed_options,
+        requested_sha=live_sha,
+    )
+
+    swept = await bb.park_for_approval(event_id, approval_requested_sha=live_sha, pending_approval=pending)
+    if isinstance(swept, list) and swept:
+        for t in swept:
+            try:
+                await ctx.broadcast({"type": "turn_updated", "event_id": event_id, "turn": t.model_dump()})
+            except Exception as e:
+                logger.error(f"Failed to broadcast swept turn: {e}")
+
     event = await bb.get_event(event_id)
-    if event and event.status == EventStatus.WAITING_APPROVAL:
+    if event and event.status.value == "waiting_approval":
         ctx.mark_waiting_for_user(event_id)
         turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="request_approval",
             thoughts=plan_summary,
             pendingApproval=True,
             waitingFor="user",
+            approval_id=approval_id,
+            approval_options=parsed_options,
         )
         await ctx.append_and_broadcast(event_id, turn)
         await ctx.broadcast({
             "type": "event_status_changed",
             "event_id": event_id,
-            "status": EventStatus.WAITING_APPROVAL.value,
+            "status": event.status.value,
         })
         if event.source in ("slack", "chat"):
             ctx.get_idle_timeout().schedule(event_id, warning_sec=ctx.get_conversation_timeout(event))
@@ -140,7 +194,7 @@ async def handle_wait_for_user(
     event = await bb.get_event(event_id)
     if event and event.source not in ("chat", "slack"):
         turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts="wait_for_user is not available for automated events. "
@@ -153,7 +207,7 @@ async def handle_wait_for_user(
     summary = args.get("summary", "")
     ctx.mark_waiting_for_user(event_id)
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain",
         action="wait",
         thoughts=summary,
@@ -273,7 +327,7 @@ async def handle_wait_for_jarvis(
         if existing_reply:
             result_text = "JARVIS already replied. Check his message above."
             turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
+                turn=0,
                 actor="brain", action="tool_result",
                 waitingFor="wait_for_jarvis",
                 thoughts=result_text,
@@ -282,7 +336,7 @@ async def handle_wait_for_jarvis(
             await ctx.append_and_broadcast(event_id, turn)
             return True
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain",
         action="wait",
         thoughts=f"Waiting for JARVIS response: {context}",
@@ -307,7 +361,7 @@ async def handle_hold_watch(
         return False
     if event.source != "jarvis" or _resolve_phase(event.brain_phase) != "close":
         reject_turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts="hold_watch is only available for jarvis-sourced events in the close phase.",
@@ -325,7 +379,7 @@ async def handle_hold_watch(
     ctx.set_hold_watch_park_time(event_id)
     context = args.get("context", "")
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain",
         action="hold_watch",
         thoughts=f"Parking: {context}" if context else "Parking in hold_watch",
@@ -355,7 +409,7 @@ async def handle_classify_event(
         if not event_doc:
             logger.warning(f"classify_event: cannot verify source for {event_id}, rejecting casual")
             turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
+                turn=0,
                 actor="brain", action="tool_result",
                 waitingFor="classify_event",
                 evidence=(
@@ -368,7 +422,7 @@ async def handle_classify_event(
             return True
         if event_doc.source not in ("chat", "slack"):
             turn = ConversationTurn(
-                turn=(await ctx.next_turn_number(event_id)),
+                turn=0,
                 actor="brain", action="tool_result",
                 waitingFor="classify_event",
                 evidence=(
@@ -388,7 +442,7 @@ async def handle_classify_event(
         await ctx.broadcast({"type": "severity_updated", "event_id": event_id, "severity": severity})
     thoughts += f" {reasoning}"
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain", action="triage",
         thoughts=thoughts,
         response_parts=response_parts if _THOUGHT_SIG_V2 else None,
@@ -407,7 +461,7 @@ async def handle_classify_event(
     if intent and intent.strip():
         directive += f" Your stated intent: {intent.strip()}"
     nudge = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain", action="tool_result",
         evidence=directive,
         waitingFor="classify_event",
@@ -440,7 +494,7 @@ async def handle_defer_event(
     if ctx.is_waiting_for_user(event_id):
         logger.warning(f"Ignoring defer_event for {event_id}: waiting for user response")
         turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts="This event is currently waiting for user input and "
@@ -460,7 +514,7 @@ async def handle_defer_event(
     if existing_event and existing_event.status == EventStatus.DEFERRED:
         logger.info(f"Ignoring duplicate defer_event for {event_id}: already deferred")
         dup_turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts="This event is already deferred. Skipping duplicate defer_event call.",
@@ -476,7 +530,7 @@ async def handle_defer_event(
     defer_started_at = time.time()
     defer_until = defer_started_at + delay
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain",
         action="defer",
         thoughts=f"Deferring event for {delay}s: {reason}",
@@ -522,7 +576,7 @@ async def handle_respond_to_jarvis(
     response_text = args.get("response", "").strip()
     if len(response_text) < 20:
         turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts="Response was too brief. JARVIS needs to understand your reasoning. "
@@ -535,7 +589,7 @@ async def handle_respond_to_jarvis(
         await ctx.emit_pulse(event_id, [("tool:respond_to_jarvis", "tool", 0.3)])
         return True
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=0,
         actor="brain",
         action="respond_jarvis",
         thoughts=response_text,

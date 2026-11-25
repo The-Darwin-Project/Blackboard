@@ -1422,7 +1422,7 @@ class LiveAPIAdapter:
             await self._write_shadow(event_id, "send_event_message", {"message": message})
             return f"[SHADOW] Message queued for {event_id} (source={source})"
 
-        from ..models import ConversationTurn
+        from ..models import ConversationTurn, EventStatus
         turn = ConversationTurn(
             turn=current_turn + 1,
             actor="jarvis",
@@ -1432,12 +1432,12 @@ class LiveAPIAdapter:
         await self._blackboard.append_turn(event_id, turn)
         # Wake FRIDAY: clear in-memory wait + hold_watch + transition deferred->active + thaw if frozen
         if self._brain:
-            self._brain.clear_waiting(event_id)
-            self._brain.clear_jarvis_wait(event_id)
-            self._brain.clear_hold_watch(event_id)
-            await self._brain.resume_if_parked(event_id)
-            self._brain.enqueue_for_processing(event_id)
-        from ..models import EventStatus
+            if event.status != EventStatus.WAITING_APPROVAL:
+                self._brain.clear_waiting(event_id)
+                self._brain.clear_jarvis_wait(event_id)
+                self._brain.clear_hold_watch(event_id)
+                await self._brain.resume_if_parked(event_id)
+                self._brain.enqueue_for_processing(event_id)
         await self._blackboard.transition_event_status(
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,
         )

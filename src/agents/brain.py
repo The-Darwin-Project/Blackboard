@@ -6756,7 +6756,17 @@ class Brain:
         event = await self.blackboard.get_event(event_id)
         if not event or event.status != EventStatus.WAITING_APPROVAL:
             return False
+        had_pending = any(getattr(t, "pendingApproval", False) for t in event.conversation)
         await self.blackboard.resume_from_approval(event_id)
+        if had_pending:
+            try:
+                updated = await self.blackboard.get_event(event_id)
+                if updated:
+                    for t in updated.conversation:
+                        if getattr(t, "approval_resolution", None) and not getattr(t, "pendingApproval", False):
+                            await self._broadcast({"type": "turn_updated", "event_id": event_id, "turn": t.model_dump()})
+            except Exception as e:
+                logger.error(f"Failed to broadcast swept turns in resume_if_parked: {e}")
         if self._scheduler:
             self._scheduler.enqueue(event_id)
         await self._broadcast({
@@ -6766,6 +6776,37 @@ class Brain:
         })
         logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
+
+
+    async def complete_approval_resume(self, event_id: str, updated_request_turn, user_turn) -> None:
+        self.clear_waiting(event_id)
+        self.clear_jarvis_wait(event_id)
+        self.clear_hold_watch(event_id)
+
+        if hasattr(self, "dashboard_adapter") and self.dashboard_adapter:
+            try:
+                if updated_request_turn:
+                    await self.dashboard_adapter.broadcast_event(event_id, {
+                        "type": "turn_updated",
+                        "event_id": event_id,
+                        "turn": updated_request_turn.model_dump(),
+                    })
+                if user_turn:
+                    await self.dashboard_adapter.broadcast_event(event_id, {
+                        "type": "turn",
+                        "event_id": event_id,
+                        "turn": user_turn.model_dump(),
+                    })
+                from ..models import EventStatus
+                await self.dashboard_adapter.broadcast_event(event_id, {
+                    "type": "event_status_changed",
+                    "event_id": event_id,
+                    "status": EventStatus.ACTIVE.value,
+                })
+            except Exception as exc:
+                logger.warning("complete_approval_resume broadcast failed for %s: %s", event_id, exc)
+
+        self.enqueue_for_processing(event_id)
 
     def enqueue_for_processing(self, event_id: str) -> bool:
         """Enqueue event for immediate reconciliation. Safe no-op if already pending/inflight."""
@@ -7234,7 +7275,17 @@ class Brain:
             if latest and has_unevaluated_close_blocker(latest.conversation):
                 logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
                 return
+        had_pending = event and any(getattr(t, "pendingApproval", False) for t in event.conversation)
         await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        if had_pending:
+            try:
+                updated = await self.blackboard.get_event(event_id)
+                if updated:
+                    for t in updated.conversation:
+                        if getattr(t, "approval_resolution", None) and not getattr(t, "pendingApproval", False):
+                            await self._broadcast({"type": "turn_updated", "event_id": event_id, "turn": t.model_dump()})
+            except Exception as e:
+                logger.error(f"Failed to broadcast swept turns in _close_and_broadcast: {e}")
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)

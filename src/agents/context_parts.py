@@ -35,7 +35,12 @@ import re
 from typing import TYPE_CHECKING
 
 from src.utils.jarvis_ack import is_jarvis_acknowledgment
-from src.utils.prompt_sanitize import PROMPT_NAME_MAX_LEN, sanitize_prompt_text, strip_xml_fences
+from src.utils.prompt_sanitize import (
+    PROMPT_NAME_MAX_LEN,
+    sanitize_prompt_text,
+    sanitize_user_input_text,
+    strip_xml_fences,
+)
 from src.utils.turn_decay import DECAY_MIN_CHARS
 
 if TYPE_CHECKING:
@@ -753,6 +758,14 @@ def turn_to_parts(
                 text = strip_xml_fences(raw_combined)
         else:
             text = strip_xml_fences(raw_thoughts)
+        if turn.action == "request_approval" and getattr(turn, "approval_options", None):
+            opts_text = ", ".join(
+                f"{o.get('id') if isinstance(o, dict) else o.id}: "
+                f"{o.get('label') if isinstance(o, dict) else o.label} "
+                f"({o.get('effect') if isinstance(o, dict) else o.effect})"
+                for o in turn.approval_options
+            )
+            text = f"{text}\nOptions: {opts_text}" if text else f"Options: {opts_text}"
         if turn.action not in ("response",):
             safe_action = (
                 strip_xml_fences(sanitize_prompt_text(turn.action or "action", max_len=PROMPT_NAME_MAX_LEN)).strip()
@@ -761,8 +774,13 @@ def turn_to_parts(
             text = f"[FRIDAY {safe_action}]: {text}" if text else f"[FRIDAY {safe_action}]"
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
-        raw = strip_xml_fences(raw)
-        action_suffix = f" ({turn.action})" if turn.action and turn.action != "message" else ""
+        raw = sanitize_user_input_text(raw)
+        opt_tag = f":{turn.selected_option_id}" if getattr(turn, "selected_option_id", None) else ""
+        action_suffix = (
+            f" ({turn.action}{opt_tag})"
+            if turn.action and turn.action != "message"
+            else (f" ({turn.selected_option_id})" if getattr(turn, "selected_option_id", None) else "")
+        )
         # user_name is operator/Slack-supplied: sanitize + cap so a crafted display name
         # cannot break out of the [USER ...] prefix or inject lines into the turn text.
         safe_name = sanitize_prompt_text(turn.user_name, max_len=PROMPT_NAME_MAX_LEN).strip()

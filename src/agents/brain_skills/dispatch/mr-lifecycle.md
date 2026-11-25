@@ -207,6 +207,9 @@ Once user or maintainer approval is recorded (turn `action="approve"` or `status
 2. **Observe Post-Merge Pipeline**: After merge, observe the post-merge build, test, and deployment pipeline until terminal success.
 3. **Cluster Rollout Verification**: A merged MR is only the beginning of deployment. Verify the affected deployment/service rolled out to the target cluster (`oc rollout status` or ArgoCD synced and healthy with zero restart loops) before transitioning to closure.
 
+
+- **Structured Option Semantics**: A user response is only an authorization if it carries `effect="approve"`. Selections with `effect="steer"`, `effect="reject"`, or free-form `write_in` text are steering mechanisms — they NEVER authorize irreversible actions or sidecar mutations.
+
 ## MR/PR Pipeline Fix Principle
 
 The entire purpose of an MR/PR pipeline is to validate changes before they reach main. Merging an untested fix to main first and then rebasing the MR defeats this validation gate — main now contains a change that was never pipeline-validated, and the MR pipeline result no longer tests the original change in isolation.

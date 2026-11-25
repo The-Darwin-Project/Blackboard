@@ -164,3 +164,5 @@ Values that are safe to change without user approval (Helm charts or Kustomize o
 - Node anti-affinity rules (scheduling)
 - PodDisruptionBudget values (eviction control)
 - Replica count to 0 then back (restart)
+
+- **Structured Option Semantics**: A user response is only an authorization if it carries `effect="approve"`. Selections with `effect="steer"`, `effect="reject"`, or free-form `write_in` text are steering mechanisms — they NEVER authorize irreversible actions or sidecar mutations.

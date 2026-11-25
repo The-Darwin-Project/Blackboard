@@ -329,7 +329,9 @@ def has_unevaluated_close_blocker(conversation: list) -> bool:
             if is_jarvis_acknowledgment(raw) or is_stabilization_wake(raw):
                 continue
 
-        if actor in ("jarvis", "user") and action == "message" and (not status_val or status_val in ("sent", "delivered")):
+        if actor == "jarvis" and action == "message" and (not status_val or status_val in ("sent", "delivered")):
+            return True
+        if actor == "user" and action in ("message", "approve", "reject", "select_option", "write_in") and (not status_val or status_val in ("sent", "delivered")):
             return True
     return False
 
@@ -387,7 +389,7 @@ def _pred_silent_park(ctx: GateContext) -> bool:
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
         if actor == "brain" and action == "response":
             return False
-        if actor == "user" and action == "message":
+        if actor == "user" and action in ("message", "approve", "reject", "select_option", "write_in"):
             found_user_msg = True
             break
     return found_user_msg

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from .agents.brain_skill_loader import BrainSkillLoader
+    from .models import ConversationTurn
 
 
 class BroadcastPort(Protocol):
@@ -43,6 +44,8 @@ class BrainLifecyclePort(Protocol):
     def enqueue_for_processing(self, event_id: str) -> None: ...
 
     async def resume_if_parked(self, event_id: str) -> bool: ...
+
+    async def complete_approval_resume(self, event_id: str, updated_request_turn: ConversationTurn | None, user_turn: ConversationTurn | None) -> None: ...
 
     async def close_jarvis_meta_event(self, event_id: str) -> None: ...
 
