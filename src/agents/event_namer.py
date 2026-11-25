@@ -6,7 +6,6 @@
 # 4. [Hexagonal]: Broadcasts 'event_title_updated' via brain.broadcast(). No direct UI/Slack calls.
 """Background task for generating concise event titles using a lightweight LLM."""
 from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -14,7 +13,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..utils.prompt_sanitize import sanitize_prompt_text, sanitize_title
-from .llm import create_adapter
+from .llm import PRIORITY_HIGH, PROVIDER_VERTEX_GEMINI, create_adapter, record_token_usage
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -64,7 +63,9 @@ async def generate_event_title(
         # Timeout bounds semaphore wait AND the LLM call, so bursts cannot queue unboundedly.
         async with asyncio.timeout(NAMER_TIMEOUT_SECONDS):
             async with _get_semaphore():
-                response = await get_adapter().generate(system_prompt=sys_prompt, contents=user_prompt, max_output_tokens=256, thinking_level="low")
+                response = await get_adapter().generate(system_prompt=sys_prompt, contents=user_prompt, max_output_tokens=256, thinking_level="low", priority=PRIORITY_HIGH)
+        if getattr(response, "usage", None):
+            record_token_usage("event_namer", response.usage, event_id, provider=PROVIDER_VERTEX_GEMINI)
 
         # First visible line of the model output (extra lines are commentary), sanitized like user titles.
         line = next((t for ln in (response.text or "").splitlines() if (t := sanitize_title(ln).strip("\"'*` "))), "")
@@ -73,12 +74,7 @@ async def generate_event_title(
             return
 
         if await blackboard.update_event_title_if_not_user(event_id, clean_title, "llm"):
-            await brain.broadcast({
-                "type": "event_title_updated",
-                "event_id": event_id,
-                "title": clean_title,
-                "title_source": "llm",
-            })
+            await brain.broadcast({"type": "event_title_updated", "event_id": event_id, "title": clean_title, "title_source": "llm"})
             logger.info("Event %s (%s) title generated via LLM (len=%d)", event_id, source, len(clean_title))
     except Exception as exc:
         logger.warning("LLM title generation failed for %s: %s", event_id, exc)

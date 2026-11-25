@@ -81,6 +81,7 @@ import math
 import os
 import re
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ..agents.jarvis_instructions import (
@@ -753,6 +754,37 @@ class LiveAPIAdapter:
                 logger.debug("Cortex session resumption handle updated")
 
         eid = getattr(self, "_last_pulse_event_id", None)
+        usage_meta = getattr(msg, "usage_metadata", None)
+        if usage_meta is not None:
+            try:
+                from ..agents.llm.raw_genai_meter import record_raw_genai_post_hoc
+                baseline = getattr(self, "_live_turn_usage_baseline", None)
+                if baseline is None:
+                    baseline = {}
+                delta_fields: dict[str, int] = {}
+                for attr in (
+                    "prompt_token_count",
+                    "candidates_token_count",
+                    "thoughts_token_count",
+                    "cached_content_token_count",
+                    "tool_use_prompt_token_count",
+                    "total_token_count",
+                ):
+                    cur = getattr(usage_meta, attr, None)
+                    if isinstance(cur, int) and not isinstance(cur, bool) and cur >= 0:
+                        prev = baseline.get(attr, 0)
+                        delta_fields[attr] = max(0, cur - prev)
+                        baseline[attr] = max(prev, cur)
+                self._live_turn_usage_baseline = baseline
+                if delta_fields:
+                    record_raw_genai_post_hoc(
+                        "jarvis",
+                        getattr(self, "_model", "gemini-live"),
+                        SimpleNamespace(**delta_fields),
+                        event_id=getattr(self, "_active_meta_event_id", None) or eid,
+                    )
+            except Exception as e:
+                logger.debug("Cortex usage_metadata recording failed (non-fatal): %s", e)
 
         if hasattr(msg, "server_content") and msg.server_content:
             try:
@@ -820,6 +852,8 @@ class LiveAPIAdapter:
             (hasattr(msg, "server_content") and getattr(msg.server_content, "turn_complete", False))
             or (hasattr(msg, "tool_call") and msg.tool_call)
         )
+        if should_flush:
+            self._live_turn_usage_baseline = None
         if should_flush and self._collecting_handoff:
             report = "".join(self._handoff_buffer).strip()
             self._handoff_buffer = []
@@ -1569,12 +1603,28 @@ class LiveAPIAdapter:
             }
             if "gemini-4" in (model or "").lower():
                 config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
-            async with asyncio.timeout(30):
-                response = await client.aio.models.generate_content(
-                    model=model,
-                    contents=query,
-                    config=types.GenerateContentConfig(**config_kwargs),
+            from ..agents.llm import PRIORITY_HIGH
+            from ..agents.llm.raw_genai_meter import acquire_raw_genai, finalize_raw_genai, rollback_raw_genai
+            res_state = await acquire_raw_genai(query, priority=PRIORITY_HIGH)
+            finalized = False
+            try:
+                async with asyncio.timeout(30):
+                    response = await client.aio.models.generate_content(
+                        model=model,
+                        contents=query,
+                        config=types.GenerateContentConfig(**config_kwargs),
+                    )
+                finalize_raw_genai(
+                    "jarvis_web_search",
+                    model,
+                    getattr(response, "usage_metadata", None),
+                    res_state,
+                    event_id=getattr(self, "_active_meta_event_id", None),
                 )
+                finalized = True
+            finally:
+                if not finalized:
+                    rollback_raw_genai(res_state)
             chunks = []
             if response.candidates:
                 gm = getattr(response.candidates[0], "grounding_metadata", None)

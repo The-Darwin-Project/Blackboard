@@ -197,7 +197,15 @@ gcp:
       temperature: "0.3"
       thinkingLevel: "low"
       maxOutputTokens: "6144" # Raised from 4096 for Phase 1 narrative analysis (summary/probable_cause/signals/suggested_next_step) alongside per-job triage.
-  tpmLimit: "3000000" # Vertex AI tokens-per-minute quota (GCP base-model cap is 4M; 3M leaves 1M headroom for sidecars). Shared across Brain, Aligner, Headhunter, Archivist.
+  tpmLimit: "3500000" # Vertex AI Gemini TPM quota (4M GCP ceiling; 3.5M leaves 500k GCP safety buffer for mid-flight sidecars, ~3.0M auto ceiling at 0.85).
+  claudeTpmLimit: "2000000" # Vertex AI Claude TPM quota (in-process Claude + claude sidecars).
+  enmaasTpmLimit: "2000000" # EnMaaS TPM quota (dormant until ENMAAS_ENABLED=true).
+  enmaasEnabled: false # Set true to enable EnMaaS TPM pool in global denominator.
+  tpmNormalCeilingRatio: "0.85" # 85% normal sustained ceiling / 15% PRIORITY_HIGH burst reserve.
+  tpmPriorityAgingSec: "15.0" # Aging threshold (s) before PRIORITY_NORMAL yields to queued PRIORITY_HIGH waiters.
+  sidecarMaxFrameTokens: "500000" # Per-WS-frame sidecar token clamp ceiling.
+  sidecarMaxTaskTokens: "1500000" # Cumulative per-task sidecar token metering cap.
+  sidecarTpmMaxDefers: "5" # Max consecutive TPM-reserve deferrals per event before fail-open dispatch.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
   existingSecret: "" # e.g., "gcp-sa-key"

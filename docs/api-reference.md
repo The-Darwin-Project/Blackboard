@@ -223,8 +223,8 @@ POST /api/cortex/proposals/dismiss    # Dismiss proposals by timestamps {timesta
 ## Flow Observability
 
 ```text
-GET /flow                             # Queue depth, active events, agent utilization, token totals
-GET /flow/history                     # FlowSnapshot time-series (60s intervals, Redis sorted set)
+GET /flow                             # Queue depth, active events, automated WIP (excludes chat, slack, jarvis), agent utilization, token totals, per-pool TPM metrics (vertex_gemini, vertex_claude, enmaas, peak_pool_utilization_pct)
+GET /flow/history                     # FlowSnapshot time-series (60s intervals, Redis sorted set; includes automated WIP and per-pool TPM metrics)
 GET /flow/{event_id}                  # Value stream breakdown (queue_wait, routing, execution, total_lead_time)
 ```
 
@@ -313,7 +313,7 @@ GET /skills/version                   # Skill reconciler sync metadata (version 
 ## Telemetry
 
 ```text
-GET /telemetry/llm                    # LLM quota stats (TPM usage)
+GET /telemetry/llm                    # Multi-pool LLM quota stats (vertex_gemini, vertex_claude, enmaas, enmaas_active, peak_pool_utilization_pct) + bounded callers/teams attribution (256-entry LRU with "_other" overflow)
 ```
 
 The legacy `POST /telemetry/` push endpoint returns HTTP 410 (deprecated). Use `darwin.io` annotations for passive discovery instead.

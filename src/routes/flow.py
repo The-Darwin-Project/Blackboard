@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from .. import dependencies
 from ..models import FlowMetricsResponse, FlowSnapshot
+from ..state.wip_meta import count_interactive_sessions, fetch_active_events_meta
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,41 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     except Exception:
         pass
 
+    active_user_sessions = 0
+    try:
+        if blackboard is not None:
+            meta_map = await fetch_active_events_meta(blackboard)
+            active_user_sessions = count_interactive_sessions(meta_map)
+    except Exception:
+        pass
+
+    peak_pool_util = latest.peak_pool_utilization_pct if latest else 0.0
+    gem_used = latest.gemini_tpm_used if latest else 0
+    gem_lim = latest.gemini_tpm_limit if latest else 0
+    claude_used = latest.claude_tpm_used if latest else 0
+    claude_lim = latest.claude_tpm_limit if latest else 0
+    enmaas_used = latest.enmaas_tpm_used if latest else 0
+    enmaas_lim = latest.enmaas_tpm_limit if latest else 0
+    try:
+        from ..agents.llm import get_quota_registry
+        all_stats = get_quota_registry().get_all_stats()
+        pools = all_stats.get("pools", {})
+        g_stats = all_stats.get("global", {})
+        enmaas_active = bool(all_stats.get("enmaas_active", False))
+        if pools:
+            gem = pools.get("vertex_gemini", {})
+            cld = pools.get("vertex_claude", {})
+            enm = pools.get("enmaas", {})
+            peak_pool_util = float(g_stats.get("peak_pool_utilization_pct", 0.0) or 0.0)
+            gem_used = int(gem.get("tokens_used_60s", 0) or 0)
+            gem_lim = int(gem.get("tpm_limit", 0) or 0)
+            claude_used = int(cld.get("tokens_used_60s", 0) or 0)
+            claude_lim = int(cld.get("tpm_limit", 0) or 0)
+            enmaas_used = int(enm.get("tokens_used_60s", 0) or 0)
+            enmaas_lim = int(enm.get("tpm_limit", 0) or 0) if enmaas_active else 0
+    except Exception:
+        pass
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
@@ -141,6 +177,14 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,
         staleness_guards=staleness_guards,
+        active_user_sessions=active_user_sessions,
+        peak_pool_utilization_pct=peak_pool_util,
+        gemini_tpm_used=gem_used,
+        gemini_tpm_limit=gem_lim,
+        claude_tpm_used=claude_used,
+        claude_tpm_limit=claude_lim,
+        enmaas_tpm_used=enmaas_used,
+        enmaas_tpm_limit=enmaas_lim,
     )
 
 

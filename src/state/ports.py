@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         Snapshot,
         TopologySnapshot,
     )
+    from .wip_meta import ActiveEventMeta
 
 
 @runtime_checkable
@@ -423,6 +424,8 @@ class EventRepository(Protocol):
     async def get_active_events(self) -> list[str]: ...
 
     async def get_active_events_with_status(self) -> dict[str, str]: ...
+
+    async def get_active_events_metadata(self) -> dict[str, ActiveEventMeta]: ...
 
     async def find_active_event_by_source(self, source: str) -> str | None: ...
 

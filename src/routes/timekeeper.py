@@ -230,6 +230,7 @@ async def refine_instructions(
             max_tokens = int(os.getenv("LLM_MAX_TOKENS_TIMEKEEPER", "2048"))
             thinking_level = os.getenv("LLM_THINKING_TIMEKEEPER") or "low"
 
+            from src.agents.llm import PRIORITY_HIGH, PROVIDER_VERTEX_GEMINI, record_token_usage
             async with asyncio.timeout(float(os.getenv("TIMEKEEPER_REFINE_TIMEOUT_SEC", "30"))):
                 response = await adapter.generate(
                     system_prompt=system_prompt,
@@ -237,9 +238,9 @@ async def refine_instructions(
                     temperature=temp,
                     max_output_tokens=max_tokens,
                     thinking_level=thinking_level,
+                    priority=PRIORITY_HIGH,
                 )
-            from src.agents.llm import record_token_usage
-            record_token_usage("timekeeper", response.usage)
+            record_token_usage("timekeeper", response.usage, provider=PROVIDER_VERTEX_GEMINI)
 
             refined = (response.text or "").strip()
             return RefineResponse(refined=refined, reasoning="")

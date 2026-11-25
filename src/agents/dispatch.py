@@ -33,15 +33,24 @@ import logging
 import os
 import re
 import uuid
-from typing import Callable
+from typing import Any, Callable
 
 from .agent_registry import AgentRegistry
+from .llm.quota_registry import parse_tpm_limit
+from .llm.types import TokenUsage
+from .sidecar_usage import (
+    _VALID_PROVIDERS,
+    normalize_sidecar_provider,
+    record_sidecar_usage,
+    validate_usage_payload,
+)
 from .task_bridge import TaskBridge, ERROR_SENTINEL_TYPE
 from .security import FORBIDDEN_PATTERNS, SecurityError
 
 logger = logging.getLogger(__name__)
 
 RETRYABLE_SENTINEL = "__RETRYABLE__"
+SIDECAR_MAX_TASK_TOKENS = parse_tpm_limit("SIDECAR_MAX_TASK_TOKENS", 1_500_000)
 
 _TOOL_MARKER_RE = re.compile(r'\[tool\]\s*\S+', re.IGNORECASE)
 
@@ -56,6 +65,132 @@ def _dispatch_timeout_s() -> int:
     without a process restart, and so dispatch_to_agent and consume_wake_task always agree.
     """
     return int(os.environ.get("DISPATCH_TIMEOUT_S", "3000"))
+
+
+def _commit_with_task_cap(
+    caller: str,
+    u_obj: TokenUsage,
+    *,
+    cli: str,
+    prov: str,
+    model: str,
+    event_id: str,
+    team_id: str | None,
+    streamed_by_provider: dict[str, dict[str, int]],
+) -> int:
+    """Enforce cumulative SIDECAR_MAX_TASK_TOKENS cap and record pre-validated TokenUsage."""
+    if u_obj.total_tokens <= 0:
+        return 0
+    task_total = sum(v.get("total_tokens", 0) for v in streamed_by_provider.values())
+    remaining = max(0, SIDECAR_MAX_TASK_TOKENS - task_total)
+    if remaining <= 0:
+        logger.warning(
+            "Sidecar task token cap (%d) reached for event=%s caller=%s; dropping frame (%d tokens)",
+            SIDECAR_MAX_TASK_TOKENS, event_id, caller, u_obj.total_tokens,
+        )
+        return 0
+    if u_obj.total_tokens > remaining:
+        logger.warning(
+            "Clamping sidecar task tokens for event=%s caller=%s (%d -> %d, cap=%d)",
+            event_id, caller, u_obj.total_tokens, remaining, SIDECAR_MAX_TASK_TOKENS,
+        )
+        u_obj = TokenUsage(
+            input_tokens=min(u_obj.input_tokens, remaining),
+            output_tokens=min(u_obj.output_tokens, remaining),
+            thinking_tokens=min(u_obj.thinking_tokens, remaining),
+            cached_tokens=min(u_obj.cached_tokens, remaining),
+            total_tokens=remaining,
+            model_version=u_obj.model_version,
+        )
+    delta = record_sidecar_usage(
+        cli=cli,
+        raw_provider=prov,
+        model=model,
+        event_id=event_id,
+        team_id=team_id,
+        parsed=(caller, u_obj),
+    )
+    if delta > 0:
+        acc = streamed_by_provider.setdefault(prov, {})
+        for k in ("input_tokens", "output_tokens", "thinking_tokens", "cached_tokens", "total_tokens"):
+            acc[k] = acc.get(k, 0) + getattr(u_obj, k, 0)
+    return delta
+
+
+def _record_live_token_usage(
+    msg: dict,
+    streamed_by_provider: dict[str, dict[str, int]],
+    event_id: str,
+    *,
+    default_cli: str,
+    default_provider: str,
+    team_id: str | None = None,
+) -> None:
+    """Record live WS token_usage delta non-blockingly and accumulate per-provider streamed totals."""
+    cli = default_cli or str(msg.get("cli") or "")
+    raw_prov = str(msg.get("provider") or default_provider)
+    prov = normalize_sidecar_provider(cli, raw_prov)
+    parsed = validate_usage_payload(msg.get("usage"), cli)
+    if parsed is None:
+        return
+    caller, u_obj = parsed
+    _commit_with_task_cap(
+        caller,
+        u_obj,
+        cli=cli,
+        prov=prov,
+        model=str(msg.get("model") or ""),
+        event_id=event_id,
+        team_id=team_id,
+        streamed_by_provider=streamed_by_provider,
+    )
+
+
+def _reconcile_terminal_token_usage(
+    msg: dict,
+    streamed_by_provider: dict[str, dict[str, int]],
+    event_id: str,
+    *,
+    default_cli: str,
+    default_provider: str,
+    team_id: str | None = None,
+) -> None:
+    """Reconcile terminal result/error cumulative usage minus streamed per-provider deltas."""
+    cli = default_cli or str(msg.get("cli") or "")
+    model = str(msg.get("used_model") or msg.get("model") or "")
+    by_prov = msg.get("usage_by_provider")
+    entries: list[tuple[str, Any]] = []
+    if isinstance(by_prov, dict) and by_prov:
+        entries = [(str(p), u) for p, u in by_prov.items() if str(p) in _VALID_PROVIDERS]
+    elif msg.get("usage") is not None:
+        entries = [(str(msg.get("provider") or default_provider), msg.get("usage"))]
+    for raw_prov, u_dict in entries:
+        prov = normalize_sidecar_provider(cli, raw_prov)
+        parsed = validate_usage_payload(u_dict, cli, max_tokens=SIDECAR_MAX_TASK_TOKENS)
+        if parsed is None:
+            continue
+        caller, final_u = parsed
+        streamed = streamed_by_provider.get(prov, {})
+        res_total = max(0, final_u.total_tokens - streamed.get("total_tokens", 0))
+        if res_total <= 0:
+            continue
+        residual_u = TokenUsage(
+            input_tokens=max(0, final_u.input_tokens - streamed.get("input_tokens", 0)),
+            output_tokens=max(0, final_u.output_tokens - streamed.get("output_tokens", 0)),
+            thinking_tokens=max(0, final_u.thinking_tokens - streamed.get("thinking_tokens", 0)),
+            cached_tokens=max(0, final_u.cached_tokens - streamed.get("cached_tokens", 0)),
+            total_tokens=res_total,
+        )
+        _commit_with_task_cap(
+            caller,
+            residual_u,
+            cli=cli,
+            prov=prov,
+            model=model,
+            event_id=event_id,
+            team_id=team_id,
+            streamed_by_provider=streamed_by_provider,
+        )
 
 
 def _sanitize_stdout(raw: str) -> str:
@@ -127,6 +262,7 @@ async def dispatch_to_agent(
     model: str = "",
     effort: str = "",
     work_style: str = "autonomous",
+    team_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Send task to an available agent via persistent WS, return (result, session_id)."""
     if mode and mode not in KNOWN_AGENT_MODES:
@@ -192,6 +328,9 @@ async def dispatch_to_agent(
 
         latest_callback_result: str | None = None
         returned_session_id = session_id
+        streamed_by_provider: dict[str, dict[str, int]] = {}
+        conn_cli = getattr(agent_conn, "cli", "") or ""
+        conn_prov = getattr(agent_conn, "provider", "") or ""
 
         # Safety timeout: prevent indefinite blocking when sidecar never responds.
         # See _dispatch_timeout_s() docstring for the ceiling rationale.
@@ -203,7 +342,14 @@ async def dispatch_to_agent(
                 msg = await queue.get()
                 msg_type = msg.get("type", "")
 
-                if msg_type == "progress":
+                if msg_type == "token_usage":
+                    accepted = True
+                    _record_live_token_usage(
+                        msg, streamed_by_provider, event_id,
+                        default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                    )
+
+                elif msg_type == "progress":
                     accepted = True
                     if on_progress:
                         await on_progress({
@@ -236,6 +382,10 @@ async def dispatch_to_agent(
 
                 elif msg_type == "result":
                     accepted = True
+                    _reconcile_terminal_token_usage(
+                        msg, streamed_by_provider, event_id,
+                        default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                    )
                     status = msg.get("status", "success")
                     output = msg.get("output", "")
                     source = msg.get("source", "stdout")
@@ -259,6 +409,10 @@ async def dispatch_to_agent(
                     return str(output), returned_session_id
 
                 elif msg_type == "error":
+                    _reconcile_terminal_token_usage(
+                        msg, streamed_by_provider, event_id,
+                        default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                    )
                     error_msg = msg.get("error", msg.get("message", "Unknown error"))
                     if msg.get("retryable"):
                         if latest_callback_result:
@@ -316,6 +470,7 @@ async def consume_wake_task(
     role: str,
     on_progress: Callable | None = None,
     on_huddle: Callable | None = None,
+    team_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Consume a self-initiated wake task's messages from a pre-created TaskBridge queue.
 
@@ -329,6 +484,10 @@ async def consume_wake_task(
     latest_callback_result: str | None = None
     returned_session_id: str | None = None
     timeout_s = _dispatch_timeout_s()
+    streamed_by_provider: dict[str, dict[str, int]] = {}
+    conn = await registry.get_by_id(agent_id) if registry is not None else None
+    conn_cli = getattr(conn, "cli", "") if conn is not None else ""
+    conn_prov = getattr(conn, "provider", "") if conn is not None else ""
 
     async def _consume():
         nonlocal latest_callback_result, returned_session_id
@@ -336,7 +495,13 @@ async def consume_wake_task(
             msg = await queue.get()
             msg_type = msg.get("type", "")
 
-            if msg_type == "progress":
+            if msg_type == "token_usage":
+                _record_live_token_usage(
+                    msg, streamed_by_provider, event_id,
+                    default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                )
+
+            elif msg_type == "progress":
                 if on_progress:
                     await on_progress({
                         "actor": role, "event_id": event_id,
@@ -370,6 +535,10 @@ async def consume_wake_task(
                     })
 
             elif msg_type == "result":
+                _reconcile_terminal_token_usage(
+                    msg, streamed_by_provider, event_id,
+                    default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                )
                 status = msg.get("status", "success")
                 output = msg.get("output", "")
                 source = msg.get("source", "stdout")
@@ -389,6 +558,10 @@ async def consume_wake_task(
                 return str(output), returned_session_id
 
             elif msg_type == "error":
+                _reconcile_terminal_token_usage(
+                    msg, streamed_by_provider, event_id,
+                    default_cli=conn_cli, default_provider=conn_prov, team_id=team_id,
+                )
                 error_msg = msg.get("error", msg.get("message", "Unknown error"))
                 if msg.get("retryable"):
                     if latest_callback_result:

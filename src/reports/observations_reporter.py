@@ -66,13 +66,27 @@ async def _analyze_series(client, model: str, series: dict) -> str:
     config: dict = {"max_output_tokens": 2048, "temperature": 0.2}
     if "gemini-4" in (model or "").lower():
         config["thinking_config"] = {"thinking_level": "LOW"}
-    async with asyncio.timeout(30):
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=model,
-            contents=prompt,
-            config=config,
+    from ..agents.llm.raw_genai_meter import acquire_raw_genai, finalize_raw_genai, rollback_raw_genai
+    res_state = await acquire_raw_genai(prompt)
+    finalized = False
+    try:
+        async with asyncio.timeout(30):
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model,
+                contents=prompt,
+                config=config,
+            )
+        finalize_raw_genai(
+            "observations_reporter",
+            model,
+            getattr(response, "usage_metadata", None),
+            res_state,
         )
+        finalized = True
+    finally:
+        if not finalized:
+            rollback_raw_genai(res_state)
     return text if (text := (response.text or "").strip()) else f"[Analysis unavailable for `{series['name']}`: empty LLM response]"
 
 
@@ -85,13 +99,27 @@ async def _summarize(client, model: str, analyses: list[str], context: str) -> s
     config: dict = {"max_output_tokens": 4096, "temperature": 0.2}
     if "gemini-4" in (model or "").lower():
         config["thinking_config"] = {"thinking_level": "LOW"}
-    async with asyncio.timeout(30):
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=model,
-            contents=prompt,
-            config=config,
+    from ..agents.llm.raw_genai_meter import acquire_raw_genai, finalize_raw_genai, rollback_raw_genai
+    res_state = await acquire_raw_genai(prompt)
+    finalized = False
+    try:
+        async with asyncio.timeout(30):
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model,
+                contents=prompt,
+                config=config,
+            )
+        finalize_raw_genai(
+            "observations_reporter",
+            model,
+            getattr(response, "usage_metadata", None),
+            res_state,
         )
+        finalized = True
+    finally:
+        if not finalized:
+            rollback_raw_genai(res_state)
     return response.text or ""
 
 

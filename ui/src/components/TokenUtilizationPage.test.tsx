@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import TokenUtilizationPage from './TokenUtilizationPage';
+import { setTokenGetter } from '../api/client';
 import type { FlowSnapshot } from '../api/types';
 
 vi.mock('recharts', async (importOriginal) => {
@@ -34,10 +35,13 @@ describe('TokenUtilizationPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
   });
 
   afterEach(() => {
+    setTokenGetter(() => null);
     localStorage.clear();
+    vi.unstubAllGlobals();
   });
 
   it('renders correctly with populated FlowSnapshot entries (calculates aggregate and Brain hit percentages)', () => {
@@ -140,5 +144,90 @@ describe('TokenUtilizationPage', () => {
 
     render(<TokenUtilizationPage />);
     expect(screen.getByText('Collecting data... first snapshot in ~60s.')).toBeInTheDocument();
+  });
+
+  it('T-23: renders Claude Tokens and Sidecar Tokens SparkCards plus By Pool & By Caller breakdown card', async () => {
+    setTokenGetter(() => 'test-bearer-jwt');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        pools: {
+          vertex_gemini: { tokens_used_60s: 350_000, tpm_limit: 3_500_000, utilization_pct: 10.0 },
+          vertex_claude: { tokens_used_60s: 800_000, tpm_limit: 2_000_000, utilization_pct: 40.0 },
+        },
+        callers: {
+          brain: { total_tokens: 350_000, calls: 4 },
+          'sidecar:claude': { total_tokens: 800_000, calls: 2 },
+        },
+        teams: {
+          'team-alpha': { total_tokens: 150_000, calls: 1 },
+        },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    vi.mocked(useFlowHistory).mockReturnValue({
+      data: [
+        makeSnapshot({
+          token_input_delta: 1000,
+          token_cached_delta: 600,
+          claude_token_total_delta: 1200,
+          sidecar_token_total_delta: 800,
+        } as Partial<FlowSnapshot>),
+      ],
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any);
+
+    render(<TokenUtilizationPage />);
+
+    expect(screen.getByText('Claude Tokens')).toBeInTheDocument();
+    expect(screen.getByText('in-process + sidecar:claude')).toBeInTheDocument();
+    expect(screen.getByText('1.2K')).toBeInTheDocument();
+    expect(screen.getByText('1.2K total')).toBeInTheDocument();
+    expect(screen.getByText('Sidecar Tokens')).toBeInTheDocument();
+    expect(screen.getByText('sidecar:agy + sidecar:claude')).toBeInTheDocument();
+    expect(screen.getByText('800')).toBeInTheDocument();
+    expect(screen.getByText('800 total')).toBeInTheDocument();
+
+    const breakdownCard = await screen.findByTestId('telemetry-breakdown-card');
+    expect(breakdownCard).toBeInTheDocument();
+    const breakdown = within(breakdownCard);
+    expect(breakdown.getByText('By Pool & By Caller')).toBeInTheDocument();
+    expect(breakdown.getByText(/vertex_gemini/)).toBeInTheDocument();
+    expect(breakdown.getByText('350.0K / 3.5M (10.0%)')).toBeInTheDocument();
+    expect(breakdown.getByText(/vertex_claude/)).toBeInTheDocument();
+    expect(breakdown.getByText('800.0K / 2.0M (40.0%)')).toBeInTheDocument();
+    expect(breakdown.getByText(/brain/)).toBeInTheDocument();
+    expect(breakdown.getByText('350.0K (4)')).toBeInTheDocument();
+    expect(breakdown.getByText(/sidecar:claude/)).toBeInTheDocument();
+    expect(breakdown.getByText('800.0K (2)')).toBeInTheDocument();
+    expect(breakdown.getByText(/team-alpha/)).toBeInTheDocument();
+    expect(breakdown.getByText('150.0K (1)')).toBeInTheDocument();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/telemetry/llm',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-bearer-jwt',
+        }),
+      }),
+    );
+  });
+
+  it('T-23: stays fail-open when /telemetry/llm fetch rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+    vi.mocked(useFlowHistory).mockReturnValue({
+      data: [makeSnapshot({ claude_token_total_delta: 100, sidecar_token_total_delta: 50 } as Partial<FlowSnapshot>)],
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any);
+
+    render(<TokenUtilizationPage />);
+    expect(screen.getByText('Total Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Claude Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Sidecar Tokens')).toBeInTheDocument();
   });
 });

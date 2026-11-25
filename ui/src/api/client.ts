@@ -28,6 +28,7 @@ import type {
   FlowSnapshot,
   GraphResponse,
   KargoStageStatus,
+  LlmTelemetryBreakdown,
   ObservationsResponse,
   ReportFull,
   ReportMeta,
@@ -352,6 +353,10 @@ export async function getFlowMetrics(): Promise<FlowMetrics> {
 
 export async function getFlowHistory(rangeSeconds = 3600): Promise<FlowSnapshot[]> {
   return fetchApi<FlowSnapshot[]>(`/flow/history?range_seconds=${rangeSeconds}`);
+}
+
+export async function getLlmTelemetry(): Promise<LlmTelemetryBreakdown> {
+  return fetchApi<LlmTelemetryBreakdown>('/telemetry/llm');
 }
 
 // =============================================================================

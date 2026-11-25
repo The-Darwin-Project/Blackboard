@@ -37,6 +37,7 @@ const {
   resolveTimeoutMs, parsePositiveInt, MAX_TASK_WALL_MS, MAX_TIMER_MS,
 } = require('./config');
 const { wsSend } = require('./ws-utils');
+const { inferProvider } = require('./usage-tracker');
 const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
 const { ensureEventDocument } = require('./event-transport');
 
@@ -109,6 +110,54 @@ function signalIdleExit() {
   try { fs.writeFileSync(`${SENTINEL_DIR}/${name}`, ''); } catch {}
 }
 
+function buildRegisterPayload(agentId = null) {
+  const id = agentId || (EPHEMERAL
+    ? (AGENT_ROLE ? `${AGENT_ROLE}-${os.hostname()}` : `oncall-${os.hostname()}`)
+    : `${AGENT_ROLE}-${os.hostname()}`);
+  return {
+    type: 'register', agent_id: id, role: AGENT_ROLE,
+    event_id: EVENT_ID || null, ephemeral: EPHEMERAL,
+    capabilities: [], cli: AGENT_CLI, model: AGENT_MODEL,
+    provider: inferProvider(AGENT_CLI, process.env),
+  };
+}
+
+async function handleServerMessage(ws, msg, cleanupActiveTask = null) {
+  // Pong must fire immediately -- never gated behind awaited handlers
+  if (msg.type === 'ping') { wsSend(ws, { type: 'pong' }); return; }
+  if (msg.type === 'task') await handleTask(ws, msg); // handleTask pauses/re-arms the idle timer itself
+  else if (msg.type === 'cancel') handleCancel(msg);
+  else if (msg.type === 'terminate') {
+    console.log(`[${new Date().toISOString()}] Terminate received for ${msg.event_id || 'unknown'}`);
+    if (cleanupActiveTask) cleanupActiveTask();
+    try { fs.writeFileSync('/data/workspace/.terminate', ''); } catch {}
+    if (_activeWs) try { _activeWs.close(); } catch {}
+    process.exit(0);
+  }
+  else if (msg.type === 'huddle_reply') {
+    // Brain replied to a HuddleSendMessage -- resolve the held HTTP response
+    const pending = state.getPendingHuddleReply();
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.res.writeHead(200, { 'Content-Type': 'application/json' });
+      pending.res.end(JSON.stringify({ reply: msg.content || '' }));
+      state.clearPendingHuddleReply();
+      console.log(`[${new Date().toISOString()}] Huddle reply delivered (${(msg.content || '').length} chars)`);
+    }
+  } else if (msg.type === 'blackboard_update') {
+    state.pushBlackboardTurn(msg.turn, msg.event_status, msg.total_turns);
+    console.log(`[${new Date().toISOString()}] Blackboard update: turn ${msg.turn?.turn || '?'} (${msg.turn?.actor || '?'}.${msg.turn?.action || '?'}), total=${msg.total_turns || '?'}`);
+  } else if (msg.type === 'proactive_message') {
+    state.pushInboundMessage({
+      from: msg.from || 'FRIDAY',
+      content: msg.content || '',
+      event_id: msg.event_id || '',
+    });
+    console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars, event=${msg.event_id || 'current'})`);
+    tryWake(msg.from || 'FRIDAY', msg.content || '');
+  }
+}
+
 function startWSClient(brainUrl) {
   const agentId = EPHEMERAL
     ? (AGENT_ROLE ? `${AGENT_ROLE}-${os.hostname()}` : `oncall-${os.hostname()}`)
@@ -126,11 +175,7 @@ function startWSClient(brainUrl) {
         console.warn(`[${new Date().toISOString()}] WS reconnected -- inbound messages during disconnect were lost`);
       }
       backoff = BACKOFF_MIN;
-      wsSend(ws, {
-        type: 'register', agent_id: agentId, role: AGENT_ROLE,
-        event_id: EVENT_ID || null, ephemeral: EPHEMERAL,
-        capabilities: [], cli: AGENT_CLI, model: AGENT_MODEL,
-      });
+      wsSend(ws, buildRegisterPayload(agentId));
       if (!_catalogSynced) {
         _catalogSynced = true;
         startCatalogSync(process.env.SKILLS_CATALOG_URL || '', EPHEMERAL);
@@ -141,39 +186,7 @@ function startWSClient(brainUrl) {
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
-      // Pong must fire immediately -- never gated behind awaited handlers
-      if (msg.type === 'ping') { wsSend(ws, { type: 'pong' }); return; }
-      if (msg.type === 'task') await handleTask(ws, msg); // handleTask pauses/re-arms the idle timer itself
-      else if (msg.type === 'cancel') handleCancel(msg);
-      else if (msg.type === 'terminate') {
-        console.log(`[${new Date().toISOString()}] Terminate received for ${msg.event_id || 'unknown'}`);
-        cleanupActiveTask();
-        try { fs.writeFileSync('/data/workspace/.terminate', ''); } catch {}
-        if (_activeWs) try { _activeWs.close(); } catch {}
-        process.exit(0);
-      }
-      else if (msg.type === 'huddle_reply') {
-        // Brain replied to a HuddleSendMessage -- resolve the held HTTP response
-        const pending = state.getPendingHuddleReply();
-        if (pending) {
-          clearTimeout(pending.timeout);
-          pending.res.writeHead(200, { 'Content-Type': 'application/json' });
-          pending.res.end(JSON.stringify({ reply: msg.content || '' }));
-          state.clearPendingHuddleReply();
-          console.log(`[${new Date().toISOString()}] Huddle reply delivered (${(msg.content || '').length} chars)`);
-        }
-      } else if (msg.type === 'blackboard_update') {
-        state.pushBlackboardTurn(msg.turn, msg.event_status, msg.total_turns);
-        console.log(`[${new Date().toISOString()}] Blackboard update: turn ${msg.turn?.turn || '?'} (${msg.turn?.actor || '?'}.${msg.turn?.action || '?'}), total=${msg.total_turns || '?'}`);
-      } else if (msg.type === 'proactive_message') {
-        state.pushInboundMessage({
-          from: msg.from || 'FRIDAY',
-          content: msg.content || '',
-          event_id: msg.event_id || '',
-        });
-        console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars, event=${msg.event_id || 'current'})`);
-        tryWake(msg.from || 'FRIDAY', msg.content || '');
-      }
+      await handleServerMessage(ws, msg, cleanupActiveTask);
     });
 
     ws.on('close', () => {
@@ -332,12 +345,14 @@ async function runTask(ws, msg) {
         obj.task_id = taskId;
         ws.send(JSON.stringify(obj));
         if (obj.type === 'progress') resetTimer();
-      } catch (e) { ws.send(raw); }
+      } catch (e) { try { ws.send(raw); } catch {} }
     },
     onActivity() {
       resetTimer();
     },
   };
+
+  const aggUsage = { used_model: null, provider: inferProvider(AGENT_CLI, process.env), usage: null, usage_by_provider: {} };
 
   try {
     // Set full task state BEFORE execution so callbacks (sendResults, sendMessage)
@@ -379,6 +394,21 @@ async function runTask(ws, msg) {
     let result;
     let retryDelay = CLI_429_INITIAL_DELAY_MS;
     let retriesTaken = 0;
+    const mergeUsageFrom = (res) => {
+      if (!res) return;
+      if (res.used_model) aggUsage.used_model = res.used_model;
+      if (res.provider) aggUsage.provider = res.provider;
+      if (res.usage) {
+        if (!aggUsage.usage) aggUsage.usage = { ...res.usage };
+        else for (const [k, v] of Object.entries(res.usage)) aggUsage.usage[k] = (aggUsage.usage[k] || 0) + (Number(v) || 0);
+      }
+      if (res.usage_by_provider) {
+        for (const [prov, u] of Object.entries(res.usage_by_provider)) {
+          if (!aggUsage.usage_by_provider[prov]) aggUsage.usage_by_provider[prov] = { ...u };
+          else for (const [k, v] of Object.entries(u)) aggUsage.usage_by_provider[prov][k] = (aggUsage.usage_by_provider[prov][k] || 0) + (Number(v) || 0);
+        }
+      }
+    };
 
     for (let attempt = 0; attempt <= CLI_429_MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -405,6 +435,7 @@ async function runTask(ws, msg) {
         result = await executeCLIStreaming(wsProxy, eventId, prompt, {
           autoApprove, cwd: workDir, sessionId, model, effort, role, workStyle,
         });
+        mergeUsageFrom(result);
       } catch (spawnErr) {
         if (attempt < CLI_429_MAX_RETRIES) {
           console.log(`[429-RETRY] spawn error on attempt ${attempt + 1}, will retry: ${spawnErr.message}`);
@@ -433,10 +464,15 @@ async function runTask(ws, msg) {
     const cur = state.getCurrentTask();
     if (cur?.timer) clearTimeout(cur.timer);
     if (cur?.taskId === taskId) {
+      const hasByProv = Object.keys(aggUsage.usage_by_provider).length > 0;
       sendMsg(ws, taskId, {
         type: 'result', event_id: eventId, session_id: result.sessionId || null,
         status: result.status, output: result.output || result.stdout || '',
         source: result.source || 'stdout',
+        used_model: aggUsage.used_model,
+        provider: aggUsage.provider,
+        usage: aggUsage.usage,
+        usage_by_provider: hasByProv ? aggUsage.usage_by_provider : null,
       });
       state.saveLastTaskContext({ sessionId: result.sessionId || null, eventId, cwd: workDir });
       state.clearCurrentTask();
@@ -445,7 +481,11 @@ async function runTask(ws, msg) {
     const cur = state.getCurrentTask();
     if (cur?.timer) clearTimeout(cur.timer);
     if (cur?.taskId === taskId) {
-      sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: err.message });
+      sendMsg(ws, taskId, {
+        type: 'error', event_id: eventId, message: err.message,
+        provider: inferProvider(AGENT_CLI, process.env),
+        ...(aggUsage.usage ? { usage: aggUsage.usage, usage_by_provider: aggUsage.usage_by_provider } : {}),
+      });
       state.saveLastTaskContext({ sessionId: cur?.sessionId || null, eventId, cwd: workDir });
       state.clearCurrentTask();
     }
@@ -503,4 +543,7 @@ function tryWake(from, content, eventId) {
     .finally(() => { _isWaking = false; });
 }
 
-module.exports = { startWSClient, tryWake, handleTask, resetIdleTimer, clearIdleTimer, computeBackstopMs, BACKSTOP_GRACE_MS };
+module.exports = {
+  startWSClient, tryWake, handleTask, handleServerMessage, buildRegisterPayload,
+  resetIdleTimer, clearIdleTimer, computeBackstopMs, BACKSTOP_GRACE_MS,
+};

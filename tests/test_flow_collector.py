@@ -300,24 +300,28 @@ class TestFlowCollectorScenarioT8:
         assert (s5.tpm_used, s5.tpm_limit, s5.tpm_utilization_pct, s5.quota_throttle_delta) == (900_000, 3_000_000, 30.0, 4)
 
     def test_default_tpm_limit_matches_helm_values(self, monkeypatch):
-        """Scenario: Helm gcp.tpmLimit and llm.create_adapter default agree on 3,000,000 TPM."""
+        """Scenario: Helm gcp.tpmLimit and llm.create_adapter default agree on 3,500,000 TPM."""
         from pathlib import Path
         import yaml
         import src.agents.llm as llm_pkg
 
         repo_root = Path(__file__).resolve().parent.parent
         values = yaml.safe_load((repo_root / "helm" / "values.yaml").read_text())
-        assert str(values["gcp"]["tpmLimit"]) == str(llm_pkg.DEFAULT_TPM_LIMIT) == "3000000"
+        assert str(values["gcp"]["tpmLimit"]) == str(llm_pkg.DEFAULT_TPM_LIMIT) == "3500000"
 
-        for bad_env in (None, "", "-5", "bad"):
-            if bad_env is None:
-                monkeypatch.delenv("LLM_TPM_LIMIT", raising=False)
-            else:
-                monkeypatch.setenv("LLM_TPM_LIMIT", bad_env)
-            monkeypatch.setattr(llm_pkg, "_quota_tracker", None)
-            with patch("src.agents.llm.gemini_client.GeminiAdapter") as mock_adapter_cls:
-                llm_pkg.create_adapter("gemini", "proj", "global", "gemini-4-carbon")
-            assert mock_adapter_cls.call_args.kwargs["quota_tracker"].get_stats()["tpm_limit"] == 3_000_000
+        try:
+            for bad_env in (None, "", "-5", "bad"):
+                if bad_env is None:
+                    monkeypatch.delenv("LLM_TPM_LIMIT", raising=False)
+                else:
+                    monkeypatch.setenv("LLM_TPM_LIMIT", bad_env)
+                monkeypatch.setattr(llm_pkg, "_quota_tracker", None)
+                llm_pkg.reset_quota_registry()
+                with patch("src.agents.llm.gemini_client.GeminiAdapter") as mock_adapter_cls:
+                    llm_pkg.create_adapter("gemini", "proj", "global", "gemini-4-carbon")
+                assert mock_adapter_cls.call_args.kwargs["quota_tracker"].get_stats()["tpm_limit"] == 3_500_000
+        finally:
+            llm_pkg.reset_quota_registry()
 
 
 # 4-Layer ATDD Specification: VMER-2450 Step 2 (Scenario T-4)
@@ -394,6 +398,8 @@ class CacheTelemetryProtocolDriver:
         mock_bb.get_flow_metrics = AsyncMock(
             return_value={"queue_depth": 0, "active_events": 0, "waiting_approval_events": 0}
         )
+        mock_bb.get_active_events_with_status = AsyncMock(return_value={})
+        mock_bb.get_active_events_metadata = AsyncMock(return_value={})
         mock_bb.get_latest_flow_snapshot = AsyncMock(return_value=latest_snapshot)
 
         with (
@@ -739,3 +745,214 @@ class TestFlowCollectorHeadhunterParityT15:
         assert agg.headhunter_github_pending == round((0 + 1 + 5) / 3)
         assert agg.headhunter_gitlab_breaker == "half_open"
         assert agg.headhunter_github_breaker == "open"
+
+
+class TestFlowCollectorVmer2505T18T22:
+    """VMER-2505 T-18, T-19 & T-22: 2-RTT metadata WIP/session separation, multi-pool DI, and downsampling."""
+
+    @pytest.mark.asyncio
+    async def test_t18_build_snapshot_uses_metadata_pipeline_zero_get_event(self):
+        """
+        Scenario T-18:
+        Given 2 active automated events, 3 active chat/slack/jarvis events, and 1 parked wait_for_user automated event
+        When FlowCollector._build_snapshot() runs
+        Then zero get_event() calls occur, wip_used == 2, and active_user_sessions == 3.
+        """
+        from src.observers.flow_collector import FlowCollector
+        from src.state.wip_meta import ActiveEventMeta
+
+        meta = {
+            "evt-auto-1": ActiveEventMeta(status="active", source="aligner", is_waiting_user=False, queued_at=100.0),
+            "evt-auto-2": ActiveEventMeta(status="deferred", source="headhunter", is_waiting_user=False, queued_at=110.0),
+            "evt-parked": ActiveEventMeta(status="active", source="aligner", is_waiting_user=True, queued_at=90.0),
+            "evt-chat": ActiveEventMeta(status="active", source="chat", is_waiting_user=False, queued_at=120.0),
+            "evt-slack": ActiveEventMeta(status="active", source="slack", is_waiting_user=False, queued_at=130.0),
+            "evt-jarvis": ActiveEventMeta(status="active", source="jarvis", is_waiting_user=False, queued_at=140.0),
+        }
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(return_value={"queue_depth": 0, "waiting_approval_events": 0})
+        mock_bb.get_active_events_metadata = AsyncMock(return_value=meta)
+        mock_bb.get_event = AsyncMock(side_effect=AssertionError("get_event() fan-out forbidden when metadata is available"))
+        mock_bb.redis = None
+
+        collector = FlowCollector(scheduler=mock_scheduler, blackboard=mock_bb)
+        snap = await collector._build_snapshot()
+
+        assert mock_bb.get_event.await_count == 0
+        assert snap.wip_used == 2
+        assert snap.active_user_sessions == 3
+
+    @pytest.mark.asyncio
+    async def test_t18b_build_snapshot_with_real_blackboard_fakeredis_metadata_and_corruption_resilience(self):
+        """
+        Scenario T-18b:
+        Given a real BlackboardState(FakeRedis) with valid automated, parked, and interactive events
+        plus corrupt JSON, invalid UTF-8 bytes, and malformed field types in EVENT_ACTIVE
+        When FlowCollector._build_snapshot() runs
+        Then 2-RTT get_active_events_metadata() succeeds with zero get_event() calls,
+        corrupt entries are skipped safely, and wip_used & active_user_sessions are exact.
+        """
+        import json
+        import fakeredis.aioredis
+        from src.observers.flow_collector import FlowCollector
+        from src.state.blackboard import BlackboardState
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        bb = BlackboardState(redis)
+        bb.get_event = AsyncMock(side_effect=AssertionError("get_event() must not be called"))
+
+        # Valid automated active + deferred events
+        await redis.sadd(bb.EVENT_ACTIVE, b"evt-a1", b"evt-a2", b"evt-park", b"evt-chat", b"evt-slack", b"evt-bad-json", b"evt-bad-utf8", b"evt-bad-fields")
+        await redis.set(f"{bb.EVENT_PREFIX}evt-a1", json.dumps({"status": "active", "source": "aligner", "queued_at": 100.0}).encode())
+        await redis.set(f"{bb.EVENT_PREFIX}evt-a2", json.dumps({"status": "deferred", "source": "headhunter", "queued_at": 110.0}).encode())
+        await redis.set(
+            f"{bb.EVENT_PREFIX}evt-park",
+            json.dumps({
+                "status": "active",
+                "source": "aligner",
+                "queued_at": 90.0,
+                "conversation": [{"waitingFor": "user", "action": "wait"}],
+            }).encode(),
+        )
+        await redis.set(f"{bb.EVENT_PREFIX}evt-chat", json.dumps({"status": "active", "source": "chat", "queued_at": 120.0}).encode())
+        await redis.set(f"{bb.EVENT_PREFIX}evt-slack", json.dumps({"status": "active", "source": "slack", "queued_at": 130.0}).encode())
+        # Corrupt JSON, invalid UTF-8, and invalid field types
+        await redis.set(f"{bb.EVENT_PREFIX}evt-bad-json", b"{not-valid-json")
+        await redis.set(f"{bb.EVENT_PREFIX}evt-bad-utf8", b"\xff\xfe\xfd")
+        await redis.set(
+            f"{bb.EVENT_PREFIX}evt-bad-fields",
+            json.dumps({
+                "status": 123,
+                "source": None,
+                "queued_at": True,
+                "atdd_cycle_sec": "nan",
+                "conversation": "not-a-list",
+            }).encode(),
+        )
+
+        # Verify 2-RTT get_active_events_metadata() directly first
+        meta = await bb.get_active_events_metadata()
+        assert "evt-a1" in meta and "evt-a2" in meta and "evt-park" in meta
+        assert "evt-bad-json" not in meta and "evt-bad-utf8" not in meta
+        assert meta["evt-bad-fields"].status == "active"
+        assert meta["evt-bad-fields"].queued_at is None
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        collector = FlowCollector(scheduler=mock_scheduler, blackboard=bb)
+        snap = await collector._build_snapshot()
+
+        assert bb.get_event.await_count == 0
+        # evt-a1, evt-a2, plus evt-bad-fields (defaults status="active", source="") count as automated non-parked
+        assert snap.wip_used == 3
+        assert snap.active_user_sessions == 2
+
+    @pytest.mark.asyncio
+    async def test_t19_multi_pool_quota_registry_di_and_runtime_deltas(self, monkeypatch):
+        """
+        Scenario T-19:
+        Given QuotaPoolRegistry (enmaas disabled) and TokenMeter recording vertex_gemini, vertex_claude, and sidecars
+        When FlowCollector._build_snapshot() runs
+        Then tpm_limit == 5_500_000, peak_pool_utilization_pct reflects bottleneck pool, and runtime deltas separate cleanly.
+        """
+        from src.agents.llm.quota_registry import QuotaPoolRegistry
+        from src.agents.llm.token_meter import TokenMeter
+        from src.agents.llm.types import PROVIDER_VERTEX_CLAUDE, PROVIDER_VERTEX_GEMINI, TokenUsage
+        from src.observers.flow_collector import FlowCollector
+
+        monkeypatch.setenv("ENMAAS_ENABLED", "false")
+        monkeypatch.delenv("LLM_TPM_LIMIT", raising=False)
+        monkeypatch.delenv("LLM_TPM_LIMIT_CLAUDE", raising=False)
+        monkeypatch.delenv("LLM_TPM_LIMIT_ENMAAS", raising=False)
+
+        registry = QuotaPoolRegistry()
+        registry.get(PROVIDER_VERTEX_GEMINI).record_post_hoc(350_000)   # 10%
+        registry.get(PROVIDER_VERTEX_CLAUDE).record_post_hoc(1_000_000) # 50% (bottleneck)
+
+        meter = TokenMeter()
+        meter.record("brain", "gemini-4-neon", TokenUsage(input_tokens=100, output_tokens=50, total_tokens=150), provider=PROVIDER_VERTEX_GEMINI)
+        meter.record("archivist", "claude-sonnet-5", TokenUsage(input_tokens=200, output_tokens=100, total_tokens=300), provider=PROVIDER_VERTEX_CLAUDE)
+        meter.record("sidecar:agy", "gemini-4-neon", TokenUsage(input_tokens=400, output_tokens=100, total_tokens=500), provider=PROVIDER_VERTEX_GEMINI)
+        meter.record("sidecar:claude", "claude-sonnet-5", TokenUsage(input_tokens=600, output_tokens=200, total_tokens=800), provider=PROVIDER_VERTEX_CLAUDE)
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.metrics = {"reconcile_count": 0, "error_count": 0}
+        mock_bb = AsyncMock()
+        mock_bb.get_flow_metrics = AsyncMock(return_value={"queue_depth": 0, "waiting_approval_events": 0})
+        mock_bb.get_active_events_metadata = AsyncMock(return_value={})
+        mock_bb.redis = None
+
+        collector = FlowCollector(
+            scheduler=mock_scheduler,
+            blackboard=mock_bb,
+            token_meter=meter,
+            quota_registry=lambda: registry,
+        )
+        snap = await collector._build_snapshot()
+
+        assert snap.tpm_limit == 5_500_000
+        assert snap.tpm_used == 1_350_000
+        assert snap.gemini_tpm_limit == 3_500_000
+        assert snap.gemini_tpm_used == 350_000
+        assert snap.claude_tpm_limit == 2_000_000
+        assert snap.claude_tpm_used == 1_000_000
+        assert snap.enmaas_tpm_limit == 0
+        assert snap.peak_pool_utilization_pct == pytest.approx(50.0, rel=1e-2)
+        assert snap.claude_token_total_delta == 1100  # 300 archivist + 800 sidecar:claude
+        assert snap.sidecar_token_total_delta == 1300  # 500 sidecar:agy + 800 sidecar:claude
+
+    def test_t22_downsample_snapshots_new_fields_and_legacy_simplenamespace(self):
+        """
+        Scenario T-22:
+        Given legacy SimpleNamespace missing new VMER-2505 fields + 2 populated FlowSnapshots
+        When _downsample_snapshots() runs
+        Then active_user_sessions & *_tpm_used average, limits & peak_pool_utilization_pct take max(),
+        and claude_token_total_delta & sidecar_token_total_delta sum cleanly.
+        """
+        from types import SimpleNamespace
+        from src.state.blackboard import BlackboardState
+
+        legacy_obj = SimpleNamespace(
+            timestamp=305.0, queue_depth=0, active_events=0, deferred_events=0,
+            waiting_approval_events=0, headhunter_pending=0, aligner_pending=0, jenkins_pending=0,
+            jenkins_breaker_open=False, jenkins_view_unhealthy=False, wip_used=0, wip_cap=20,
+            wip_utilization_pct=0.0, wip_available=20, busy_agents=0, idle_agents=0,
+            active_subscriptions=0, avg_event_age_sec=0.0, avg_reconcile_ms=0.0,
+            avg_spawn_latency_sec=0.0, dispatch_success_rate_pct=100.0,
+            tpm_used=0, tpm_limit=0, tpm_utilization_pct=0.0,
+            reconcile_count_delta=0, error_count_delta=0, quota_throttle_delta=0,
+            token_input_delta=0, token_output_delta=0, token_thinking_delta=0,
+            token_cached_delta=0, token_tool_use_delta=0, token_total_delta=0,
+            token_calls_delta=0, dispatch_total=0, dispatch_infra_fails=0,
+            dispatch_circuit_breaks=0, token_total_cumulative=0,
+        )
+        s1 = FlowSnapshot(
+            timestamp=310.0, active_user_sessions=3, peak_pool_utilization_pct=42.0,
+            gemini_tpm_used=300_000, gemini_tpm_limit=3_500_000,
+            claude_tpm_used=600_000, claude_tpm_limit=2_000_000,
+            enmaas_tpm_used=0, enmaas_tpm_limit=0,
+            claude_token_total_delta=500, sidecar_token_total_delta=700,
+        )
+        s2 = FlowSnapshot(
+            timestamp=320.0, active_user_sessions=6, peak_pool_utilization_pct=88.5,
+            gemini_tpm_used=900_000, gemini_tpm_limit=3_500_000,
+            claude_tpm_used=1_200_000, claude_tpm_limit=2_000_000,
+            enmaas_tpm_used=300_000, enmaas_tpm_limit=2_000_000,
+            claude_token_total_delta=1000, sidecar_token_total_delta=800,
+        )
+        bb = BlackboardState.__new__(BlackboardState)
+        buckets = bb._downsample_snapshots([legacy_obj, s1, s2], bucket_seconds=300)
+        assert len(buckets) == 1
+        agg = buckets[0]
+        assert agg.active_user_sessions == round((0 + 3 + 6) / 3)
+        assert agg.peak_pool_utilization_pct == pytest.approx(88.5)
+        assert agg.gemini_tpm_used == round((0 + 300_000 + 900_000) / 3)
+        assert agg.gemini_tpm_limit == 3_500_000
+        assert agg.claude_tpm_used == round((0 + 600_000 + 1_200_000) / 3)
+        assert agg.claude_tpm_limit == 2_000_000
+        assert agg.enmaas_tpm_used == round((0 + 0 + 300_000) / 3)
+        assert agg.enmaas_tpm_limit == 2_000_000
+        assert agg.claude_token_total_delta == 1500
+        assert agg.sidecar_token_total_delta == 1500

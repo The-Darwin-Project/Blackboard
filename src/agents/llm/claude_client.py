@@ -15,7 +15,8 @@ import logging
 import re
 from collections.abc import AsyncIterator
 
-from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage, PRIORITY_NORMAL
+from .quota_tracker import QuotaTracker, Reservation
+from .types import FunctionCall, LLMChunk, LLMResponse, PRIORITY_NORMAL, PROVIDER_VERTEX_CLAUDE, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,13 @@ _CLAUDE_5_RE = re.compile(r"(?:sonnet|opus|haiku|fable|mythos)[-.]?5(?!\d)|claud
 class ClaudeAdapter:
     """Anthropic Claude adapter implementing LLMPort via Vertex AI."""
 
-    def __init__(self, project: str, location: str, model_name: str):
+    def __init__(
+        self,
+        project: str,
+        location: str,
+        model_name: str,
+        quota_tracker: QuotaTracker | None = None,
+    ):
         from anthropic import AsyncAnthropicVertex
 
         self._client = AsyncAnthropicVertex(
@@ -33,11 +40,46 @@ class ClaudeAdapter:
             project_id=project,
         )
         self._model_name = model_name
+        self._tracker = quota_tracker
+        self._provider_name = PROVIDER_VERTEX_CLAUDE
         logger.info(f"ClaudeAdapter initialized: {model_name} (region={location})")
 
     # -----------------------------------------------------------------
-    # Token usage extraction
+    # Quota & token usage helpers
     # -----------------------------------------------------------------
+
+    @staticmethod
+    def _estimate_tokens(contents: str | list) -> int:
+        """Rough pre-request token estimate (char count / 4)."""
+        return max(1, len(str(contents)) // 4)
+
+    async def acquire_stream_reservation(
+        self, contents: str | list, priority: int = PRIORITY_NORMAL
+    ) -> list:
+        """Pre-acquire QuotaTracker reservation outside stream TTFB timers."""
+        estimate = self._estimate_tokens(contents)
+        reservation = None
+        tracker = getattr(self, "_tracker", None)
+        if tracker is not None:
+            reservation = await tracker.acquire(
+                estimate, max_wait_seconds=30.0, priority=priority
+            )
+        return [estimate, reservation, False]
+
+    def _record_usage(
+        self, token_usage: TokenUsage | None, estimate: int, reservation: Reservation | None = None
+    ) -> None:
+        """Record actual usage with QuotaTracker or rollback reservation on missing usage."""
+        tracker = getattr(self, "_tracker", None)
+        if tracker is None:
+            return
+        if token_usage is not None and token_usage.total_tokens > 0:
+            if isinstance(reservation, Reservation):
+                tracker.record(token_usage.total_tokens, estimate, reservation=reservation)
+            else:
+                tracker.record(token_usage.total_tokens, estimate)
+        elif isinstance(reservation, Reservation):
+            tracker.rollback(reservation)
 
     def _extract_usage(self, message) -> TokenUsage | None:
         """Extract TokenUsage from Anthropic message.usage.
@@ -46,7 +88,7 @@ class ClaudeAdapter:
           input_tokens        — uncached prompt tokens (cache misses)
           cache_read_input_tokens  — served from cache (cache hits)
           cache_creation_input_tokens — written to cache (billed at 1.25x)
-        All three are non-overlapping; total = sum of all + output.
+        All three are non-overlapping; total = sum of all + output (which includes thinking).
         """
         usage = getattr(message, "usage", None)
         if usage is None:
@@ -55,10 +97,13 @@ class ClaudeAdapter:
         output_t = getattr(usage, "output_tokens", None) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", None) or 0
         cache_create = getattr(usage, "cache_creation_input_tokens", None) or 0
+        details = getattr(usage, "output_tokens_details", None)
+        thinking_t = (getattr(details, "thinking_tokens", None) or 0) if details is not None else 0
         total_input = input_t + cache_read + cache_create
         return TokenUsage(
             input_tokens=total_input,
             output_tokens=output_t,
+            thinking_tokens=thinking_t,
             cached_tokens=cache_read + cache_create,
             total_tokens=total_input + output_t,
             model_version=self._model_name,
@@ -323,8 +368,21 @@ class ClaudeAdapter:
         # Anthropic SDK rejects non-streaming messages.create when max_tokens > 128000 / 6 (21333).
         kwargs["max_tokens"] = min(kwargs["max_tokens"], 21333)
 
-        message = await self._client.messages.create(**kwargs)
-        token_usage = self._extract_usage(message)
+        tracker = getattr(self, "_tracker", None)
+        estimate = 0
+        reservation = None
+        recorded = False
+        if tracker is not None:
+            estimate = self._estimate_tokens(contents)
+            reservation = await tracker.acquire(estimate, max_wait_seconds=30.0, priority=priority)
+        try:
+            message = await self._client.messages.create(**kwargs)
+            token_usage = self._extract_usage(message)
+            self._record_usage(token_usage, estimate, reservation=reservation)
+            recorded = True
+        finally:
+            if not recorded and tracker is not None and reservation is not None:
+                tracker.rollback(reservation)
 
         tool_uses = [b for b in message.content if b.type == "tool_use"]
         text_blocks = [b.text for b in message.content if b.type == "text"]
@@ -353,6 +411,8 @@ class ClaudeAdapter:
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
+        *,
+        _preacquired: list | None = None,
     ) -> AsyncIterator[LLMChunk]:
         return self._stream_chunks(
             system_prompt=system_prompt,
@@ -364,6 +424,7 @@ class ClaudeAdapter:
             thinking_level=thinking_level,
             tool_choice=tool_choice,
             priority=priority,
+            _preacquired=_preacquired,
         )
 
     async def _stream_chunks(
@@ -377,53 +438,70 @@ class ClaudeAdapter:
         thinking_level: str = "",
         tool_choice: dict | None = None,
         priority: int = PRIORITY_NORMAL,
+        *,
+        _preacquired: list | None = None,
     ) -> AsyncIterator[LLMChunk]:
         from unittest.mock import NonCallableMock
 
-        claude_temp = min(temperature / 2.0, 1.0)
-        kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
+        reservation_recorded = False
+        estimate = 0
+        reservation = None
+        if _preacquired is not None:
+            estimate, reservation = _preacquired[0], _preacquired[1]
+            _preacquired[2] = True
 
-        async with self._client.messages.stream(**kwargs) as stream:
-            use_raw_events = hasattr(stream, "__aiter__") and not (
-                isinstance(stream, NonCallableMock)
-                and "__aiter__" not in getattr(stream, "__dict__", {})
-                and "text_stream" in getattr(stream, "__dict__", {})
-            )
-            if use_raw_events:
-                async for event in stream:
-                    if isinstance(event, str):
-                        yield LLMChunk(text=event)
-                        continue
-                    ev_type = getattr(event, "type", None)
-                    if ev_type == "content_block_delta":
-                        delta = getattr(event, "delta", None)
-                        d_type = getattr(delta, "type", None)
-                        if d_type == "text_delta":
-                            text = getattr(delta, "text", None)
-                            if text:
-                                yield LLMChunk(text=text)
-                            else:
-                                yield LLMChunk()
-                        elif d_type == "thinking_delta":
-                            thinking = getattr(delta, "thinking", None)
-                            yield LLMChunk(text=thinking or None, is_thought=True)
-                        elif d_type in ("input_json_delta", "signature_delta", "citations_delta"):
-                            yield LLMChunk()
-                    elif ev_type in ("message_start", "content_block_start"):
-                        yield LLMChunk()
-            else:
-                async for text in stream.text_stream:
-                    yield LLMChunk(text=text)
+        try:
+            claude_temp = min(temperature / 2.0, 1.0)
+            kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
+            if _preacquired is None:
+                estimate, reservation, _ = await self.acquire_stream_reservation(contents, priority=priority)
 
-            message = await stream.get_final_message()
-            token_usage = self._extract_usage(message)
-            tool_uses = [b for b in message.content if b.type == "tool_use"]
-            if tool_uses:
-                tc = tool_uses[0]
-                yield LLMChunk(
-                    function_call=FunctionCall(name=tc.name, args=tc.input or {}),
-                    done=True,
-                    usage=token_usage,
+            async with self._client.messages.stream(**kwargs) as stream:
+                use_raw_events = hasattr(stream, "__aiter__") and not (
+                    isinstance(stream, NonCallableMock)
+                    and "__aiter__" not in getattr(stream, "__dict__", {})
+                    and "text_stream" in getattr(stream, "__dict__", {})
                 )
-            else:
-                yield LLMChunk(done=True, usage=token_usage)
+                if use_raw_events:
+                    async for event in stream:
+                        if isinstance(event, str):
+                            yield LLMChunk(text=event)
+                            continue
+                        ev_type = getattr(event, "type", None)
+                        if ev_type == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            d_type = getattr(delta, "type", None)
+                            if d_type == "text_delta":
+                                text = getattr(delta, "text", None)
+                                if text:
+                                    yield LLMChunk(text=text)
+                                else:
+                                    yield LLMChunk()
+                            elif d_type == "thinking_delta":
+                                thinking = getattr(delta, "thinking", None)
+                                yield LLMChunk(text=thinking or None, is_thought=True)
+                            elif d_type in ("input_json_delta", "signature_delta", "citations_delta"):
+                                yield LLMChunk()
+                        elif ev_type in ("message_start", "content_block_start"):
+                            yield LLMChunk()
+                else:
+                    async for text in stream.text_stream:
+                        yield LLMChunk(text=text)
+
+                message = await stream.get_final_message()
+                token_usage = self._extract_usage(message)
+                self._record_usage(token_usage, estimate, reservation=reservation)
+                reservation_recorded = True
+                tool_uses = [b for b in message.content if b.type == "tool_use"]
+                if tool_uses:
+                    tc = tool_uses[0]
+                    yield LLMChunk(
+                        function_call=FunctionCall(name=tc.name, args=tc.input or {}),
+                        done=True,
+                        usage=token_usage,
+                    )
+                else:
+                    yield LLMChunk(done=True, usage=token_usage)
+        finally:
+            if not reservation_recorded:
+                self._record_usage(None, estimate, reservation=reservation)

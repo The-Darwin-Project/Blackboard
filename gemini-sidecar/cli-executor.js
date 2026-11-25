@@ -43,6 +43,7 @@ const os = require('os');
 const { AGENT_CLI, AGY_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, MAX_TASK_WALL_MS, MAX_TIMER_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS, STORAGE_PRETASK_TIMEOUT_MS, resolveStorageRoot } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
+const { createTaskUsageAccumulator, inferProvider } = require('./usage-tracker');
 const { wsSend } = require('./ws-utils');
 const { READ_ONLY_ROLES, isReadOnlyRoleName, isMutatingRoleName } = require('./roles');
 const { setupGoogleAuthForAgy } = require('./credentials');
@@ -94,6 +95,26 @@ function settingsFileForRole(role, workStyle) {
 // task's own workStyle -- never from a process-global write -- so concurrent/rejected tasks cannot change a running task's lock.
 function spawnEnv(workStyle) {
     return workStyle ? { ...process.env, DARWIN_WORK_STYLE: workStyle } : process.env;
+}
+
+function createLineUsageEmitter(usageAcc, agentCli, model, ws, eventId) {
+    if (!usageAcc) return () => {};
+    const tracker = usageAcc.startSpawn(agentCli, inferProvider(agentCli, process.env), model);
+    return (line) => {
+        if (!line || !line.trim()) return;
+        try {
+            const delta = tracker.onLine(line);
+            if (delta && delta.usage && ws) wsSend(ws, { type: 'token_usage', event_id: eventId, ...delta });
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] Usage tracking error: ${err.message}`);
+        }
+    };
+}
+
+function resolveWithUsage(resolve, usageAcc, payload) {
+    let summary = {};
+    try { summary = usageAcc ? usageAcc.summary() : {}; } catch {}
+    resolve({ ...summary, ...payload });
 }
 
 // Fallback model per CLI for the invalid-model retry (see getRetryOptions).
@@ -252,7 +273,7 @@ function stdoutFallback(effectiveOutput) {
  * Priority: callback -> cachedFindings -> disk findings -> retry -> stdout tail.
  */
 async function resolveResult(opts) {
-    const { callbackResult, cachedFindings, findingsPath, workDir, autoApprove, effectiveOutput } = opts;
+    const { callbackResult, cachedFindings, findingsPath, workDir, autoApprove, effectiveOutput, usageAcc, agentCli, ws, eventId } = opts;
 
     if (callbackResult && callbackResult.length > 0) {
         console.log(`[${new Date().toISOString()}] Using callback result (${callbackResult.length} chars)`);
@@ -283,7 +304,7 @@ async function resolveResult(opts) {
     const model = task?.model || '';
     const role = task?.role || '';
     const workStyle = task?.workStyle || '';
-    const retryFindings = await requestFindings(workDir, autoApprove, model, role, workStyle);
+    const retryFindings = await requestFindings(workDir, autoApprove, model, role, workStyle, { usageAcc, agentCli, ws, eventId });
     if (retryFindings) {
         return { output: retryFindings, source: 'findings' };
     }
@@ -291,7 +312,7 @@ async function resolveResult(opts) {
     return { output: stdoutFallback(effectiveOutput), source: 'stdout' };
 }
 
-async function requestFindings(workDir, autoApprove, model, role, workStyle) {
+async function requestFindings(workDir, autoApprove, model, role, workStyle, usageOpts = {}) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
@@ -306,23 +327,29 @@ async function requestFindings(workDir, autoApprove, model, role, workStyle) {
         console.log(`[${new Date().toISOString()}] Retry findings buildCLICommand failed: ${e.message}`);
         return null;
     }
+    const { usageAcc = null, agentCli = AGENT_CLI, ws = null, eventId = '' } = usageOpts;
+    const emitLineUsage = createLineUsageEmitter(usageAcc, agentCli, model, ws, eventId);
     return new Promise((resolve) => {
         let child = null;
+        let lineBuffer = '';
         const timeout = setTimeout(() => {
-            if (child) {
-                try { child.kill('SIGKILL'); } catch (_) {}
-            }
+            if (child) try { child.kill('SIGKILL'); } catch (_) {}
             resolve(null);
         }, 60000);
         if (timeout.unref) timeout.unref();
 
-        child = spawn(binary, args, {
-            env: spawnEnv(workStyle),
-            cwd: workDir,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
+        child = spawn(binary, args, { env: spawnEnv(workStyle), cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] });
+        if (child.stdout && usageAcc) {
+            child.stdout.on('data', (data) => {
+                lineBuffer += data.toString();
+                const lines = lineBuffer.split('\n');
+                lineBuffer = lines.pop();
+                for (const line of lines) emitLineUsage(line);
+            });
+        }
         child.on('close', () => {
             clearTimeout(timeout);
+            emitLineUsage(lineBuffer);
             const findingsPath = `${workDir}/results/findings.md`;
             try {
                 if (fs.existsSync(findingsPath)) {
@@ -548,15 +575,11 @@ async function executeCLI(prompt, options = {}) {
     // own try/catch, so a throw here degrades to a clean error response, never an
     // unhandled rejection. (Raised repeatedly in AI review across multiple rounds --
     // documenting the reasoning here rather than adding a redundant try/catch.)
+    const usageAcc = options._usageAcc || createTaskUsageAccumulator();
     return withTaskStorage(options.cwd, 'executeCLI', () => new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
-            autoApprove: options.autoApprove,
-            model: options.model,
-            effort: options.effort,
-            role: options.role,
-            workStyle: options.workStyle,
-            sessionId: options.sessionId,
-            conversationId: options.conversationId,
+            autoApprove: options.autoApprove, model: options.model, effort: options.effort,
+            role: options.role, workStyle: options.workStyle, sessionId: options.sessionId, conversationId: options.conversationId,
         });
 
         console.log(`[${new Date().toISOString()}] Executing: ${AGENT_CLI} (prompt length: ${prompt.length})`);
@@ -566,11 +589,9 @@ async function executeCLI(prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
-        const child = spawn(binary, args, {
-            env: spawnEnv(options.workStyle),
-            cwd: workDir,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
+        const usedModel = resolveModel(options, agentCli);
+        const emitLineUsage = createLineUsageEmitter(usageAcc, agentCli, usedModel, null, '');
+        const child = spawn(binary, args, { env: spawnEnv(options.workStyle), cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] });
         const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         let stdout = '';
@@ -589,6 +610,7 @@ async function executeCLI(prompt, options = {}) {
             lineBuffer = lines.pop();
             for (const line of lines) {
                 if (!line.trim()) continue;
+                emitLineUsage(line);
                 const parsed = parseStreamLine(line);
                 if (parsed?.text) streamTextAccum += parsed.text;
                 const task = state.getCurrentTask();
@@ -607,6 +629,7 @@ async function executeCLI(prompt, options = {}) {
             watch.close();
 
             if (lineBuffer.trim()) {
+                emitLineUsage(lineBuffer);
                 const parsed = parseStreamLine(lineBuffer);
                 if (parsed?.text) streamTextAccum += parsed.text;
                 const task = state.getCurrentTask();
@@ -621,35 +644,30 @@ async function executeCLI(prompt, options = {}) {
                 console.log(`[${new Date().toISOString()}] stderr: ${stderr}`);
             }
 
-            const usedModel = resolveModel(options, AGENT_CLI);
-
             // A child that exited 0 with no signal finished cleanly (it won the race against SIGTERM) -- never downgrade it.
             if (child._timedOut && !(code === 0 && !signal)) {
-                resolve(buildTimeoutResult({ child, code, timeoutMs, stderr, effectiveOutput, watch, usedModel }));
+                const tr = buildTimeoutResult({ child, code, timeoutMs, stderr, effectiveOutput, watch, usedModel });
+                resolveWithUsage(resolve, usageAcc, { ...tr, usedModel });
                 return;
             }
 
             if (code === 0) {
                 try {
                     const result = JSON.parse(effectiveOutput);
-                    resolve({ status: 'success', exitCode: code, output: result, source: 'stdout', usedModel });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', exitCode: code, output: result, source: 'stdout', usedModel });
                     return;
                 } catch (e) {}
 
                 const capturedCallback = state.getCallbackResult();
                 state.resetCallbackResult();
                 resolveResult({
-                    callbackResult: capturedCallback,
-                    cachedFindings: watch.cachedFindings,
-                    findingsPath: watch.findingsPath,
-                    workDir,
-                    autoApprove: options.autoApprove !== false,
-                    effectiveOutput,
+                    callbackResult: capturedCallback, cachedFindings: watch.cachedFindings, findingsPath: watch.findingsPath,
+                    workDir, autoApprove: options.autoApprove !== false, effectiveOutput, usageAcc, agentCli,
                 }).then(({ output, source }) => {
-                    resolve({ status: 'success', exitCode: code, output, source, usedModel });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', exitCode: code, output, source, usedModel });
                 }).catch((err) => {
                     console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
-                    resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout', usedModel });
                 });
             } else {
                 if (code === null && signal) {
@@ -658,10 +676,10 @@ async function executeCLI(prompt, options = {}) {
                 const retry = getRetryOptions(options, code, stderr);
                 if (retry) {
                     console.log(`[${new Date().toISOString()}] ${retry.reason}`);
-                    executeCLI(prompt, retry.options).then(resolve).catch(reject);
+                    executeCLI(prompt, { ...retry.options, _usageAcc: usageAcc }).then(resolve).catch(reject);
                     return;
                 }
-                resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
+                resolveWithUsage(resolve, usageAcc, { status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
             }
         });
 
@@ -690,15 +708,11 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
     // (ws-server.js task/followup handlers, ws-client.js reconnect path) already
     // awaits this inside its own try/catch, converting a throw into a clean WS error
     // message -- never an unhandled rejection.
+    const usageAcc = options._usageAcc || createTaskUsageAccumulator();
     return withTaskStorage(options.cwd, 'executeCLIStreaming', () => new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
-            autoApprove: options.autoApprove,
-            sessionId: options.sessionId,
-            conversationId: options.conversationId,
-            model: options.model,
-            effort: options.effort,
-            role: options.role,
-            workStyle: options.workStyle,
+            autoApprove: options.autoApprove, sessionId: options.sessionId, conversationId: options.conversationId,
+            model: options.model, effort: options.effort, role: options.role, workStyle: options.workStyle,
         });
 
         console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
@@ -708,11 +722,9 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const watch = watchResultsDir(workDir);
 
         const timeoutMs = resolveTimeoutMs(options.role || AGENT_ROLE);
-        const child = spawn(binary, args, {
-            env: spawnEnv(options.workStyle),
-            cwd: workDir,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
+        const usedModel = resolveModel(options, agentCli);
+        const emitLineUsage = createLineUsageEmitter(usageAcc, agentCli, usedModel, ws, eventId);
+        const child = spawn(binary, args, { env: spawnEnv(options.workStyle), cwd: workDir, stdio: ['ignore', 'pipe', 'pipe'] });
         const watchdog = createInactivityWatchdog(child, timeoutMs);
 
         // Only mutate the existing task object in place when it's the SAME logical call
@@ -752,6 +764,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             lineBuffer = lines.pop();
             for (const line of lines) {
                 if (!line.trim()) continue;
+                emitLineUsage(line);
                 const parsed = parseStreamLine(line);
                 if (!parsed) continue;
                 const task = state.getCurrentTask();
@@ -779,6 +792,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             const capturedSessionId = state.getCurrentTask()?.sessionId || null;
 
             if (lineBuffer.trim()) {
+                emitLineUsage(lineBuffer);
                 const parsed = parseStreamLine(lineBuffer);
                 if (parsed?.text) {
                     streamTextAccum += parsed.text;
@@ -799,34 +813,30 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             }
 
             if (child._timedOut && !(code === 0 && !signal)) {
-                resolve(buildTimeoutResult({
-                    child, code, timeoutMs, stderr, effectiveOutput, watch, sessionId: capturedSessionId,
-                    usedModel: resolveModel(options, AGENT_CLI),
-                }));
+                const tr = buildTimeoutResult({
+                    child, code, timeoutMs, stderr, effectiveOutput, watch, sessionId: capturedSessionId, usedModel,
+                });
+                resolveWithUsage(resolve, usageAcc, tr);
                 return;
             }
 
             if (code === 0) {
                 try {
                     const result = JSON.parse(effectiveOutput);
-                    resolve({ status: 'success', sessionId: capturedSessionId, output: result, source: 'stdout' });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', sessionId: capturedSessionId, output: result, source: 'stdout' });
                     return;
                 } catch (e) {}
 
                 const capturedCallback = state.getCallbackResult();
                 state.resetCallbackResult();
                 resolveResult({
-                    callbackResult: capturedCallback,
-                    cachedFindings: watch.cachedFindings,
-                    findingsPath: watch.findingsPath,
-                    workDir,
-                    autoApprove: options.autoApprove !== false,
-                    effectiveOutput,
+                    callbackResult: capturedCallback, cachedFindings: watch.cachedFindings, findingsPath: watch.findingsPath,
+                    workDir, autoApprove: options.autoApprove !== false, effectiveOutput, usageAcc, agentCli, ws, eventId,
                 }).then(({ output, source }) => {
-                    resolve({ status: 'success', sessionId: capturedSessionId, output, source });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', sessionId: capturedSessionId, output, source });
                 }).catch((err) => {
                     console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
-                    resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), source: 'stdout' });
+                    resolveWithUsage(resolve, usageAcc, { status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), source: 'stdout' });
                 });
             } else {
                 if (code === null && signal) {
@@ -835,20 +845,17 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                 if (options.sessionId && !options._retryWithoutSession && is400SessionError(effectiveOutput, stderr)) {
                     console.log(`[${new Date().toISOString()}] [${eventId}] 400 session error detected, retrying without --resume`);
                     executeCLIStreaming(ws, eventId, prompt, {
-                        ...options,
-                        sessionId: null,
-                        conversationId: null,
-                        _retryWithoutSession: true,
+                        ...options, sessionId: null, conversationId: null, _retryWithoutSession: true, _usageAcc: usageAcc,
                     }).then(resolve).catch(reject);
                     return;
                 }
                 const retry = getRetryOptions(options, code, stderr);
                 if (retry) {
                     console.log(`[${new Date().toISOString()}] [${eventId}] ${retry.reason}`);
-                    executeCLIStreaming(ws, eventId, prompt, retry.options).then(resolve).catch(reject);
+                    executeCLIStreaming(ws, eventId, prompt, { ...retry.options, _usageAcc: usageAcc }).then(resolve).catch(reject);
                     return;
                 }
-                resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel: resolveModel(options, AGENT_CLI) });
+                resolveWithUsage(resolve, usageAcc, { status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout', usedModel });
             }
         });
 

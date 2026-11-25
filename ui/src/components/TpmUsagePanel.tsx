@@ -14,13 +14,21 @@ export default function TpmUsagePanel({ snapshots }: TpmUsagePanelProps) {
   const latest = snapshots[snapshots.length - 1];
   const latestUsed = latest?.tpm_used ?? 0;
   const latestLimit = [...snapshots].reverse().find((s) => (s.tpm_limit ?? 0) > 0)?.tpm_limit ?? 0;
-  const latestPct = latest?.tpm_utilization_pct ?? 0;
+  const reserveLimit = Math.round(latestLimit * 0.85);
+  const rawPeak = latest?.peak_pool_utilization_pct;
+  const latestPct = (rawPeak != null && rawPeak > 0) ? rawPeak : (latest?.tpm_utilization_pct ?? 0);
   const latestThrottles = latest?.quota_throttle_delta ?? 0;
   const totalThrottles = snapshots.reduce((sum, s) => sum + (s.quota_throttle_delta ?? 0), 0);
+  const hasEnmaas = snapshots.some((s) => (s.enmaas_tpm_used ?? 0) > 0);
   const chartData = snapshots.map((s) => ({
     timestamp: s.timestamp,
     tpm_used: s.tpm_used ?? 0,
-    tpm_utilization_pct: s.tpm_utilization_pct ?? 0,
+    gemini_tpm_used: s.gemini_tpm_used ?? 0,
+    claude_tpm_used: s.claude_tpm_used ?? 0,
+    enmaas_tpm_used: s.enmaas_tpm_used ?? 0,
+    tpm_utilization_pct: (s.peak_pool_utilization_pct != null && s.peak_pool_utilization_pct > 0)
+      ? s.peak_pool_utilization_pct
+      : (s.tpm_utilization_pct ?? 0),
   }));
   const peakUsed = chartData.reduce((max, d) => Math.max(max, d.tpm_used), 0);
   const peakPct = chartData.reduce((max, d) => Math.max(max, d.tpm_utilization_pct), 0);
@@ -32,7 +40,7 @@ export default function TpmUsagePanel({ snapshots }: TpmUsagePanelProps) {
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-testid="tpm-usage-panel">
       <div className="bg-bg-secondary border border-border rounded-lg p-4 md:col-span-2">
         <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-text-primary">Gemini TPM Usage</h3>
+          <h3 className="text-sm font-medium text-text-primary">Global TPM Usage</h3>
           <div className="text-sm font-mono">
             <span className="text-lg text-sky-400">{formatTokenCount(latestUsed)}</span>
             {latestLimit > 0 && (
@@ -45,9 +53,13 @@ export default function TpmUsagePanel({ snapshots }: TpmUsagePanelProps) {
             <LineChart data={chartData}>
               <YAxis domain={[0, yMax]} allowDecimals={false} tickFormatter={formatTokenCount} width={44} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <XAxis dataKey="timestamp" tickFormatter={formatTime} minTickGap={30} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <Tooltip labelFormatter={(v) => formatTime(v as number)} formatter={(v: number | undefined) => [formatTokenCount(v ?? 0), 'TPM Used']} contentStyle={tipStyle} />
+              <Tooltip labelFormatter={(v) => formatTime(v as number)} formatter={(v: number | undefined, name?: string) => [formatTokenCount(v ?? 0), name || 'TPM Used']} contentStyle={tipStyle} />
               {latestLimit > 0 && <ReferenceLine y={latestLimit} stroke="#f59e0b" strokeDasharray="4 4" />}
+              {latestLimit > 0 && <ReferenceLine y={reserveLimit} stroke="#94a3b8" strokeDasharray="2 2" label="85% reserve" />}
               <Line type="monotone" dataKey="tpm_used" stroke="#38bdf8" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="gemini_tpm_used" stroke="#34d399" strokeWidth={1.2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="claude_tpm_used" stroke="#e879f9" strokeWidth={1.2} dot={false} isAnimationActive={false} />
+              {hasEnmaas && <Line type="monotone" dataKey="enmaas_tpm_used" stroke="#fbbf24" strokeWidth={1.2} dot={false} isAnimationActive={false} />}
             </LineChart>
           </ResponsiveContainer>
         </div>

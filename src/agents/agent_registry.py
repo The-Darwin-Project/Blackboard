@@ -36,6 +36,7 @@ class AgentConnection:
     ephemeral: bool = False
     bound_event_id: str | None = None
     current_role: str | None = None
+    provider: str = ""
 
 
 class AgentRegistry:
@@ -63,6 +64,7 @@ class AgentRegistry:
         model: str,
         ephemeral: bool = False,
         event_id: str | None = None,
+        provider: str = "",
     ) -> None:
         async with self._lock:
             if not ephemeral:
@@ -113,10 +115,11 @@ class AgentRegistry:
                 connected_at=time.time(),
                 ephemeral=ephemeral,
                 bound_event_id=event_id,
+                provider=provider,
             )
             logger.info(
-                "Registered agent %s (role=%s, cli=%s, model=%s, ephemeral=%s, event=%s)",
-                agent_id, role, cli, model, ephemeral, event_id,
+                "Registered agent %s (role=%s, cli=%s, model=%s, provider=%s, ephemeral=%s, event=%s)",
+                agent_id, role, cli, model, provider, ephemeral, event_id,
             )
 
         if ephemeral and event_id and self._on_ephemeral_registered:
@@ -231,6 +234,7 @@ class AgentRegistry:
                     "ephemeral": c.ephemeral,
                     "bound_event_id": c.bound_event_id,
                     "current_role": c.current_role,
+                    "provider": c.provider,
                 }
                 for c in self._agents.values()
             ]

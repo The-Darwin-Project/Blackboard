@@ -1,13 +1,15 @@
 // BlackBoard/ui/src/components/TokenUtilizationPage.tsx
 // @ai-rules:
 // 1. [Pattern]: Mirrors FlowHistoryPage SparkCard inline pattern (not extracted).
-// 2. [Constraint]: v1 scope — aggregate-only SparkCards from FlowSnapshot delta fields.
+// 2. [Pattern]: Combines FlowSnapshot SparkCards (aggregate + Claude/Sidecar runtime deltas) with a fail-open
+//    GET /telemetry/llm By Pool & By Caller (+ non-empty teams) breakdown card.
 // 3. [Pattern]: Uses useFlowHistory hook with time range selector (same as FlowHistoryPage).
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LineChart, Line, ResponsiveContainer, Tooltip, YAxis, XAxis } from 'recharts';
+import { getLlmTelemetry } from '../api/client';
 import { useFlowHistory } from '../hooks/useFlowHistory';
 import { formatTokenCount } from '../utils/formatTokens';
-import type { FlowSnapshot } from '../api/types';
+import type { FlowSnapshot, LlmTelemetryBreakdown } from '../api/types';
 
 const RANGES = [
   { label: '1h', seconds: 3600 },
@@ -72,8 +74,22 @@ function SparkCard({ title, data, dataKey, color, subtitle }: {
 
 export default function TokenUtilizationPage() {
   const [rangeIdx, setRangeIdx] = useState(0);
+  const [breakdown, setBreakdown] = useState<LlmTelemetryBreakdown | null>(null);
   const range = RANGES[rangeIdx];
   const { data, isLoading, error } = useFlowHistory(range.seconds);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const json = await getLlmTelemetry();
+        if (!cancelled && json && typeof json === 'object') setBreakdown(json);
+      } catch {
+        // Fail-open: SparkCards remain visible when /telemetry/llm is unreachable
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   if (error) {
     return (
@@ -141,7 +157,58 @@ export default function TokenUtilizationPage() {
           subtitle={`${cacheHitPct}% hit (Brain: ${brainHitPct}%)`}
         />
         <SparkCard title="LLM Calls" data={snapshots} dataKey="token_calls_delta" color="#fb923c" />
+        <SparkCard
+          title="Claude Tokens"
+          data={snapshots}
+          dataKey="claude_token_total_delta"
+          color="#e879f9"
+          subtitle="in-process + sidecar:claude"
+        />
+        <SparkCard
+          title="Sidecar Tokens"
+          data={snapshots}
+          dataKey="sidecar_token_total_delta"
+          color="#38bdf8"
+          subtitle="sidecar:agy + sidecar:claude"
+        />
       </div>
+
+      {breakdown && (
+        <div className="bg-bg-secondary border border-border rounded-lg p-4 space-y-3" data-testid="telemetry-breakdown-card">
+          <h3 className="text-sm font-medium text-text-primary">By Pool &amp; By Caller</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
+            <div>
+              <div className="text-text-muted mb-1">Pools (60s)</div>
+              {Object.entries(breakdown.pools ?? {}).map(([pool, stats]) => (
+                <div key={pool} className="flex justify-between py-0.5 text-text-secondary">
+                  <span>{pool}</span>
+                  <span>{formatTokens(stats.tokens_used_60s ?? 0)} / {formatTokens(stats.tpm_limit ?? 0)} ({(stats.utilization_pct ?? 0).toFixed(1)}%)</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div className="text-text-muted mb-1">Callers (since boot)</div>
+              {Object.entries(breakdown.callers ?? {}).map(([caller, stats]) => (
+                <div key={caller} className="flex justify-between py-0.5 text-text-secondary">
+                  <span>{caller}</span>
+                  <span>{formatTokens(stats.total_tokens ?? 0)} ({stats.calls ?? 0})</span>
+                </div>
+              ))}
+            </div>
+            {breakdown.teams && Object.keys(breakdown.teams).length > 0 && (
+              <div>
+                <div className="text-text-muted mb-1">Teams</div>
+                {Object.entries(breakdown.teams).map(([team, stats]) => (
+                  <div key={team} className="flex justify-between py-0.5 text-text-secondary">
+                    <span>{team}</span>
+                    <span>{formatTokens(stats.total_tokens ?? 0)} ({stats.calls ?? 0})</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

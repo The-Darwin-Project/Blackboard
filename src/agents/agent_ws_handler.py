@@ -28,8 +28,9 @@ logger = logging.getLogger(__name__)
 
 _ROUTED_TYPES = frozenset({
     "progress", "result", "error", "busy", "partial_result", "huddle_message",
-    "agent_teammate_message",
+    "agent_teammate_message", "token_usage",
 })
+_ALLOWED_PROVIDERS = frozenset({"vertex_gemini", "vertex_claude", "enmaas"})
 
 # 3 consecutive unanswered pings (~90s at the 30s interval). A single delayed
 # pong must not trip the watchdog; counting missed ping cycles (not elapsed
@@ -93,19 +94,22 @@ async def agent_websocket_handler(
 
     try:
         raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
-        if raw.get("type") != "register" or not raw.get("agent_id"):
+        if not isinstance(raw, dict) or raw.get("type") != "register" or not raw.get("agent_id"):
             await websocket.close(code=1008, reason="Expected register message")
             return
 
         agent_id = raw["agent_id"]
         is_ephemeral = raw.get("ephemeral", False)
         event_id = raw.get("event_id")
+        raw_provider = raw.get("provider")
+        provider = raw_provider if isinstance(raw_provider, str) and raw_provider in _ALLOWED_PROVIDERS else ""
 
         await registry.register(
             agent_id, raw.get("role", "unknown"), websocket,
             raw.get("capabilities", []), raw.get("cli", ""), raw.get("model", ""),
             ephemeral=is_ephemeral,
             event_id=event_id,
+            provider=provider,
         )
         last_pong = [time.monotonic()]
         missed_pings = [0]
@@ -125,15 +129,25 @@ async def agent_websocket_handler(
 
         while True:
             data = await websocket.receive_json()
+            if not isinstance(data, dict):
+                continue
             msg_type = data.get("type", "")
             if msg_type in _ROUTED_TYPES:
-                bridge.put(data.get("task_id", ""), data)
+                tid = data.get("task_id")
+                if isinstance(tid, str) and tid:
+                    bridge.put(tid, data)
             elif msg_type == "pong":
                 logger.debug("Heartbeat pong from %s", agent_id)
                 last_pong[0] = time.monotonic()
                 missed_pings[0] = 0
             elif msg_type == "wake_register":
-                wake_task_id = data.get("task_id", "")
+                wake_task_id = data.get("task_id")
+                if not isinstance(wake_task_id, str) or not wake_task_id:
+                    logger.warning("wake_register missing valid task_id from %s", agent_id)
+                    continue
+                if bridge.get_queue(wake_task_id) is not None:
+                    logger.warning("Duplicate wake_register ignored for task=%s agent=%s", wake_task_id, agent_id)
+                    continue
                 bridge.create_queue(wake_task_id)
                 await registry.mark_busy(
                     agent_id, data.get("event_id", ""), wake_task_id,

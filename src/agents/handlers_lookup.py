@@ -452,12 +452,37 @@ async def handle_google_web_search(
         }
         if "gemini-4" in (model or "").lower():
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
-        async with asyncio.timeout(60):
-            response = await client.aio.models.generate_content(
-                model=model,
-                contents=query,
-                config=types.GenerateContentConfig(**config_kwargs),
+        from .llm import PRIORITY_NORMAL, derive_llm_priority
+        from .llm.raw_genai_meter import acquire_raw_genai, finalize_raw_genai, rollback_raw_genai
+        priority = PRIORITY_NORMAL
+        bb = ctx.get_blackboard()
+        if bb is not None:
+            try:
+                ev = await bb.get_event(event_id)
+                if ev is not None:
+                    priority = derive_llm_priority(ev)
+            except Exception:
+                pass
+        res_state = await acquire_raw_genai(query, priority=priority)
+        finalized = False
+        try:
+            async with asyncio.timeout(60):
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=query,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+            finalize_raw_genai(
+                "web_search",
+                model,
+                getattr(response, "usage_metadata", None),
+                res_state,
+                event_id=event_id,
             )
+            finalized = True
+        finally:
+            if not finalized:
+                rollback_raw_genai(res_state)
 
         chunks = []
         search_queries = []

@@ -33,6 +33,7 @@ const {
 const state = require('./state');
 const { DEFAULT_WORK_DIR } = require('./config');
 const { wsSend } = require('./ws-utils');
+const { inferProvider } = require('./usage-tracker');
 const { ensureEventDocument } = require('./event-transport');
 
 function setupWSServer(wss) {
@@ -140,12 +141,17 @@ function setupWSServer(wss) {
             status: result.status,
             output: result.output || result.stdout || '',
             source: result.source || 'stdout',
+            used_model: result.used_model || null,
+            provider: result.provider || inferProvider(process.env.AGENT_CLI, process.env),
+            usage: result.usage || null,
+            usage_by_provider: result.usage_by_provider || null,
           });
         } catch (err) {
           wsSend(ws, {
             type: 'error',
             event_id: eventId,
             message: err.message,
+            provider: inferProvider(process.env.AGENT_CLI, process.env),
           });
         }
         state.clearCurrentTask();
@@ -187,9 +193,18 @@ function setupWSServer(wss) {
               session_id: result.sessionId || sessionId,
               output: result.output || result.stdout || '',
               source: result.source || 'stdout',
+              used_model: result.used_model || null,
+              provider: result.provider || inferProvider(process.env.AGENT_CLI, process.env),
+              usage: result.usage || null,
+              usage_by_provider: result.usage_by_provider || null,
             });
           } catch (err) {
-            wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
+            wsSend(ws, {
+              type: 'error',
+              event_id: eventId,
+              message: err.message,
+              provider: inferProvider(process.env.AGENT_CLI, process.env),
+            });
           }
           state.clearCurrentTask();
         } else {

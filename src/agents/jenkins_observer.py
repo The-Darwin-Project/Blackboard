@@ -90,6 +90,7 @@ if TYPE_CHECKING:
 from ..adapters.jenkins import _strip_pipeline_annotations
 from ..models import CIAnalysis, EventEvidence
 from ..skills_catalog import download_skill_md
+from ..state.wip_meta import fetch_active_events_meta, is_automated_wip_event
 from ..utils.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
@@ -603,8 +604,8 @@ class JenkinsObserver:
         self._wip_counter = counter
 
     async def _local_count_wip(self) -> int:
-        status_map = await self.blackboard.get_active_events_with_status()
-        return sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        meta_map = await fetch_active_events_meta(self.blackboard)
+        return sum(1 for meta in meta_map.values() if is_automated_wip_event(meta, include_new=True))
 
     async def _get_wip_headroom(self) -> int:
         """Query current WIP usage and return available headroom."""
@@ -1211,8 +1212,8 @@ class JenkinsObserver:
                 max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_JENKINS_OBSERVER", "4096")),
                 thinking_level=os.getenv("LLM_THINKING_JENKINS_OBSERVER") or "low",
             )
-            from .llm import record_token_usage
-            record_token_usage("jenkins_observer", response.usage if response else None)
+            from .llm import PROVIDER_VERTEX_GEMINI, record_token_usage
+            record_token_usage("jenkins_observer", response.usage if response else None, provider=PROVIDER_VERTEX_GEMINI)
             if response and response.text:
                 llm_triage, parsed_analysis = self._parse_triage_response(response.text)
                 if self._analysis_enabled:

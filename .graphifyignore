@@ -66,8 +66,18 @@ requirements.txt
 requirements-dev.txt
 ui/index.html
 .github/**
-
-# Non-architectural guides & repo metadata
 docs/deployment.md
 docs/api-reference.md
 docs/brain-skills.md
+
+# Tooling configs & sidecar shell/hook scripts (non-architectural)
+gemini-sidecar/hooks/**
+gemini-sidecar/scripts/**
+gemini-sidecar/package.json
+ui/package.json
+ui/eslint.config.js
+ui/vite.config.ts
+ui/vitest.config.ts
+ui/tsconfig.json
+ui/tsconfig.app.json
+ui/tsconfig.node.json

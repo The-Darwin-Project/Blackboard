@@ -129,24 +129,28 @@ export default function FlowHistoryPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <SparkCard title="Waiting Approval" data={snapshots} dataKey="waiting_approval_events" color="#f97316" />
         <SparkCard title="WIP Utilization" data={snapshots} dataKey="wip_utilization_pct" color="#14b8a6" unit="%" />
-        <SparkCard title="Avg Event Age" data={snapshots} dataKey="avg_event_age_sec" color="#8b5cf6" unit="s" />
+        <SparkCard title="Interactive Sessions" data={snapshots} dataKey="active_user_sessions" color="#a855f7" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <SparkCard title="Avg Event Age" data={snapshots} dataKey="avg_event_age_sec" color="#8b5cf6" unit="s" />
         <SparkCard title="Agent Utilization" data={snapshots} dataKey="busy_agents" color="#06b6d4" />
         <SparkCard title="Reconcile Latency" data={snapshots} dataKey="avg_reconcile_ms" color="#ec4899" unit="ms" />
-        <SparkCard title="Subscriptions" data={snapshots} dataKey="active_subscriptions" color="#64748b" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <SparkCard title="Subscriptions" data={snapshots} dataKey="active_subscriptions" color="#64748b" />
         <SparkCard title="Dispatch Success %" data={snapshots} dataKey="dispatch_success_rate_pct" color="#22c55e" unit="%" />
         <SparkCard title="Spawn Latency" data={snapshots} dataKey="avg_spawn_latency_sec" color="#64748b" unit="s" />
-        <SparkCard title="Infra Failures" data={snapshots} dataKey="dispatch_infra_fails" color="#ef4444" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <SparkCard title="Infra Failures" data={snapshots} dataKey="dispatch_infra_fails" color="#ef4444" />
         <SparkCard title="HH Pending" data={snapshots} dataKey="headhunter_pending" color="#ef4444" />
         <SparkCard title="Aligner Pending" data={snapshots} dataKey="aligner_pending" color="#EF7B4D" />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <SparkCard title="Jenkins Pending" data={snapshots} dataKey="jenkins_pending" color="#D33833" />
       </div>
     </div>

@@ -11,11 +11,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .dispatch import KNOWN_WORK_STYLES
+from .llm import get_quota_registry
+from .llm.types import PRIORITY_NORMAL, derive_llm_priority
+from .sidecar_usage import resolve_sidecar_provider
+from ..event_types import AUTOMATED_SOURCES, AUTOMATED_WIP_EXCLUDED_SOURCES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventDocument, EventType
 from ..utils.event_markdown import event_to_markdown
 
@@ -24,10 +29,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("darwin.brain")
 
+
+def get_registry_and_bridge():
+    """Lazy import to avoid circular src.dependencies <-> src.agents.brain load."""
+    from ..dependencies import get_registry_and_bridge as _get
+    return _get()
+
 # Mirrors brain.py's _THOUGHT_SIG_V2 (duplicated, not imported -- this module's
 # @ai-rules forbid importing Brain). With V2 off, notify turns must not persist
 # response_parts: FC-bearing parts would replay as an unanswered model functionCall.
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
+_TPM_RESERVE_DEFER_PREFIX = "Provider TPM reserve reached"
+
+
+def _max_tpm_reserve_defers() -> int:
+    """Read SIDECAR_TPM_MAX_DEFERS (>=1, default 5)."""
+    try:
+        return max(1, int(os.environ.get("SIDECAR_TPM_MAX_DEFERS", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _consecutive_tpm_defers(event: EventDocument | None) -> int:
+    """Count consecutive trailing TPM-reserve deferrals since the last route or user turn."""
+    if event is None or not event.conversation:
+        return 0
+    count = 0
+    for turn in reversed(event.conversation):
+        if turn.action == "route" or turn.actor == "user":
+            break
+        if turn.action == "defer" and _TPM_RESERVE_DEFER_PREFIX in (turn.thoughts or ""):
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +82,8 @@ async def handle_reply_to_agent(
         )
         return await handle_message_agent(ctx, event_id, args, response_parts)
 
-    from ..dependencies import get_registry_and_bridge
-    registry, _ = get_registry_and_bridge()
+    from ..dependencies import get_registry_and_bridge as _get_reg_bridge
+    registry, _ = _get_reg_bridge()
     agent_conn = None
     if registry:
         agent_conn = await registry.get_by_event(event_id)
@@ -130,12 +163,15 @@ async def handle_select_agent(
         await ctx.append_and_broadcast(event_id, dup_turn)
         return False
 
-    if ctx.is_dispatch_locked():
-        bb = ctx.get_blackboard()
-        flow = await bb.get_flow_metrics()
+    bb = ctx.get_blackboard()
+    event = await bb.get_event(event_id) if bb is not None else None
+    is_interactive = bool(event and event.source in AUTOMATED_WIP_EXCLUDED_SOURCES)
+
+    if not is_interactive and ctx.is_dispatch_locked():
+        flow = await bb.get_flow_metrics() if bb is not None else {}
         logger.warning(
             f"Dispatch WIP cap reached for {event_id}, deferring "
-            f"(queue_depth={flow['queue_depth']}, active={len(flow.get('active_events', []))})"
+            f"(queue_depth={flow.get('queue_depth', 0)}, active={flow.get('active_events', 0)})"
         )
         await ctx.dispatch_handler(
             "defer_event", event_id,
@@ -143,6 +179,50 @@ async def handle_select_agent(
             None,
         )
         return False
+
+    if event is None or derive_llm_priority(event) == PRIORITY_NORMAL:
+        prior_defers = _consecutive_tpm_defers(event)
+        max_defers = _max_tpm_reserve_defers()
+        try:
+            registry, _ = get_registry_and_bridge()
+            prov = await resolve_sidecar_provider(agent_name, registry, event_id=event_id)
+            quota_reg = get_quota_registry()
+            saturated = quota_reg.is_normal_saturated(prov, already_deferred=(prior_defers > 0))
+            pool_stats = quota_reg.get(prov).get_stats()
+            pool_exhausted = (
+                pool_stats.get("tpm_limit", 0) > 0
+                and pool_stats.get("tokens_used_60s", 0) >= pool_stats["tpm_limit"]
+            )
+        except Exception as exc:
+            logger.warning(
+                "Sidecar pool saturation check failed for %s (agent=%s); failing open: %s",
+                event_id, agent_name, exc,
+            )
+            saturated = False
+            pool_exhausted = False
+        if saturated:
+            if prior_defers >= max_defers and not pool_exhausted:
+                logger.warning(
+                    "TPM reserve defer cap (%d) reached for %s (agent=%s); proceeding into available burst headroom",
+                    max_defers, event_id, agent_name,
+                )
+            else:
+                base_delay = min(300, 30 * (2 ** min(prior_defers, 4)))
+                jitter_s = int(base_delay * random.uniform(0.0, 0.2))
+                delay_s = min(360, base_delay + jitter_s)
+                logger.warning(
+                    "Provider TPM reserve reached for %s (agent=%s), deferring PRIORITY_NORMAL dispatch (attempt %d/%d, delay=%ds)",
+                    event_id, agent_name, prior_defers + 1, max_defers, delay_s,
+                )
+                await ctx.dispatch_handler(
+                    "defer_event", event_id,
+                    {
+                        "delay_seconds": delay_s,
+                        "reason": f"Provider TPM reserve reached (PRIORITY_NORMAL deferred, attempt {prior_defers + 1}/{max_defers})",
+                    },
+                    None,
+                )
+                return False
 
     depth = ctx.increment_routing_depth(event_id)
     if depth > 30:
@@ -171,9 +251,7 @@ async def handle_select_agent(
         narrative=f"Routed {event_id} to {agent_name}: {task[:80]}",
     )
 
-    bb = ctx.get_blackboard()
-    event = await bb.get_event(event_id)
-    if event:
+    if event and bb is not None:
         svc_meta = await bb.get_service(event.service)
         await ctx.broadcast({
             "type": "attachment",
@@ -288,8 +366,8 @@ async def handle_message_agent(
     )
     await ctx.append_and_broadcast(event_id, turn)
 
-    from ..dependencies import get_registry_and_bridge
-    registry, _ = get_registry_and_bridge()
+    from ..dependencies import get_registry_and_bridge as _get_reg_bridge
+    registry, _ = _get_reg_bridge()
 
     running_agent = ctx.get_active_agent_for_event(event_id)
     event_has_active_task = ctx.is_task_running(event_id)
@@ -455,8 +533,7 @@ async def handle_report_incident(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return True
-    automated_sources = ("headhunter", "timekeeper", "aligner")
-    if event_doc.source not in automated_sources:
+    if event_doc.source not in AUTOMATED_SOURCES:
         result_text = (
             f"report_incident is only available for automated events "
             f"(source={event_doc.source} is not eligible)."

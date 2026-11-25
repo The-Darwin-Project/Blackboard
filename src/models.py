@@ -495,6 +495,10 @@ class EventDocument(BaseModel):
         None,
         description="Email of the user who created this event (stable identity for multi-tenant filtering)"
     )
+    team_id: Optional[str] = Field(
+        None,
+        description="Optional team/tenant attribution slug for token usage telemetry"
+    )
     # Human-readable title & origin
     title: Optional[str] = Field(None, description="Concise human-readable event title")
     title_source: Optional[Literal["fallback", "llm", "user"]] = Field(None, description="Origin of event title")
@@ -513,11 +517,18 @@ class EventDocument(BaseModel):
         Defense against garbage data corrupting the None-vs-string ownership
         check in auth.can_append_message / can_override_domain.
         """
-        if v is None:
-            return None
-        if not isinstance(v, str):
+        if v is None or not isinstance(v, str):
             return None
         stripped = v.strip()
+        return stripped if stripped else None
+
+    @field_validator("team_id", mode="before")
+    @classmethod
+    def _normalize_team_id(cls, v: Any) -> str | None:
+        """Normalize and bound team_id slug to 64 chars (non-string/blank -> None)."""
+        if v is None or not isinstance(v, str):
+            return None
+        stripped = v.strip()[:64]
         return stripped if stripped else None
     # Sticky notes (FRIDAY-to-FRIDAY via JARVIS close phase)
     sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
@@ -762,6 +773,14 @@ class FlowMetricsResponse(BaseModel):
     snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
+    active_user_sessions: int = 0
+    peak_pool_utilization_pct: float = 0.0
+    gemini_tpm_used: int = 0
+    gemini_tpm_limit: int = 0
+    claude_tpm_used: int = 0
+    claude_tpm_limit: int = 0
+    enmaas_tpm_used: int = 0
+    enmaas_tpm_limit: int = 0
 
 
 FLOW_QUOTA_SHED_TIER1_KEY = "darwin:flow:quota_shed_tier1_total"
@@ -818,6 +837,16 @@ class FlowSnapshot(BaseModel):
     quota_shed_tier1_total: int = 0
     quota_shed_tier2_total: int = 0
     atdd_cycle_sec: float | None = None
+    active_user_sessions: int = 0
+    peak_pool_utilization_pct: float = 0.0
+    gemini_tpm_used: int = 0
+    gemini_tpm_limit: int = 0
+    claude_tpm_used: int = 0
+    claude_tpm_limit: int = 0
+    enmaas_tpm_used: int = 0
+    enmaas_tpm_limit: int = 0
+    claude_token_total_delta: int = 0
+    sidecar_token_total_delta: int = 0
 
 
 class PendingAnomaly(BaseModel):

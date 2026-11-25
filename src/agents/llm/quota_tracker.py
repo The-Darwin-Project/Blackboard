@@ -9,14 +9,14 @@
 #    before any reservation. It is PERMANENT for that payload: Brain._is_transient must treat it as non-retryable, and callers
 #    (Nightwatcher) must shrink the request rather than wait. Plain QuotaExhaustedError (window timeout) stays transient.
 # 7. [Pattern]: Priority gating: acquire(priority=PRIORITY_HIGH) registers in _high_priority_waiters for its whole wait; while
-#    that counter is > 0, every non-HIGH caller is gated (strict priority, no aging) even if capacity exists. Only
-#    `== PRIORITY_HIGH` is special; any other value is low priority. Gated callers still honour max_wait_seconds.
+#    that counter is > 0, non-HIGH callers are gated until aging threshold (LLM_TPM_PRIORITY_AGING_SEC, default 15s) expires.
+#    Only `== PRIORITY_HIGH` is special; any other value is low priority. Gated callers still honour max_wait_seconds.
 # 8. [Constraint]: _high_priority_waiters is incremented/decremented in a try/finally inside acquire(); the decrement MUST stay
 #    in `finally` (success, timeout, cancellation). An underflow is logged as an error -- it signals a counter-balance bug.
 # 9. [Pattern]: _prune() aligns stale active-reservation eviction dynamically above LLM_HTTP_TIMEOUT_SEC via
 #    max(1800s, LLM_HTTP_TIMEOUT_SEC + 120s) so long Carbon turns (600s-1200s) retain active reservations for record().
 """
-Token-bucket rate limiter for Vertex AI Gemini calls.
+Token-bucket rate limiter for multi-provider LLM calls (vertex_gemini, vertex_claude, enmaas).
 
 Proactively throttles LLM requests before hitting 429 limits.
 Uses rolling 60-second window with estimate-then-correct accounting:
@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -39,6 +40,22 @@ from .types import DEFAULT_HTTP_TIMEOUT_S, PRIORITY_HIGH, PRIORITY_NORMAL, parse
 logger = logging.getLogger(__name__)
 
 _MIN_STALE_RESERVATION_TTL_S: float = 1800.0
+DEFAULT_PRIORITY_AGING_SEC: float = 15.0
+
+
+def _parse_priority_aging_sec(default: float = DEFAULT_PRIORITY_AGING_SEC) -> float:
+    """Parse finite non-negative LLM_TPM_PRIORITY_AGING_SEC from env with fallback to default."""
+    raw = os.getenv("LLM_TPM_PRIORITY_AGING_SEC")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw.strip())
+        if math.isfinite(val) and val >= 0.0:
+            return val
+    except ValueError:
+        pass
+    logger.warning("Invalid/non-finite LLM_TPM_PRIORITY_AGING_SEC=%r; falling back to %.1fs", raw, default)
+    return default
 
 
 def _stale_reservation_ttl_s() -> float:
@@ -81,24 +98,27 @@ class Reservation:
 
 
 class QuotaTracker:
-    """Rolling-window token bucket for shared Gemini TPM quota."""
+    """Rolling-window token bucket for per-provider TPM quota (vertex_gemini, vertex_claude, enmaas)."""
 
     def __init__(
         self,
         tpm_limit: int = 60000,
         burst_factor: float = 0.8,
         tpm_cap: int | None = None,
+        enforce_sustained_for_normal: bool = False,
     ):
         limit = tpm_cap if tpm_cap is not None else tpm_limit
         self._tpm_limit = limit
         self._burst_limit = limit
         self._sustained_limit = int(limit * burst_factor)
+        self._enforce_sustained_for_normal = enforce_sustained_for_normal
         self._window: deque[tuple[float, int, str | None]] = deque()
         self._active_reservations: dict[str, Reservation] = {}
         self._total_requests = 0
         self._total_tokens = 0
         self._throttle_events = 0
         self._high_priority_waiters: int = 0
+        self._priority_aging_sec = _parse_priority_aging_sec()
         logger.info(
             f"QuotaTracker initialized: tpm={limit}, "
             f"sustained={self._sustained_limit} (burst={burst_factor})"
@@ -145,17 +165,31 @@ class QuotaTracker:
                 f"({self._burst_limit}) and can never be admitted. Reduce the request size."
             )
 
-        deadline = time.monotonic() + max_wait_seconds
-        throttled = False
-
         is_high_prio = (priority == PRIORITY_HIGH)
+        if self._enforce_sustained_for_normal and not is_high_prio and estimated_tokens > self._sustained_limit:
+            reserve = max(0, self._burst_limit - self._sustained_limit)
+            raise RequestExceedsBurstError(
+                f"Request of {estimated_tokens} estimated tokens exceeds the normal-priority sustained ceiling "
+                f"({self._sustained_limit}); remaining {reserve} tokens are reserved for high-priority callers."
+            )
+
+        effective_limit = (
+            self._burst_limit if (is_high_prio or not self._enforce_sustained_for_normal) else self._sustained_limit
+        )
+        deadline = time.monotonic() + max_wait_seconds
+        wait_start = time.monotonic()
+        throttled = False
         try:
             if is_high_prio:
                 self._high_priority_waiters += 1
             while True:
                 current = self._prune()
-                is_gated = (not is_high_prio and self._high_priority_waiters > 0)
-                if not is_gated and (current + estimated_tokens <= self._burst_limit):
+                is_gated = (
+                    not is_high_prio
+                    and self._high_priority_waiters > 0
+                    and (time.monotonic() - wait_start) < self._priority_aging_sec
+                )
+                if not is_gated and (current + estimated_tokens <= effective_limit):
                     now = time.monotonic()
                     res = Reservation(id=str(uuid.uuid4()), tokens=estimated_tokens, timestamp=now)
                     self._window.append((now, estimated_tokens, res.id))
@@ -252,12 +286,24 @@ class QuotaTracker:
             f"(estimate was {estimated_tokens}, delta={delta:+d})"
         )
 
+    def record_post_hoc(self, actual_tokens: int) -> None:
+        """Record external usage (e.g. CLI sidecar / WS stream) directly into the 60s window."""
+        if isinstance(actual_tokens, bool) or not isinstance(actual_tokens, int) or actual_tokens <= 0:
+            return
+        now = time.monotonic()
+        self._window.append((now, actual_tokens, None))
+        self._total_requests += 1
+        self._total_tokens += actual_tokens
+        self._prune()
+
     def get_stats(self) -> dict:
         """Return current quota state for observability."""
         current = self._prune()
         return {
             "tokens_used_60s": current,
             "tpm_limit": self._tpm_limit,
+            "sustained_limit": self._sustained_limit,
+            "reserve_tokens": max(0, self._burst_limit - self._sustained_limit),
             "tokens_remaining": max(0, self._tpm_limit - current),
             "utilization_pct": round(current / self._tpm_limit * 100, 1) if self._tpm_limit else 0,
             "total_requests": self._total_requests,
