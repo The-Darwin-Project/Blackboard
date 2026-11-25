@@ -166,7 +166,7 @@ def _reconcile_terminal_token_usage(
         entries = [(str(msg.get("provider") or default_provider), msg.get("usage"))]
     for raw_prov, u_dict in entries:
         prov = normalize_sidecar_provider(cli, raw_prov)
-        parsed = validate_usage_payload(u_dict, cli)
+        parsed = validate_usage_payload(u_dict, cli, max_tokens=SIDECAR_MAX_TASK_TOKENS)
         if parsed is None:
             continue
         caller, final_u = parsed

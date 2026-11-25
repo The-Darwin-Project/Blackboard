@@ -10,7 +10,7 @@ alwaysApply: false
 ## Architecture
 
 * **Dual-tier ephemeral model**:
-  * **User-facing squad** (`roster="squad"`): User-facing events (`chat`, `slack`, `workspace`, `agent_workspace`) dispatch an on-demand Tekton TaskRun pod containing 4 role-specific sidecars (`architect`, `developer`, `sysadmin`, `qe`) and a `squad-keeper` step. Each sidecar has its fixed `AGENT_ROLE`, distinct listen port (9091–9094), and mounts a shared `/data/workspace` emptyDir volume.
+  * **User-facing squad** (`roster="squad"`): User-facing interactive events (`USER_INTERACTIVE_SOURCES`: `chat`, `slack`) dispatch an on-demand Tekton TaskRun pod containing 4 role-specific sidecars (`architect`, `developer`, `sysadmin`, `qe`) and a `squad-keeper` step. Each sidecar has its fixed `AGENT_ROLE`, distinct listen port (9091–9094), and mounts a shared `/data/workspace` emptyDir volume.
   * **Sensor shapeshifter** (`roster="single"`): Sensor events (`headhunter`, `timekeeper`) dispatch a single on-call agent container booting with `AGENT_ROLE=""` on port 9090 that dynamically switches roles per task dispatch.
   * **Specialized reviewers**: Reviewer roles (`code_reviewer`, `security_analyst`, `explorer`) dispatched dynamically during events coexist in `AgentRegistry` keyed by `(bound_event_id, role)`.
 * **Orchestration**: Tekton TaskRun via EventListener webhook. Brain's `EphemeralProvisioner` fires HTTP POST with `event_id` (and `roster="squad"` for user-facing events).

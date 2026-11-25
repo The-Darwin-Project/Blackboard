@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -39,6 +40,22 @@ from .types import DEFAULT_HTTP_TIMEOUT_S, PRIORITY_HIGH, PRIORITY_NORMAL, parse
 logger = logging.getLogger(__name__)
 
 _MIN_STALE_RESERVATION_TTL_S: float = 1800.0
+DEFAULT_PRIORITY_AGING_SEC: float = 15.0
+
+
+def _parse_priority_aging_sec(default: float = DEFAULT_PRIORITY_AGING_SEC) -> float:
+    """Parse finite non-negative LLM_TPM_PRIORITY_AGING_SEC from env with fallback to default."""
+    raw = os.getenv("LLM_TPM_PRIORITY_AGING_SEC")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw.strip())
+        if math.isfinite(val) and val >= 0.0:
+            return val
+    except ValueError:
+        pass
+    logger.warning("Invalid/non-finite LLM_TPM_PRIORITY_AGING_SEC=%r; falling back to %.1fs", raw, default)
+    return default
 
 
 def _stale_reservation_ttl_s() -> float:
@@ -101,6 +118,7 @@ class QuotaTracker:
         self._total_tokens = 0
         self._throttle_events = 0
         self._high_priority_waiters: int = 0
+        self._priority_aging_sec = _parse_priority_aging_sec()
         logger.info(
             f"QuotaTracker initialized: tpm={limit}, "
             f"sustained={self._sustained_limit} (burst={burst_factor})"
@@ -160,7 +178,6 @@ class QuotaTracker:
         )
         deadline = time.monotonic() + max_wait_seconds
         wait_start = time.monotonic()
-        _PRIORITY_AGING_S = float(os.getenv("LLM_TPM_PRIORITY_AGING_SEC", "15.0"))
         throttled = False
         try:
             if is_high_prio:
@@ -170,7 +187,7 @@ class QuotaTracker:
                 is_gated = (
                     not is_high_prio
                     and self._high_priority_waiters > 0
-                    and (time.monotonic() - wait_start) < _PRIORITY_AGING_S
+                    and (time.monotonic() - wait_start) < self._priority_aging_sec
                 )
                 if not is_gated and (current + estimated_tokens <= effective_limit):
                     now = time.monotonic()

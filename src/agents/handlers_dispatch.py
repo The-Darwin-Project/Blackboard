@@ -11,13 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .dispatch import KNOWN_WORK_STYLES
+from .llm import get_quota_registry
 from .llm.types import PRIORITY_NORMAL, derive_llm_priority
-from .sidecar_usage import is_sidecar_pool_saturated
+from .sidecar_usage import resolve_sidecar_provider
 from ..event_types import AUTOMATED_SOURCES, AUTOMATED_WIP_EXCLUDED_SOURCES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventDocument, EventType
 from ..utils.event_markdown import event_to_markdown
@@ -183,8 +185,13 @@ async def handle_select_agent(
         max_defers = _max_tpm_reserve_defers()
         try:
             registry, _ = get_registry_and_bridge()
-            saturated = await is_sidecar_pool_saturated(
-                agent_name, registry, event_id=event_id, already_deferred=(prior_defers > 0),
+            prov = await resolve_sidecar_provider(agent_name, registry, event_id=event_id)
+            quota_reg = get_quota_registry()
+            saturated = quota_reg.is_normal_saturated(prov, already_deferred=(prior_defers > 0))
+            pool_stats = quota_reg.get(prov).get_stats()
+            pool_exhausted = (
+                pool_stats.get("tpm_limit", 0) > 0
+                and pool_stats.get("tokens_used_60s", 0) >= pool_stats["tpm_limit"]
             )
         except Exception as exc:
             logger.warning(
@@ -192,14 +199,17 @@ async def handle_select_agent(
                 event_id, agent_name, exc,
             )
             saturated = False
+            pool_exhausted = False
         if saturated:
-            if prior_defers >= max_defers:
+            if prior_defers >= max_defers and not pool_exhausted:
                 logger.warning(
-                    "TPM reserve defer cap (%d) reached for %s (agent=%s); proceeding fail-open to avoid starvation",
+                    "TPM reserve defer cap (%d) reached for %s (agent=%s); proceeding into available burst headroom",
                     max_defers, event_id, agent_name,
                 )
             else:
-                delay_s = min(300, 30 * (2 ** prior_defers))
+                base_delay = min(300, 30 * (2 ** min(prior_defers, 4)))
+                jitter_s = int(base_delay * random.uniform(0.0, 0.2))
+                delay_s = min(360, base_delay + jitter_s)
                 logger.warning(
                     "Provider TPM reserve reached for %s (agent=%s), deferring PRIORITY_NORMAL dispatch (attempt %d/%d, delay=%ds)",
                     event_id, agent_name, prior_defers + 1, max_defers, delay_s,

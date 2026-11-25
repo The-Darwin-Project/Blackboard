@@ -1159,6 +1159,48 @@ class TestQuotaPoolRegistryAndClaudeAdapter:
             await high_waiter
         assert tracker.get_stats()["high_priority_waiters"] == 0
 
+    def test_quota_tracker_parse_priority_aging_sec_handles_blank_invalid_and_nonfinite(self, monkeypatch, caplog):
+        import logging
+        from src.agents.llm.quota_tracker import (
+            DEFAULT_PRIORITY_AGING_SEC,
+            QuotaTracker,
+            _parse_priority_aging_sec,
+        )
+
+        # Unset and blank values fall back silently to DEFAULT_PRIORITY_AGING_SEC (15.0)
+        monkeypatch.delenv("LLM_TPM_PRIORITY_AGING_SEC", raising=False)
+        with caplog.at_level(logging.WARNING, logger="src.agents.llm.quota_tracker"):
+            assert _parse_priority_aging_sec() == DEFAULT_PRIORITY_AGING_SEC == 15.0
+            assert QuotaTracker(tpm_cap=100)._priority_aging_sec == DEFAULT_PRIORITY_AGING_SEC
+        assert not [r for r in caplog.records if "LLM_TPM_PRIORITY_AGING_SEC" in r.message]
+
+        for blank_val in ("", "   "):
+            caplog.clear()
+            monkeypatch.setenv("LLM_TPM_PRIORITY_AGING_SEC", blank_val)
+            with caplog.at_level(logging.WARNING, logger="src.agents.llm.quota_tracker"):
+                assert _parse_priority_aging_sec() == DEFAULT_PRIORITY_AGING_SEC
+                assert QuotaTracker(tpm_cap=100)._priority_aging_sec == DEFAULT_PRIORITY_AGING_SEC
+            assert not [r for r in caplog.records if "LLM_TPM_PRIORITY_AGING_SEC" in r.message]
+
+        # Invalid or non-finite values fall back to 15.0 without raising ValueError and emit warning
+        for bad_val in ("bad", "nan", "inf", "-inf", "-5"):
+            caplog.clear()
+            monkeypatch.setenv("LLM_TPM_PRIORITY_AGING_SEC", bad_val)
+            with caplog.at_level(logging.WARNING, logger="src.agents.llm.quota_tracker"):
+                assert _parse_priority_aging_sec() == DEFAULT_PRIORITY_AGING_SEC
+                assert QuotaTracker(tpm_cap=100)._priority_aging_sec == DEFAULT_PRIORITY_AGING_SEC
+            warn_msgs = [r.message for r in caplog.records if "Invalid/non-finite LLM_TPM_PRIORITY_AGING_SEC" in r.message]
+            assert len(warn_msgs) == 2
+
+        # Valid finite non-negative values parse accurately with no warning
+        for raw_val, expected in (("0", 0.0), ("0.05", 0.05)):
+            caplog.clear()
+            monkeypatch.setenv("LLM_TPM_PRIORITY_AGING_SEC", raw_val)
+            with caplog.at_level(logging.WARNING, logger="src.agents.llm.quota_tracker"):
+                assert _parse_priority_aging_sec() == expected
+                assert QuotaTracker(tpm_cap=100)._priority_aging_sec == expected
+            assert not [r for r in caplog.records if "LLM_TPM_PRIORITY_AGING_SEC" in r.message]
+
     def test_quota_pool_registry_unknown_provider_warns_and_falls_back(self, caplog):
         import logging
         from src.agents.llm.quota_registry import QuotaPoolRegistry

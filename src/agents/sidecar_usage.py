@@ -32,29 +32,29 @@ def normalize_sidecar_provider(cli: str = "", raw_provider: str = "") -> str:
         return PROVIDER_ENMAAS if is_enmaas_enabled() else PROVIDER_VERTEX_CLAUDE
     return raw_provider if raw_provider in _VALID_PROVIDERS else PROVIDER_VERTEX_GEMINI
 
-def validate_usage_payload(usage_dict: Any, cli: str = "") -> tuple[str, TokenUsage] | None:
+def validate_usage_payload(usage_dict: Any, cli: str = "", *, max_tokens: int | None = None) -> tuple[str, TokenUsage] | None:
     """Validate and clamp a WS sidecar usage payload; returns (caller_slug, TokenUsage) or None."""
     if not isinstance(usage_dict, dict):
         return None
+    cap = SIDECAR_MAX_FRAME_TOKENS if max_tokens is None else max_tokens
     c = (cli or "").strip().lower()
     caller = f"sidecar:{c}" if c in _ALLOWED_CLIS else "sidecar:unknown"
     vals: dict[str, int] = {}
     clamped = False
     for k in _USAGE_KEYS:
         raw = usage_dict.get(k)
-        if raw is None:
-            vals[k] = 0
+        if raw is None: vals[k] = 0
         elif isinstance(raw, bool) or not isinstance(raw, int) or raw < 0: return None
         else:
-            clamped = clamped or (raw > SIDECAR_MAX_FRAME_TOKENS)
-            vals[k] = min(raw, SIDECAR_MAX_FRAME_TOKENS)
+            clamped = clamped or (raw > cap)
+            vals[k] = min(raw, cap)
     if clamped:
-        logger.warning("Clamped oversized sidecar token frame for caller=%s (limit=%d)", caller, SIDECAR_MAX_FRAME_TOKENS)
+        logger.warning("Clamped oversized sidecar token frame for caller=%s (limit=%d)", caller, cap)
     anth_cache = vals["cache_read_input_tokens"] + vals["cache_creation_input_tokens"]
     has_anth = vals["cached_tokens"] == 0 and anth_cache > 0
-    cached = min(SIDECAR_MAX_FRAME_TOKENS, anth_cache) if has_anth else vals["cached_tokens"]
-    effective_input = min(SIDECAR_MAX_FRAME_TOKENS, vals["input_tokens"] + (anth_cache if has_anth else 0))
-    total = vals["total_tokens"] or min(SIDECAR_MAX_FRAME_TOKENS, effective_input + vals["output_tokens"] + (vals["thinking_tokens"] if c == "agy" else 0))
+    cached = min(cap, anth_cache) if has_anth else vals["cached_tokens"]
+    effective_input = min(cap, vals["input_tokens"] + (anth_cache if has_anth else 0))
+    total = vals["total_tokens"] or min(cap, effective_input + vals["output_tokens"] + (vals["thinking_tokens"] if c == "agy" else 0))
     return caller, TokenUsage(input_tokens=effective_input, output_tokens=vals["output_tokens"], thinking_tokens=vals["thinking_tokens"], cached_tokens=cached, total_tokens=total)
 
 def record_sidecar_usage(
