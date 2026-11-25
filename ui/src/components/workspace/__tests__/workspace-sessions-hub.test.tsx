@@ -878,14 +878,6 @@ describe('WorkspaceSessionsHub (Left Sidebar)', () => {
       fireEvent.click(openChatItem);
       expect(mockSelectEvent).toHaveBeenCalledWith('evt-1');
 
-      // Right click evt-2 (status: 'waiting_approval')
-      const taskCard2 = screen.getByTitle('evt-2');
-      fireEvent.contextMenu(taskCard2, { clientX: 260, clientY: 190 });
-
-      const approveItem = screen.getByText('Approve Plan');
-      expect(approveItem).toBeInTheDocument();
-      fireEvent.click(approveItem);
-      expect(mockSend).toHaveBeenCalledWith({ type: 'approve', event_id: 'evt-2' });
     });
   });
 

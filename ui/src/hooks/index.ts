@@ -8,7 +8,7 @@ export { useEvents } from './useEvents';
 export { useGraph } from './useGraph';
 export { useKargoStages, useKargoStagesInvalidation } from './useKargo';
 export { useObservations } from './useObservations';
-export { useActiveEvents, useClosedEvents, useEventDocument, useQueueInvalidation } from './useQueue';
+export { useActiveEvents, useClosedEvents, useEventDocument, useQueueInvalidation, useWaitingApprovalEvents } from './useQueue';
 export { useResizablePanel } from './useResizablePanel';
 export { useService, useTopology } from './useTopology';
 export { useWebSocket } from './useWebSocket';

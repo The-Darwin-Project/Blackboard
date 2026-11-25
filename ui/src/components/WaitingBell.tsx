@@ -8,7 +8,8 @@
  * Shows badge count, color-coded urgency, and shakes after 1 hour.
  */
 import { useState, useEffect, useRef } from 'react';
-import { useActiveEvents } from '../hooks/useQueue';
+import { useActiveEvents } from '../hooks';
+import { useWaitingApprovalEvents } from '../hooks';
 import { getEventDocument } from '../api/client';
 
 interface WaitingEvent {
@@ -22,6 +23,7 @@ interface WaitingEvent {
 
 export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: string) => void }) {
   const { data: activeEvents } = useActiveEvents();
+  const { data: waitingData } = useWaitingApprovalEvents();
   const [waitingEvents, setWaitingEvents] = useState<WaitingEvent[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -34,14 +36,16 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
 
   // Fetch full event docs for active events and find ones waiting for user
   useEffect(() => {
-    if (!activeEvents?.length) {
+    const allEvents = [...(activeEvents || []), ...(waitingData || [])];
+    const uniqueEvents = Array.from(new Map(allEvents.map(e => [e.id, e])).values());
+    if (!uniqueEvents.length) {
       setWaitingEvents([]);
       return;
     }
 
     const fetchWaiting = async () => {
       const waiting: WaitingEvent[] = [];
-      for (const evt of activeEvents) {
+      for (const evt of uniqueEvents) {
         try {
           const doc = await getEventDocument(evt.id);
           if (!doc?.conversation?.length) continue;
@@ -64,7 +68,7 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
     };
 
     fetchWaiting();
-  }, [activeEvents]);
+  }, [activeEvents, waitingData]);
 
   const count = waitingEvents.length;
 

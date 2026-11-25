@@ -1,13 +1,50 @@
 // BlackBoard/ui/src/api/client.test.ts
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, approveEvent, headhunterItemAction } from './client';
+import * as apiClient from './client';
 
-describe('api/client fetchApi & approveEvent (H9)', () => {
+describe('api/client fetchApi & approveEvent / submitApprovalDecision (H9, T-18)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('preserves structured ApiError.body and string detail on 409 response', async () => {
+  it('T-18f: preserves structured ApiError.body and string detail on 409 response for submitApprovalDecision', async () => {
+    const submitFn = (apiClient as Record<string, any>).submitApprovalDecision;
+    expect(typeof submitFn).toBe('function', 'submitApprovalDecision must be exported');
+
+    const payload = {
+      code: 'sha_drift',
+      detail: 'HEAD SHA changed',
+      approval_requested_sha: '1111111111111111',
+      live_sha: '2222222222222222',
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify(payload), {
+        status: 409,
+        statusText: 'Conflict',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    let caught: unknown;
+    try {
+      await submitFn('evt-1', { option_id: 'opt1' });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/queue/evt-1/decision',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ option_id: 'opt1' }) })
+    );
+    expect(caught).toBeInstanceOf(ApiError);
+    const apiErr = caught as ApiError;
+    expect(apiErr.status).toBe(409);
+    expect(apiErr.detail).toBe('HEAD SHA changed');
+    expect(apiErr.body).toEqual(payload);
+  });
+
+  it('preserves structured ApiError.body and string detail on 409 response for approveEvent', async () => {
     const payload = {
       code: 'sha_drift',
       detail: 'HEAD SHA changed',
