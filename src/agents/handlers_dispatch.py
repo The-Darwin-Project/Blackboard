@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .dispatch import KNOWN_WORK_STYLES
+from .llm.types import PRIORITY_NORMAL, derive_llm_priority
+from .sidecar_usage import is_sidecar_pool_saturated
+from ..event_types import AUTOMATED_SOURCES, AUTOMATED_WIP_EXCLUDED_SOURCES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventDocument, EventType
 from ..utils.event_markdown import event_to_markdown
 
@@ -23,6 +26,12 @@ if TYPE_CHECKING:
     from .tool_router import ToolContext
 
 logger = logging.getLogger("darwin.brain")
+
+
+def get_registry_and_bridge():
+    """Lazy import to avoid circular src.dependencies <-> src.agents.brain load."""
+    from ..dependencies import get_registry_and_bridge as _get
+    return _get()
 
 # Mirrors brain.py's _THOUGHT_SIG_V2 (duplicated, not imported -- this module's
 # @ai-rules forbid importing Brain). With V2 off, notify turns must not persist
@@ -49,8 +58,8 @@ async def handle_reply_to_agent(
         )
         return await handle_message_agent(ctx, event_id, args, response_parts)
 
-    from ..dependencies import get_registry_and_bridge
-    registry, _ = get_registry_and_bridge()
+    from ..dependencies import get_registry_and_bridge as _get_reg_bridge
+    registry, _ = _get_reg_bridge()
     agent_conn = None
     if registry:
         agent_conn = await registry.get_by_event(event_id)
@@ -130,12 +139,15 @@ async def handle_select_agent(
         await ctx.append_and_broadcast(event_id, dup_turn)
         return False
 
-    if ctx.is_dispatch_locked():
-        bb = ctx.get_blackboard()
-        flow = await bb.get_flow_metrics()
+    bb = ctx.get_blackboard()
+    event = await bb.get_event(event_id) if bb is not None else None
+    is_interactive = bool(event and event.source in AUTOMATED_WIP_EXCLUDED_SOURCES)
+
+    if not is_interactive and ctx.is_dispatch_locked():
+        flow = await bb.get_flow_metrics() if bb is not None else {}
         logger.warning(
             f"Dispatch WIP cap reached for {event_id}, deferring "
-            f"(queue_depth={flow['queue_depth']}, active={len(flow.get('active_events', []))})"
+            f"(queue_depth={flow.get('queue_depth', 0)}, active={flow.get('active_events', 0)})"
         )
         await ctx.dispatch_handler(
             "defer_event", event_id,
@@ -143,6 +155,20 @@ async def handle_select_agent(
             None,
         )
         return False
+
+    if event is None or derive_llm_priority(event) == PRIORITY_NORMAL:
+        registry, _ = get_registry_and_bridge()
+        if await is_sidecar_pool_saturated(agent_name, registry, event_id=event_id):
+            logger.warning(
+                "Provider TPM reserve reached for %s (agent=%s), deferring PRIORITY_NORMAL dispatch",
+                event_id, agent_name,
+            )
+            await ctx.dispatch_handler(
+                "defer_event", event_id,
+                {"delay_seconds": 30, "reason": "Provider TPM reserve reached (PRIORITY_NORMAL deferred)"},
+                None,
+            )
+            return False
 
     depth = ctx.increment_routing_depth(event_id)
     if depth > 30:
@@ -171,9 +197,7 @@ async def handle_select_agent(
         narrative=f"Routed {event_id} to {agent_name}: {task[:80]}",
     )
 
-    bb = ctx.get_blackboard()
-    event = await bb.get_event(event_id)
-    if event:
+    if event and bb is not None:
         svc_meta = await bb.get_service(event.service)
         await ctx.broadcast({
             "type": "attachment",
@@ -288,8 +312,8 @@ async def handle_message_agent(
     )
     await ctx.append_and_broadcast(event_id, turn)
 
-    from ..dependencies import get_registry_and_bridge
-    registry, _ = get_registry_and_bridge()
+    from ..dependencies import get_registry_and_bridge as _get_reg_bridge
+    registry, _ = _get_reg_bridge()
 
     running_agent = ctx.get_active_agent_for_event(event_id)
     event_has_active_task = ctx.is_task_running(event_id)
@@ -455,8 +479,7 @@ async def handle_report_incident(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return True
-    automated_sources = ("headhunter", "timekeeper", "aligner")
-    if event_doc.source not in automated_sources:
+    if event_doc.source not in AUTOMATED_SOURCES:
         result_text = (
             f"report_incident is only available for automated events "
             f"(source={event_doc.source} is not eligible)."
