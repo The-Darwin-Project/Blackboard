@@ -448,6 +448,18 @@ class SlackChannel:
             )
             if decision is None:
                 return
+        from ..models import PendingApproval
+        if isinstance(getattr(decision.event_doc, "pending_approval", None), PendingApproval):
+            from .slack_approvals import _process_decision
+            from ..routes.approval_decision_helpers import DecisionRequest
+            await _process_decision(
+                client, self, event_id, user, channel, thread_ts, "",
+                legacy_mode="approve",
+                req=DecisionRequest(expected_sha=expected_sha),
+                message_ts=message_ts,
+                decision=decision,
+            )
+            return
         event_doc = decision.event_doc
         email_str = decision.email
         clean_name_str = decision.clean_name
@@ -981,11 +993,16 @@ class SlackChannel:
             if decision is None:
                 return
                 
-            if option_id:
+            from ..models import PendingApproval
+            if option_id or isinstance(getattr(decision.event_doc, "pending_approval", None), PendingApproval):
                 from .slack_approvals import _process_decision
                 from ..routes.approval_decision_helpers import DecisionRequest
-                req = DecisionRequest(approval_id=approval_id, option_id=option_id, expected_sha=expected_sha)
-                await _process_decision(client, self, event_id, user, channel, thread_ts, option_id, msg=None, legacy_mode=None, req=req, message_ts=msg_ts, approval_id=approval_id, decision=decision)
+                req = DecisionRequest(approval_id=approval_id or None, option_id=option_id, expected_sha=expected_sha)
+                await _process_decision(
+                    client, self, event_id, user, channel, thread_ts, option_id,
+                    msg=None, legacy_mode=None if option_id else "approve",
+                    req=req, message_ts=msg_ts, approval_id=approval_id or None, decision=decision,
+                )
                 return
 
             await self._complete_slack_approve(
@@ -1062,7 +1079,14 @@ class SlackChannel:
                 try:
                     from .approval_blocks import format_frozen_approval_blocks
                     from ..models import ApprovalResolution
-                    res = ApprovalResolution(outcome="closed", effect="reject", resolved_by=clean_name_str)
+                    res = ApprovalResolution(
+                        outcome="closed",
+                        effect="reject",
+                        option_id="reject",
+                        option_label="Reject plan",
+                        resolved_by=clean_name_str,
+                        resolved_at=time.time(),
+                    )
                     plan_text = "Plan ready for review."
                     if event_doc.conversation:
                         req_turn = next((t for t in reversed(event_doc.conversation) if t.action == "request_approval"), None)

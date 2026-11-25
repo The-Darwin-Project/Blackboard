@@ -10,7 +10,7 @@
 # 7. [Gotcha]: GateDefinition.hint is appended by diagnose_rejection(), not by _msg_* functions.
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 # 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
-#    user.message turns exist. Prevents closing over unread interventions.
+#    user turns (message, approve, reject, select_option, write_in) exist. Prevents closing over unread interventions.
 # 10. [Pattern]: get_intermediate_tools(ctx) (INTERMEDIATE_TOOLS + the dynamic recall_pruned_turns) and
 #     is_defer_event_available() are exported so brain.py's empty-toolset fallback and post-gate
 #     leak-detector reuse this module's policy instead of hand-duplicating literals that can drift.
@@ -304,7 +304,7 @@ def _pred_dispatch_defer(ctx: GateContext) -> bool:
 
 
 def has_unevaluated_close_blocker(conversation: list) -> bool:
-    """True if unevaluated jarvis/user message exists after last brain.phase/close.
+    """True if unevaluated jarvis.message or user turn (message, approve, reject, select_option, write_in) exists after last brain.phase/close.
 
     Shared by the UNEVALUATED_CLOSE gate (pre-LLM) and the handle_close_event
     pessimistic re-check (post-LLM). Handles both dict and object turns.
@@ -367,7 +367,7 @@ def count_agent_waits_in_dispatch_epoch(conversation: list) -> int:
 
 
 def _pred_unevaluated_close(ctx: GateContext) -> bool:
-    """Block close_event when unevaluated jarvis.message or user.message turns exist.
+    """Block close_event when unevaluated jarvis.message or user turns (message, approve, reject, select_option, write_in) exist.
 
     Scan stops at the close phase transition — messages before it triggered
     the close and are by definition addressed.
@@ -376,7 +376,7 @@ def _pred_unevaluated_close(ctx: GateContext) -> bool:
 
 
 def _pred_silent_park(ctx: GateContext) -> bool:
-    """Block wait_for_user if no brain.response exists after the last user.message.
+    """Block wait_for_user if no brain.response exists after the last user turn (message, approve, reject, select_option, write_in).
 
     Only applies to chat/slack events. Prevents FRIDAY from silently parking
     without answering the user. Does NOT fire if there's no user message at all.

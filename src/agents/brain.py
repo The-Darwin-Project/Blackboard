@@ -6759,11 +6759,7 @@ class Brain:
         pending_turn_nums = {
             t.turn for t in event.conversation if getattr(t, "pendingApproval", False)
         }
-        try:
-            await self.blackboard.resume_from_approval(event_id)
-        except Exception as exc:
-            logger.warning("resume_if_parked: resume_from_approval failed for %s: %s", event_id, exc)
-            return False
+        await self.blackboard.resume_from_approval(event_id)
         if pending_turn_nums:
             try:
                 updated = await self.blackboard.get_event(event_id)
@@ -6784,11 +6780,11 @@ class Brain:
         return True
 
     async def complete_approval_resume(self, event_id: str, updated_request_turn, user_turn) -> None:
-        self.clear_waiting(event_id)
-        self.clear_jarvis_wait(event_id)
-        self.clear_hold_watch(event_id)
-
         try:
+            self.clear_waiting(event_id)
+            self.clear_jarvis_wait(event_id)
+            self.clear_hold_watch(event_id)
+
             if updated_request_turn:
                 await self._broadcast({
                     "type": "turn_updated",
@@ -6807,9 +6803,9 @@ class Brain:
                 "status": EventStatus.ACTIVE.value,
             })
         except Exception as exc:
-            logger.warning("complete_approval_resume broadcast failed for %s: %s", event_id, exc)
-
-        self.enqueue_for_processing(event_id)
+            logger.warning("complete_approval_resume cleanup/broadcast failed for %s: %s", event_id, exc)
+        finally:
+            self.enqueue_for_processing(event_id)
 
     def enqueue_for_processing(self, event_id: str) -> bool:
         """Enqueue event for immediate reconciliation. Safe no-op if already pending/inflight."""
@@ -7283,11 +7279,7 @@ class Brain:
         pending_turn_nums = {
             t.turn for t in source_event.conversation if getattr(t, "pendingApproval", False)
         } if source_event else set()
-        try:
-            await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
-        except Exception as exc:
-            logger.warning("_close_and_broadcast: close_event failed for %s: %s", event_id, exc)
-            return
+        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
         if pending_turn_nums:
             try:
                 updated = await self.blackboard.get_event(event_id)

@@ -774,7 +774,10 @@ def turn_to_parts(
             text = f"[FRIDAY {safe_action}]: {text}" if text else f"[FRIDAY {safe_action}]"
     elif turn.actor == "user":
         raw = turn.thoughts or turn.result or ""
-        raw = sanitize_user_input_text(raw)
+        raw = sanitize_user_input_text(
+            raw,
+            max_len=4000 if turn.action in ("approve", "reject", "select_option", "write_in") else None,
+        )
         opt_tag = f":{turn.selected_option_id}" if getattr(turn, "selected_option_id", None) else ""
         action_suffix = (
             f" ({turn.action}{opt_tag})"

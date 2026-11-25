@@ -27,7 +27,9 @@ async def execute_approval_decision(*, blackboard: "BlackboardState | EventRepos
     event = await blackboard.get_event(event_id)
     if not event: return ApprovalDecisionOutcome(kind="not_found", message=f"Event {event_id} not found")
     if auth_enabled and not user.email: return ApprovalDecisionOutcome(kind="auth_rejected", message="Authentication required")
-    if not can_approve_event(user, event, auth_enabled): return ApprovalDecisionOutcome(kind="auth_rejected", message="Insufficient permissions")
+    if not can_approve_event(user, event, auth_enabled):
+        logger.warning("Forbidden approval decision attempt on %s by %s (source=%s)", event_id, user.email or user.user_id, source)
+        return ApprovalDecisionOutcome(kind="auth_rejected", message="Insufficient permissions")
     if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED): return ApprovalDecisionOutcome(kind="closed", message=f"Event {event_id} is closed")
     if event.status != EventStatus.WAITING_APPROVAL: return ApprovalDecisionOutcome(kind="not_waiting", message=f"Event {event_id} is not waiting for approval")
     pending = event.pending_approval

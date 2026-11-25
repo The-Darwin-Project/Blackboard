@@ -2594,6 +2594,7 @@ return 1
                         )
                         swept = sweep_dangling_approvals(event, outcome="closed")
                         if swept_turns_out is not None:
+                            swept_turns_out.clear()
                             swept_turns_out.extend(swept)
                         event.conversation.append(close_turn)
                         pipe.set(key, json.dumps(event.model_dump()))
@@ -2736,11 +2737,15 @@ return 1
                         logger.warning(f"resume_from_approval: {event_id} not found")
                         return
                     event = EventDocument(**json.loads(data))
+                    if event.status in (EventStatus.CLOSED, EventStatus.RESOLVED):
+                        await pipe.unwatch()
+                        return
                     event.status = EventStatus.ACTIVE
                     event.pending_approval = None
                     event.approval_requested_sha = None
                     swept = sweep_dangling_approvals(event, outcome="closed")
                     if swept_turns_out is not None:
+                        swept_turns_out.clear()
                         swept_turns_out.extend(swept)
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))

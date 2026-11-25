@@ -143,7 +143,7 @@ async def test_t4_decision_approve_stamps_sha(async_client, blackboard, mock_bra
     setattr(evt, "pending_approval", PendingApproval(
         approval_id="apv-123", summary="Test", options=options, requested_sha="1111111"
     ))
-    setattr(evt, "github_context", {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"})
+    evt.event.evidence.github_context = {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"}
     
     await _seed_event(blackboard, evt)
     
@@ -189,7 +189,7 @@ async def test_t5_decision_steer_no_stamp(async_client, blackboard):
     setattr(evt, "pending_approval", PendingApproval(
         approval_id="apv-123", summary="Test", options=options, requested_sha="1111111"
     ))
-    setattr(evt, "github_context", {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"})
+    evt.event.evidence.github_context = {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"}
     await _seed_event(blackboard, evt)
     
     with patch("src.utils.vcs_approval.resolve_live_head_sha", new_callable=AsyncMock) as m_live_sha:
@@ -266,7 +266,7 @@ async def test_t6_decision_sha_drift(async_client, blackboard):
     setattr(evt, "pending_approval", PendingApproval(
         approval_id="apv-123", summary="Test", options=options, requested_sha="1111111"
     ))
-    setattr(evt, "github_context", {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"})
+    evt.event.evidence.github_context = {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"}
     await _seed_event(blackboard, evt)
     
     with patch("src.utils.vcs_approval.resolve_live_head_sha", new_callable=AsyncMock) as m_live_sha:
@@ -360,7 +360,7 @@ async def test_t9_decision_ambiguous_options(async_client, blackboard):
     setattr(evt, "pending_approval", PendingApproval(
         approval_id="apv-123", summary="Test", options=options, requested_sha="1111111"
     ))
-    setattr(evt, "github_context", {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"})
+    evt.event.evidence.github_context = {"pr_number": 42, "repo": "org/repo", "head_sha": "1111111"}
     await _seed_event(blackboard, evt)
     
     with patch("src.utils.vcs_approval.resolve_live_head_sha", new_callable=AsyncMock) as m_live_sha:
@@ -533,15 +533,11 @@ async def test_t16_writein_metadata_hmac():
     assert data["id"] == "evt-1"
     
     token2 = sign_writein_metadata({"id": "evt-1"}, ttl_sec=-1)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="Token expired"):
         verify_writein_metadata(token2)
-        
-    try:
-        res = verify_writein_metadata("bad" + token[3:])
-        if res is not None:
-            pytest.fail("Should have failed")
-    except Exception:
-        pass
+
+    with pytest.raises(ValueError, match="Signature mismatch"):
+        verify_writein_metadata("bad" + token[3:])
 
 
 @pytest.mark.asyncio

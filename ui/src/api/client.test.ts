@@ -1,17 +1,22 @@
 // BlackBoard/ui/src/api/client.test.ts
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, approveEvent, headhunterItemAction } from './client';
-import * as apiClient from './client';
+import {
+  ApiError,
+  approveEvent,
+  headhunterItemAction,
+  setOnUnauthorized,
+  setTokenGetter,
+  submitApprovalDecision,
+} from './client';
 
 describe('api/client fetchApi & approveEvent / submitApprovalDecision (H9, T-18)', () => {
   afterEach(() => {
+    setTokenGetter(() => null);
+    setOnUnauthorized(null);
     vi.restoreAllMocks();
   });
 
   it('T-18f: preserves structured ApiError.body and string detail on 409 response for submitApprovalDecision', async () => {
-    const submitFn = (apiClient as Record<string, any>).submitApprovalDecision;
-    expect(typeof submitFn).toBe('function', 'submitApprovalDecision must be exported');
-
     const payload = {
       code: 'sha_drift',
       detail: 'HEAD SHA changed',
@@ -28,7 +33,7 @@ describe('api/client fetchApi & approveEvent / submitApprovalDecision (H9, T-18)
 
     let caught: unknown;
     try {
-      await submitFn('evt-1', { option_id: 'opt1' });
+      await submitApprovalDecision('evt-1', { option_id: 'opt1' });
     } catch (err) {
       caught = err;
     }
@@ -42,6 +47,44 @@ describe('api/client fetchApi & approveEvent / submitApprovalDecision (H9, T-18)
     expect(apiErr.status).toBe(409);
     expect(apiErr.detail).toBe('HEAD SHA changed');
     expect(apiErr.body).toEqual(payload);
+  });
+
+  it('sends Authorization Bearer token and invokes onUnauthorized on 401 for submitApprovalDecision', async () => {
+    setTokenGetter(() => 'secret-jwt-token');
+    const onUnauthorized = vi.fn();
+    setOnUnauthorized(onUnauthorized);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Token expired' }), {
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    let caught: unknown;
+    try {
+      await submitApprovalDecision('evt-auth', { option_id: 'opt1' });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/queue/evt-auth/decision',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer secret-jwt-token',
+        }),
+        body: JSON.stringify({ option_id: 'opt1' }),
+      })
+    );
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(caught).toBeInstanceOf(ApiError);
+    const apiErr = caught as ApiError;
+    expect(apiErr.status).toBe(401);
+    expect(apiErr.detail).toBe('Token expired');
   });
 
   it('preserves structured ApiError.body and string detail on 409 response for approveEvent', async () => {

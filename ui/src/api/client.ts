@@ -1029,15 +1029,8 @@ export async function deleteNote(noteId: string): Promise<void> {
 }
 
 export async function submitApprovalDecision(eventId: string, payload: DecisionPayload): Promise<unknown> {
-  const resp = await fetch(`/queue/${encodeURIComponent(eventId)}/decision`, {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/decision`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  if (!resp.ok) {
-    let body;
-    try { body = await resp.json(); } catch { /* ignore */ }
-    throw new ApiError(resp.status, resp.statusText, `/queue/${eventId}/decision`, body?.detail || 'Approval submission failed', body);
-  }
-  return resp.json();
 }

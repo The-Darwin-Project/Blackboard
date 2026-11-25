@@ -63,6 +63,6 @@ Tool descriptions in `llm/types.py` act as the most proximate LLM instruction. T
 - `GATE_REGISTRY` length = 31 (27 strip + 4 allow; verify: `len(GATE_REGISTRY)` in code).
 - Gate predicates are named functions (not lambdas) for per-gate unit testing.
 - `context_flags` is always a dict by the time it reaches `GateContext` (`build_gate_context` normalizes `None` → `{}`).
-- `UNEVALUATED_CLOSE` gate strips `close_event` when unevaluated `jarvis.message` or `user.message` turns exist — prevents closing over unread interventions.
+- `UNEVALUATED_CLOSE` gate strips `close_event` when unevaluated `jarvis.message` or `user` turns (`message`, `approve`, `reject`, `select_option`, `write_in`) exist — prevents closing over unread interventions.
 - `evaluate_gates()` enforces a structural post-loop invariant: once `WAIT_LOOP` fires (4+ epoch waits), `defer_event` is force-restored if any gate (or combination of gates — `HARD_STRIP_DEFER`, `DEFER_WAKE_ITER0`, an allow-mode gate whose allow-set omits it, or any future gate) stripped it — the emergency flange never removes both escape tools at once, regardless of WHICH gate did the stripping. `INTERMEDIATE_TOOLS` (frozenset) and `is_defer_event_available()` are the shared single-source-of-truth exports `brain.py` reuses for its empty-toolset fallback and post-gate leak-detector; `is_defer_event_available()` mirrors `evaluate_gates()`'s exact two-part rule (per-gate exclusion, then the same escape-valve invariant) so the two cannot drift apart.
 

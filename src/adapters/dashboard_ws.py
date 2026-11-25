@@ -252,6 +252,45 @@ class DashboardWSAdapter:
         if not event:
             return
 
+        raw_expected = data.get("expected_sha")
+        expected_sha = raw_expected if isinstance(raw_expected, str) else None
+        if getattr(event, "pending_approval", None) is not None:
+            from ..routes.approval_decision import execute_approval_decision
+            from ..routes.approval_decision_helpers import DecisionRequest
+
+            outcome = await execute_approval_decision(
+                blackboard=self._blackboard,
+                brain=self._brain,
+                event_id=event_id,
+                user=user,
+                auth_enabled=self._auth_enabled,
+                req=DecisionRequest(expected_sha=expected_sha),
+                legacy_mode="approve",
+                source="dashboard",
+                head_sha_resolver=resolve_live_head_sha,
+            )
+            if outcome.kind != "ok":
+                kind = "auth_rejected" if outcome.kind in ("unauthenticated", "forbidden") else outcome.kind
+                payload: dict = {
+                    "type": "error",
+                    "kind": kind,
+                    "event_id": event_id,
+                    "message": outcome.message,
+                }
+                if outcome.expected_sha is not None:
+                    payload["approval_requested_sha"] = outcome.expected_sha
+                if outcome.actual_sha is not None:
+                    payload["live_sha"] = outcome.actual_sha
+                await ws.send_json(payload)
+                return
+            if ws not in self._clients and outcome.turn is not None:
+                await ws.send_json({
+                    "type": "turn",
+                    "event_id": event_id,
+                    "turn": outcome.turn.model_dump(),
+                })
+            return
+
         if not can_approve_event(user, event, auth_enabled=self._auth_enabled):
             logger.warning(
                 "WS approval rejected for event %s by user %s (roles=%s)",
@@ -387,7 +426,7 @@ class DashboardWSAdapter:
                         payload["approval_id"] = req.approval_id
                 await ws.send_json(payload)
                 return
-            if outcome.turn is not None:
+            if ws not in self._clients and outcome.turn is not None:
                 await ws.send_json({
                     "type": "turn",
                     "event_id": event_id,

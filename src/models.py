@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .event_types import EventSource
 
@@ -352,7 +352,6 @@ class PendingApproval(BaseModel):
     requested_sha: Optional[str] = None
 
 class ApprovalResolution(BaseModel):
-    model_config = ConfigDict(extra="allow")
     approval_id: Optional[str] = None
     outcome: Literal["option", "write_in", "superseded", "closed", "expired"] = "option"
     option_id: Optional[str] = None
@@ -364,7 +363,6 @@ class ApprovalResolution(BaseModel):
 
 class ConversationTurn(BaseModel):
     """A single turn in an event conversation."""
-    model_config = ConfigDict(extra="allow")
     turn: int = Field(..., description="Turn number in conversation")
     actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, security_analyst, code_reviewer, explorer, aligner, headhunter, cortex, dispatcher, user")
     action: str = Field(
@@ -457,7 +455,6 @@ def resolve_event_domain(event: EventDocument | None) -> str:
 
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
-    model_config = ConfigDict(extra="allow")
 
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
     source: EventSource

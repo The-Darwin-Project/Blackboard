@@ -66,7 +66,7 @@ def build_approval_blocks(turn: ConversationTurn, event_id: str, md_to_mrkdwn=No
     if res is not None or getattr(turn, "pendingApproval", None) is False:
         if res is None:
             from ..models import ApprovalResolution
-            res = ApprovalResolution(outcome="closed", effect="reject", resolved_by="system", option_id="auto_closed", option_label="Auto closed")
+            res = ApprovalResolution(outcome="closed", effect="reject", resolved_by="system", option_id="auto_closed", option_label="Auto closed", resolved_at=time.time())
         return format_frozen_approval_blocks(plan_text, turn.approval_options or [], res, md_to_mrkdwn, truncate)
     
     blocks: list[dict[str, Any]] = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*:clipboard: Plan ready:*\n{truncate(md_to_mrkdwn(plan_text))}"}}]
