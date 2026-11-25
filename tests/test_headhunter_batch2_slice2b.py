@@ -794,11 +794,69 @@ class TestT9GitLabFifoAndShaSweep:
 
         await hh._poll_and_process()
 
-        hh._gitlab.poll_work_items.assert_awaited_once()
+        assert hh._gitlab.poll_work_items.await_count == 1
         assert hh._gitlab.queue_item.await_count == 2
         hh._gitlab.create_platform_event.assert_not_awaited()
         assert hh._gitlab_queued == 2
         assert hh.pending_count == 2  # NOT 4 (no double counting of pending + queued)
+
+    @pytest.mark.asyncio
+    async def test_queue_item_posts_no_mr_notes_preserving_gitlab_todo_until_phase_a_promote(self):
+        """Regression: GitLab auto-resolves pending todos when the bot posts ANY note on an MR.
+        queue_item() must NOT post <!-- darwin-queue-pos --> so queued MRs survive across polls
+        until Phase A promotes them when WIP capacity reopens."""
+        from src.agents.headhunter import Headhunter
+
+        bb = _make_fake_bb()
+        todo_q = _make_gitlab_todo(todo_id=451, action_name="review_requested", project_id=42, mr_iid=45, head_sha=SHA_1)
+        note_requests: list[tuple[str, str]] = []
+        todo_pending = True
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raw_path = req.url.raw_path.decode("utf-8", errors="ignore")
+            if "/notes" in raw_path:
+                note_requests.append((req.method, raw_path))
+                if req.method == "POST":
+                    # Mirror real GitLab: commenting on an MR auto-resolves the commenter's todo
+                    nonlocal todo_pending
+                    todo_pending = False
+                    return httpx.Response(201, json={"id": 999})
+                return httpx.Response(200, json=[])
+            if req.method == "GET" and raw_path.startswith("/api/v4/todos"):
+                return httpx.Response(200, json=[todo_q] if todo_pending else [])
+            if req.method == "GET" and re.search(r"/projects/42/merge_requests/45$", raw_path.split("?")[0]):
+                return httpx.Response(200, json={
+                    "iid": 45, "project_id": 42, "state": "opened", "sha": SHA_1,
+                    "title": "MR !45", "source_branch": "feat", "target_branch": "main",
+                })
+            if req.method == "GET" and "/merge_requests/45/diffs" in raw_path:
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[])
+
+        with patch.dict(os.environ, {"GITLAB_HOST": "gitlab.example.com", "MAX_ACTIVE_EVENTS": "1"}):
+            hh = Headhunter(bb)
+        hh._gitlab._gitlab_token = "tok"
+        hh._gitlab._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+        hh.analyze_and_plan = AsyncMock(return_value="---\nplan: Review MR !45\n---")
+
+        try:
+            # Cycle 1: gate closed -> queues in Redis without posting any /notes
+            hh.check_flow_gate = AsyncMock(return_value=False)
+            await hh._poll_and_process()
+            assert note_requests == []
+            assert todo_pending is True
+            assert await bb.redis.zscore("darwin:gitlab:queue", "42:45") is not None
+
+            # Cycle 2: gate opens -> Phase A promotes 42:45 to a real Brain event & dequeues
+            hh.check_flow_gate = AsyncMock(return_value=True)
+            await hh._poll_and_process()
+            assert len(await bb.list_gitlab_queue()) == 0
+            active_ids = await bb.get_active_events()
+            assert len(active_ids) == 1
+            ev = await bb.get_event(active_ids[0])
+            assert ev.event.evidence.gitlab_context["mr_iid"] == 45
+        finally:
+            await hh._gitlab.close()
 
 
 # =============================================================================
