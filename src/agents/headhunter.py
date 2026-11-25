@@ -1185,20 +1185,43 @@ class Headhunter:
             if inspect.isawaitable(res):
                 await res
 
+        def _prune_from_snapshot(target: Any) -> None:
+            if not hasattr(platform, "remove_from_snapshot_cache"):
+                return
+            norm = self._item_key(plat_key, target)
+            if norm is None:
+                return
+            if norm[0] == "gitlab":
+                platform.remove_from_snapshot_cache(norm[2], norm[3])
+            elif norm[0] == "github":
+                ref = str(norm[2])
+                owner, _, repo = ref.partition("/")
+                platform.remove_from_snapshot_cache(
+                    ref, norm[3], owner=owner, repo=repo, is_issue=(norm[1] == "issue"),
+                )
+
+        async def _skip_phase_b(target: Any, *, prune_snapshot: bool = True) -> None:
+            if prune_snapshot:
+                _prune_from_snapshot(target)
+            await _notify_phase_b(on_phase_b_skipped, target)
+
         for item in new_items:
             if self._is_dismissed(plat_key, item):
-                await _notify_phase_b(on_phase_b_skipped, item)
+                await _skip_phase_b(item)
                 continue
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 if queue_fn is None:
                     logger.info(f"Headhunter flow gate closed mid-cycle ({platform_label}) -- stopping")
                     break
+                if self._is_dismissed(plat_key, item):
+                    await _skip_phase_b(item)
+                    continue
                 position = len(remaining_queued) + 1
                 try:
                     queued_ok = await queue_fn(item, position)
                     if not queued_ok and getattr(queued_ok, "permanent", False):
-                        await _notify_phase_b(on_phase_b_skipped, item)
+                        await _skip_phase_b(item)
                         logger.info(
                             f"{platform_label} queue item permanently rejected for "
                             f"{self._item_label(item)} (not counting toward systemic failure)"
@@ -1227,11 +1250,11 @@ class Headhunter:
             try:
                 context = await platform.fetch_context(item)
                 if context is None:
-                    await _notify_phase_b(on_phase_b_skipped, item)
+                    await _skip_phase_b(item)
                     continue
                 plan_text = await self.analyze_and_plan(context, si)
                 if self._is_dismissed(plat_key, item):
-                    await _notify_phase_b(on_phase_b_skipped, item)
+                    await _skip_phase_b(item)
                     continue
                 await platform.create_platform_event(item, plan_text, context)
                 self._consume_promoted_key(plat_key, item)
@@ -1274,7 +1297,7 @@ class Headhunter:
         def _sync_gitlab_queued(remaining: list[Any]) -> None:
             self._gitlab_queued = len(remaining)
 
-        async def _on_gl_phase_b_created(_item: Any) -> None:
+        async def _on_gl_phase_b_settled(_item: Any) -> None:
             async with self._with_poll_lock():
                 self._gitlab_pending = max(0, self._gitlab_pending - 1)
 
@@ -1297,8 +1320,8 @@ class Headhunter:
             platform_label="GitLab",
             queue_fn=self._gitlab.queue_item,
             on_queue_update=_sync_gitlab_queued,
-            on_phase_b_created=_on_gl_phase_b_created,
-            on_phase_b_skipped=_on_gl_phase_b_created,
+            on_phase_b_created=_on_gl_phase_b_settled,
+            on_phase_b_skipped=_on_gl_phase_b_settled,
             gate_closed_initial=not gate_open,
         )
         async with self._with_poll_lock():
@@ -1337,7 +1360,7 @@ class Headhunter:
             self._github._last_queued_prs = remaining
             self._github_queued = len(remaining)
 
-        async def _on_gh_phase_b_created(_item: Any) -> None:
+        async def _on_gh_phase_b_settled(_item: Any) -> None:
             async with self._with_poll_lock():
                 self._github_pending = max(0, self._github_pending - 1)
 
@@ -1354,8 +1377,8 @@ class Headhunter:
             phase_prefix="PR ",
             queue_fn=self._github.queue_item,
             on_queue_update=_sync_github_queued,
-            on_phase_b_created=_on_gh_phase_b_created,
-            on_phase_b_skipped=_on_gh_phase_b_created,
+            on_phase_b_created=_on_gh_phase_b_settled,
+            on_phase_b_skipped=_on_gh_phase_b_settled,
             gate_closed_initial=not gate_open,
         )
 

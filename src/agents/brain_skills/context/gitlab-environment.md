@@ -12,11 +12,11 @@ pipelines, and job logs; post comments; trigger retests via GitOps commands;
 merge MRs when conditions are met;
 and update reviewers/assignees.
 
-When the Darwin bot account itself opens a new MR and needs Headhunter tracking,
-adding itself as reviewer generates no GitLab `review_requested` todo (self-action
-suppression) and self-`@mentions` are intentionally rejected by Headhunter to avoid
-infinite reply loops. Ask a maintainer to request review / `@mention` the bot, or
-continue monitoring within the creating event when appropriate.
+Because GitLab suppresses self-review todos and Headhunter blocks self-`@mentions`
+(`author == bot`) to prevent reply loops, bot-authored MRs do not generate
+Headhunter todos when the bot adds itself as reviewer or mentions itself; external
+Headhunter tracking depends on triggers from another actor (such as a maintainer
+review request or `@mention`), or direct monitoring within the originating event.
 
 ## Pipeline Verification
 
