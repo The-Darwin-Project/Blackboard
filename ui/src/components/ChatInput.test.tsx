@@ -11,9 +11,16 @@ import ChatInput from './ChatInput';
 
 const mockSendMessage = vi.fn();
 
-vi.mock('../hooks', () => ({
-  useChat: () => ({ sendMessage: mockSendMessage, isPending: false }),
-}));
+const { useEventDocumentMock } = vi.hoisted(() => ({ useEventDocumentMock: vi.fn(() => ({ data: undefined })) }));
+
+vi.mock('../hooks', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../hooks')>();
+  return {
+    ...mod,
+    useChat: () => ({ sendMessage: mockSendMessage, isPending: false }),
+    useEventDocument: useEventDocumentMock,
+  };
+});
 
 // Capture the latest handler ChatInput registers via useWSMessage so tests can
 // simulate an inbound WS error envelope without a real WebSocketProvider.
@@ -27,6 +34,7 @@ vi.mock('../contexts/WebSocketContext', () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  useEventDocumentMock.mockReturnValue({ data: undefined });
   latestWsHandler = null;
 });
 
@@ -124,6 +132,29 @@ describe('ChatInput draft restore', () => {
     await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toBe(''));
   });
 });
+
+
+  it('T-19a: disables input and renders jump button when waiting_approval, which calls scrollIntoView', async () => {
+    useEventDocumentMock.mockReturnValue({ data: { status: 'waiting_approval' } });
+    render(<ChatInput eventId="evt-1" wsSend={vi.fn()} />);
+    
+    const textarea = screen.queryByRole('textbox');
+    expect(textarea).toBeDisabled();
+    
+    const jumpBtn = screen.getByText(/Pending decision above/i);
+    expect(jumpBtn).toBeInTheDocument();
+    
+    const scrollMock = vi.fn();
+    const fakeEl = document.createElement('div');
+    fakeEl.scrollIntoView = scrollMock;
+    fakeEl.setAttribute('data-pending-approval', 'true');
+    document.body.appendChild(fakeEl);
+    
+    fireEvent.click(jumpBtn);
+    expect(scrollMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
+    document.body.removeChild(fakeEl);
+    useEventDocumentMock.mockReturnValue({ data: undefined });
+  });
 
 describe('ChatInput Step 9 resilience (WS error envelope handling)', () => {
   function getTextarea() {

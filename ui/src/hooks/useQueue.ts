@@ -26,7 +26,7 @@ import {
   getJenkinsPending,
   type HeadhunterItemActionPayload,
 } from '../api/client';
-import type { ActiveEvent, EventDocument, EventEvidence, MessageStatus } from '../api/types';
+import type { ActiveEvent, EventDocument, EventEvidence, MessageStatus, ConversationTurn } from '../api/types';
 
 export function useActiveEvents() {
   return useQuery({
@@ -154,6 +154,9 @@ const HH_INVALIDATE_COOLDOWN_MS = 1500;
  */
 export function useQueueInvalidation() {
   const queryClient = useQueryClient();
+  const optimisticPatchTurn = (eventId: string, turn: ConversationTurn) => {
+    queryClient.setQueryData<EventDocument>(['eventDocument', eventId], (old) => old ? { ...old, conversation: old.conversation.map((t: ConversationTurn) => t.turn === turn.turn ? turn : t) } : old);
+  };
   const hhCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hhPendingTrailingRef = useRef(false);
 
@@ -197,6 +200,7 @@ export function useQueueInvalidation() {
     },
     invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
     invalidateWaitingApproval: () => queryClient.invalidateQueries({ queryKey: ['waitingApprovalEvents'] }),
+    optimisticPatchTurn,
     invalidateHeadhunter,
     invalidateAligner: () => queryClient.invalidateQueries({ queryKey: ['alignerPending'] }),
     invalidateJenkins: () => queryClient.invalidateQueries({ queryKey: ['jenkinsPending'] }),
@@ -253,3 +257,4 @@ export function useQueueInvalidation() {
     },
   };
 }
+

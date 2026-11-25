@@ -402,10 +402,10 @@ class SlackChannel:
     _EVENT_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]{1,64}\Z")
 
     @staticmethod
-    def _extract_action_fields(body: Any) -> tuple[str, str, str, str]:
-        """Safely extract (raw_value, user_id, channel_id, thread_ts) from a Slack action body."""
+    def _extract_action_context(body: Any) -> tuple[str, str, str, str, str]:
+        """Safely extract (raw_value, user_id, channel_id, thread_ts, message_ts) from a Slack action body."""
         if not isinstance(body, dict):
-            return "", "", "", ""
+            return "", "", "", "", ""
         actions = body.get("actions")
         raw_val = actions[0].get("value") if isinstance(actions, list) and actions and isinstance(actions[0], dict) else ""
         val = raw_val if isinstance(raw_val, str) else ""
@@ -418,7 +418,14 @@ class SlackChannel:
         msg = body.get("message")
         raw_ts = (msg.get("thread_ts") or msg.get("ts")) if isinstance(msg, dict) else ""
         thread_ts = raw_ts if isinstance(raw_ts, str) else ""
-        return val, user, channel, thread_ts
+        msg_ts = msg.get("ts") if isinstance(msg, dict) else ""
+        message_ts = msg_ts if isinstance(msg_ts, str) else ""
+        return val, user, channel, thread_ts, message_ts
+
+    @staticmethod
+    def _extract_action_fields(body: Any) -> tuple[str, str, str, str]:
+        val, user, chan, thread, _ = SlackChannel._extract_action_context(body)
+        return val, user, chan, thread
 
     async def _complete_slack_approve(
         self,
@@ -429,14 +436,29 @@ class SlackChannel:
         channel: str,
         thread_ts: str,
         expected_sha: str | None = None,
+        message_ts: str | None = None,
+        decision: Any = None,
     ) -> None:
         from ..utils.vcs_approval import check_approval_sha_drift, resolve_live_head_sha
 
-        decision = await self._authorize_plan_decision(
-            client, event_id=event_id, user=user, channel=channel,
-            thread_ts=thread_ts, verb="approve",
-        )
         if decision is None:
+            decision = await self._authorize_plan_decision(
+                client, event_id=event_id, user=user, channel=channel,
+                thread_ts=thread_ts, verb="approve",
+            )
+            if decision is None:
+                return
+        from ..models import PendingApproval
+        if isinstance(getattr(decision.event_doc, "pending_approval", None), PendingApproval):
+            from .slack_approvals import _process_decision
+            from ..routes.approval_decision_helpers import DecisionRequest
+            await _process_decision(
+                client, self, event_id, user, channel, thread_ts, "",
+                legacy_mode="approve",
+                req=DecisionRequest(expected_sha=expected_sha),
+                message_ts=message_ts,
+                decision=decision,
+            )
             return
         event_doc = decision.event_doc
         email_str = decision.email
@@ -545,11 +567,36 @@ class SlackChannel:
         self._brain.clear_waiting(event_id)
         await self._brain.resume_if_parked(event_id)
         self._brain.enqueue_for_processing(event_id)
+        
+        if message_ts:
+            try:
+                from .approval_blocks import format_frozen_approval_blocks
+                from ..models import ApprovalResolution
+                res = ApprovalResolution(
+                    outcome="closed",
+                    effect="approve",
+                    resolved_by=clean_name_str,
+                    resolved_at=time.time(),
+                    option_id="approve",
+                    option_label="Approve plan",
+                )
+                plan_text = "Plan ready for review."
+                if fresh_doc.conversation:
+                    req_turn = next((t for t in reversed(fresh_doc.conversation) if t.action == "request_approval"), None)
+                    if req_turn:
+                        plan_text = req_turn.plan or req_turn.thoughts or plan_text
+                blocks = format_frozen_approval_blocks(plan_text, [], res)
+                await client.chat_update(channel=channel, ts=message_ts, text="Decision recorded", blocks=blocks)
+            except Exception as e:
+                logger.warning(f"Failed to freeze approval message: {e}")
+
         await self._safe_react(client, channel, thread_ts, "white_check_mark")
         logger.info(f"Slack approve on {event_id} by {user} (mr_id={mr_id}, sha={mr_sha})")
 
     def _register_handlers(self) -> None:
         """Register Slack event listeners on the Bolt app."""
+        from .slack_approvals import register_approval_handlers
+        register_approval_handlers(self._app, self)
 
         @self._app.command("/darwin")
         async def handle_darwin_command(ack: Any, body: dict, client: Any, respond: Any) -> None:
@@ -878,10 +925,25 @@ class SlackChannel:
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            event_id, user, channel, thread_ts = self._extract_action_fields(body)
+            event_id, user, channel, thread_ts, msg_ts = self._extract_action_context(body)
             if not self._EVENT_ID_RE.match(event_id):
                 logger.warning("Slack darwin_approve rejected invalid event_id from user=%s", user)
                 return
+                
+            decision = await self._authorize_plan_decision(
+                client, event_id=event_id, user=user, channel=channel,
+                thread_ts=thread_ts, verb="approve",
+            )
+            if decision is None:
+                return
+
+            event_doc = decision.event_doc
+            from ..models import PendingApproval
+            if isinstance(getattr(event_doc, "pending_approval", None), PendingApproval):
+                from .slack_approvals import _process_decision
+                await _process_decision(client, self, event_id, user, channel, thread_ts, "", legacy_mode="approve", message_ts=msg_ts, decision=decision)
+                return
+
             await self._complete_slack_approve(
                 client,
                 event_id=event_id,
@@ -889,20 +951,60 @@ class SlackChannel:
                 channel=channel,
                 thread_ts=thread_ts,
                 expected_sha=None,
+                message_ts=msg_ts,
+                decision=decision,
             )
 
         @self._app.action("darwin_approve_sha")
         async def handle_approve_sha(ack: Any, body: dict, client: Any) -> None:
             from ..utils.vcs_approval import HEX_SHA_RE
+            import json
 
             await ack()
-            raw_val, user, channel, thread_ts = self._extract_action_fields(body)
-            event_id, sep, expected_sha = raw_val.rpartition(":")
-            if sep != ":" or not self._EVENT_ID_RE.match(event_id) or not HEX_SHA_RE.match(expected_sha):
+            raw_val, user, channel, thread_ts, msg_ts = self._extract_action_context(body)
+            if raw_val.startswith("{"):
+                try:
+                    payload = json.loads(raw_val)
+                    event_id = payload.get("e", "")
+                    expected_sha = payload.get("s", "")
+                    approval_id = payload.get("a", "")
+                    option_id = payload.get("o", "")
+                except Exception:
+                    logger.warning("Slack darwin_approve_sha rejected invalid JSON payload from user=%s", user)
+                    return
+            else:
+                event_id, sep, expected_sha = raw_val.rpartition(":")
+                approval_id = ""
+                option_id = ""
+                if sep != ":":
+                    logger.warning("Slack darwin_approve_sha rejected malformed payload from user=%s", user)
+                    return
+                    
+            if not self._EVENT_ID_RE.match(event_id) or not HEX_SHA_RE.match(expected_sha):
                 logger.warning(
                     "Slack darwin_approve_sha rejected malformed payload from user=%s", user,
                 )
                 return
+                
+            decision = await self._authorize_plan_decision(
+                client, event_id=event_id, user=user, channel=channel,
+                thread_ts=thread_ts, verb="approve",
+            )
+            if decision is None:
+                return
+                
+            from ..models import PendingApproval
+            if option_id or isinstance(getattr(decision.event_doc, "pending_approval", None), PendingApproval):
+                from .slack_approvals import _process_decision
+                from ..routes.approval_decision_helpers import DecisionRequest
+                req = DecisionRequest(approval_id=approval_id or None, option_id=option_id, expected_sha=expected_sha)
+                await _process_decision(
+                    client, self, event_id, user, channel, thread_ts, option_id,
+                    msg=None, legacy_mode=None if option_id else "approve",
+                    req=req, message_ts=msg_ts, approval_id=approval_id or None, decision=decision,
+                )
+                return
+
             await self._complete_slack_approve(
                 client,
                 event_id=event_id,
@@ -910,23 +1012,32 @@ class SlackChannel:
                 channel=channel,
                 thread_ts=thread_ts,
                 expected_sha=expected_sha,
+                message_ts=msg_ts,
+                decision=decision,
             )
 
         @self._app.action("darwin_reject")
         async def handle_reject(ack: Any, body: dict, client: Any) -> None:
             await ack()
-            event_id, user, channel, thread_ts = self._extract_action_fields(body)
+            event_id, user, channel, thread_ts, msg_ts = self._extract_action_context(body)
             if not self._EVENT_ID_RE.match(event_id):
                 logger.warning("Slack darwin_reject rejected invalid event_id from user=%s", user)
                 return
-
+                
             decision = await self._authorize_plan_decision(
                 client, event_id=event_id, user=user, channel=channel,
                 thread_ts=thread_ts, verb="reject",
             )
             if decision is None:
                 return
+                
             event_doc = decision.event_doc
+            from ..models import PendingApproval
+            if isinstance(getattr(event_doc, "pending_approval", None), PendingApproval):
+                from .slack_approvals import _process_decision
+                await _process_decision(client, self, event_id, user, channel, thread_ts, "", legacy_mode="reject", message_ts=msg_ts, decision=decision)
+                return
+
             email_str = decision.email
             clean_name_str = decision.clean_name
 
@@ -963,6 +1074,29 @@ class SlackChannel:
             self._brain.clear_waiting(event_id)
             await self._brain.resume_if_parked(event_id)
             self._brain.enqueue_for_processing(event_id)
+            
+            if msg_ts:
+                try:
+                    from .approval_blocks import format_frozen_approval_blocks
+                    from ..models import ApprovalResolution
+                    res = ApprovalResolution(
+                        outcome="closed",
+                        effect="reject",
+                        option_id="reject",
+                        option_label="Reject plan",
+                        resolved_by=clean_name_str,
+                        resolved_at=time.time(),
+                    )
+                    plan_text = "Plan ready for review."
+                    if event_doc.conversation:
+                        req_turn = next((t for t in reversed(event_doc.conversation) if t.action == "request_approval"), None)
+                        if req_turn:
+                            plan_text = req_turn.plan or req_turn.thoughts or plan_text
+                    blocks = format_frozen_approval_blocks(plan_text, [], res)
+                    await client.chat_update(channel=channel, ts=msg_ts, text="Decision recorded", blocks=blocks)
+                except Exception as e:
+                    logger.warning(f"Failed to freeze reject message: {e}")
+
             await self._safe_react(client, channel, thread_ts, "x")
             logger.info(f"Slack reject on {event_id} by {user}")
 

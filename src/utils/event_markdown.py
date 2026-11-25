@@ -295,8 +295,23 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
             lines.append(f"**Selected Agents:** {_esc_join(turn.selectedAgents)}")
         if turn.executed is not None:
             lines.append(f"**Executed:** {turn.executed}")
-        if turn.pendingApproval:
+        if getattr(turn, "pendingApproval", False) is True:
             lines.append(f"**Pending Approval:** YES")
+        if turn.action == "request_approval":
+            opts = getattr(turn, "approval_options", None)
+            if opts:
+                lines.append("**Offered Options:**")
+                for opt in opts:
+                    if hasattr(opt, "model_dump"):
+                        opt = opt.model_dump()
+                    lines.append(f"- {_esc(opt.get('label', opt.get('id', '')))}")
+            res = getattr(turn, "approval_resolution", None)
+            if res:
+                if hasattr(res, "model_dump"):
+                    res = res.model_dump()
+                effect = res.get("effect", "")
+                selected_label = res.get("option_label") or res.get("write_in_text") or res.get("option_id") or res.get("selected_option_label") or res.get("selected_option_id") or ""
+                lines.append(f"**Approval Resolution:** {effect.upper()} ({_esc(selected_label)})")
         if turn.waitingFor:
             lines.append(f"**Waiting For:** {_esc(turn.waitingFor)}")
         lines.append("")

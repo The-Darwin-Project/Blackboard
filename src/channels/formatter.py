@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..models import ConversationTurn, EventDocument
+from .approval_blocks import build_approval_blocks
 
 logger = logging.getLogger("darwin.formatter")
 
@@ -284,27 +285,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         blocks.append(_section(header))
 
     elif key == "brain.request_approval":
-        plan_text = _md_to_mrkdwn(turn.plan or turn.thoughts or "Plan ready for review.")
-        blocks.append(_section(f"*:clipboard: Plan ready:*\n{_truncate(plan_text)}"))
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Approve"},
-                    "style": "primary",
-                    "action_id": "darwin_approve",
-                    "value": event_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Reject"},
-                    "style": "danger",
-                    "action_id": "darwin_reject",
-                    "value": event_id,
-                },
-            ],
-        })
+        blocks.extend(build_approval_blocks(turn, event_id, _md_to_mrkdwn, _truncate))
 
     elif key == "brain.wait":
         waiting = turn.waitingFor or "user input"
@@ -370,7 +351,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     elif key == "aligner.confirm":
         blocks.append(_section(f":chart_with_upwards_trend: {turn.thoughts or turn.result or 'Metrics confirmed.'}"))
 
-    elif key in ("user.message", "user.approve", "user.reject"):
+    elif key in ("user.message", "user.approve", "user.reject", "user.select_option", "user.write_in"):
         text = turn.thoughts or turn.result or turn.action
         if turn.user_name:
             prefix = f"*{turn.user_name}:* "

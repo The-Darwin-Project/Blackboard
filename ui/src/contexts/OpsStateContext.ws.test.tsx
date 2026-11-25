@@ -265,3 +265,101 @@ describe('OpsControlProvider headhunter invalidation coalescing (M10)', () => {
     }
   });
 });
+
+describe('WS turn_updated and approvalError handling', () => {
+  let qc: QueryClient;
+
+  beforeEach(() => {
+    qc = new QueryClient();
+    mockSend.mockClear();
+  });
+
+  it('T-19b: turn_updated WS message patches the query cache directly and invalidates', () => {
+    qc.setQueryData(['eventDocument', 'e1'], {
+      id: 'e1',
+      status: 'waiting_approval',
+      conversation: [
+        { turn: 1, action: 'request_approval', pendingApproval: true }
+      ]
+    });
+
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+    renderHook(() => null, { wrapper });
+
+    act(() => {
+      wsHandler!({
+        type: 'turn_updated',
+        event_id: 'e1',
+        turn: {
+          turn: 1,
+          action: 'request_approval',
+          pendingApproval: false,
+          approval_resolution: { outcome: 'option', option_id: 'o1' }
+        }
+      });
+    });
+
+    const evt = qc.getQueryData<{ conversation: Array<{ pendingApproval?: boolean; approval_resolution?: { option_id?: string } }> }>(['eventDocument', 'e1']);
+    expect(evt).toBeDefined();
+    expect(evt!.conversation[0].pendingApproval).toBe(false);
+    expect(evt!.conversation[0].approval_resolution?.option_id).toBe('o1');
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['eventDocument', 'e1'] });
+  });
+
+  it('T-19c: confirmApprovalDrift sends structured multi-option approval_decision', () => {
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, createElement(OpsControlProvider, null, children));
+
+    const { result } = renderHook(() => useOpsControl(), { wrapper });
+
+    act(() => {
+      wsHandler!({
+        type: 'error',
+        kind: 'sha_drift',
+        event_id: 'e1',
+        message: 'drift',
+        live_sha: 'newsha',
+        option_id: 'o1',
+        approval_id: 'apv-1'
+      });
+    });
+
+    expect(result.current.approvalError?.eventId).toBe('e1');
+
+    act(() => {
+      result.current.confirmApprovalDrift('e1');
+    });
+
+    expect(mockSend).toHaveBeenCalledWith({
+      type: 'approval_decision',
+      event_id: 'e1',
+      option_id: 'o1',
+      approval_id: 'apv-1',
+      expected_sha: 'newsha'
+    });
+
+    // Fallback test
+    act(() => {
+      wsHandler!({
+        type: 'error',
+        kind: 'sha_drift',
+        event_id: 'e2',
+        message: 'drift',
+        live_sha: 'oldsha'
+      });
+    });
+
+    act(() => {
+      result.current.confirmApprovalDrift('e2');
+    });
+
+    expect(mockSend).toHaveBeenCalledWith({
+      type: 'approve',
+      event_id: 'e2',
+      expected_sha: 'oldsha'
+    });
+  });
+});

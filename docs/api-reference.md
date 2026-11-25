@@ -325,3 +325,9 @@ GET /dex/*                            # Proxies to internal Dex OIDC provider
 ```
 
 Only active when `DEX_ENABLED=true`.
+
+## Multi-Option Approvals (VMER-2501)
+- `POST /queue/{event_id}/decision`: Submit a decision (`DecisionRequest`: `approval_id`, `option_id`, `message`, `write_in_text`, `image`, `reject_reason`, `expected_sha`).
+- WebSocket `approval_decision` accepts the same `DecisionRequest` fields (`event_id`, `approval_id`, `option_id`, `message`, `write_in_text`, `image`, `reject_reason`, `expected_sha`) and broadcasts `turn_updated` for swept `pendingApproval` turns.
+- Legacy `/approve` and `/reject` shims (HTTP and WebSocket) route through `execute_approval_decision` when `pending_approval` is present.
+- Event status transitions and approvals are atomic via Redis WATCH/MULTI/EXEC.

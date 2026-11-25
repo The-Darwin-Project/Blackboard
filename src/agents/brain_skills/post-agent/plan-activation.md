@@ -71,7 +71,7 @@ Before dispatching agent-sourced plan steps:
 
 ## Special Cases
 
-- If the plan proposed multiple options with trade-offs, present them to the user first. Only begin execution after the user selects an option.
+- If the plan proposed multiple options with trade-offs, present them to the user first. Wire multi-option trade-off presentation to `request_user_approval` with `options=[...]` (`steer` for exploratory/alternate paths, `approve` only when execution/merge is authorized, `reject` for decline; platform auto-appends Write-in). Only begin execution after the user selects an option.
 - If there is no plan turn, use your normal routing judgment.
 - Structural changes on the default/main branch require user approval before execution.
   MR-scoped source changes follow the same approval rules as any source code mutation

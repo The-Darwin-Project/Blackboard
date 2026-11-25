@@ -335,6 +335,32 @@ class MessageStatus(str, Enum):
     PROCESSED = "processed"
 
 
+
+WRITE_IN_OPTION_ID = "__write_in__"
+ApprovalEffect = Literal["approve", "steer", "reject"]
+
+class ApprovalOption(BaseModel):
+    id: str
+    label: str
+    description: Optional[str] = None
+    effect: ApprovalEffect
+
+class PendingApproval(BaseModel):
+    approval_id: str
+    summary: str
+    options: list[ApprovalOption]
+    requested_sha: Optional[str] = None
+
+class ApprovalResolution(BaseModel):
+    approval_id: Optional[str] = None
+    outcome: Literal["option", "write_in", "superseded", "closed", "expired"] = "option"
+    option_id: Optional[str] = None
+    option_label: Optional[str] = None
+    effect: Optional[ApprovalEffect] = None
+    write_in_text: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: float
+
 class ConversationTurn(BaseModel):
     """A single turn in an event conversation."""
     turn: int = Field(..., description="Turn number in conversation")
@@ -353,6 +379,11 @@ class ConversationTurn(BaseModel):
     evidence: Optional[str] = None
     waitingFor: Optional[str] = None
     pendingApproval: Optional[bool] = None
+    approval_id: Optional[str] = None
+    approval_options: Optional[list[ApprovalOption]] = None
+    approval_resolution: Optional[ApprovalResolution] = None
+    selected_option_id: Optional[str] = None
+    selected_option_label: Optional[str] = None
     image: Optional[str] = Field(None, description="Base64 data URI of an attached image")
     status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
     source: Optional[str] = Field(None, description="Origin channel: 'dashboard' | 'slack' | None (legacy)")
@@ -424,6 +455,7 @@ def resolve_event_domain(event: EventDocument | None) -> str:
 
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
+
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
     source: EventSource
     status: EventStatus = EventStatus.NEW
@@ -471,6 +503,7 @@ class EventDocument(BaseModel):
     approved_mr_id: Optional[str] = Field(None, description="Approved MR IID or PR number")
     approved_mr_sha: Optional[str] = Field(None, description="Live HEAD SHA captured at approval time")
     approval_requested_sha: Optional[str] = Field(None, description="Live HEAD SHA captured when approval was requested")
+    pending_approval: Optional[PendingApproval] = None
 
     @field_validator("created_by_email", mode="before")
     @classmethod
@@ -847,3 +880,10 @@ class ChatResponse(BaseModel):
     message: str
     plan_id: Optional[str] = None
     conversation_id: Optional[str] = Field(None, description="Conversation ID for follow-up messages")
+
+
+class ApprovalCommitResult(BaseModel):
+    code: Literal["ok", "not_found", "closed", "not_waiting", "stale_approval", "sha_conflict"]
+    request_turn: Optional[ConversationTurn] = None
+    user_turn: Optional[ConversationTurn] = None
+    event_doc: Optional[EventDocument] = None

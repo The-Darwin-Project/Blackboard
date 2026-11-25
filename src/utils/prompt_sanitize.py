@@ -74,6 +74,7 @@ def sanitize_prompt_text(value: object, *, max_len: int) -> str:
 # unclosed opening tag cannot swallow trailing text.
 _FENCE_TAGS = (
     "--- CONVERSATION ---",
+    "--- RESPOND TO THIS ---",
 )
 # Linear bounded pattern covering Brain XML prompt fences (open/close/whitespace/attributes).
 # Optional closing '>' strips unclosed trailing tags and >512-char padded attributes; outer-first
@@ -234,3 +235,17 @@ def sanitize_title(value: object, *, max_len: int | None = None) -> str:
 def fallback_title(value: object) -> str:
     """Immediate (pre-LLM) event title derived from the first message text."""
     return sanitize_title(value, max_len=FALLBACK_TITLE_MAX_LEN) or UNTITLED_EVENT
+
+
+def sanitize_user_input_text(text: str | None, *, max_len: int | None = 4000) -> str:
+    """Sanitize user-provided text without PII redaction, preserving safe newlines."""
+    if not text:
+        return ""
+    cleaned = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
+    cleaned = _MULTILINE_STRIP_CHARS.sub("", cleaned)
+    if max_len is not None:
+        cleaned = cleaned[: max_len * 2]
+    cleaned = strip_xml_fences(cleaned)
+    cleaned = _CALL_TAG_RE.sub("[ (call:", cleaned)
+    cleaned = re.sub(r"(?im)^([ \t]*)\[\s*(USER|FRIDAY|SYSTEM|AGENT)\b((?:[ \t][^\n\]]{0,200})?)\]", r"\1(\2\3)", cleaned)
+    return cleaned.strip()[:max_len] if max_len is not None else cleaned.strip()

@@ -35,6 +35,7 @@ vi.mock('../../../hooks/useQueue', () => ({
   useHeadhunterItemAction: vi.fn(),
   useAlignerPending: vi.fn(),
   useJenkinsPending: vi.fn(),
+  useEventDocument: vi.fn(() => ({ data: undefined })),
 }));
 
 vi.mock('../../../hooks/useTimeKeeper', () => ({

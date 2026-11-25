@@ -1053,6 +1053,36 @@ class TestATDDVmer2450ThinkingLevelAndSkillCleanup:
         )
 
 
+class TestPhase4AMultiOptionApprovals:
+    """Phase 4A: VMER-2501 Multi-option approvals skill probes (T-14)."""
+
+    def test_wait_protocol_phrasing(self, loader):
+        raw_text = _skill_text("waiting", "wait-protocol.md")
+        body = _skill(loader, "waiting/wait-protocol.md")
+        assert "approval buttons" not in body.lower()
+        assert "decision card" in body.lower() or "structured option" in body.lower() or "multi-option" in body.lower()
+        assert "<event_state>" in raw_text
+        assert "{{" not in raw_text
+
+    @pytest.mark.parametrize("skill_path", [
+        "always/12-actor-responses.md",
+        "dispatch/mr-lifecycle.md",
+        "dispatch/execution-method.md",
+        "post-agent/plan-activation.md",
+        "dispatch/deep-memory-fixes.md",
+        "source/_user-conversational.md",
+        "always/00-identity.md"
+    ])
+    def test_structured_option_semantics(self, loader, skill_path):
+        body = _skill(loader, skill_path)
+        body_lower = body.lower()
+        assert "effect" in body_lower or "write_in" in body_lower or "write-in" in body_lower or "steer" in body_lower
+
+    def test_line_caps(self):
+        raw_00 = _skill_text("always", "00-identity.md")
+        raw_deep = _skill_text("dispatch", "deep-memory-fixes.md")
+        assert len(raw_00.splitlines()) <= 100
+        assert len(raw_deep.splitlines()) <= 100
 
 
 class TestIssue349ReviewNotesOnDeferWake:

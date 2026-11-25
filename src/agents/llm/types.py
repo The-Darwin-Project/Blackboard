@@ -120,7 +120,7 @@ PRIORITY_NORMAL: int = 1
 # Event sources that are interactive (a human is waiting on the response).
 _HIGH_PRIORITY_SOURCES: frozenset[str] = frozenset({"chat", "slack", "jarvis"})
 # User turn actions that signal an event is resuming from human interaction.
-_HIGH_PRIORITY_USER_ACTIONS: frozenset[str] = frozenset({"approve", "reject", "message"})
+_HIGH_PRIORITY_USER_ACTIONS: frozenset[str] = frozenset({"approve", "reject", "message", "select_option", "write_in"})
 # Only the most recent N conversation turns are inspected for a user action.
 _RECENT_USER_TURN_WINDOW: int = 3
 
@@ -755,6 +755,26 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "plan_summary": {
                     "type": "string",
                     "description": "Summary of the plan for the user to review",
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": "Optional structured decision choices presented to the user (2 to 5 options).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Unique option identifier"},
+                            "label": {"type": "string", "description": "Short human-readable option label"},
+                            "description": {"type": "string", "description": "Optional brief explanation of this option"},
+                            "effect": {
+                                "type": "string",
+                                "enum": ["approve", "steer", "reject"],
+                                "description": "Semantic effect of selecting this option",
+                            },
+                        },
+                        "required": ["id", "label", "effect"],
+                    },
                 },
             },
             "required": ["plan_summary"],
